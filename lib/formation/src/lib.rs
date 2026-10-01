@@ -29,7 +29,6 @@
 
 pub mod authoring;
 pub mod browser;
-#[cfg(feature = "planning")]
 pub mod capsule_toml;
 #[cfg(feature = "planning")]
 pub mod capsule_toml_v2;
@@ -52,6 +51,12 @@ pub mod retained;
 #[cfg(feature = "planning")]
 pub mod source;
 pub mod verify;
+#[cfg(feature = "planning")]
+pub mod workspace;
 
 pub mod decision;
+pub mod generation;
+pub mod generation_context;
 pub mod search;
+
+pub mod proposal;

@@ -1,0 +1,1035 @@
+{
+  "schema": "ato.formation-deepseek-d3-v2-verification/1",
+  "base_sha": "c3f44c6e548cc4f73acaf37966621d21bad0097a",
+  "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+  "tested_documentation_head": "7dcd89dd972a10eeb61217209ac88b43c247a1c7",
+  "plan_sha256": "a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249",
+  "v1_plan_sha256": "b67607c6cff1de5339f79822bd3e5d6610d1663dcce6e3f0d6b418ef8a2a1585",
+  "ato_api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+  "receiver_wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+  "prompt_sha256": "a3217b28b4242fdc03e11fe5dee7d91fbbc47b79358c4ae31601002b7a81ea50",
+  "implementation_files": {
+    "capture": {
+      "path": "apps/formation-worker/src/runtime_network/proposal/deepseek.rs",
+      "sha256": "e8a20d880e54769a34c4e5c45456d07a52b355b5458b0014c4b84756ca073486"
+    },
+    "journal": {
+      "path": "apps/formation-worker/src/runtime_network/proposal/budget.rs",
+      "sha256": "1cf08fabe87123484595f7f623301ae640794dd70324079e705cf6f3d94eb361"
+    },
+    "timeout": {
+      "path": "apps/formation-worker/src/runtime_network/proposal.rs",
+      "sha256": "10512e91ee0a403f0cb856708a416ee3ef3ea6966822b10395045a9bc4ed228f"
+    },
+    "helper": {
+      "path": "apps/formation-worker/examples/proposal_budget.rs",
+      "sha256": "fb72a852e86d85bff20c56cfb62cd1079ef2089e85f48e07ee349be79e5e7edb"
+    }
+  },
+  "unchanged_cells": {
+    "G0": {
+      "source_manifest_sha256": "b728a2224e892476417660be71520ca2e2f49aa3dde8912bb15208de0986064a",
+      "source_context_sha256": "sha256:cb63ed5daf77b7b156278f65f9d01da6ab48369e3a0821bdb897bfeb4e197e42",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "full_cell_manifest_sha256": "02d7c7f65e98b62a62d90a365cd3a45f80d430cda320d37dd99e4b9123f93060"
+    },
+    "G1": {
+      "source_manifest_sha256": "b728a2224e892476417660be71520ca2e2f49aa3dde8912bb15208de0986064a",
+      "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "full_cell_manifest_sha256": "8ffaa20144df4699d6d41dc8cadf73911c1f15e26304434cf9f083e8437a03d5"
+    },
+    "G2": {
+      "source_manifest_sha256": "a1c5f4c7308c337f63d81638024efb4c2df38d173565cf182fbce8c2aa4f7ec8",
+      "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "full_cell_manifest_sha256": "d58d0cb4e30b43e49e04f058b3a729b19157da4b446d7af35d99ecf648dbe933"
+    },
+    "G3": {
+      "source_manifest_sha256": "8dd67e78f5949507b5aa721faf1d3d277c1545cad1eb8288b04b790ea407d5df",
+      "source_context_sha256": "sha256:0c282a337ce2a672b684408145618333f22dcc4a021bb66f3414a14a93034738",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "full_cell_manifest_sha256": "bf331cb722a2a7e4d8aed2e684de3da102d1a7dd9fefe47f5387e8f9d24b0b8e"
+    },
+    "G4": {
+      "source_manifest_sha256": "8c7ffa6667ec3a090fba456b3d29e98ffd9252d3adf7a0a5ba83ecd4f6ec47b9",
+      "source_context_sha256": "sha256:b8e7d89eaa04a37e5160639685020f6b357c83b49c3b08c84964ab2641da7433",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "full_cell_manifest_sha256": "f4b0791ec75717d867eff9afdc30c8bfdc80e3d6a14e2b7e5f04db7baa109254"
+    },
+    "G5": {
+      "source_manifest_sha256": "b728a2224e892476417660be71520ca2e2f49aa3dde8912bb15208de0986064a",
+      "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "full_cell_manifest_sha256": "66066e478050602cca2d57d0e62de79ce2aea2536a887331a5fa04541647f4fc"
+    }
+  },
+  "R1_R9": {
+    "R1": "PASS",
+    "R2": "PASS",
+    "R3": "PASS",
+    "R4": "PASS",
+    "R5": "PASS",
+    "R6": "PASS",
+    "R7": "PASS",
+    "R8": "PASS",
+    "R9": "PASS"
+  },
+  "historical_read_compatibility": "PASS",
+  "selected_rust": {
+    "packages": [
+      "ato-formation",
+      "ato-formation-worker",
+      "ato-runtime-attempt",
+      "ato-receipt-authority"
+    ],
+    "passed": 668,
+    "failed": 0,
+    "ignored": 1
+  },
+  "clippy": "PASS",
+  "fmt": "PASS",
+  "diff_check": "PASS",
+  "offline_preflight": {
+    "test_methods": 15,
+    "failed": 0,
+    "N15_N19": {
+      "N15": "PASS",
+      "N16": "PASS",
+      "N17": "PASS",
+      "N18": "PASS",
+      "N19": "PASS"
+    }
+  },
+  "Rust_helper_synthetic_inspection": "PASS; preserves unresolved request; duplicate journal rejected without stdout",
+  "G0_G5_offline_projections": "6/6 byte-equivalent to v1; no live execution",
+  "actual_mock": {
+    "run_id": "1790616245464850756",
+    "environment": "isolated Linux arm64 local Coordinator/D1/Runtime",
+    "results": {
+      "M0": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 1
+      },
+      "M1": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "malformed_response",
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M2": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "malformed_response",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M3": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 0
+      },
+      "M4": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "response_too_large",
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M5": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "provider_refused",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M6": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "provider_refused",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M7": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "provider_refused",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M8": {
+        "result": "PASS",
+        "mock_http_calls": 0,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "transport_error",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M9": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "timeout",
+        "provider_call": {
+          "error_class": "timeout",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "timeout"
+        },
+        "accepted": 0
+      },
+      "M10": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "malformed_response",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M11": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 0
+      },
+      "M12": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 1
+      },
+      "M13": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 1
+      }
+    },
+    "request_evidence": {
+      "M0": {
+        "request_count": 1,
+        "request": {
+          "cell": "M0_1790616245464850756",
+          "proposal_request_sha256": "sha256:3cbfa74e3c281aa51b8343fa2a9c250e68485492d027bc07310392283afccd76",
+          "provider_body_sha256": "sha256:a20a72ec9a3e5e7defdf1360fd0bad716f2cb8c90cf360eeb48d4866081670d3",
+          "timeout_ms": 8977,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 1,
+        "result_sha256": "665f3dd72d78940f40d48a26e06c8a5a209bb56ed661ab9c4db860c49de3bc11"
+      },
+      "M1": {
+        "request_count": 1,
+        "request": {
+          "cell": "M1_1790616245464850756",
+          "proposal_request_sha256": "sha256:94f60324a779e189fc340d10ffc5f34640b34dbbd34606b27165293ff14d5680",
+          "provider_body_sha256": "sha256:ad95ec410d11d843d18980d769fbbec26cf57371e384560c3dc07ab8b82e8cc4",
+          "timeout_ms": 9065,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "b6194ecd67298fd14326050d0a1dba2c87a85604c16afcedd3f8b3b3fe5f8798"
+      },
+      "M2": {
+        "request_count": 1,
+        "request": {
+          "cell": "M2_1790616245464850756",
+          "proposal_request_sha256": "sha256:ffb2baf618444b7aedd2ccb6fcbf4b8df34b2d4a6a87c33ce7208af4f4efe1cc",
+          "provider_body_sha256": "sha256:009ca27ae3da892d17c069b5c91de33fc784403ce720114d98deba24fa5aa285",
+          "timeout_ms": 9072,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "476f8ac7ab4c322cca70f178cab687ce878317ee1f0b9a4cac5b1e8a97845dcd"
+      },
+      "M3": {
+        "request_count": 1,
+        "request": {
+          "cell": "M3_1790616245464850756",
+          "proposal_request_sha256": "sha256:00643cc3b54b1c5d3ebcbe48f463f29e8c25bc0c9a23e83364efc0d3b093c169",
+          "provider_body_sha256": "sha256:c2b5e01d0b6b4dc12e7e3251810605c965f1f4a09c39e2e7140a0cac31e06227",
+          "timeout_ms": 9053,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 1,
+        "result_sha256": "ac05e2ff21c98d3565d1320af3e4531a48b569ab4b718c64d7db6bec5341581c"
+      },
+      "M4": {
+        "request_count": 1,
+        "request": {
+          "cell": "M4_1790616245464850756",
+          "proposal_request_sha256": "sha256:5228284415f68551d393be6f5d3f4a50bc58027a93da263cffdfdf6233feeb7b",
+          "provider_body_sha256": "sha256:41021069ca7281bc126f0fa049ad0729e57eba266f46e9761b46e92a77fd72ae",
+          "timeout_ms": 9078,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "fc5dfcabaa7175fc2c265b5fb571633fe1cbcecf477849d366f17c7706cd7011"
+      },
+      "M5": {
+        "request_count": 1,
+        "request": {
+          "cell": "M5_1790616245464850756",
+          "proposal_request_sha256": "sha256:f757a3e78fe54ed24ef3e19caed258d052342aa26307a7756b64759c8c9737b8",
+          "provider_body_sha256": "sha256:6897f6104c683935431d2d5aae2717743fc5dedaa13c698846b65ec78ab677ad",
+          "timeout_ms": 9065,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "21cfef9a859315cb8c726c1f4267d96e870750802fa60b801e75d9e440a89f3d"
+      },
+      "M6": {
+        "request_count": 1,
+        "request": {
+          "cell": "M6_1790616245464850756",
+          "proposal_request_sha256": "sha256:f3fa69ced6adf01c62dc03a48463c85e2c4310425f22a609dca3e4be4ef87a75",
+          "provider_body_sha256": "sha256:efd9a3014d6a715ca0e813a738b6cb57db0f098e3165bdc4351aab4e43296ec7",
+          "timeout_ms": 9070,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "a22c90c48a98445df93f709f7e4d143a4d86651fcb96ea16a46cb508cc68ee46"
+      },
+      "M7": {
+        "request_count": 1,
+        "request": {
+          "cell": "M7_1790616245464850756",
+          "proposal_request_sha256": "sha256:dd8ccca6b0ba07139bf668d2a07ea7177c21d3bfc06f03d4820d15b37a7f3821",
+          "provider_body_sha256": "sha256:3a8ccec03440102c2d67f633a13808dec600f224f6b02531409c261a001ab145",
+          "timeout_ms": 9057,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "33b8dde052f3319438f6820db3d951a532daa45f5ff15550ae1e896c34074b62"
+      },
+      "M8": {
+        "request_count": 1,
+        "request": {
+          "cell": "M8_1790616245464850756",
+          "proposal_request_sha256": "sha256:5c975836ef40aceacaa4a85495347833c6404f6e9de03f9a817710235b85fec8",
+          "provider_body_sha256": "sha256:b210999c7831423b98eecabff1b6037713da31b964841c401052af8d9fe55f4c",
+          "timeout_ms": 9051,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "20ca74d18c611b0534262551a5c9c55bea3b37af38daaf955fafc06207f6ecab"
+      },
+      "M9": {
+        "request_count": 1,
+        "request": {
+          "cell": "M9_1790616245464850756",
+          "proposal_request_sha256": "sha256:8cbc2c255137d76aeab475d41512d6960fd1424b97cfc3657b7aa253d3452db4",
+          "provider_body_sha256": "sha256:ec15322288078eceac6fbaa2ee0ba8c86e3bfdbe4513ec9b34ef56eae12c5e1b",
+          "timeout_ms": 9060,
+          "proposal_request_bytes": 2041,
+          "provider_body_bytes": 3817
+        },
+        "response_count": 0,
+        "result_sha256": "31741b9d08aaccaf14ec753f49d7e854e2323298c2d3cb0f01dcd86f9bef7bb9"
+      },
+      "M10": {
+        "request_count": 1,
+        "request": {
+          "cell": "M10_1790616245464850756",
+          "proposal_request_sha256": "sha256:ab0bb6c4608ba91b0bf08b3132c1201f6767b8602ffec6117f0b5095619837f8",
+          "provider_body_sha256": "sha256:4b46cce4b70eab4691015562bd753dd312bf7e89decc96852a5a195e2df80ccb",
+          "timeout_ms": 9069,
+          "proposal_request_bytes": 2042,
+          "provider_body_bytes": 3818
+        },
+        "response_count": 0,
+        "result_sha256": "ea5bf971dffe0c61c39302866a535414d8d1c41b9bdc0cc514689286fdef9aac"
+      },
+      "M11": {
+        "request_count": 1,
+        "request": {
+          "cell": "M11_1790616245464850756",
+          "proposal_request_sha256": "sha256:33a44f495277a797b3e83b6b93e1baeacb1453124b091abeb1a0b2f6472ef6f6",
+          "provider_body_sha256": "sha256:5959f572e24b4b84bc4fe4f95b337b3f86de02a73f790733b8af71845d603c56",
+          "timeout_ms": 9060,
+          "proposal_request_bytes": 2107,
+          "provider_body_bytes": 3885
+        },
+        "response_count": 1,
+        "result_sha256": "48238b4c343d09fbe6b18444110312464a0e8f5948d5c501575e3fe937c0d224"
+      },
+      "M12": {
+        "request_count": 1,
+        "request": {
+          "cell": "M12_1790616245464850756",
+          "proposal_request_sha256": "sha256:e5c3ae34497ce2fe632e90302365efdd27aa94d23a46f8b69f60ef5213129ee3",
+          "provider_body_sha256": "sha256:76e43f74e023562eea99fe2be5cce7e2fa36f15adcdc00669c9f594fde858bea",
+          "timeout_ms": 9089,
+          "proposal_request_bytes": 2042,
+          "provider_body_bytes": 3818
+        },
+        "response_count": 1,
+        "result_sha256": "d7954099d41d0534c52c65fa5c5ef807464b76d13db5192f1ab9905cb312817e"
+      },
+      "M13": {
+        "request_count": 1,
+        "request": {
+          "cell": "M13_1790616245464850756",
+          "proposal_request_sha256": "sha256:2ab1147fde83d4b2986af7926254c63d60448ba328df9705d60ce12e142404df",
+          "provider_body_sha256": "sha256:7d7fb89294798bfb47f675ecd1e46f4408efb5d829d262fc74acca06ba87393c",
+          "timeout_ms": 8944,
+          "proposal_request_bytes": 2042,
+          "provider_body_bytes": 3818
+        },
+        "response_count": 1,
+        "result_sha256": "0be93aecf9f6079ef58c245880b4a2636fb0440c14bc37bb6eb5b0c73f3e4742"
+      }
+    },
+    "live_calls": 0
+  },
+  "C2_fixed": {
+    "run_id": "1790616293069482386",
+    "groups": 15,
+    "result": "PASS",
+    "fixed_calls": 12,
+    "model_calls": 0,
+    "results": {
+      "zero": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3MGRQE39PHKQ6A5A5MHE499",
+            "d": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "d66b1e3ba89641d2064f393127e666adcf352fb6c5da5c2c7bed0ce221f80d3c"
+      },
+      "P0": {
+        "status": "unsatisfied",
+        "calls": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3MGRSTZR6BFJK0WNDW9RBHS",
+            "d": "sha256:2155124e861c6993759a9b4e8f2640ffb18509faa28b87cfeb9c32716c8c7160",
+            "status": "fail"
+          }
+        ],
+        "accepted_routes": 0,
+        "proposal_status": null,
+        "outcomes": [],
+        "result_sha256": "bcb21c25334ef62251bc0f73a513bd5e75ed5bcf6caca3aabb44bc293d3ca62c"
+      },
+      "P1_P2_P10_P11": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3MGRVXJ3K4XB3KQTZAPN2A8",
+            "d": "sha256:2479b9c63958ebf370d0461ae572bff645ebf87b2dda8c435c4ca729099a8a2e",
+            "status": "fail"
+          },
+          {
+            "id": "01M3MGRZ1XFHCWXRA81WB2JMK1",
+            "d": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted",
+          "admitted"
+        ],
+        "result_sha256": "4f00b3cac58d9f1f3afc3db03ca5e812a88cef5550528261e348b9b24995602b"
+      },
+      "P3": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3MGS2V55ABTD7WPZ3Y9059E",
+            "d": "sha256:7894c64cac1418f6bc865a8e0014e203bc4e83f6d172ea218f9a785b31b3e996",
+            "status": "fail"
+          },
+          {
+            "id": "01M3MGS63AM3GYT26YGBZ3Q00N",
+            "d": "sha256:7963207917f132f16c104de668da6f5adab40fa7436f46a6e962fd444ec6fe2b",
+            "status": "fail"
+          },
+          {
+            "id": "01M3MGS8J7CGNGRFB8NWSYH2MD",
+            "d": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted",
+          "admitted"
+        ],
+        "result_sha256": "8da0c13f77d793f39238c3e3358c505ff050ef9430252bf5c6b868702ca9a5c1"
+      },
+      "P4": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "completed",
+        "outcomes": [
+          "rejected",
+          "rejected",
+          "rejected"
+        ],
+        "result_sha256": "e078ce18769227578088427de806201f539188e3d0803b60ea0ce8dd9a8a030e"
+      },
+      "P5": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3MGSDY2EMEQGCTB0HC1CW7E",
+            "d": "sha256:b1d47555ab54f071bdcb3b21b0ea9062956c6dba6ef246e8431baa12d8d94cac",
+            "status": "fail"
+          },
+          {
+            "id": "01M3MGSHB1RV50QT4P17H49NK5",
+            "d": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted",
+          "admitted",
+          "rejected",
+          "rejected"
+        ],
+        "result_sha256": "d61b36bfb45d1758d39559f4fe6bf1673e62e886548d980099b2ff15ef10c362"
+      },
+      "P6_error": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "provider_error",
+        "outcomes": [],
+        "result_sha256": "a789e9c7cc2e2bbae73456f9a084f85e9d207c2acb971d53781732e445f24336"
+      },
+      "P6_timeout": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "timeout",
+        "outcomes": [],
+        "result_sha256": "5172a0be3ab5bca072907e618eef94174cd5ee8c02f990c2f1b1643625cd6b75"
+      },
+      "unsupported": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "completed",
+        "outcomes": [
+          "unsupported"
+        ],
+        "result_sha256": "5c63183623f0bb5f79e2af889da7e79ea10836f7c385edddab631b3df3eb6709"
+      },
+      "P7": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "timeout",
+        "outcomes": [],
+        "result_sha256": "cbc3af2429848a9b535b0b776af783aa3b1f1ed7210141ada07700c7ac927bca"
+      },
+      "P8": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3MGT4JAD9WWZH110ARCQ6JC",
+            "d": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "3310441504819d0c6d0cd9850e76750b085b3142f7ac0835d1362ee50c8e51c3"
+      },
+      "P9": {
+        "status": "unknown",
+        "calls": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3MGT952BYY5SPT44YM9SG0X",
+            "d": "sha256:4ac32803662e2c42f708f14156dc7312d00f68ca7bc8d598c7eb96ea9b0f7c60",
+            "status": "unknown"
+          }
+        ],
+        "accepted_routes": 0,
+        "proposal_status": null,
+        "outcomes": [],
+        "result_sha256": "17a28c774ab510fba1a3d81fd506b335ef39565ab0176f0e26bda46ee5f32225"
+      },
+      "L1": {
+        "status": "unsatisfied",
+        "calls": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "timeout",
+        "outcomes": [],
+        "result_sha256": "c33a36a85c1233d8bb2235186cdd1574f93ec39a1462ca9851c97ba7ccf37d2b"
+      },
+      "L2": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3MGTQ5NN6WEMHEHAGB2T0CH",
+            "d": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "ab80bd8fe257bc7e9c24f810e911c87bd564bb86e8b6e3b14135cd9c192c987e"
+      },
+      "L3": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3MGTZJCPCVMR6YMXVTQQNTT",
+            "d": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "f203ce2c287356689dc41ade6e526a3af699a4b2129f294a8dbb64668f43a6bc"
+      }
+    }
+  },
+  "CI": {
+    "head_run": 36457553330,
+    "base_run": 36432757237,
+    "status": "red, not green",
+    "platform_comparison": {
+      "macos": {
+        "head_failed_tests": [
+          "a_process_run_is_owned_by_its_run_until_stopped",
+          "activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio",
+          "b_process_hosted_observation_is_verified",
+          "c_http_status_mismatch_fails_the_observation",
+          "d_body_digest_mismatch_fails_the_observation",
+          "g1_a_derivation_the_bundle_does_not_declare_is_refused",
+          "g2_a_job_without_a_selected_derivation_is_refused"
+        ],
+        "base_failed_tests": [
+          "a_process_run_is_owned_by_its_run_until_stopped",
+          "b_process_hosted_observation_is_verified",
+          "c_http_status_mismatch_fails_the_observation",
+          "d_body_digest_mismatch_fails_the_observation",
+          "g1_a_derivation_the_bundle_does_not_declare_is_refused",
+          "g2_a_job_without_a_selected_derivation_is_refused"
+        ],
+        "head_only_failed_tests": [
+          "activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio"
+        ],
+        "compiler_errors_equal": true,
+        "head_only_observation": {
+          "test": "activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio",
+          "site": "apps/cli/tests/activity_mcp.rs:191:44",
+          "error": "WouldBlock: Resource temporarily unavailable",
+          "same_base_test": "PASS",
+          "local_macos_isolated_repetitions": [
+            "PASS",
+            "PASS",
+            "PASS"
+          ],
+          "classification": "head-only timing instability observation; not baseline-reproduced; no CLI changes; no unrelated fix",
+          "causality": "not attributed to request-evidence changes; not claimed proven by local PASS"
+        }
+      },
+      "ubuntu": {
+        "head_failed_tests": [
+          "concurrent_routes",
+          "deregister_is_prompt_with_idle_keepalive_connection",
+          "deregister_keeps_port_in_allocator",
+          "hosted_python_and_node_use_the_common_process_runtime",
+          "long_poll_20s",
+          "reregister_same_key_updates_upstream",
+          "restart_returns_same_port",
+          "sse_passthrough_events_arrive_in_order",
+          "static_get_byte_for_byte",
+          "tests::local_static_server_rejects_browser_state_without_the_run_token",
+          "upstream_gone_mid_stream",
+          "upstream_not_ready_returns_service_starting_page",
+          "websocket_echo_10_frames"
+        ],
+        "base_failed_tests": [
+          "concurrent_routes",
+          "deregister_is_prompt_with_idle_keepalive_connection",
+          "deregister_keeps_port_in_allocator",
+          "hosted_python_and_node_use_the_common_process_runtime",
+          "long_poll_20s",
+          "reregister_same_key_updates_upstream",
+          "restart_returns_same_port",
+          "sse_passthrough_events_arrive_in_order",
+          "static_get_byte_for_byte",
+          "tests::local_static_server_rejects_browser_state_without_the_run_token",
+          "upstream_gone_mid_stream",
+          "upstream_not_ready_returns_service_starting_page",
+          "websocket_echo_10_frames"
+        ],
+        "head_only_failed_tests": [],
+        "compiler_errors_equal": true
+      },
+      "windows": {
+        "head_failed_tests": [],
+        "base_failed_tests": [],
+        "head_only_failed_tests": [],
+        "compiler_errors_equal": true
+      }
+    }
+  },
+  "evidence_archive_sha256": "37c89bc54df7e5708f79156ef5836fb5ac728c88bf082bbb3eab5268282d993a",
+  "source_archive_sha256": "f8fd320b23dc1cf84d9407fb8a1ef64a408b728bc5cee42c3e1e3da0583c3288",
+  "local_evidence_hashes": {
+    "regression-final.log": "5d215e639aee81ffbd5bf7c836e355ab309bb78450c6bf46115f7bbd86ceef11",
+    "general-final.log": "3c1d9b0397a7933f45f11793109bebbe8c2259493e93a0f914c07a7d57aee6bb",
+    "clippy-final.log": "5d23dbd938ec21ec3426e01e482e091a1c071643e609763608145281f6ea6567",
+    "preflight-final.log": "36e632bbf6589bac8037ace7030ead9f8c8947bdb0f34d0e4b025484e5464ee7",
+    "exact-pin-preflight.json": "a8d35493b616a9f79b2fc9f3c01326f00476c69e55c0321d46201e1f216e08e4",
+    "mcp-isolated-1.log": "d5c0df18f65d7ef3e7e900bd6548cd3a2ec6832e3630bfa10c944f5074d9cf79",
+    "mcp-isolated-2.log": "434c9b53e1d304fce9f522e8035d328025e05ca24eb9b26a94a367228fbff5ef",
+    "mcp-isolated-3.log": "6e4bdc04212fe17e17452a351ee9354eae682bcef43ff7a77fdb423729782a05",
+    "linux-hashes.txt": "76ef4ff89c3daa8fffa2083632f476177386303ebae3904a3743207a6cfef013",
+    "head-macos.log": "cb50ecef677de1f40063a09edb6a44e1629942b9fa90b58070acf143a849b4e6",
+    "head-ubuntu.log": "d480663c5591fea54a7b572875e5dd40921b95703a65f2c5ee9ed26572d8cf40",
+    "head-windows.log": "8108f3d983fb90b44782888d8b09dfac02d1525f0e9b62c203d233a6dddca842",
+    "base-macos.log": "2f4cb2dc5e6705bc452fdc8670dbbdf64939e92a25fdf251cadf5420cbcce28c",
+    "base-ubuntu.log": "4a06d83e52643dd5f54398ab5b2ae22ce955bca1589b7039e2446cfbe74acb2b",
+    "base-windows.log": "2e52abf01e2c1b380f127f13faf7af34d5968e914a3dbe3f59fd5e1e7f499a5f"
+  },
+  "E0_E19": "PENDING v2 controller update after this PR review/merge; old E0-E14 evidence is not relabeled as v2 verification",
+  "execution_driver": {
+    "pr": 1431,
+    "head": "670d7a2801753584141aea06819085822b3ee2b7",
+    "state": "Draft OPEN unchanged"
+  },
+  "states": {
+    "implementation": "implemented",
+    "local_verification": "verified",
+    "mock_actual_integration": "verified",
+    "preregistration": "v2 recorded; Draft review pending",
+    "merged": false,
+    "deployed": false
+  },
+  "live_calls": 0,
+  "spend_usd_micros": 0,
+  "key_read": false,
+  "live_journal_initialized": false,
+  "remote_migration_applied": false,
+  "E2_1421_touched": false
+}

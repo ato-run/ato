@@ -216,6 +216,19 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
+    /// Strict batch bytes are validated by Rust, never canonicalized by TS.
+    CompileProposals {
+        frozen: Box<ato_formation::search::FrozenSearchV1>,
+        base_recipes: std::collections::BTreeMap<String, String>,
+        batch_json: String,
+    },
+    CompileGeneration {
+        policy: ato_formation::generation::GenerationPolicy,
+        base_capsule_toml: String,
+        closure_ref: String,
+        base_contract_ref: String,
+        draft: ato_formation::generation::GenerationDraft,
+    },
     FreezeSearch {
         frozen: Box<ato_formation::search::FrozenSearchV1>,
     },
@@ -238,8 +251,79 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         if bytes.len() > MAX_INPUT_BYTES {
             return Err("search_input_too_large".into());
         }
-        let request: SearchRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        // A malformed generation draft can carry source or secret text. Never
+        // echo serde's input-bearing diagnostics through the search ABI.
+        let request: SearchRequest =
+            serde_json::from_slice(bytes).map_err(|_| "search_input_invalid".to_owned())?;
         match request {
+            SearchRequest::CompileProposals {
+                frozen,
+                base_recipes,
+                batch_json,
+            } => {
+                use ato_formation::proposal::{
+                    CandidateRegistry, ProducerOutput, ProducerProvenance, ProposalOutcome,
+                };
+                let output = ProducerOutput::new(
+                    batch_json.into_bytes(),
+                    ProducerProvenance {
+                        provider: "requester".into(),
+                        model: None,
+                    },
+                )
+                .map_err(|e| e.0.to_owned())?;
+                let mut registry = CandidateRegistry::new(&frozen).map_err(|e| e.0.to_owned())?;
+                let outcomes = registry
+                    .validate_batch(&base_recipes, &output)
+                    .map_err(|e| e.0.to_owned())?;
+                let outcomes: Vec<_> = outcomes
+                    .into_iter()
+                    .map(|outcome| match outcome {
+                        ProposalOutcome::Admitted(candidate) => serde_json::json!({
+                            "status": "admitted", "proposal_id": candidate.proposal_id(),
+                            "derivation_ref": candidate.compiled().derivation_ref,
+                            "capsule_toml": candidate.compiled().capsule_toml,
+                            "derivation": candidate.compiled().derivation,
+                            "candidate": candidate.candidate(),
+                        }),
+                        ProposalOutcome::Unsupported => {
+                            serde_json::json!({"status": "unsupported"})
+                        }
+                        ProposalOutcome::Rejected(error) => {
+                            serde_json::json!({"status": "rejected", "code": error.0})
+                        }
+                    })
+                    .collect();
+                Ok(serde_json::json!({"status": "proposals_validated", "outcomes": outcomes}))
+            }
+            SearchRequest::CompileGeneration {
+                policy,
+                base_capsule_toml,
+                closure_ref,
+                base_contract_ref,
+                draft,
+            } => {
+                let compiled = match ato_formation::generation::compile_generation(
+                    &policy,
+                    &base_capsule_toml,
+                    &closure_ref,
+                    &base_contract_ref,
+                    &draft,
+                ) {
+                    Ok(compiled) => compiled,
+                    Err(error) => {
+                        return Ok(serde_json::json!({
+                            "status": "rejected", "code": error.code(), "detail": error.code(),
+                        }));
+                    }
+                };
+                Ok(serde_json::json!({
+                    "status": "generation_compiled",
+                    "derivation_ref": compiled.derivation_ref,
+                    "capsule_toml": compiled.capsule_toml,
+                    "derivation": compiled.derivation,
+                }))
+            }
             SearchRequest::FreezeSearch { frozen } => {
                 FrozenContract {
                     base_contract: frozen.base_contract.clone(),
@@ -282,6 +366,84 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         }
     };
     evaluate().unwrap_or_else(|detail|serde_json::json!({"status":"rejected","code":"search_state_invalid","detail":detail}))
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::evaluate_search;
+    use ato_formation::{
+        authoring::{BindingContext, bind},
+        capsule_toml::parse_capsule_toml,
+    };
+    use serde_json::{Value, json};
+
+    fn request() -> Value {
+        let text = include_str!(
+            "../../../apps/formation-worker/fixtures/runtime-network/notes/capsule.toml"
+        );
+        let closure = format!("sha256:{}", "a".repeat(64));
+        let (k, d) = bind(
+            &parse_capsule_toml(text).unwrap(),
+            &BindingContext {
+                source_closure_ref: &closure,
+            },
+        )
+        .unwrap();
+        json!({
+            "operation": "compile_generation",
+            "policy": {
+                "schema": "ato.formation-generation-policy/1",
+                "base_derivation_ref": d.derivation_ref().unwrap(),
+                "entrypoints": { "entry_a": "alternate.py" },
+                "max_generations": 1, "timeout_ms": 5000
+            },
+            "base_capsule_toml": text,
+            "closure_ref": closure,
+            "base_contract_ref": k.contract_ref().unwrap(),
+            "draft": {
+                "schema": "ato.formation-derivation-draft/1",
+                "operation": "python_script", "entrypoint_id": "entry_a"
+            }
+        })
+    }
+
+    #[test]
+    fn compile_abi_returns_canonical_d_without_accepting_a_route() {
+        let request = request();
+        let response = evaluate_search(&serde_json::to_vec(&request).unwrap());
+        assert_eq!(response["status"], "generation_compiled");
+        let d: ato_formation::authoring::BoundDerivation =
+            serde_json::from_value(response["derivation"].clone()).unwrap();
+        assert_eq!(response["derivation_ref"], d.derivation_ref().unwrap());
+        assert_ne!(
+            response["derivation_ref"],
+            request["policy"]["base_derivation_ref"]
+        );
+        let (k, rebound) = bind(
+            &parse_capsule_toml(response["capsule_toml"].as_str().unwrap()).unwrap(),
+            &BindingContext {
+                source_closure_ref: request["closure_ref"].as_str().unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(rebound, d);
+        assert_eq!(k.contract_ref().unwrap(), request["base_contract_ref"]);
+        assert!(response.get("fully_satisfied").is_none());
+    }
+
+    #[test]
+    fn compile_abi_reports_duplicates_and_rejects_arbitrary_drafts_without_leaking_them() {
+        let mut request = request();
+        request["policy"]["entrypoints"]["entry_a"] = "app.py".into();
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["code"],
+            "generation_duplicate"
+        );
+        request["draft"]["argv"] = json!(["SECRET_CANARY"]);
+        let response = evaluate_search(&serde_json::to_vec(&request).unwrap());
+        assert_eq!(response["status"], "rejected");
+        assert!(!response.to_string().contains("SECRET_CANARY"));
+    }
 }
 
 // Each JS call creates a fresh instance. Buffers remain owned by Rust for the
@@ -335,5 +497,143 @@ mod abi {
             *output = bytes;
             ((output.len() as u64) << 32) | output.as_ptr() as u64
         })
+    }
+}
+
+#[cfg(test)]
+mod proposal_tests {
+    use super::*;
+    use ato_formation::{
+        authoring::{BindingContext, bind},
+        capsule_toml::parse_capsule_toml,
+        search::SearchStateV1,
+    };
+    const BASE: &str = include_str!("../../../lib/formation/tests/fixtures/proposal-python.toml");
+    fn request() -> Value {
+        let mut state: SearchStateV1 = serde_json::from_str(include_str!(
+            "../../../lib/formation/tests/fixtures/search-state/d1-failed.json"
+        ))
+        .unwrap();
+        let closure = format!("sha256:{}", "a".repeat(64));
+        let (k, d) = bind(
+            &parse_capsule_toml(BASE).unwrap(),
+            &BindingContext {
+                source_closure_ref: &closure,
+            },
+        )
+        .unwrap();
+        state.frozen.base_contract_ref = k.contract_ref().unwrap();
+        state.frozen.contract_ref = state.frozen.base_contract_ref.clone();
+        state.frozen.base_contract = k;
+        state.frozen.candidates.truncate(1);
+        state.frozen.candidates[0].derivation_ref = d.derivation_ref().unwrap();
+        state.frozen.candidates[0].materialization =
+            ato_formation::search::CandidateInput::Source {
+                closure_ref: closure.clone(),
+                archive_digest: closure.clone(),
+            };
+        state.frozen.initial_source = Some(ato_formation::search::InitialSource {
+            closure_ref: closure.clone(),
+            archive_digest: closure,
+        });
+        state.frozen.policy.proposal=Some(serde_json::from_value(serde_json::json!({
+            "modifiable_derivation_refs":[d.derivation_ref().unwrap()],"source_domain":{"entrypoints":{"e":"working.py"},"modules":{"m":"pkg.server"}}, "python_http_process":null,
+            "policy":{"max_proposal_rounds":1,"max_proposals":4,"timeout_ms":5000,"allow_source_text":false,"max_source_bytes":0}
+        })).unwrap());
+        serde_json::json!({"operation":"compile_proposals","frozen":state.frozen,"base_recipes":{(d.derivation_ref().unwrap()):BASE},
+            "batch_json":serde_json::json!({"schema":"ato.formation-proposal/1","proposals":[
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"python_script@1","entrypoint_id":"e"}]},
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"python_module@1","module_id":"m"}]},
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"python_script@1","entrypoint_id":"e"}]},
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"shell@1","secret":"do-not-echo"}]}
+            ]}).to_string()})
+    }
+    #[test]
+    fn shared_rust_abi_validates_mixed_batch_without_becoming_receipt_authority() {
+        let request = request();
+        let result = evaluate_search(&serde_json::to_vec(&request).unwrap());
+        assert_eq!(result["status"], "proposals_validated");
+        assert_eq!(result["outcomes"][0]["status"], "admitted");
+        assert_eq!(result["outcomes"][1]["status"], "admitted");
+        assert_eq!(result["outcomes"][2]["code"], "proposal_duplicate");
+        assert_eq!(result["outcomes"][3]["status"], "rejected");
+        assert!(!result.to_string().contains("do-not-echo"));
+        assert!(result.get("fully_satisfied").is_none());
+        // Compiler output is not accepted by the independent receipt ABI.
+        assert!(matches!(
+            evaluate(&serde_json::to_vec(&result).unwrap()),
+            Decision::Rejected { .. }
+        ));
+        for outcome in result["outcomes"].as_array().unwrap().iter().take(2) {
+            let (k, d) = bind(
+                &parse_capsule_toml(outcome["capsule_toml"].as_str().unwrap()).unwrap(),
+                &BindingContext {
+                    source_closure_ref:
+                        request["frozen"]["candidates"][0]["materialization"]["closure_ref"]
+                            .as_str()
+                            .unwrap(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                k.contract_ref().unwrap(),
+                request["frozen"]["base_contract_ref"]
+            );
+            assert_eq!(d.derivation_ref().unwrap(), outcome["derivation_ref"]);
+        }
+    }
+    #[test]
+    fn base_free_abi_needs_initial_source_but_no_known_d_or_base_recipe() {
+        let mut request = request();
+        request["frozen"]["candidates"] = serde_json::json!([]);
+        request["frozen"]["policy"]["proposal"]["modifiable_derivation_refs"] =
+            serde_json::json!([]);
+        request["frozen"]["policy"]["proposal"]["python_http_process"] =
+            serde_json::json!({"python_version":"3.12.7","http_port":"app.http","guest_port":8000});
+        request["base_recipes"] = serde_json::json!({});
+        request["batch_json"] = serde_json::json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"propose_derivation","operations":[{"operation":"python_http_process@1","entrypoint_id":"e"}]}]}).to_string().into();
+        let result = evaluate_search(&serde_json::to_vec(&request).unwrap());
+        assert_eq!(result["outcomes"][0]["status"], "admitted", "{result}");
+        let compiled = &result["outcomes"][0];
+        let (k, d) = bind(
+            &parse_capsule_toml(compiled["capsule_toml"].as_str().unwrap()).unwrap(),
+            &BindingContext {
+                source_closure_ref: request["frozen"]["initial_source"]["closure_ref"]
+                    .as_str()
+                    .unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(k.contract_ref().unwrap(), request["frozen"]["contract_ref"]);
+        assert_eq!(d.derivation_ref().unwrap(), compiled["derivation_ref"]);
+        assert!(matches!(
+            evaluate(&serde_json::to_vec(&result).unwrap()),
+            Decision::Rejected { .. }
+        ));
+        request["frozen"]
+            .as_object_mut()
+            .unwrap()
+            .remove("initial_source");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+    }
+    #[test]
+    fn missing_policy_or_unknown_abi_field_rejects_without_echoing_input() {
+        for remove_policy in [true, false] {
+            let mut r = request();
+            if remove_policy {
+                r["frozen"]["policy"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("proposal");
+            } else {
+                r["secret"] = "do-not-echo".into();
+            }
+            let result = evaluate_search(&serde_json::to_vec(&r).unwrap());
+            assert_eq!(result["status"], "rejected");
+            assert!(!result.to_string().contains("do-not-echo"));
+        }
     }
 }

@@ -164,6 +164,17 @@ pub fn container_adapter(
     context: &ResolvedRuntimeLaunchContext,
     labels: BTreeMap<String, String>,
 ) -> Result<DockerOciAdapter> {
+    DockerOciAdapter::new(container_oci_spec(spec, oci, context, labels)?)
+}
+
+/// The common-Adapter spec for a v1 OCI realization. Omitted `working_dir`
+/// and `workspace_mount_path` keep `/app`.
+pub fn container_oci_spec(
+    spec: &RuntimeLaunchSpecV1,
+    oci: &OciRealizationV1,
+    context: &ResolvedRuntimeLaunchContext,
+    labels: BTreeMap<String, String>,
+) -> Result<OciSpec> {
     let image = oci
         .image_reference
         .clone()
@@ -204,7 +215,7 @@ pub fn container_adapter(
             attachment.guest_target().to_owned(),
         );
     }
-    DockerOciAdapter::new(OciSpec {
+    Ok(OciSpec {
         id: spec.context.run_id.clone(),
         image,
         platform,
@@ -540,6 +551,12 @@ pub fn service_oci_spec(
         );
     }
 
+    ensure!(
+        service.working_dir == "/app",
+        "service `{}` declares working directory {}; service groups run in /app",
+        service.name,
+        service.working_dir
+    );
     Ok(OciSpec {
         id: format!("{}-{}", spec.context.run_id, service.name),
         image: service.image_reference.clone(),
@@ -749,6 +766,51 @@ fn remove_owned(paths: &[PathBuf]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hosted_portable_projection_reaches_the_adapter_with_its_working_dir() {
+        use crate::launch::resolved::{ResolvedStateAttachment, allocate_endpoint};
+        // The exact bytes ato-api's portableRouteRealization produces.
+        let raw = include_str!(
+            "../../../ipc/tests/fixtures/runtime-launch-spec-v1/portable-oci-working-dir.json"
+        );
+        let spec = RuntimeLaunchSpecV1::parse(raw).expect("portable fixture");
+        let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &spec.realization else {
+            panic!("fixture is an OCI realization");
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.path().to_path_buf(),
+            "",
+            BTreeMap::new(),
+            vec![],
+            vec![ResolvedStateAttachment::new(
+                "server_data",
+                None,
+                state.path().to_path_buf(),
+                "/opt/app/server-data",
+                StateAccessV1::ReadWrite,
+            )],
+            vec![allocate_endpoint(&spec.endpoints[0], 18080)],
+        )
+        .expect("context");
+        let adapter_spec = container_oci_spec(&spec, oci, &context, BTreeMap::new()).expect("spec");
+        assert_eq!(adapter_spec.working_dir, "/opt/app");
+        assert_eq!(adapter_spec.workspace_mount_path, "/.ato-workspace");
+        assert_eq!(adapter_spec.argv, ["python3", "server.py"]);
+        assert_eq!(adapter_spec.mounts.len(), 1);
+        assert_eq!(adapter_spec.mounts[0].guest_path, "/opt/app/server-data");
+        assert!(adapter_spec.mounts[0].writable);
+        ato_adapter_oci::validate_oci_spec(&adapter_spec).expect("the Adapter accepts it");
+
+        // Without the fact, the pre-existing /app working directory.
+        let mut legacy = oci.clone();
+        legacy.working_dir = None;
+        let adapter_spec =
+            container_oci_spec(&spec, &legacy, &context, BTreeMap::new()).expect("spec");
+        assert_eq!(adapter_spec.working_dir, "/app");
+    }
 
     /// Uses real Docker, with one test-process-only wrapper refusing the
     /// first container's state inspection. Never stops the shared daemon.

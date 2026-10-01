@@ -1,0 +1,812 @@
+{
+  "schema": "ato.formation-d2-final-integration/1",
+  "base": "f91cccd556cf2b7406eaabd68ae8d082ddfa59b1",
+  "head": "c1f9feb28c760bc039c634998ce03c0bbc4d6179",
+  "receiver": "38668a97e7632256b33074b0d223670c16b76bfd",
+  "merge": "8980ab8aef353cd5e33dadce4a8dbf7367f4afa2",
+  "ci": {
+    "macos": {
+      "base": [
+        "a_process_run_is_owned_by_its_run_until_stopped",
+        "b_process_hosted_observation_is_verified",
+        "c_http_status_mismatch_fails_the_observation",
+        "d_body_digest_mismatch_fails_the_observation",
+        "g1_a_derivation_the_bundle_does_not_declare_is_refused",
+        "g2_a_job_without_a_selected_derivation_is_refused"
+      ],
+      "head": [
+        "a_process_run_is_owned_by_its_run_until_stopped",
+        "b_process_hosted_observation_is_verified",
+        "c_http_status_mismatch_fails_the_observation",
+        "d_body_digest_mismatch_fails_the_observation",
+        "g1_a_derivation_the_bundle_does_not_declare_is_refused",
+        "g2_a_job_without_a_selected_derivation_is_refused"
+      ],
+      "new": []
+    },
+    "ubuntu": {
+      "base": [
+        "hosted_python_and_node_use_the_common_process_runtime"
+      ],
+      "head": [
+        "hosted_python_and_node_use_the_common_process_runtime"
+      ],
+      "new": []
+    },
+    "windows": {
+      "rust_matches_base": true,
+      "cli_matches_base_rust": true
+    },
+    "cli_macos": {
+      "head": [
+        "a_process_run_is_owned_by_its_run_until_stopped"
+      ],
+      "present_in_current_main_rust": true,
+      "note": "CLI workflow has no push-main run; same test/current-main Rust job evidence, not an identical CLI workflow run"
+    }
+  },
+  "checks": [
+    {
+      "link": "https://github.com/ato-run/ato/runs/108873606114",
+      "name": "CodeQL",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570652/job/108873584212",
+      "name": "build-local-artifacts (${{ join(matrix.targets, ', ') }})",
+      "state": "SKIPPED"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570652/job/108873587594",
+      "name": "announce",
+      "state": "SKIPPED"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570652/job/108873586228",
+      "name": "publish-homebrew-formula",
+      "state": "SKIPPED"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570652/job/108873585061",
+      "name": "host",
+      "state": "SKIPPED"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570652/job/108873584929",
+      "name": "build-global-artifacts",
+      "state": "SKIPPED"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570652/job/108873352849",
+      "name": "plan",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570643/job/108873352760",
+      "name": "legacy apps/desktop shim compiles (macOS)",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570661/job/108873352689",
+      "name": "cli (macos-latest)",
+      "state": "FAILURE"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570653/job/108873353224",
+      "name": "workspace (macos-latest)",
+      "state": "FAILURE"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570643/job/108873352391",
+      "name": "tauri shell (macOS)",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570661/job/108873353142",
+      "name": "cli (windows-latest)",
+      "state": "FAILURE"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570653/job/108873352875",
+      "name": "workspace (windows-latest)",
+      "state": "FAILURE"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570685/job/108873353506",
+      "name": "desktop xtask build paths",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570640/job/108873352603",
+      "name": "snapshot",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570653/job/108873353066",
+      "name": "workspace (ubuntu-latest)",
+      "state": "FAILURE"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570685/job/108873353152",
+      "name": "cargo-dist generate --check + plan",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405568010/job/108873349081",
+      "name": "Analyze (javascript-typescript)",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405568010/job/108873348976",
+      "name": "Analyze (python)",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405568010/job/108873348918",
+      "name": "Analyze (rust)",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405568010/job/108873348998",
+      "name": "Analyze (go)",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405570661/job/108873353009",
+      "name": "cli (ubuntu-latest)",
+      "state": "SUCCESS"
+    },
+    {
+      "link": "https://github.com/ato-run/ato/actions/runs/36405568010/job/108873348694",
+      "name": "Analyze (actions)",
+      "state": "SUCCESS"
+    }
+  ],
+  "mock": {
+    "receiver": "38668a97e7632256b33074b0d223670c16b76bfd",
+    "results": {
+      "M0": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 1
+      },
+      "M1": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "malformed_response",
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M2": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "malformed_response",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M3": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 0
+      },
+      "M4": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "response_too_large",
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M5": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "provider_refused",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M6": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "provider_refused",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M7": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "provider_refused",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M8": {
+        "result": "PASS",
+        "mock_http_calls": 0,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "transport_error",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M9": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "timeout",
+        "provider_call": {
+          "error_class": "timeout",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "timeout"
+        },
+        "accepted": 0
+      },
+      "M10": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "provider_error",
+        "provider_call": {
+          "error_class": "malformed_response",
+          "provenance": {
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": null,
+              "output_tokens": null
+            }
+          },
+          "status": "provider_error"
+        },
+        "accepted": 0
+      },
+      "M11": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 0
+      },
+      "M12": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 1
+      },
+      "M13": {
+        "result": "PASS",
+        "mock_http_calls": 1,
+        "reservations": 1,
+        "attempts": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "round_status": "completed",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 444,
+            "kind": "llm",
+            "model": "mock-deepseek-d2",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "accepted": 1
+      }
+    },
+    "live_model_calls": 0,
+    "spend_usd_micros": 0
+  },
+  "fixed": {
+    "receiver": {
+      "sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+      "baseline": "0306_portable_attempt_lifecycle.sql"
+    },
+    "results": {
+      "zero": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3KPMQGG6MCP0A3XFQYEC0ES",
+            "d": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "f50800f3fc1448eb563ca92bac057d383aaedfe8e9b1e0134d5bd7ca8b55aeb6"
+      },
+      "P0": {
+        "status": "unsatisfied",
+        "calls": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3KPMSY2ZTVN5S1X3K32790S",
+            "d": "sha256:2155124e861c6993759a9b4e8f2640ffb18509faa28b87cfeb9c32716c8c7160",
+            "status": "fail"
+          }
+        ],
+        "accepted_routes": 0,
+        "proposal_status": null,
+        "outcomes": [],
+        "result_sha256": "e966eed4922823b79f68b6a920ad40bcce80fc24fde5585fb66ff06bd7ffab62"
+      },
+      "P1_P2_P10_P11": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3KPMW1FN1PM11NVXYMSV7GE",
+            "d": "sha256:2479b9c63958ebf370d0461ae572bff645ebf87b2dda8c435c4ca729099a8a2e",
+            "status": "fail"
+          },
+          {
+            "id": "01M3KPMZ4NXG60EWRQWG711SER",
+            "d": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted",
+          "admitted"
+        ],
+        "result_sha256": "dc88907f0b48705d19371a69f95bd5a738ce6c4e3bc88ae5f95251504326b48c"
+      },
+      "P3": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3KPN2VKPT6V0WRWNXPD4XSR",
+            "d": "sha256:7894c64cac1418f6bc865a8e0014e203bc4e83f6d172ea218f9a785b31b3e996",
+            "status": "fail"
+          },
+          {
+            "id": "01M3KPN64JZW6H9840YFEGH4AB",
+            "d": "sha256:7963207917f132f16c104de668da6f5adab40fa7436f46a6e962fd444ec6fe2b",
+            "status": "fail"
+          },
+          {
+            "id": "01M3KPN8J3XQFDJC3SGCHFBSHQ",
+            "d": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted",
+          "admitted"
+        ],
+        "result_sha256": "73f92cdec70330164af56dc540edec1df8bef5d4d4702bf4209bd66ccc771e9d"
+      },
+      "P4": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "completed",
+        "outcomes": [
+          "rejected",
+          "rejected",
+          "rejected"
+        ],
+        "result_sha256": "a946abc696922cdf2ef0bc911140408fdb69a64e3f68c4831b5129ff4e3a2979"
+      },
+      "P5": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3KPNDT0ERW9TMQHYMX78BZ0",
+            "d": "sha256:b1d47555ab54f071bdcb3b21b0ea9062956c6dba6ef246e8431baa12d8d94cac",
+            "status": "fail"
+          },
+          {
+            "id": "01M3KPNH7B8KVW5M6KSCG1D0C2",
+            "d": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted",
+          "admitted",
+          "rejected",
+          "rejected"
+        ],
+        "result_sha256": "d88bc5a3ab8aae7abca24a4f19a037309d97f2a55426dfb60cc923bb72a530a3"
+      },
+      "P6_error": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "provider_error",
+        "outcomes": [],
+        "result_sha256": "8f2b244ed9911e895d98cb3447d10d49cf9fdc675e175b97071ca583da6426d7"
+      },
+      "P6_timeout": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "timeout",
+        "outcomes": [],
+        "result_sha256": "163cfbcc66ab007da38113a2297ff26182c59266ed7966f077761855e08d00ba"
+      },
+      "unsupported": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "completed",
+        "outcomes": [
+          "unsupported"
+        ],
+        "result_sha256": "20f57107b0da7368fb6eae9c1c55e9d83e117221c65e7f7470e85fb572739f50"
+      },
+      "P7": {
+        "status": "unsatisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "timeout",
+        "outcomes": [],
+        "result_sha256": "aba879bdf1d2a5482b05463a09e5c7f5ef69af86fbb39bcf1ca2b580740db8cc"
+      },
+      "P8": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3KPP4FKH05WMXWB8NDHKMN0",
+            "d": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "e96af2ab1cc77e6b7d8582512f9b302e58955ca73524315f83d73f47975ac4dd"
+      },
+      "P9": {
+        "status": "unknown",
+        "calls": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 1,
+        "attempts": [
+          {
+            "id": "01M3KPP8KJEN7R0BFPMVXPCMZQ",
+            "d": "sha256:4ac32803662e2c42f708f14156dc7312d00f68ca7bc8d598c7eb96ea9b0f7c60",
+            "status": "unknown"
+          }
+        ],
+        "accepted_routes": 0,
+        "proposal_status": null,
+        "outcomes": [],
+        "result_sha256": "75207a5b08ba79d6281d82b901420fc8e1d9cf767d175c8bfc00adecac4cbe4b"
+      },
+      "L1": {
+        "status": "unsatisfied",
+        "calls": 0,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [],
+        "accepted_routes": 0,
+        "proposal_status": "timeout",
+        "outcomes": [],
+        "result_sha256": "3fa6e2c9c4b5b26c1708721b41d96fc36237738cf0c36720dff0d6cfa65ed0ca"
+      },
+      "L2": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3KPPPKRRS772FQHYTYKN3EN",
+            "d": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "0a010452dad1287159a795491f9f62676132dea98da388799e4f8e5870f47d0a"
+      },
+      "L3": {
+        "status": "satisfied",
+        "calls": 1,
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "known_count": 0,
+        "attempts": [
+          {
+            "id": "01M3KPPZ01V33X0MR3ZJ2F97EA",
+            "d": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
+            "status": "pass"
+          }
+        ],
+        "accepted_routes": 1,
+        "proposal_status": "completed",
+        "outcomes": [
+          "admitted"
+        ],
+        "result_sha256": "78b1c7307526adcbe5d11dd13720dab749041490d9117430081455503c631e4f"
+      }
+    },
+    "model_calls": 0
+  },
+  "fixed_calls": 12,
+  "regression": {
+    "pass": 654,
+    "fail": 0,
+    "ignored": 1
+  },
+  "receiver_regression": 312,
+  "clippy": "pass",
+  "fmt": "pass",
+  "live_calls": 0,
+  "spend_usd_micros": 0,
+  "key_read": false,
+  "remote_apply": false,
+  "deployed": false,
+  "hashes": {
+    ".tmp/d2-final/evidence/runs/1790588849659359178/summary.json": "3a6ee48a1f5367cad4480614d84b7045c40920852a240d64db4e1377f154bd21",
+    ".tmp/d2-final/evidence/runs/1790588899100301875/summary.json": "c20f0921a2433e559f450eee64b5ee6606f70d967c687424db7161b9515e153c",
+    ".tmp/d2-final/regression.log": "9a6f8b72cc847b62552bf35ec9910b8ec072ad3c46e3ddc18134321b5810abfb",
+    ".tmp/d2-final/clippy.log": "92bec25ad54c650450560360480d5f94d3d8ad203f81a2c724e0c641b330bbfb",
+    ".tmp/d2-final/head-macos.log": "010969a83b9b9467b5a1e4091b37293a7717387c5ae050bd92281b968d615e0a",
+    ".tmp/d2-final/head-ubuntu.log": "5132dccd49e50af14f0aae8f8c9e15e66c665a474bc2cd8277e72add7c35bf99",
+    ".tmp/d2-final/base-108851717943.log": "7532357a50392843a926280c8a3b74c784a528d5b8e97cef70a1cc22f760410f",
+    ".tmp/d2-final/base-108851717432.log": "ae8c54a5c4298cefb28c3f4de5a1e40e76e9e68a8b3634542f5bcdce955314b3"
+  }
+}
