@@ -1,9 +1,15 @@
 //! CandidateProducer proposals are untrusted authoring input, never decisions or
 //! verification evidence. Ato alone resolves logical IDs and compiles canonical D.
 //! This core has no provider transport, durable storage or execution authority.
+mod execution_plan;
 mod node_static_workspace;
 mod python_http;
 mod source_context;
+pub use execution_plan::{
+    CatalogSource, DependencyOperation, ExecutionPlanProposal, PlanAuthorization,
+    PlanStateRequirement, RuntimeSelection, SourceReference, VerifiedSourceFile, isolated_state_id,
+    isolated_state_mount, source_file_allowed, source_inspection_priority,
+};
 pub use node_static_workspace::{
     MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,
     WorkspaceInstallScope, WorkspaceStaticBuild, relative_dir,
@@ -22,6 +28,7 @@ use crate::{
 };
 
 pub const PROPOSAL_SCHEMA: &str = "ato.formation-proposal/1";
+pub const REASONING_BATCH_SCHEMA: &str = "ato.formation-proposal/2";
 pub const CATALOG_SCHEMA: &str = "ato.formation-operation-catalog/1";
 pub const MAX_PROPOSALS: usize = 4;
 pub const MAX_BATCH_BYTES: usize = 16 * 1024;
@@ -69,6 +76,8 @@ pub struct ProposalAuthorization {
     /// every earlier authorization, whose canonical bytes are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_static_workspace: Option<NodeStaticWorkspaceAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_plan: Option<PlanAuthorization>,
     pub policy: CandidateProducerPolicy,
 }
 
@@ -88,6 +97,13 @@ pub struct OperationCatalog {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum OperationDomain {
+    #[serde(rename = "execution_plan@1")]
+    ExecutionPlan {
+        toolchains: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
+        sources: Vec<CatalogSource>,
+    },
     #[serde(rename = "python_http_process@1")]
     PythonHttpProcess { entrypoint_ids: Vec<String> },
     #[serde(rename = "python_script@1")]
@@ -100,6 +116,8 @@ pub enum OperationDomain {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum OperationInvocation {
+    #[serde(rename = "execution_plan@1")]
+    ExecutionPlan { plan: Box<ExecutionPlanProposal> },
     #[serde(rename = "python_http_process@1")]
     PythonHttpProcess { entrypoint_id: String },
     #[serde(rename = "python_script@1")]
@@ -112,6 +130,9 @@ pub enum OperationInvocation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Proposal {
+    InspectSource {
+        sources: Vec<SourceReference>,
+    },
     ProposeDerivation {
         operations: Vec<OperationInvocation>,
     },
@@ -119,8 +140,22 @@ pub enum Proposal {
         base_derivation_ref: String,
         operations: Vec<OperationInvocation>,
     },
-    Unsupported {},
+    Unsupported {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evidence: Vec<DeclineEvidence>,
+    },
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclineEvidence {
+    pub code: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceReference>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposalBatch {
@@ -137,6 +172,8 @@ struct RawBatch<'a> {
     schema: String,
     #[serde(borrow)]
     proposals: Vec<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    inspection_history: Vec<SourceReference>,
 }
 
 impl ProposalAuthorization {
@@ -154,7 +191,8 @@ impl ProposalAuthorization {
         self.policy.validate()?;
         let domain = &self.source_domain;
         if (domain.entrypoints.len() + domain.modules.len() == 0
-            && self.node_static_workspace.is_none())
+            && self.node_static_workspace.is_none()
+            && self.execution_plan.is_none())
             || domain.entrypoints.len() + domain.modules.len() > generation::MAX_ENTRYPOINTS
             || self.modifiable_derivation_refs.len() > 64
             || self
@@ -191,6 +229,9 @@ impl ProposalAuthorization {
         if let Some(workspace) = &self.node_static_workspace {
             workspace.validate()?;
         }
+        if let Some(plan) = &self.execution_plan {
+            plan.validate()?;
+        }
         Ok(())
     }
 
@@ -199,6 +240,13 @@ impl ProposalAuthorization {
     pub fn catalog(&self) -> Result<OperationCatalog, ProposalError> {
         self.validate()?;
         let mut operations = Vec::new();
+        if let Some(plan) = &self.execution_plan {
+            operations.push(OperationDomain::ExecutionPlan {
+                toolchains: plan.toolchains.clone(),
+                source_oci: plan.source_oci.clone(),
+                sources: plan.catalog_sources(),
+            });
+        }
         let domain = &self.source_domain;
         if self.python_http_process.is_some() && !domain.entrypoints.is_empty() {
             operations.push(OperationDomain::PythonHttpProcess {
@@ -230,6 +278,9 @@ impl ProposalAuthorization {
 
     pub fn validate_search(&self, frozen: &FrozenSearchV1) -> Result<(), ProposalError> {
         self.validate()?;
+        if self.execution_plan.is_some() && frozen.policy.exploration.is_none() {
+            return Err(ProposalError("exploration_policy_required"));
+        }
         let source = frozen
             .initial_source
             .as_ref()
@@ -291,6 +342,7 @@ pub enum ProposalOutcome {
     Admitted(Box<ValidatedCandidate>),
     Unsupported,
     Rejected(ProposalError),
+    InspectionRequested(Vec<SourceReference>),
 }
 
 /// Ato-owned candidate set. Frozen candidates are borrowed, never rewritten.
@@ -299,6 +351,7 @@ pub enum ProposalOutcome {
 pub struct CandidateRegistry<'a> {
     frozen: &'a FrozenSearchV1,
     generated: Vec<ValidatedCandidate>,
+    inspection_remaining: u32,
 }
 impl<'a> CandidateRegistry<'a> {
     pub fn new(frozen: &'a FrozenSearchV1) -> Result<Self, ProposalError> {
@@ -308,7 +361,19 @@ impl<'a> CandidateRegistry<'a> {
         Ok(Self {
             frozen,
             generated: Vec::new(),
+            inspection_remaining: frozen
+                .policy
+                .exploration
+                .as_ref()
+                .map_or(0, |p| p.max_inspections),
         })
+    }
+    pub fn with_inspection_budget(mut self, remaining: u32) -> Result<Self, ProposalError> {
+        if remaining > self.inspection_remaining {
+            return Err(ProposalError("inspection_budget_invalid"));
+        }
+        self.inspection_remaining = remaining;
+        Ok(self)
     }
     pub fn candidates(&self) -> impl Iterator<Item = &SearchCandidate> {
         self.frozen
@@ -341,16 +406,51 @@ impl<'a> CandidateRegistry<'a> {
         }
         let batch: RawBatch<'_> =
             serde_json::from_slice(bytes).map_err(|_| ProposalError("proposal_batch_schema"))?;
-        if batch.schema != PROPOSAL_SCHEMA
+        if (batch.schema != PROPOSAL_SCHEMA && batch.schema != REASONING_BATCH_SCHEMA)
+            || (batch.schema == REASONING_BATCH_SCHEMA
+                && self
+                    .frozen
+                    .policy
+                    .exploration
+                    .as_ref()
+                    .is_none_or(|p| p.reasoning.is_none()))
+            || (batch.schema == PROPOSAL_SCHEMA && !batch.inspection_history.is_empty())
             || batch.proposals.len() > authorization.policy.max_proposals
         {
             return Err(ProposalError("proposal_batch_bounds"));
         }
-        let mut outcomes = Vec::with_capacity(batch.proposals.len());
+        let mut outcomes = Vec::with_capacity(batch.proposals.len() + 1);
+        if !batch.inspection_history.is_empty() {
+            let sources = validate_inspection_sources(
+                authorization,
+                &batch.inspection_history,
+                self.inspection_remaining,
+                16,
+            )?;
+            self.inspection_remaining -= sources.len() as u32;
+            outcomes.push(ProposalOutcome::InspectionRequested(sources));
+        }
         for raw in batch.proposals {
-            let result = serde_json::from_str::<Proposal>(raw.get())
-                .map_err(|_| ProposalError("proposal_schema"))
-                .and_then(|proposal| compile_proposal(self.frozen, base_recipes, &proposal));
+            let parsed = serde_json::from_str::<Proposal>(raw.get())
+                .map_err(|_| ProposalError("proposal_schema"));
+            if let Ok(Proposal::InspectSource { sources }) = &parsed {
+                let validated = validate_inspection_sources(
+                    authorization,
+                    sources,
+                    self.inspection_remaining,
+                    4,
+                );
+                if let Ok(sources) = &validated {
+                    self.inspection_remaining -= sources.len() as u32;
+                }
+                outcomes.push(match validated {
+                    Ok(sources) => ProposalOutcome::InspectionRequested(sources),
+                    Err(error) => ProposalOutcome::Rejected(error),
+                });
+                continue;
+            }
+            let result =
+                parsed.and_then(|proposal| compile_proposal(self.frozen, base_recipes, &proposal));
             let outcome = match result {
                 Ok(None) => ProposalOutcome::Unsupported,
                 Err(error) => ProposalOutcome::Rejected(error),
@@ -394,8 +494,67 @@ fn compile_proposal(
         .as_ref()
         .ok_or(ProposalError("proposal_initial_source_required"))?;
     let (compiled, mut candidate) = match proposal {
-        Proposal::Unsupported {} => return Ok(None),
+        Proposal::InspectSource { .. } => {
+            return Err(ProposalError("source_inspection_requires_registry"));
+        }
+        Proposal::Unsupported { reason, evidence } => {
+            if evidence.len() > 8
+                || evidence.iter().any(|e| {
+                    e.code.is_empty()
+                        || e.code.len() > 96
+                        || e.detail.is_empty()
+                        || e.detail.len() > 1024
+                        || e.code.chars().any(char::is_control)
+                        || e.detail.chars().any(char::is_control)
+                })
+                || reason.as_deref() == Some("source_broken")
+                    && !evidence.iter().any(|e| {
+                        matches!(
+                            e.code.as_str(),
+                            "correct_environment_reproduction" | "source_change_required"
+                        )
+                    })
+                || evidence.iter().filter_map(|e| e.source.as_ref()).any(|r| {
+                    authorization
+                        .execution_plan
+                        .as_ref()
+                        .and_then(|p| p.files.get(&r.file_id))
+                        .is_none_or(|f| f.digest != r.digest)
+                })
+            {
+                return Err(ProposalError("decline_evidence_invalid"));
+            }
+
+            if reason.as_deref().is_some_and(|reason| {
+                !matches!(
+                    reason,
+                    "unsupported_toolchain"
+                        | "unsupported_source_layout"
+                        | "needs_input"
+                        | "source_broken"
+                        | "no_progress"
+                        | "unsupported_dependency_operation"
+                        | "unsupported_entrypoint"
+                        | "unsupported_build_operation"
+                        | "requires_external_service"
+                        | "requires_binding"
+                        | "source_oci_builder_unavailable"
+                        | "insufficient_source"
+                        | "unknown"
+                )
+            }) {
+                return Err(ProposalError("unsupported_reason_invalid"));
+            }
+            return Ok(None);
+        }
         Proposal::ProposeDerivation { operations } => match operations.as_slice() {
+            [OperationInvocation::ExecutionPlan { plan }] => plan.compile(
+                frozen,
+                authorization
+                    .execution_plan
+                    .as_ref()
+                    .ok_or(ProposalError("proposal_operation_unauthorized"))?,
+            )?,
             [OperationInvocation::PythonHttpProcess { entrypoint_id }] => {
                 let template = authorization
                     .python_http_process
@@ -474,6 +633,7 @@ fn compile_proposal(
                     )
                 }
                 OperationInvocation::PythonHttpProcess { .. }
+                | OperationInvocation::ExecutionPlan { .. }
                 | OperationInvocation::NodeStaticWorkspace { .. } => {
                     return Err(ProposalError("proposal_modify_operation"));
                 }
@@ -528,7 +688,18 @@ pub fn validate_candidate_scope(
     }
     for candidate in generated {
         let new_scope =
-            authorization.python_http_process.as_ref().is_some_and(|t| {
+            authorization.execution_plan.as_ref().is_some_and(|t| {
+                let ceiling = t.candidate(source, candidate.derivation_ref.clone());
+                let mut compared = candidate.clone();
+                compared.provisions = ceiling.provisions.clone();
+                compared == ceiling
+                    && (!candidate.provisions.is_empty() || t.source_oci.is_some())
+                    && candidate
+                        .provisions
+                        .iter()
+                        .all(|p| ceiling.provisions.contains(p))
+                    && candidate.provisions.windows(2).all(|p| p[0] < p[1])
+            }) || authorization.python_http_process.as_ref().is_some_and(|t| {
                 t.candidate(source, candidate.derivation_ref.clone()) == *candidate
             }) || authorization
                 .node_static_workspace
@@ -555,6 +726,41 @@ pub fn validate_candidate_scope(
     Ok(())
 }
 
+/// Common validator for bounded read-only source observations. It grants no
+/// execution, toolchain, network or external resource authority.
+pub fn validate_inspection_sources(
+    authorization: &ProposalAuthorization,
+    sources: &[SourceReference],
+    remaining: u32,
+    per_exchange: usize,
+) -> Result<Vec<SourceReference>, ProposalError> {
+    if sources.is_empty() || sources.len() > per_exchange {
+        return Err(ProposalError("source_inspection_bounds"));
+    }
+    let domain = authorization
+        .execution_plan
+        .as_ref()
+        .ok_or(ProposalError("source_inspection_unauthorized"))?;
+    if !authorization.policy.allow_source_text {
+        return Err(ProposalError("source_text_disabled"));
+    }
+    let mut ids = BTreeSet::new();
+    for source in sources {
+        if !ids.insert(&source.file_id)
+            || domain
+                .files
+                .get(&source.file_id)
+                .is_none_or(|f| f.digest != source.digest)
+        {
+            return Err(ProposalError("source_inspection_unauthorized"));
+        }
+    }
+    if sources.len() > remaining as usize {
+        return Err(ProposalError("inspection_budget_exhausted"));
+    }
+    Ok(sources.to_vec())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalRoundOutcome {
@@ -572,6 +778,12 @@ pub struct ProposalRoundRecord {
     pub expires_at_ms: u64,
     pub outcome: Option<ProposalRoundOutcome>,
     pub candidates: Vec<SearchCandidate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derivations: Vec<crate::authoring::BoundDerivation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inspection_requests: Vec<SourceReference>,
 }
 
 pub const PROPOSAL_REQUEST_SCHEMA: &str = "ato.formation-proposal-request/1";

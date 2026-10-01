@@ -84,6 +84,16 @@ pub fn plan_candidate(
         FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
     })?;
     crate::cached_toolchain::resolve_python(&mut plan, triple);
+    if bound.derivation.steps.iter().any(|s| {
+        matches!(
+            s.network,
+            ato_formation::authoring::StepNetwork::ScopedDependencies
+                | ato_formation::authoring::StepNetwork::ScopedBuild
+                | ato_formation::authoring::StepNetwork::ScopedRuntime
+        )
+    }) {
+        crate::cached_toolchain::resolve_node(&mut plan, triple);
+    }
     Ok(PlannedCandidate { bound, plan })
 }
 

@@ -23,6 +23,7 @@
 //! This is intentional best-effort delivery; Slice E does not persist
 //! receipts to disk.
 
+pub mod gate;
 pub mod handler;
 pub mod policy;
 

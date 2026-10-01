@@ -206,6 +206,9 @@ pub enum StepNetwork {
     Denied,
     /// Resolve dependencies from the network.
     DependencyResolution,
+    ScopedDependencies,
+    ScopedBuild,
+    ScopedRuntime,
 }
 
 impl StepNetwork {
@@ -286,6 +289,8 @@ pub enum EffectClass {
 /// The proposed route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DerivationDraft {
+    pub variable_bindings: Vec<crate::variables::VariableRequirement>,
+    pub requirements: crate::requirements::ExecutionRequirements,
     pub inputs: Vec<InputDraft>,
     pub runtimes: Vec<RuntimeDraft>,
     pub steps: Vec<StepDraft>,
@@ -310,6 +315,7 @@ pub struct DerivationDraft {
     /// compilers do different things, and a Capsule identity that could not
     /// tell them apart would let one be resumed as the other.
     pub workspace_compiler: Option<String>,
+    pub source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
     /// The platforms this route can run on, when the author restricts them.
     /// Empty: no restriction stated.
     pub platforms: Vec<PlatformDraft>,
@@ -456,7 +462,14 @@ pub struct BoundState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundDerivation {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub schema: String,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::requirements::ExecutionRequirements::is_empty"
+    )]
+    pub requirements: crate::requirements::ExecutionRequirements,
     pub inputs: Vec<BoundInput>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runtimes: BTreeMap<String, String>,
@@ -471,6 +484,8 @@ pub struct BoundDerivation {
     // before this existed digests exactly as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_compiler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
     /// The platforms this route can run on. A route that states none digests
     /// exactly as before this field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -495,6 +510,14 @@ impl BoundContract {
 
 impl BoundDerivation {
     pub fn derivation_ref(&self) -> Result<String, AuthoringError> {
+        if self
+            .requirements
+            .canonicalized()
+            .map_err(|e| malformed("requirements", e.0))?
+            != self.requirements
+        {
+            return Err(malformed("requirements", "requirements must be canonical"));
+        }
         digest_of(self)
     }
 }
@@ -664,8 +687,20 @@ fn bind_derivation(
     }
     state.sort_by(|a, b| a.id.cmp(&b.id));
 
+    if let Some(recipe) = &draft.source_oci {
+        recipe.validate().map_err(|e| malformed("source_oci", e))?;
+    }
+    crate::variables::validate(&draft.variable_bindings)
+        .map_err(|e| malformed("variable_bindings", e))?;
+    let mut variable_bindings = draft.variable_bindings.clone();
+    variable_bindings.sort_by(|a, b| (&a.name, a.phase).cmp(&(&b.name, b.phase)));
     Ok(BoundDerivation {
+        variable_bindings,
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
+        requirements: draft
+            .requirements
+            .canonicalized()
+            .map_err(|e| malformed("requirements", e.0))?,
         inputs,
         runtimes,
         steps,
@@ -673,6 +708,7 @@ fn bind_derivation(
         state,
         workspace_build: draft.workspace_build.clone(),
         workspace_compiler: draft.workspace_compiler.clone(),
+        source_oci: draft.source_oci.clone(),
         platforms: {
             let mut platforms = draft.platforms.clone();
             platforms.sort();
@@ -818,6 +854,8 @@ mod tests {
                 }],
             },
             derivation: DerivationDraft {
+                variable_bindings: vec![],
+                requirements: Default::default(),
                 inputs: vec![InputDraft {
                     id: "workspace".to_owned(),
                     protocol: WORKSPACE_PROTOCOL.to_owned(),
@@ -848,6 +886,7 @@ mod tests {
                 state: vec![],
                 workspace_build: None,
                 workspace_compiler: None,
+                source_oci: None,
                 effects: EffectClass::Pure,
             },
             provenance,

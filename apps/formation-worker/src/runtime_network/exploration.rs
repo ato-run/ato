@@ -1,0 +1,195 @@
+//! Owner-scoped broker assembly. The source receives only a phase-local Unix
+//! bridge into netd, never a host network interface or a management credential.
+use super::{ExplorationSandbox, ExplorationTicket};
+use anyhow::{Result, ensure};
+use ato_formation::requirements::{ExecutionPhase, ExecutionRequirements};
+use netd::egress::{
+    gate::{EgressAllowance, EgressGate},
+    policy::TransferBudget,
+};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+pub(super) struct ScopedGates {
+    #[cfg(unix)]
+    bridges: Vec<ato_runtime_attempt::network_bridge::HostBridge>,
+    gates: BTreeMap<ExecutionPhase, EgressGate>,
+    pub sockets: BTreeMap<ExecutionPhase, PathBuf>,
+}
+impl ScopedGates {
+    pub fn start(
+        ticket: &ExplorationTicket,
+        configured: Option<&ExplorationSandbox>,
+        requirements: &ExecutionRequirements,
+        control: &Path,
+    ) -> Result<Self> {
+        let configured =
+            configured.ok_or_else(|| anyhow::anyhow!("exploration_sandbox_unconfigured"))?;
+        ticket
+            .ceiling
+            .within(&configured.ceiling)
+            .map_err(|e| anyhow::anyhow!(e.0))?;
+        requirements
+            .within(&ticket.ceiling)
+            .map_err(|e| anyhow::anyhow!(e.0))?;
+        // The current physical adapter is HTTPS CONNECT only. A mixed-port
+        // host/port Cartesian product must never widen canonical D's scope.
+        ensure!(
+            requirements.network.iter().all(|r| r.port == 443),
+            "exploration_unsupported_network_protocol"
+        );
+        ensure!(!ticket.search_id.is_empty(), "exploration_search_missing");
+        ensure!(
+            ticket.network_transfer_bytes <= configured.max_network_transfer_bytes_per_attempt,
+            "exploration_network_reservation_exceeded"
+        );
+        ensure!(
+            requirements.network.is_empty() || ticket.network_transfer_bytes > 0,
+            "exploration_network_budget_exhausted"
+        );
+        #[cfg(not(unix))]
+        {
+            let _ = control;
+            anyhow::bail!("runtime_cannot_contain_candidate");
+        }
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(control)?;
+            let budget = Arc::new(TransferBudget::new(ticket.network_transfer_bytes.max(1)));
+            let mut assembled = Self {
+                bridges: vec![],
+                gates: BTreeMap::new(),
+                sockets: BTreeMap::new(),
+            };
+            for phase in [
+                ExecutionPhase::Dependencies,
+                ExecutionPhase::Build,
+                ExecutionPhase::Runtime,
+            ] {
+                let mut hosts = requirements
+                    .network
+                    .iter()
+                    .filter(|n| n.phase == phase)
+                    .map(|n| n.host.clone())
+                    .collect::<Vec<_>>();
+                let mut ports = requirements
+                    .network
+                    .iter()
+                    .filter(|n| n.phase == phase)
+                    .map(|n| n.port)
+                    .collect::<Vec<_>>();
+                hosts.sort();
+                hosts.dedup();
+                ports.sort();
+                ports.dedup();
+                // netd's generic empty policy is permissive. A reserved .invalid
+                // sentinel makes an empty phase explicitly deny every target.
+                if hosts.is_empty() {
+                    hosts.push("exploration-denied.invalid".into());
+                    ports.push(443);
+                }
+                let gate = EgressGate::start_with_budget(
+                    "127.0.0.1:0".parse()?,
+                    EgressAllowance {
+                        hosts,
+                        ports,
+                        max_transfer_bytes: budget.limit(),
+                    },
+                    budget.clone(),
+                )?;
+                let socket = control.join(match phase {
+                    ExecutionPhase::Dependencies => "dependencies.sock",
+                    ExecutionPhase::Build => "build.sock",
+                    ExecutionPhase::Runtime => "runtime.sock",
+                });
+                let bridge = ato_runtime_attempt::network_bridge::HostBridge::start(
+                    &socket,
+                    gate.address(),
+                )?;
+                assembled.sockets.insert(phase, socket);
+                assembled.bridges.push(bridge);
+                assembled.gates.insert(phase, gate);
+            }
+            Ok(assembled)
+        }
+    }
+    pub fn evidence(&self) -> serde_json::Value {
+        serde_json::json!({"kind":"exploration_network_evidence","reports":self.gates.iter().map(|(phase,gate)|serde_json::json!({"phase":phase,"report":gate.report()})).collect::<Vec<_>>()})
+    }
+
+    /// A positive gate observation can stop a refused build promptly. The
+    /// bounded observational channel cannot prove the absence of refusals.
+    pub fn first_refusal(
+        &self,
+        phase: ExecutionPhase,
+    ) -> Option<ato_formation::requirements::NetworkRequirement> {
+        self.gates
+            .get(&phase)?
+            .report()
+            .refused
+            .into_iter()
+            .map(|target| ato_formation::requirements::NetworkRequirement {
+                phase,
+                host: target.target,
+                port: target.port,
+            })
+            .find(|requirement| {
+                ExecutionRequirements {
+                    network: vec![requirement.clone()],
+                    authority: vec![],
+                }
+                .validate()
+                .is_ok()
+            })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn actual_gate_refusal_is_reported_only_for_its_phase_without_external_dns() {
+        let gate = EgressGate::start(
+            "127.0.0.1:0".parse().unwrap(),
+            EgressAllowance {
+                hosts: vec!["exploration-denied.invalid".into()],
+                ports: vec![443],
+                max_transfer_bytes: 1000,
+            },
+        )
+        .unwrap();
+        let mut stream = std::net::TcpStream::connect(gate.address()).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        write!(
+            stream,
+            "CONNECT registry.npmjs.org:443 HTTP/1.1\r\nHost: registry.npmjs.org:443\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = [0; 512];
+        let n = stream.read(&mut response).unwrap();
+        assert!(String::from_utf8_lossy(&response[..n]).contains("403"));
+        let gates = ScopedGates {
+            bridges: vec![],
+            sockets: BTreeMap::new(),
+            gates: BTreeMap::from([(ExecutionPhase::Dependencies, gate)]),
+        };
+        let start = std::time::Instant::now();
+        let refused = loop {
+            if let Some(refused) = gates.first_refusal(ExecutionPhase::Dependencies) {
+                break refused;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(refused.host, "registry.npmjs.org");
+        assert_eq!(refused.port, 443);
+        assert!(gates.first_refusal(ExecutionPhase::Build).is_none());
+    }
+}
