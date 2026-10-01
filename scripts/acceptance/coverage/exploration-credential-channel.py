@@ -30,6 +30,9 @@ def main():
                    close_fds=True, check=True)
     plan = json.loads(Path(command[command.index('--plan') + 1]).read_text())
     maximum = plan['model_budget']['max_requester_invocations']
+    expected_keys = set(plan.get('credential_keys', ['DEEPSEEK_API_KEY', 'ATO_DECISION_JEV_API_KEY']))
+    if expected_keys not in ({'DEEPSEEK_API_KEY'}, {'DEEPSEEK_API_KEY', 'ATO_DECISION_JEV_API_KEY'}):
+        raise ValueError('unsupported key scope')
     if not 0 < maximum <= 110:
         raise ValueError('delivery budget')
     directory = Path(a.channel_dir); directory.mkdir(mode=0o700)
@@ -42,7 +45,7 @@ def main():
             print('READY_FOR_REQUESTER_CREDENTIAL', flush=True)
             raw = sys.stdin.buffer.read(32769)
             keys = json.loads(raw)
-            if set(keys) != {'DEEPSEEK_API_KEY', 'ATO_DECISION_JEV_API_KEY'}:
+            if set(keys) != expected_keys:
                 raise ValueError('key scope')
             if not all(isinstance(v, str) and 1 <= len(v) <= 8192 and all(33 <= ord(c) <= 126 for c in v)
                        for v in keys.values()): raise ValueError('format')

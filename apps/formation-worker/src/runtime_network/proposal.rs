@@ -3,6 +3,7 @@
 pub mod budget;
 pub mod deepseek;
 pub mod provenance;
+pub mod reasoning;
 
 use super::*;
 use ato_formation::{
@@ -1138,9 +1139,43 @@ pub fn serve_general_proposal(
         Invocation::General(producer),
     )
 }
+/// Shared session/API driver. Exact inputs and responses are durable before a
+/// proposal reaches the same independent receiver compiler and Runtime.
+pub fn serve_reasoning_proposal(
+    client: &Client,
+    id: &str,
+    status: &Value,
+    submission: &mut Submission,
+    claimant_id: &str,
+    producer: Arc<reasoning::ReasoningProducer>,
+) -> Result<bool> {
+    let policy = submission
+        .request
+        .policy
+        .exploration
+        .as_ref()
+        .context("exploration missing")?;
+    anyhow::ensure!(
+        policy.provider_configuration_ref.as_deref() == Some(producer.configuration_ref()),
+        "frozen reasoning configuration mismatch"
+    );
+    if let Some(identity) = producer.api_identity() {
+        submission.configure_general_producer(identity)?;
+    }
+    serve_proposal_inner(
+        client,
+        id,
+        status,
+        submission,
+        claimant_id,
+        Invocation::Reasoning(producer),
+    )
+}
+
 enum Invocation {
     Fixed(Arc<dyn CandidateProducer + Send + Sync>),
     General(Arc<DeepSeekCandidateProducer>),
+    Reasoning(Arc<reasoning::ReasoningProducer>),
 }
 fn serve_proposal_inner(
     client: &Client,
@@ -1155,12 +1190,16 @@ fn serve_proposal_inner(
     }
     submission.accept_proposal_round(status)?;
     let point = &status["proposal_point"];
-    if point.is_null() || point["claimed"] != false {
+    if point.is_null()
+        || (point["claimed"] != false && !matches!(producer, Invocation::Reasoning(_)))
+    {
         return Ok(false);
     }
     let request = submission.proposal_request(status)?;
     let general_request = match &producer {
-        Invocation::General(_) => Some(submission.proposal_request_v2(status)?),
+        Invocation::General(_) | Invocation::Reasoning(_) => {
+            Some(submission.proposal_request_v2(status)?)
+        }
         Invocation::Fixed(_) => {
             anyhow::ensure!(
                 submission
@@ -1178,7 +1217,7 @@ fn serve_proposal_inner(
         .as_mut()
         .context("producer not enabled")?;
     let seq = point["round_seq"].as_u64().context("invalid round")?;
-    if local.attempted_claims.contains(&seq) {
+    if local.attempted_claims.contains(&seq) && !matches!(producer, Invocation::Reasoning(_)) {
         return Ok(false);
     }
     anyhow::ensure!(
@@ -1186,9 +1225,18 @@ fn serve_proposal_inner(
         "proposal point revision mismatch"
     );
     local.attempted_claims.insert(seq);
-    let claim = match client.claim_proposal(id, state.revision, claimant_id) {
+    let saved_claim = if let Invocation::Reasoning(p) = &producer {
+        p.saved_claim(id, seq)?
+    } else {
+        None
+    };
+    let cached = saved_claim.is_some();
+    let claim = match saved_claim
+        .map(Ok)
+        .unwrap_or_else(|| client.claim_proposal(id, state.revision, claimant_id))
+    {
         Ok(claim) => claim,
-        Err(error) if matches!(&producer, Invocation::General(_)) => {
+        Err(error) if matches!(&producer, Invocation::General(_) | Invocation::Reasoning(_)) => {
             // No send follows an uncertain/refused claim. Surface the receiver
             // diagnostic instead of silently waiting out every generated round.
             return Err(error.context("proposal claim failed before provider send; no retry"));
@@ -1202,7 +1250,11 @@ fn serve_proposal_inner(
         .as_u64()
         .context("missing claim revision")?;
     anyhow::ensure!(
-        state.revision.checked_add(1) == Some(revision)
+        (if cached {
+            Some(state.revision)
+        } else {
+            state.revision.checked_add(1)
+        }) == Some(revision)
             && claim["round_seq"] == seq
             && fence.len() == 36
             && fence
@@ -1215,6 +1267,9 @@ fn serve_proposal_inner(
                 }),
         "invalid claim response"
     );
+    if let Invocation::Reasoning(p) = &producer {
+        p.save_claim(id, seq, &claim)?;
+    }
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     let expires = state
         .proposal_round
@@ -1229,6 +1284,55 @@ fn serve_proposal_inner(
     }
     let mut completion = json!({"revision":revision,"fence":fence});
     match producer {
+        Invocation::Reasoning(producer) => {
+            let answer = producer.run_round(
+                submission,
+                status,
+                general_request.context("reasoning request missing")?,
+                expires,
+            );
+            match answer {
+                Ok(answer) => {
+                    completion["raw_output_base64"] = json!(BASE64.encode(answer.output.raw()));
+                    if let Some(call) = answer.provider_call {
+                        completion["provenance"] = serde_json::to_value(&call.provenance)?;
+                        submission
+                            .proposal_state
+                            .as_mut()
+                            .context("producer missing")?
+                            .observed_calls
+                            .insert(seq, call);
+                    } else {
+                        completion["provenance"] = json!({"provider":"fixed"});
+                    }
+                }
+                Err(error) => {
+                    completion["outcome"] = json!("provider_error");
+                    if let Some(failure) =
+                        error.downcast_ref::<reasoning::ReasoningProviderFailure>()
+                    {
+                        let call = ProviderCall {
+                            provenance: failure.0.provenance.clone(),
+                            status: if failure.0.class == ErrorClass::Timeout {
+                                CallStatus::Timeout
+                            } else {
+                                CallStatus::ProviderError
+                            },
+                            error_class: Some(failure.0.class),
+                        };
+                        completion["outcome"] = serde_json::to_value(call.status)?;
+                        completion["provenance"] = serde_json::to_value(&call.provenance)?;
+                        completion["error_class"] = serde_json::to_value(call.error_class)?;
+                        submission
+                            .proposal_state
+                            .as_mut()
+                            .context("producer missing")?
+                            .observed_calls
+                            .insert(seq, call);
+                    }
+                }
+            }
+        }
         Invocation::Fixed(producer) => {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             std::thread::spawn(move || {
