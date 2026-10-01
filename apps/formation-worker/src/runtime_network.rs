@@ -494,12 +494,24 @@ pub fn probe_facts(browser_verifier: Option<&BrowserVerifierCommand>) -> BTreeMa
     let root = Path::new(TOOLCHAIN_ROOT);
     if root.is_dir() {
         facts.insert("toolchain.root".to_owned(), TOOLCHAIN_ROOT.to_owned());
-        for language in ["python", "node", "pnpm", "yarn"] {
+        for language in [
+            "python",
+            "node",
+            "pnpm",
+            "yarn",
+            "gcc",
+            "make",
+            "pkg-config",
+        ] {
             let Ok(entries) = std::fs::read_dir(root.join(language)) else {
                 continue;
             };
             for entry in entries.flatten() {
-                if entry.path().join("bin").is_dir() {
+                let binary = match language {
+                    "python" => "python3",
+                    _ => language,
+                };
+                if entry.path().join("bin").join(binary).is_file() {
                     facts.insert(
                         format!(
                             "toolchain.{language}.{}",
