@@ -229,8 +229,10 @@ impl DeepSeekCandidateProducer {
         let mut provenance = self.identity().unknown_usage();
         let started = std::time::Instant::now();
         let result = (|| {
-            if self.config.prompt_version != PROMPT_VERSION_V5
-                || input.schema != super::reasoning::INPUT_SCHEMA
+            if !matches!(
+                self.config.prompt_version.as_str(),
+                PROMPT_VERSION_V5 | PROMPT_VERSION_V6
+            ) || input.schema != super::reasoning::INPUT_SCHEMA
             {
                 return Err(ErrorClass::MalformedResponse);
             }
