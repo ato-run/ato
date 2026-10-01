@@ -722,6 +722,7 @@ fn shared_inspection_and_generated_d_share_one_frozen_round() {
     use ato_formation::exploration::ReasoningLimits;
     let mut s = state();
     s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(ReasoningLimits {
+        goal: None,
         round_timeout_ms: 60_000,
         inspection_timeout_ms: 20_000,
         inspection_source_bytes: 16384,
@@ -802,6 +803,7 @@ fn reasoning_limits_are_positive_bounded_and_frozen() {
         (100, 1, 65537),
     ] {
         p.reasoning = Some(ReasoningLimits {
+            goal: None,
             round_timeout_ms: round,
             inspection_timeout_ms: inspection,
             inspection_source_bytes: bytes,
