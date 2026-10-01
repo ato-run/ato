@@ -134,9 +134,36 @@ def execute(mode, plan):
                           wheels=json.loads((wheels / 'artifacts.json').read_text()))
         if artifacts(acquired) != provenance['acquired']:
             raise ValueError('dependency_artifact_changed')
+        # An acquired wheel is copied unchanged by pip wheel. Preserve its
+        # identity once, alongside the original sdists and completed wheels.
+        outputs = {a['file']: a for a in provenance['wheels']['artifacts']}
+        retained_inputs = []
+        for artifact in provenance['acquired']:
+            output = outputs.get(artifact['file'])
+            unchanged = (artifact['file'].endswith('.whl') and output
+                         and output['sha256'] == artifact['sha256']
+                         and output['bytes'] == artifact['bytes'])
+            retained_inputs.append(dict(artifact, retained_path=(
+                'wheels/' if unchanged else 'acquired/') + artifact['file']))
+        provenance['retained_inputs'] = retained_inputs
         write(root / 'provenance.json', provenance)
         print(json.dumps(dict(schema=provenance['schema'], wheel_count=len(provenance['wheels']['artifacts']))))
     elif mode == 'cleanup':
+        provenance = json.loads((root / 'provenance.json').read_text())
+        if artifacts(acquired) != provenance['acquired']:
+            raise ValueError('dependency_artifact_changed')
+        for artifact in provenance['retained_inputs']:
+            name = artifact['file']
+            if Path(name).name != name:
+                raise ValueError('dependency_artifact_path_invalid')
+            if artifact['retained_path'] == 'wheels/' + name:
+                original, completed = acquired / name, wheels / name
+                if (not name.endswith('.whl')
+                        or digest(original) != artifact['sha256']
+                        or digest(completed) != artifact['sha256']
+                        or original.stat().st_size != completed.stat().st_size):
+                    raise ValueError('dependency_artifact_changed')
+                original.unlink()
         # Generated build inputs and pinned wheels/provenance stay. A venv's
         # interpreter symlinks and transient pip cache are not retained output.
         for directory in (root / 'build-env', root / 'cache'):
