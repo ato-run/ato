@@ -442,7 +442,7 @@ struct FormArgs {
     search_id: Option<String>,
     /// The search's lifetime from its first request, in seconds (at most
     /// 7 days). Never extended.
-    #[arg(long, default_value_t = 24 * 60 * 60)]
+    #[arg(long, default_value_t = 30 * 60)]
     deadline_seconds: u64,
     /// Logical source bytes the search may hand to Runtimes, over all of its
     /// attempts (at most 10 GiB).

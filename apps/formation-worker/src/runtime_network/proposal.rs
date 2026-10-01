@@ -32,8 +32,44 @@ pub(super) struct RequesterProposal {
     recipes: BTreeMap<String, String>,
     source_context: Vec<SourceContextEntry>,
     inspection_context: BTreeMap<String, SourceContextEntry>,
+    source_root: PathBuf,
     provider_identity: Option<ProviderIdentity>,
     observed_calls: BTreeMap<u64, ProviderCall>,
+}
+
+impl RequesterProposal {
+    fn source_text(&self, id: &str) -> Result<SourceContextEntry> {
+        if let Some(text) = self.inspection_context.get(id) {
+            return Ok(text.clone());
+        }
+        let auth = self
+            .frozen
+            .policy
+            .proposal
+            .as_ref()
+            .context("source authorization missing")?;
+        let file = auth
+            .execution_plan
+            .as_ref()
+            .and_then(|p| p.files.get(id))
+            .context("source_inspection_unauthorized")?;
+        let bytes = std::fs::read(self.source_root.join(&file.path))?;
+        anyhow::ensure!(
+            format!("sha256:{:x}", Sha256::digest(&bytes)) == file.digest,
+            "proposal_source_digest_mismatch"
+        );
+        build_source_context(
+            auth,
+            &[AuthorizedSourceText {
+                kind: SourceContextKind::VerifiedFile,
+                logical_id: id,
+                bytes: &bytes,
+            }],
+        )?
+        .into_iter()
+        .next()
+        .context("source_not_bounded_text")
+    }
 }
 
 /// No preset, route or placeholder D is planned. K is supplied explicitly by
@@ -385,6 +421,16 @@ impl Submission {
             }
             if let Some(domain) = &authorization.execution_plan {
                 for (id, file) in &domain.files {
+                    if self
+                        .request
+                        .policy
+                        .exploration
+                        .as_ref()
+                        .is_some_and(|p| p.reasoning.is_some())
+                        && file.path.contains('/')
+                    {
+                        continue;
+                    }
                     texts.push((
                         SourceContextKind::VerifiedFile,
                         id.as_str(),
@@ -413,6 +459,14 @@ impl Submission {
                     .as_ref()
                     .into_iter()
                     .flat_map(|p| p.files.iter())
+                    .filter(|(_, f)| {
+                        self.request
+                            .policy
+                            .exploration
+                            .as_ref()
+                            .is_none_or(|p| p.reasoning.is_none())
+                            || !f.path.contains('/')
+                    })
                     .collect();
                 ids.sort_by_key(|(id, f)| {
                     (
@@ -483,6 +537,7 @@ impl Submission {
             recipes: BTreeMap::new(),
             source_context,
             inspection_context,
+            source_root: inventory.root.clone(),
             provider_identity: None,
             observed_calls: Default::default(),
         });
@@ -1231,10 +1286,33 @@ fn serve_proposal_inner(
         None
     };
     let cached = saved_claim.is_some();
-    let claim = match saved_claim
-        .map(Ok)
-        .unwrap_or_else(|| client.claim_proposal(id, state.revision, claimant_id))
-    {
+    let expires = state
+        .proposal_round
+        .as_ref()
+        .context("missing open round")?
+        .expires_at_ms;
+    let retries = state
+        .frozen
+        .policy
+        .exploration
+        .as_ref()
+        .map_or(0, |p| p.formation.max_retries);
+    let claim_revision = if point["claimed"] == true {
+        state.revision.saturating_sub(1)
+    } else {
+        state.revision
+    };
+    let claim_request = serde_jcs::to_vec(&json!({"satisfy_id":id,"revision":claim_revision,
+        "claimant_id":claimant_id}))?;
+    let claim = match saved_claim.map(Ok).unwrap_or_else(|| {
+        if let Invocation::Reasoning(p) = &producer {
+            p.coordinator_operation(seq, "claim", &claim_request, retries, expires, || {
+                client.claim_proposal(id, claim_revision, claimant_id)
+            })
+        } else {
+            client.claim_proposal(id, state.revision, claimant_id)
+        }
+    }) {
         Ok(claim) => claim,
         Err(error) if matches!(&producer, Invocation::General(_) | Invocation::Reasoning(_)) => {
             // No send follows an uncertain/refused claim. Surface the receiver
@@ -1250,7 +1328,7 @@ fn serve_proposal_inner(
         .as_u64()
         .context("missing claim revision")?;
     anyhow::ensure!(
-        (if cached {
+        (if cached || point["claimed"] == true {
             Some(state.revision)
         } else {
             state.revision.checked_add(1)
@@ -1283,6 +1361,11 @@ fn serve_proposal_inner(
         return Ok(false);
     }
     let mut completion = json!({"revision":revision,"fence":fence});
+    let durable_producer = if let Invocation::Reasoning(p) = &producer {
+        Some(p.clone())
+    } else {
+        None
+    };
     match producer {
         Invocation::Reasoning(producer) => {
             let answer = producer.run_round(
@@ -1406,7 +1489,13 @@ fn serve_proposal_inner(
     let bytes = serde_json::to_vec(&completion)?;
     // A lost completion response is recovered by the caller's next GET. Never
     // re-enter the producer or synthesize a new batch to repair that transport.
-    let _ = client.complete_proposal(id, &bytes);
+    if let Some(p) = durable_producer {
+        p.coordinator_operation(seq, "complete", &bytes, retries, expires, || {
+            client.complete_proposal(id, &bytes)
+        })?;
+    } else {
+        let _ = client.complete_proposal(id, &bytes);
+    }
     Ok(true)
 }
 

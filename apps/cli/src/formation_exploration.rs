@@ -318,7 +318,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
     claimant[6] = (claimant[6] & 0x0f) | 0x40;
     claimant[8] = (claimant[8] & 0x3f) | 0x80;
     let hex: String = claimant.iter().map(|b| format!("{b:02x}")).collect();
-    let claimant_id = format!(
+    let mut claimant_id = format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],
         &hex[8..12],
@@ -326,6 +326,17 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         &hex[16..20],
         &hex[20..]
     );
+    if shared {
+        let claimant_path = journal.with_extension("claimant.json");
+        if claimant_path.exists() {
+            claimant_id = serde_json::from_slice(&std::fs::read(&claimant_path)?)?;
+        } else {
+            ato_formation_worker::runtime_network::proposal::reasoning::save_owner_checkpoint(
+                &claimant_path,
+                &serde_jcs::to_vec(&claimant_id)?,
+            )?;
+        }
+    }
     let client = Client::new(&api, &token)?;
     let accepted = if continuation {
         client.resume_exploration(&submission)?
