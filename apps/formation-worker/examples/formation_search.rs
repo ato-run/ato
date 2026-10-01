@@ -368,10 +368,7 @@ fn validate_generation_capture(mode: Option<&str>, context: GenerationContextMod
         (Some("jev" | "jev_v2" | "jev_v3" | "deterministic_v1" | "deterministic_v2"), _) => false,
         _ => true,
     };
-    anyhow::ensure!(
-        valid,
-        "generation provider and context versions must match"
-    );
+    anyhow::ensure!(valid, "generation provider and context versions must match");
     Ok(())
 }
 
@@ -429,7 +426,9 @@ impl ato_formation_worker::generation_provider::GenerationProvider for RecordedG
             .and_then(|bytes| std::fs::write(&self.path, bytes).ok())
             .is_none()
         {
-            return GenerationAnswer::Fallback { reason: "provider_error" };
+            return GenerationAnswer::Fallback {
+                reason: "provider_error",
+            };
         }
         self.inner.generate_v3(point)
     }
@@ -647,7 +646,10 @@ mod capture_tests {
             ("deterministic_v2", NoContext),
             ("deterministic_v2", V2),
         ] {
-            assert!(validate_generation_capture(Some(mode), context).is_err(), "{mode}/{context:?}");
+            assert!(
+                validate_generation_capture(Some(mode), context).is_err(),
+                "{mode}/{context:?}"
+            );
         }
     }
 
@@ -680,15 +682,28 @@ mod capture_tests {
 
     #[test]
     fn selector_v2_scores_only_closed_lexical_markers() {
-        use ato_formation::generation_context::v2::Delegation;
         use ato_formation::generation_context::ImportMarker;
-        let server = summary("b1", Delegation::None, &[ImportMarker::HttpServer], true, true, true);
+        use ato_formation::generation_context::v2::Delegation;
+        let server = summary(
+            "b1",
+            Delegation::None,
+            &[ImportMarker::HttpServer],
+            true,
+            true,
+            true,
+        );
         let wrapper = summary("a0", Delegation::PythonMain, &[], false, false, false);
         let cli = summary("c2", Delegation::None, &[], false, false, false);
         // HTTP-looking entrypoint outranks delegation evidence and CLI entries.
-        assert_eq!(efficacy_entrypoint_v2(&[wrapper.clone(), server.clone(), cli.clone()]), Some("b1"));
+        assert_eq!(
+            efficacy_entrypoint_v2(&[wrapper.clone(), server.clone(), cli.clone()]),
+            Some("b1")
+        );
         // Without server markers the delegation evidence still beats an empty summary.
-        assert_eq!(efficacy_entrypoint_v2(&[wrapper.clone(), cli.clone()]), Some("a0"));
+        assert_eq!(
+            efficacy_entrypoint_v2(&[wrapper.clone(), cli.clone()]),
+            Some("a0")
+        );
         // Positive score is required; an all-zero domain declines.
         let empty = summary("a0", Delegation::None, &[], false, false, false);
         assert_eq!(efficacy_entrypoint_v2(&[empty, cli]), None);

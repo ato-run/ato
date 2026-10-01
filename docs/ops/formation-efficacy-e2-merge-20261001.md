@@ -22,4 +22,6 @@ API pinは`f7d866cbef7768f67b46840766497fbf806640fe`です。
 統合時は最新mainのroadmapを保持します。過去の5b pending表や古いcoverage値を
 復元せず、実験登録と、現在成立している探索loopの受入を区別します。
 PythonのE1/E2 fixture・analysis・protocol・mock orchestration 91 testsは通過しました。
+Rustの`generation_context_v2` 12 testsと`formation_search` example 5 tests、
+対象のclippy（`-D warnings`）とworkspace全体のfmt checkも通過しました。
 これは実oracle・Runtime cell・model callの実行結果ではありません。
