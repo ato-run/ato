@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 
 use crate::build::{
     BuildAttempt, NetworkRefusalObserver, control_policy_path, output_root,
-    run_build_scoped_observed,
+    run_build_with_variables,
 };
 use crate::build_sandbox::{BuildSandbox, NetworkPolicy};
 use crate::plan::{PlannedCandidate, stage_workspace};
@@ -92,6 +92,16 @@ impl LocalAttemptExecutor {
         gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
         refusal: Option<&NetworkRefusalObserver<'_>>,
     ) -> Result<ExecutedCandidate> {
+        self.execute_with_variables(execution, build_attempt, gates, refusal, &[])
+    }
+    pub fn execute_with_variables(
+        &self,
+        execution: &AttemptExecution<'_>,
+        build_attempt: BuildAttempt,
+        gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
+        refusal: Option<&NetworkRefusalObserver<'_>>,
+        variables: &[crate::variables::ResolvedVariable],
+    ) -> Result<ExecutedCandidate> {
         anyhow::ensure!(
             build_attempt.attempt_id == execution.attempt_id,
             "build attempt identity mismatch"
@@ -107,7 +117,7 @@ impl LocalAttemptExecutor {
         let cache_root = attempt_root.join("cache");
         std::fs::create_dir_all(&cache_root).context("cannot create the build cache")?;
 
-        let built = run_build_scoped_observed(
+        let built = run_build_with_variables(
             &candidate.plan,
             &candidate.derivation,
             build_attempt,
@@ -124,11 +134,24 @@ impl LocalAttemptExecutor {
             },
             gates,
             refusal,
+            variables,
         )?;
 
         match candidate.plan.lane {
             ato_formation::intent::Lane::PythonProcess | ato_formation::intent::Lane::Process => {
                 let root = output_root(&built, "")?;
+                let secrets = variables
+                    .iter()
+                    .filter(|v| {
+                        candidate
+                            .derivation
+                            .variable_bindings
+                            .iter()
+                            .any(|r| r.name == v.value.name() && r.secret)
+                    })
+                    .map(|v| v.value.expose_for_spawn().as_bytes())
+                    .collect::<Vec<_>>();
+                crate::variables::scan_artifact(&root, &secrets)?;
                 Ok(ExecutedCandidate::Process {
                     workspace_root: root,
                 })
@@ -142,10 +165,18 @@ impl LocalAttemptExecutor {
                     &built.workspace_root,
                     &attempt_root.join("bundle"),
                     &format!("swm_{attempt_id}"),
-                    // No canaries: this build redeems no secrets, so there is
-                    // nothing to scan for — and an empty list is NOT a claim
-                    // that the output was scanned.
-                    &[],
+                    // Redeemed values may not become reusable artifact bytes.
+                    &variables
+                        .iter()
+                        .filter(|v| {
+                            candidate
+                                .derivation
+                                .variable_bindings
+                                .iter()
+                                .any(|r| r.name == v.value.name() && r.secret)
+                        })
+                        .map(|v| v.value.expose_for_spawn().as_bytes())
+                        .collect::<Vec<_>>(),
                 )?;
                 Ok(ExecutedCandidate::StaticWeb {
                     output: Box::new(produced),

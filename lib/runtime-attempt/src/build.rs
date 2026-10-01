@@ -145,6 +145,17 @@ pub fn run_build_scoped_observed(
     gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
     refusal: Option<&NetworkRefusalObserver<'_>>,
 ) -> Result<BuildOutcome> {
+    run_build_with_variables(plan, derivation, attempt, sandbox, gates, refusal, &[])
+}
+pub fn run_build_with_variables(
+    plan: &ExecutionPlan,
+    derivation: &BoundDerivation,
+    attempt: BuildAttempt,
+    sandbox: &BuildSandbox<'_>,
+    gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
+    refusal: Option<&NetworkRefusalObserver<'_>>,
+    variables: &[crate::variables::ResolvedVariable],
+) -> Result<BuildOutcome> {
     let (source_root, workspace_root, cache_root, shim, network, limits) = (
         sandbox.source_root,
         sandbox.workspace_root,
@@ -166,7 +177,18 @@ pub fn run_build_scoped_observed(
             && !path_is_within(policy_path, source_root)?,
         "the build sandbox policy must live outside every path the build can reach"
     );
-    let steps = plan.steps(derivation)?;
+    let mut steps = plan.steps(derivation)?;
+    for step in &mut steps {
+        let phase = step
+            .network_phase
+            .unwrap_or(ato_formation::requirements::ExecutionPhase::Build);
+        for variable in variables.iter().filter(|v| v.phase == phase) {
+            step.to_mut().env.insert(
+                variable.value.name().to_owned(),
+                variable.value.expose_for_spawn().to_owned(),
+            );
+        }
+    }
     let mut diagnostics = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(limits.wall_clock_seconds);
 
@@ -244,9 +266,18 @@ pub fn run_build_scoped_observed(
         }
         let facts = (network == NetworkPolicy::Scoped)
             .then(|| policy_path.with_file_name("execution-facts.jsonl"));
-        let output =
-            run_step_with_facts(step, &command.argv, remaining, facts.as_deref(), refusal)?;
-        diagnostics.push(bounded_diagnostic(&step.name, &output));
+        let output = run_step_with_variables(
+            step,
+            &command.argv,
+            remaining,
+            facts.as_deref(),
+            refusal,
+            variables,
+        )?;
+        diagnostics.push(crate::variables::redact(
+            &bounded_diagnostic(&step.name, &output),
+            variables,
+        ));
     }
 
     Ok(BuildOutcome {
@@ -458,12 +489,13 @@ impl<R: std::io::Read + std::os::fd::AsRawFd> Drain<R> {
 /// writer, which then never exits: the step would hang until its budget and
 /// fail as a timeout. Only each stream's tail is kept.
 #[cfg(unix)]
-fn run_step_with_facts(
+fn run_step_with_variables(
     step: &BuildStepV1,
     argv: &[String],
     budget: Duration,
     facts: Option<&Path>,
     refusal: Option<&NetworkRefusalObserver<'_>>,
+    variables: &[crate::variables::ResolvedVariable],
 ) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt as _;
 
@@ -558,7 +590,10 @@ fn run_step_with_facts(
                     "build",
                     &step.name,
                     Some(status),
-                    &bounded_diagnostic(&step.name, &combined),
+                    &crate::variables::redact(
+                        &bounded_diagnostic(&step.name, &combined),
+                        variables,
+                    ),
                 )?;
             }
             return Err(FormationFailure::new(
@@ -625,7 +660,10 @@ fn run_step_with_facts(
                         "build",
                         &step.name,
                         Some(status),
-                        &bounded_diagnostic(&step.name, &combined),
+                        &crate::variables::redact(
+                            &bounded_diagnostic(&step.name, &combined),
+                            variables,
+                        ),
                     )?;
                 }
                 if !status.success() {
@@ -636,12 +674,20 @@ fn run_step_with_facts(
                     // so a person who imported lodash would be told "the
                     // build failed".
                     if let Some(failure) = typed_step_failure(&combined) {
-                        return Err(anyhow::Error::new(failure));
+                        return Err(FormationFailure::new(
+                            failure.code,
+                            failure.stage,
+                            crate::variables::redact(&failure.message, variables),
+                        )
+                        .into());
                     }
                     bail!(
                         "build step {:?} failed ({status}): {}",
                         step.name,
-                        bounded_diagnostic(&step.name, &combined)
+                        crate::variables::redact(
+                            &bounded_diagnostic(&step.name, &combined),
+                            variables
+                        )
                     );
                 }
                 return Ok(combined);
@@ -693,7 +739,7 @@ fn group_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn run_step_with_facts(
+fn run_step_with_variables(
     _step: &BuildStepV1,
     _argv: &[String],
     _budget: Duration,
@@ -801,6 +847,16 @@ pub fn guest_workspace_root() -> &'static str {
     GUEST_WORKSPACE_ROOT
 }
 
+#[cfg(test)]
+fn run_step_with_facts(
+    step: &BuildStepV1,
+    argv: &[String],
+    budget: Duration,
+    facts: Option<&Path>,
+    refusal: Option<&NetworkRefusalObserver<'_>>,
+) -> Result<Vec<u8>> {
+    run_step_with_variables(step, argv, budget, facts, refusal, &[])
+}
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

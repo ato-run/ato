@@ -289,6 +289,7 @@ pub enum EffectClass {
 /// The proposed route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DerivationDraft {
+    pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub requirements: crate::requirements::ExecutionRequirements,
     pub inputs: Vec<InputDraft>,
     pub runtimes: Vec<RuntimeDraft>,
@@ -461,6 +462,8 @@ pub struct BoundState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundDerivation {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub schema: String,
     #[serde(
         default,
@@ -687,7 +690,12 @@ fn bind_derivation(
     if let Some(recipe) = &draft.source_oci {
         recipe.validate().map_err(|e| malformed("source_oci", e))?;
     }
+    crate::variables::validate(&draft.variable_bindings)
+        .map_err(|e| malformed("variable_bindings", e))?;
+    let mut variable_bindings = draft.variable_bindings.clone();
+    variable_bindings.sort_by(|a, b| (&a.name, a.phase).cmp(&(&b.name, b.phase)));
     Ok(BoundDerivation {
+        variable_bindings,
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         requirements: draft
             .requirements
@@ -846,6 +854,7 @@ mod tests {
                 }],
             },
             derivation: DerivationDraft {
+                variable_bindings: vec![],
                 requirements: Default::default(),
                 inputs: vec![InputDraft {
                     id: "workspace".to_owned(),

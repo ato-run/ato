@@ -436,6 +436,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
             ],
         },
         derivation: DerivationDraft {
+            variable_bindings: vec![],
             requirements: Default::default(),
             inputs: vec![InputDraft {
                 id: PRESET_INPUT_ID.to_owned(),

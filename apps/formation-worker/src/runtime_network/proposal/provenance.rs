@@ -97,6 +97,10 @@ impl Provenance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
+    ConnectBeforeSend,
+    ProviderUnavailable,
+    ProviderAuthentication,
+    ProviderConfiguration,
     TransportError,
     ProviderRefused,
     Timeout,

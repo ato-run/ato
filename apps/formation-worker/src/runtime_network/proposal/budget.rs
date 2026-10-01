@@ -111,6 +111,17 @@ impl CallBudget {
         .map(|_| ())
     }
     /// Controllers consume this validated view, never reinterpret journal JSON.
+    pub fn record_transport(&self, transport: TransportEvidence) -> Result<()> {
+        self.transact(Some(JournalEvent::Transport { transport }))
+            .map(|_| ())
+    }
+    pub fn settle_retry(&self, cell: &str, not_sent: bool) -> Result<()> {
+        self.transact(Some(JournalEvent::RetryCharge {
+            retry_charge: cell.into(),
+            not_sent,
+        }))
+        .map(|_| ())
+    }
     pub fn snapshot(&self) -> Result<BudgetSnapshot> {
         self.transact(None)
     }
@@ -297,6 +308,8 @@ pub struct BudgetSnapshot {
 }
 #[derive(Debug, Serialize)]
 pub struct CallEvidence {
+    pub transport: Option<TransportEvidence>,
+    pub not_sent: bool,
     /// None only for a historical Cell reservation. Not acceptable for D3 v2.
     pub request: Option<RequestEvidence>,
     pub response: Option<ResponseEvidence>,
@@ -305,7 +318,7 @@ pub struct CallEvidence {
 }
 impl CallEvidence {
     pub fn is_settled(&self) -> bool {
-        self.response.is_some() || self.charged_unknown
+        self.response.is_some() || self.charged_unknown || self.not_sent
     }
 }
 impl BudgetSnapshot {
@@ -338,6 +351,8 @@ impl BudgetSnapshot {
                 request,
                 response: None,
                 charged_unknown: false,
+                transport: None,
+                not_sent: false,
             },
         );
         Ok(())
@@ -353,6 +368,30 @@ impl BudgetSnapshot {
             JournalEvent::Request { request } => {
                 request.validate()?;
                 self.reserve(request.cell.clone(), Some(request), plan)?;
+            }
+            JournalEvent::Transport { transport } => {
+                let call = self
+                    .cells
+                    .get_mut(&transport.cell)
+                    .ok_or_else(|| anyhow::anyhow!("provider reservation missing"))?;
+                ensure!(call.transport.is_none(), "provider transport write once");
+                call.transport = Some(transport);
+            }
+            JournalEvent::RetryCharge {
+                retry_charge,
+                not_sent,
+            } => {
+                let call = self
+                    .cells
+                    .get_mut(&retry_charge)
+                    .ok_or_else(|| anyhow::anyhow!("provider reservation missing"))?;
+                ensure!(!call.is_settled(), "provider accounting already settled");
+                ensure!(
+                    !not_sent || call.transport.as_ref().is_some_and(|t| !t.possibly_sent),
+                    "unproved unsent call"
+                );
+                call.not_sent = not_sent;
+                call.charged_unknown = !not_sent;
             }
             JournalEvent::Halt { halt } => {
                 ensure!(halt, "invalid halt");
@@ -416,9 +455,35 @@ impl ResponseEvidence {
 #[derive(Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 enum JournalEvent {
+    Transport {
+        transport: TransportEvidence,
+    },
+    RetryCharge {
+        retry_charge: String,
+        not_sent: bool,
+    },
     Cell(String),
-    Request { request: RequestEvidence },
-    Halt { halt: bool },
-    ChargedUnknown { charged_unknown: String },
-    Response { response: ResponseEvidence },
+    Request {
+        request: RequestEvidence,
+    },
+    Halt {
+        halt: bool,
+    },
+    ChargedUnknown {
+        charged_unknown: String,
+    },
+    Response {
+        response: ResponseEvidence,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportEvidence {
+    pub cell: String,
+    pub possibly_sent: bool,
+    pub http_status: Option<u16>,
+    pub retry_after_ms: u64,
+    pub recorded_at_ms: u64,
+    pub error_class: super::provenance::ErrorClass,
 }

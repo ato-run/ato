@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Deserialize)]
@@ -176,9 +176,17 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
     let work_root = args
         .work_root
         .unwrap_or_else(|| PathBuf::from(".tmp/formation-exploration"));
-    let continuation = args.search_id.is_some();
+    let restart_checkpoint =
+        std::path::absolute(&config.provider_journal)?.with_extension("search.json");
+    let continuation = args.search_id.is_some() || restart_checkpoint.exists();
     let search_id = match args.search_id {
         Some(id) => id,
+        None if restart_checkpoint.exists() => serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&restart_checkpoint)?,
+        )?["search_id"]
+            .as_str()
+            .context("restart search identity missing")?
+            .to_owned(),
         None => {
             let mut bytes = [0; 16];
             getrandom::fill(&mut bytes)
@@ -338,7 +346,44 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         }
     }
     let client = Client::new(&api, &token)?;
-    let accepted = if continuation {
+    let start_deadline = journal.with_extension("start.json");
+    let expires = if start_deadline.exists() {
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&start_deadline)?)?["deadline_ms"].as_u64().context("start deadline missing")?
+    } else {
+        let expires = (SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+            .saturating_add(args.deadline_seconds.saturating_mul(1000));
+        ato_formation_worker::runtime_network::proposal::reasoning::save_owner_checkpoint(
+            &start_deadline,
+            &serde_jcs::to_vec(&serde_json::json!({"deadline_ms": expires}))?,
+        )?;
+        expires
+    };
+    let accepted = if let Some(producer) = &reasoning {
+        producer.coordinator_operation(
+            0,
+            "start",
+            &serde_jcs::to_vec(&submission.request)?,
+            submission
+                .request
+                .policy
+                .exploration
+                .as_ref()
+                .context("exploration policy missing")?
+                .formation
+                .max_retries,
+            expires,
+            || {
+                // Query the persisted Search before any resend, including after a lost response.
+                match client.resume_exploration(&submission) {
+                    Ok(value) => Ok(value),
+                    Err(error) if error.to_string().starts_with("coordinator answered 404") => {
+                        client.submit(&submission)
+                    }
+                    Err(error) => Err(error),
+                }
+            },
+        )?
+    } else if continuation {
         client.resume_exploration(&submission)?
     } else {
         client.submit(&submission)?
@@ -347,9 +392,22 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         .as_str()
         .context("satisfy identity missing")?
         .to_string();
-    let deadline = Instant::now() + Duration::from_secs(args.deadline_seconds.min(1800));
+    let deadline = Instant::now()
+        + Duration::from_millis(
+            expires
+                .saturating_sub(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64),
+        );
     loop {
         let status = client.satisfy_status(&id)?;
+        if status["pause_reason"] == "needs_input" {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"status":"needs_input","search_id":search_id,"contract_ref":submission.request.contract_ref,"input_requirements":status["input_requirements"],"search_budget":status["search_budget"],"approval":"not_assessed","deployed":false,"submission":null,"reasoning_accounting":reasoning.as_ref().map(|p|p.accounting()).transpose()?})
+                )?
+            );
+            return Ok(());
+        }
         if let Some(decision) = &decision {
             serve_decision(&client, &id, &status, decision, &mut answered);
         }

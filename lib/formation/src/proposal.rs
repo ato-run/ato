@@ -6,9 +6,9 @@ mod node_static_workspace;
 mod python_http;
 mod source_context;
 pub use execution_plan::{
-    CatalogSource, ExecutionPlanProposal, PlanAuthorization, PlanStateRequirement,
-    RuntimeSelection, SourceReference, VerifiedSourceFile, isolated_state_id, isolated_state_mount,
-    source_file_allowed, source_inspection_priority,
+    CatalogSource, DependencyOperation, ExecutionPlanProposal, PlanAuthorization,
+    PlanStateRequirement, RuntimeSelection, SourceReference, VerifiedSourceFile, isolated_state_id,
+    isolated_state_mount, source_file_allowed, source_inspection_priority,
 };
 pub use node_static_workspace::{
     MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,
@@ -143,8 +143,19 @@ pub enum Proposal {
     Unsupported {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evidence: Vec<DeclineEvidence>,
     },
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclineEvidence {
+    pub code: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceReference>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposalBatch {
@@ -486,11 +497,42 @@ fn compile_proposal(
         Proposal::InspectSource { .. } => {
             return Err(ProposalError("source_inspection_requires_registry"));
         }
-        Proposal::Unsupported { reason } => {
+        Proposal::Unsupported { reason, evidence } => {
+            if evidence.len() > 8
+                || evidence.iter().any(|e| {
+                    e.code.is_empty()
+                        || e.code.len() > 96
+                        || e.detail.is_empty()
+                        || e.detail.len() > 1024
+                        || e.code.chars().any(char::is_control)
+                        || e.detail.chars().any(char::is_control)
+                })
+                || reason.as_deref() == Some("source_broken")
+                    && !evidence.iter().any(|e| {
+                        matches!(
+                            e.code.as_str(),
+                            "correct_environment_reproduction" | "source_change_required"
+                        )
+                    })
+                || evidence.iter().filter_map(|e| e.source.as_ref()).any(|r| {
+                    authorization
+                        .execution_plan
+                        .as_ref()
+                        .and_then(|p| p.files.get(&r.file_id))
+                        .is_none_or(|f| f.digest != r.digest)
+                })
+            {
+                return Err(ProposalError("decline_evidence_invalid"));
+            }
+
             if reason.as_deref().is_some_and(|reason| {
                 !matches!(
                     reason,
                     "unsupported_toolchain"
+                        | "unsupported_source_layout"
+                        | "needs_input"
+                        | "source_broken"
+                        | "no_progress"
                         | "unsupported_dependency_operation"
                         | "unsupported_entrypoint"
                         | "unsupported_build_operation"

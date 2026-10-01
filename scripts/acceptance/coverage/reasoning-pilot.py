@@ -66,7 +66,7 @@ class Pilot(wave.Wave):
         cmd = [self.plan['binaries']['ato']['path'], 'form', projected['source'], '--runtime-network',
             '--exploration-config', cell/'config.json', '--api', self.plan['api'], '--token-file', self.token,
             '--exact-runtime', 'local', '--network', 'denied', '--work-root', cell/'requester',
-            '--max-attempts', '4', '--deadline-seconds', '900', '--max-transfer-bytes', str(1024**3),
+            '--max-attempts', '4', '--deadline-seconds', str(self.plan.get('search_deadline_seconds',1800)), '--max-transfer-bytes', str(1024**3),
             '--max-expanded-bytes', str(2*1024**3), '--max-stored-bytes', str(1024**3)]
         if continuation:
             cmd += ['--search-id', read(cell/'producer.search.json')['search_id']]
@@ -76,7 +76,7 @@ class Pilot(wave.Wave):
         output = cell/('requester'+suffix+'.stdout.log')
         started = time.monotonic()
         requester = self.start(cmd, self.root, output, cell/('requester'+suffix+'.stderr.log'))
-        rc = requester.wait(timeout=950)
+        rc = requester.wait(timeout=self.plan.get("search_deadline_seconds",1800)+60)
         checkpoint = read(cell/'producer.search.json')
         headers = {'Authorization':'Bearer '+self.token.read_text().strip()}
         with urlopen(Request(self.plan['api']+'/v1/runtime-network/exploration/'+checkpoint['search_id']+'/resume', headers=headers)) as response:

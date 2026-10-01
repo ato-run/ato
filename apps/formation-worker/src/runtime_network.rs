@@ -43,13 +43,17 @@ use crate::job::{PlannedCandidate, digest, plan_candidate};
 use crate::journal::{AttemptJournal, AttemptLedger, AttemptPermit, AttemptRecordState};
 use crate::local::{self, host_triple};
 use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
+use anyhow::ensure;
 use ato_formation::source::FileVerifiedArchive;
 use ato_runtime_attempt::admission::EffectAuthorization;
 use ato_runtime_attempt::formation_realizer::FormationRealizer;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+mod delivery;
 pub mod proposal;
 mod source_oci_exploration;
 
@@ -359,6 +363,8 @@ pub struct AttemptTicket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExplorationTicket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
     pub search_id: String,
     pub ceiling: ato_formation::requirements::ExecutionRequirements,
     pub network_transfer_bytes: u64,
@@ -1403,6 +1409,91 @@ impl Client {
         Ok(())
     }
 
+    pub fn variable_metadata(&self) -> Result<Vec<Value>> {
+        let reply: Value = self
+            .send(self.http.get(self.url("/variables")))?
+            .context("variable_metadata_empty")?;
+        let metadata = reply
+            .get("variables")
+            .and_then(Value::as_array)
+            .context("variable_metadata_invalid")?;
+        ensure!(metadata.len() <= 128, "variable_metadata_bounds");
+        Ok(metadata.iter().map(|v|serde_json::json!({"metadata":v["metadata"],"revoked_at_ms":v["revoked_at_ms"]})).collect())
+    }
+    fn resolve_variables(
+        &self,
+        ticket: &AttemptTicket,
+        requirements: &[ato_formation::variables::VariableRequirement],
+    ) -> Result<Vec<ato_runtime_attempt::variables::ResolvedVariable>> {
+        #[derive(Deserialize)]
+        struct Reply {
+            status: String,
+            #[serde(default)]
+            variables: Vec<Value>,
+        }
+        let reply = loop {
+            let reply: Reply = self
+                .send(
+                    self.http
+                        .post(self.url(&format!(
+                            "/attempts/{}/variables/resolve",
+                            ticket.attempt_id
+                        )))
+                        .json(&json!({"fence":ticket.fence,"requirements":requirements})),
+                )?
+                .context("variable_resolution_empty")?;
+            if reply.status == "resolved" {
+                break reply;
+            }
+            ensure!(reply.status == "needs_input", "variable_resolution_invalid");
+            let deadline = ticket
+                .exploration
+                .as_ref()
+                .and_then(|e| e.deadline_ms)
+                .context("binding_wait_requires_deadline")?;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            ensure!(
+                now < deadline,
+                "needs_input: round deadline elapsed awaiting scoped variable information"
+            );
+            std::thread::sleep(Duration::from_millis(
+                deadline.saturating_sub(now).min(5000),
+            ));
+        };
+        ensure!(
+            reply.variables.len() == requirements.len(),
+            "variable_resolution_mismatch"
+        );
+        let mut variables = Vec::new();
+        for (r, v) in requirements.iter().zip(reply.variables) {
+            ensure!(
+                v.get("name").and_then(Value::as_str) == Some(&r.name)
+                    && v.get("phase") == Some(&serde_json::to_value(r.phase)?),
+                "variable_resolution_mismatch"
+            );
+            variables.push(ato_runtime_attempt::variables::ResolvedVariable::new(
+                r,
+                v.get("grant_ref")
+                    .and_then(Value::as_str)
+                    .context("variable_grant_missing")?
+                    .to_owned(),
+                v.get("value")
+                    .and_then(Value::as_str)
+                    .context("variable_value_missing")?
+                    .to_owned(),
+            )?);
+        }
+        Ok(variables)
+    }
+    fn claim_operation(&self, id: &str) -> Result<Option<AttemptTicket>> {
+        self.send::<Value>(
+            self.http
+                .post(self.url("/attempts/claim"))
+                .json(&json!({"operation_id":id})),
+        )?
+        .map(AttemptTicket::from_wire)
+        .transpose()
+    }
     pub fn claim(&self) -> Result<Option<AttemptTicket>> {
         self.send::<serde_json::Value>(self.http.post(self.url("/attempts/claim")))?
             .map(AttemptTicket::from_wire)
@@ -1642,13 +1733,14 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
         })
     };
 
+    let delivery = delivery::Delivery::open(&config.out_dir.join("delivery"))?;
     let mut handled = 0_u32;
     let outcome = (|| -> Result<()> {
         loop {
             if config.max_tickets.is_some_and(|max| handled >= max) {
                 return Ok(());
             }
-            let ticket = match client.claim() {
+            let ticket = match delivery.claim(&client) {
                 Ok(Some(ticket)) => ticket,
                 Ok(None) => {
                     std::thread::sleep(config.poll);
@@ -1657,9 +1749,7 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 // A coordinator or link that drops a request is not a reason
                 // to leave the network; the next poll tries again.
                 Err(error) => {
-                    eprintln!("[runtime-network] claim failed, retrying: {error:#}");
-                    std::thread::sleep(config.poll * 5);
-                    continue;
+                    return Err(error);
                 }
             };
             busy.store(1, Ordering::Relaxed);
@@ -1668,23 +1758,27 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
             );
-            let report = execute_ticket_with_publication(
-                config,
-                &ticket,
-                || {
-                    client.download_input(
-                        &ticket.attempt_id,
-                        ticket.resource_budget.transfer_bytes,
-                        ticket.fence,
-                        &config.work_root,
-                        match ticket.input {
-                            AttemptInput::Source { .. } => "source",
-                            AttemptInput::Retained { .. } => "retained-content",
-                        },
-                    )
-                },
-                Some(&client),
-            );
+            let report = if let Some(saved) = delivery.saved_report()? {
+                saved
+            } else {
+                execute_ticket_with_publication(
+                    config,
+                    &ticket,
+                    || {
+                        client.download_input(
+                            &ticket.attempt_id,
+                            ticket.resource_budget.transfer_bytes,
+                            ticket.fence,
+                            &config.work_root,
+                            match ticket.input {
+                                AttemptInput::Source { .. } => "source",
+                                AttemptInput::Retained { .. } => "retained-content",
+                            },
+                        )
+                    },
+                    Some(&client),
+                )
+            };
             eprintln!(
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
@@ -1696,18 +1790,7 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
             // A result that cannot be delivered is retried; if it never is,
             // the coordinator records the attempt as UNKNOWN: it was claimed,
             // and nobody can say what it did.
-            for retry in 0..5 {
-                match client.report(&ticket.attempt_id, &report) {
-                    Ok(()) => break,
-                    Err(error) => {
-                        eprintln!(
-                            "[runtime-network] report failed (try {}): {error:#}",
-                            retry + 1
-                        );
-                        std::thread::sleep(Duration::from_secs(3));
-                    }
-                }
-            }
+            delivery.report(&client, &ticket, &report)?;
             handled += 1;
         }
     })();
@@ -2006,6 +2089,42 @@ fn execute_planned_ticket(
         );
     }
 
+    if ticket
+        .exploration
+        .as_ref()
+        .and_then(|e| e.deadline_ms)
+        .is_some_and(|deadline| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+                >= deadline
+        })
+    {
+        return refused_after_expansion(
+            attested.clone(),
+            "round_deadline_exceeded",
+            "the round deadline elapsed before execution",
+        );
+    }
+    let resolved_variables = if planned.derivation.variable_bindings.is_empty() {
+        vec![]
+    } else {
+        match publisher
+            .context("variable_resolver_unavailable")
+            .and_then(|client| {
+                client.resolve_variables(ticket, &planned.derivation.variable_bindings)
+            }) {
+            Ok(v) => v,
+            Err(error) => {
+                return refused_after_expansion(
+                    attested.clone(),
+                    "needs_input",
+                    &format!("{error:#}"),
+                );
+            }
+        }
+    };
     let scoped = ticket
         .exploration
         .as_ref()
@@ -2060,7 +2179,24 @@ fn execute_planned_ticket(
     let builder = LocalAttemptExecutor {
         shim: config.shim.clone(),
         network,
-        limits: BuildLimits::default(),
+        limits: BuildLimits {
+            wall_clock_seconds: ticket
+                .exploration
+                .as_ref()
+                .and_then(|e| e.deadline_ms)
+                .map_or(900, |deadline| {
+                    deadline
+                        .saturating_sub(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        )
+                        .saturating_sub(45_000)
+                        / 1000
+                }),
+            ..BuildLimits::default()
+        },
     };
     let legacy = FormationRealizer {
         planned: &planned,
@@ -2076,6 +2212,7 @@ fn execute_planned_ticket(
         .zip(scoped.as_ref())
         .map(
             |(grant, gates)| ato_runtime_attempt::exploration_realizer::ExplorationRealizer {
+                variables: &resolved_variables,
                 planned: &planned,
                 source_root: &frozen.root,
                 builder: &builder,
@@ -2112,39 +2249,60 @@ fn execute_planned_ticket(
                 .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
         })
         .unwrap_or(&legacy);
-    let outcome = run_reserved_attempt(
-        &AttemptRequest {
-            // Every attempt of one satisfy request spends from it: a
-            // redelivered ticket, or another route after an UNKNOWN one, is
-            // held by the same record.
-            request_id: &ticket.satisfy_id,
-            attempt_id: &ticket.attempt_id,
-            label: "authored",
-            spec: &spec,
-            contract_ref: &contract_ref,
-            runtime_id: &ticket.runtime_id,
-            profile: &local::probe_local_runtime(),
-            // A ticket runs unattended, and may be retried elsewhere.
-            authorization: ticket
-                .exploration
-                .as_ref()
-                .map(|grant| EffectAuthorization::Exploration {
-                    derivation_ref: &ticket.derivation_ref,
-                    grant: &grant.ceiling,
-                })
-                .unwrap_or(EffectAuthorization::Unattended),
-            network,
-            browser: browser.as_ref(),
-            attempt_root,
-            // The Runtime keeps the artifact for the coordinator, not the
-            // running candidate.
-            continuation: Continuation::Stop,
-            receipt: ReceiptContext::formation(),
-            interrupt: None,
-        },
-        realizer,
-        Ok(permit),
-    );
+    let deadline = ticket.exploration.as_ref().and_then(|e| e.deadline_ms);
+    let expired = std::sync::atomic::AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        let (cancel, wait) = std::sync::mpsc::channel();
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_sub(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
+            let expired = &expired;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_millis(remaining)).is_err() {
+                    expired.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        let outcome = run_reserved_attempt(
+            &AttemptRequest {
+                // Every attempt of one satisfy request spends from it: a
+                // redelivered ticket, or another route after an UNKNOWN one, is
+                // held by the same record.
+                request_id: &ticket.satisfy_id,
+                attempt_id: &ticket.attempt_id,
+                label: "authored",
+                spec: &spec,
+                contract_ref: &contract_ref,
+                runtime_id: &ticket.runtime_id,
+                profile: &local::probe_local_runtime(),
+                // A ticket runs unattended, and may be retried elsewhere.
+                authorization: ticket
+                    .exploration
+                    .as_ref()
+                    .map(|grant| EffectAuthorization::Exploration {
+                        derivation_ref: &ticket.derivation_ref,
+                        grant: &grant.ceiling,
+                    })
+                    .unwrap_or(EffectAuthorization::Unattended),
+                network,
+                browser: browser.as_ref(),
+                attempt_root,
+                // The Runtime keeps the artifact for the coordinator, not the
+                // running candidate.
+                continuation: Continuation::Stop,
+                receipt: ReceiptContext::formation(),
+                interrupt: deadline.map(|_| &expired),
+            },
+            realizer,
+            Ok(permit),
+        );
+        let _ = cancel.send(());
+        outcome
+    });
     attested.execution_started = outcome.execution_started();
     attested.attempt_record = outcome.attempt_record;
     let mut attempt = outcome.attempt;

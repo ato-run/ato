@@ -234,6 +234,8 @@ pub enum Termination {
     Submitted,
     RoundsExhausted,
     NoProgress,
+    /// Provider/transport infrastructure exhausted its durable operation retries.
+    InfrastructureFailure,
     ExplorationAuthorityExceeded,
     CandidatesExhausted,
     BudgetExhausted,
@@ -895,6 +897,25 @@ fn default_next(
     if s.frozen.policy.exploration.is_some()
         && let Some(round) = &s.proposal_round
     {
+        if s.frozen
+            .policy
+            .exploration
+            .as_ref()
+            .is_some_and(|p| p.reasoning.is_some())
+            && matches!(
+                round.outcome,
+                Some(
+                    crate::proposal::ProposalRoundOutcome::ProviderError
+                        | crate::proposal::ProposalRoundOutcome::Timeout
+                )
+            )
+        {
+            return Ok(finish(if passed {
+                Termination::Submitted
+            } else {
+                Termination::InfrastructureFailure
+            }));
+        }
         // Two completed declines without a D, inspection or validator feedback
         // add no new execution/source evidence. Do not buy a third identical
         // reasoning round. Provider errors remain separately budgeted outcomes.
@@ -912,10 +933,10 @@ fn default_next(
             .is_some_and(|p| p.reasoning.is_some())
             && round.outcome == Some(crate::proposal::ProposalRoundOutcome::Completed)
             && round.candidates.is_empty()
-            && round
+            && !round
                 .diagnostics
                 .iter()
-                .all(|d| d == "source_inspection_requested");
+                .any(|d| d == "exploration_authority_exceeded");
         if shared_decline
             || (empty_decline(round) && s.proposal_history.last().is_some_and(empty_decline))
         {

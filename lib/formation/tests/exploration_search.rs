@@ -907,3 +907,57 @@ fn python_source_requirements_resolve_hash_and_install_offline_without_changing_
     assert_eq!(config.max_rounds.get(), 3);
     assert_eq!(config.max_retries, 3);
 }
+
+#[test]
+fn bindings_change_d_without_changing_k_and_never_carry_values() {
+    let r = serde_json::json!({"name":"JWT_SECRET","kind":"signing_secret","purpose":"Sign local sessions","resource":"session.signing","operation":"execute","phase":"runtime","secret":true,"temporary":true});
+    let req: ato_formation::variables::VariableRequirement =
+        serde_json::from_value(r.clone()).unwrap();
+    assert!(ato_formation::variables::validate(&[req.clone()]).is_ok());
+    assert!(
+        ato_formation::variables::validate(&[ato_formation::variables::VariableRequirement {
+            service: Some("external".into()),
+            ..req.clone()
+        }])
+        .is_err()
+    );
+    let source=ato_formation::capsule_toml::parse_capsule_toml("schema='ato.capsule/1'\n[[input]]\nid='workspace'\nuse='ato.workspace@1'\npath='.'\n[[derive.step]]\nid='app'\nuse='ato.process@1'\nop='serve'\nargv=['python','app.py']\n[[port]]\nid='app.http'\nuse='ato.http@1'\nfrom='app'\nguest_port=8080\n[[contract.require]]\nid='health'\nuse='ato.contract.http@1'\nport='app.http'\nmethod='GET'\npath='/'\n[contract.require.expect]\nstatus=200").unwrap();
+    let context = ato_formation::authoring::BindingContext {
+        source_closure_ref: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    };
+    let (k, d) = ato_formation::authoring::bind(&source, &context).unwrap();
+    let mut bound = source.clone();
+    bound.derivation.variable_bindings.push(req);
+    let rendered = ato_formation::capsule_toml::render_capsule_toml(&bound).unwrap();
+    assert_eq!(
+        ato_formation::capsule_toml::parse_capsule_toml(&rendered).unwrap(),
+        bound
+    );
+    let (same_k, new_d) = ato_formation::authoring::bind(&bound, &context).unwrap();
+    assert_eq!(k, same_k);
+    assert_ne!(d.derivation_ref().unwrap(), new_d.derivation_ref().unwrap());
+    assert!(!serde_json::to_string(&new_d).unwrap().contains("value"));
+}
+
+#[test]
+fn shared_provider_infrastructure_failure_preserves_one_round_on_restart() {
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(serde_json::from_value(json!({"round_timeout_ms":600000,"inspection_timeout_ms":30000,"inspection_source_bytes":32768})).unwrap());
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 100,
+        expires_at_ms: 60000,
+        outcome: Some(ProposalRoundOutcome::ProviderError),
+        candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec![],
+        inspection_requests: vec![],
+    });
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&restored, &[], 6000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::InfrastructureFailure
+        }
+    );
+    assert!(restored.proposal_history.is_empty());
+}
