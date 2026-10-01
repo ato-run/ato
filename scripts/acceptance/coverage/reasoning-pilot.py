@@ -61,6 +61,7 @@ class Pilot(wave.Wave):
             require(preflight.wait(timeout=600) == 0, 'preflight infrastructure failure')
         projected = read(cell/'preflight.json')
         require(projected['contract_ref'] == app['contract_ref'], 'K changed')
+        require(not projected['request']['authorized_derivations'], 'zero-known-D gate found an automatic route')
         live = {'schema':'ato.formation-exploration-config/2', 'contract':projected['contract'],
             'exploration': config['exploration'], 'toolchains':config['toolchains'],
             'provider':self.plan['producer_config'], 'provider_budget':self.plan['producer_budget'],
@@ -101,6 +102,7 @@ class Pilot(wave.Wave):
         if result is not None:
             require(result['contract_ref'] == app['contract_ref'], 'result K changed')
             require(result['approval'] == 'not_assessed' and result['deployed'] is False, 'submission became execution permission')
+            require(result['known_attempts'] == 0, 'known route used in zero-D measurement')
         row = {'index': app['index'], 'name':app['name'], 'provider': self.plan['producer_config']['provider'],
             'known_D':False, 'typed_K_pass':result is not None and result['submission'] is not None,
             'rounds_consumed': result.get('rounds_consumed') if result else None,
