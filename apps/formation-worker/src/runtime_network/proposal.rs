@@ -32,7 +32,7 @@ pub(super) struct RequesterProposal {
     recipes: BTreeMap<String, String>,
     source_context: Vec<SourceContextEntry>,
     inspection_context: BTreeMap<String, SourceContextEntry>,
-    source_root: PathBuf,
+    source_inventory: local::FrozenSource,
     available_variables: Vec<Value>,
     runtime_capabilities: Vec<Value>,
     provider_identity: Option<ProviderIdentity>,
@@ -55,7 +55,7 @@ impl RequesterProposal {
             .as_ref()
             .and_then(|p| p.files.get(id))
             .context("source_inspection_unauthorized")?;
-        let bytes = std::fs::read(self.source_root.join(&file.path))?;
+        let bytes = std::fs::read(self.source_inventory.root.join(&file.path))?;
         anyhow::ensure!(
             format!("sha256:{:x}", Sha256::digest(&bytes)) == file.digest,
             "proposal_source_digest_mismatch"
@@ -539,7 +539,7 @@ impl Submission {
             recipes: BTreeMap::new(),
             source_context,
             inspection_context,
-            source_root: inventory.root.clone(),
+            source_inventory: inventory,
             available_variables: vec![],
             runtime_capabilities: vec![],
             provider_identity: None,

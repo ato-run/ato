@@ -444,11 +444,15 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
         SessionConfig,
     };
     let (root, mut sub) = prepared(|path| {
+        std::fs::create_dir(path.join("src")).unwrap();
         for (name, text) in [
-            ("setup.py", "# manifest\n"),
+            (
+                "setup.py",
+                "# explicitly referenced config: src/requirements.txt\n",
+            ),
             ("README.md", "# application\n"),
             ("settings.py", "PORT=8000\n"),
-            ("requirements.txt", "# requirements\n"),
+            ("src/requirements.txt", "# requirements\n"),
         ] {
             std::fs::write(path.join(name), text).unwrap();
         }
@@ -462,7 +466,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
         ("manifest", "setup.py"),
         ("readme", "README.md"),
         ("config", "settings.py"),
-        ("requirements", "requirements.txt"),
+        ("requirements", "src/requirements.txt"),
     ]
     .into_iter()
     .map(|(id, path)| {
@@ -548,7 +552,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
                 let source = input
                     .inventory
                     .iter()
-                    .find(|s| s.source_relative_path == "requirements.txt")
+                    .find(|s| s.source_relative_path == "src/requirements.txt")
                     .unwrap();
                 json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"inspect_source","sources":[source.reference]}]})
             } else {
