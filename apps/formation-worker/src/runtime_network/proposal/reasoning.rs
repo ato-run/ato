@@ -322,10 +322,12 @@ fn scoped_inventory_with_feedback(
                                 }))
                     } else {
                         f.path == path
-                            || f.path.strip_prefix(&format!("{path}/")).is_some_and(|s| {
-                                !s.contains('/')
-                                    && ato_formation::proposal::source_inspection_priority(s).0 <= 5
-                            })
+                            || token.contains('/')
+                                && f.path.strip_prefix(&format!("{path}/")).is_some_and(|s| {
+                                    !s.contains('/')
+                                        && ato_formation::proposal::source_inspection_priority(s).0
+                                            <= 5
+                                })
                     }
                 })
                 .collect();
@@ -422,6 +424,7 @@ mod autonomous_tests {
                 "README.md",
                 "src/server.js",
                 "unrelated/main.py",
+                "server/index.js",
             ]
             .into_iter()
             .map(|p| {
@@ -440,7 +443,7 @@ mod autonomous_tests {
         let entry = SourceContextEntry {
             kind: SourceContextKind::VerifiedFile,
             logical_id: "package.json".into(),
-            text: "{\"main\":\"src/server.js\"} COPY . .".into(),
+            text: "{\"main\":\"src/server.js\"} COPY . . This server is useful".into(),
             source_id: "package.json".into(),
             encoding: ato_formation::proposal::SourceEncoding::Utf8,
             content_sha256: "unused".into(),
