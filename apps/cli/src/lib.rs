@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod desktop_control;
+mod formation_exploration;
 mod object_transport;
 mod portable_attempt;
 mod portable_dependency;
@@ -441,7 +442,7 @@ struct FormArgs {
     search_id: Option<String>,
     /// The search's lifetime from its first request, in seconds (at most
     /// 7 days). Never extended.
-    #[arg(long, default_value_t = 24 * 60 * 60)]
+    #[arg(long, default_value_t = 30 * 60)]
     deadline_seconds: u64,
     /// Logical source bytes the search may hand to Runtimes, over all of its
     /// attempts (at most 10 GiB).
@@ -475,6 +476,10 @@ struct FormArgs {
     /// Repeat for up to 16 files. Model sees IDs, never the paths or source.
     #[arg(long = "generation-entrypoint", requires = "generation_provider")]
     generation_entrypoints: Vec<String>,
+    /// External exploration ceiling, frozen K, source authorization and
+    /// pinned provider/spend config (JSON or TOML). No normal Run approval.
+    #[arg(long, requires = "runtime_network", conflicts_with_all = ["generation_provider", "verify_browser"])]
+    exploration_config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -510,6 +515,9 @@ struct RuntimeNetworkServeArgs {
     /// Stop after handling this many attempts.
     #[arg(long)]
     max_attempts: Option<u32>,
+    /// External exploration sandbox ceiling as JSON; no production bindings.
+    #[arg(long)]
+    exploration_sandbox: Option<PathBuf>,
 }
 
 /// The build's own identity: what this binary is, not merely which release
@@ -804,6 +812,9 @@ fn browser_verifier_command(
 
 /// Submit a SatisfyRequest and wait for the coordinator to settle it.
 fn form_on_runtime_network(args: FormArgs) -> Result<()> {
+    if args.exploration_config.is_some() {
+        return formation_exploration::run(args);
+    }
     use ato_formation_worker::runtime_network::{
         Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement, new_search_id,
         prepare_submission,
@@ -878,6 +889,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             decision: decision_policy.clone(),
             generation: None,
             proposal: None,
+            exploration: None,
         },
         SatisfyBudget {
             max_attempts: u32::try_from(args.max_attempts)
@@ -981,6 +993,10 @@ fn runtime_network_serve(args: RuntimeNetworkServeArgs) -> Result<()> {
         .join("ato/runtime-network");
     ato_formation_worker::runtime_network::serve(
         &ato_formation_worker::runtime_network::ServeConfig {
+            exploration: args
+                .exploration_sandbox
+                .map(|p| -> Result<_> { Ok(serde_json::from_slice(&std::fs::read(p)?)?) })
+                .transpose()?,
             api: args.api,
             token: read_token(&args.token_file)?,
             work_root: args.work_root.unwrap_or_else(|| base.join("work")),

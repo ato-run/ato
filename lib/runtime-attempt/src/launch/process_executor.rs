@@ -347,6 +347,25 @@ pub fn launch_process_with(
     context: &ResolvedRuntimeLaunchContext,
     host: &ProcessLaunchHost,
 ) -> Result<LaunchedProcess> {
+    launch_process_inner(spec, context, host, None)
+}
+
+pub fn launch_process_with_scoped_network(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+    egress_socket: &Path,
+    ingress_root: &Path,
+) -> Result<LaunchedProcess> {
+    launch_process_inner(spec, context, host, Some((egress_socket, ingress_root)))
+}
+
+fn launch_process_inner(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+    scoped: Option<(&Path, &Path)>,
+) -> Result<LaunchedProcess> {
     let process_spec = process_spec_for(spec, context)?;
     let (runtime_executable, runtime_version) = match &spec.realization {
         LaunchRealizationV1::Process(process) => match &process.executable {
@@ -373,13 +392,23 @@ pub fn launch_process_with(
     }
 
     let policy_path = host.runtime_root.join("sandbox-policy.json");
-    let sandboxed = super::sandbox::sandboxed_command(
-        context,
-        &process_spec.command,
-        &host.shim,
-        &policy_path,
-        true,
-    )?;
+    let mut sandboxed = match scoped {
+        Some((socket, ingress)) => super::sandbox::sandboxed_command_scoped(
+            context,
+            &process_spec.command,
+            &host.shim,
+            &policy_path,
+            socket,
+            ingress,
+        )?,
+        None => super::sandbox::sandboxed_command(
+            context,
+            &process_spec.command,
+            &host.shim,
+            &policy_path,
+            true,
+        )?,
+    };
     if let Some(parent) = policy_path.parent() {
         std::fs::create_dir_all(parent).context("failed to create the sandbox policy directory")?;
     }
@@ -390,13 +419,46 @@ pub fn launch_process_with(
     )
     .context("failed to write the sandbox policy")?;
 
+    let mut environment = super::sandbox::guest_environment(context);
+    if scoped.is_some() {
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            environment.insert(
+                key.into(),
+                format!("http://127.0.0.1:{}", crate::network_bridge::PROXY_PORT),
+            );
+        }
+        // Loopback requests stay within the isolated namespace. All external
+        // requests either use the owner broker or fail without an interface.
+        environment.insert("NO_PROXY".into(), "127.0.0.1,localhost".into());
+        environment.insert("no_proxy".into(), "127.0.0.1,localhost".into());
+        // Source-supplied environment must not affect bwrap or the owner
+        // relay before containment. Only the shim's eventual workload exec
+        // receives it, after the owner relay and Landlock are installed.
+        let shim = sandboxed
+            .argv
+            .windows(2)
+            .position(|v| v == ["/.ato/runner", "sandbox-exec"])
+            .context("owner shim boundary missing")?;
+        let boundary = sandboxed
+            .argv
+            .iter()
+            .enumerate()
+            .find_map(|(i, v)| (i > shim && v == "--").then_some(i))
+            .context("owner workload boundary missing")?;
+        let options: Vec<String> = environment
+            .iter()
+            .flat_map(|(key, value)| ["--env".to_owned(), format!("{key}={value}")])
+            .collect();
+        sandboxed.argv.splice(boundary..boundary, options);
+        environment.clear();
+    }
     let adapter = ProcessAdapter::new(ProcessSpec {
         // The workload's cwd is set INSIDE the sandbox (`--chdir /app`), so
         // the outer command runs from the workspace root and the guest cwd is
         // the spec's, not the Runner's.
         cwd: PathBuf::new(),
         command: sandboxed.argv,
-        environment: super::sandbox::guest_environment(context),
+        environment,
         ..process_spec
     })
     .context("sandboxed process spec is unusable")?;

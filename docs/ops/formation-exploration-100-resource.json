@@ -1,0 +1,51 @@
+{
+  "schema": "ato.formation-exploration-100-resource/1",
+  "measured_code_pin": "10473525efa26416ef63025dbb5003c910a43c70",
+  "receiver_pin": "b20bba7ab9daf282f8d5b1e22affe549ad3492a3",
+  "recorded_at": "2026-09-30T16:09:59.589506+00:00",
+  "host": "Linux-6.17.0-1016-oracle-aarch64-with-glibc2.39",
+  "arch": "aarch64",
+  "rust_toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "runtime_profile": "bwrap+Landlock; isolated loopback bridge; phase HTTPS broker; exact provisioned Python3.12.7/Node22.14.0",
+  "disk_free_bytes_before": 88843427840,
+  "disk_free_bytes_after": 84832514048,
+  "binary_hashes_verified": {
+    "ato": "c509c7df460fe63aeca8c5dffe48b01f6d51cd9531f98da3e1df19c274d1a4cb",
+    "preflight": "d844c518433400b1788c4e63d238435c60b111f1275fc73341bb74ff722288c3",
+    "worker": "8293a260f4e29d575511405ab207dccd46cd17649512997ebe801b805294efda",
+    "gate_requester": "f9143dba615e1d908774d01ce9185801018d6d773de80a3a70ec20258e4182a9"
+  },
+  "receiver_hashes_verified": {
+    "schema-baseline.sql": "a941408a62e7fb6cdc03c83a14240952ff5e0753778f756313c16367185ef6e8",
+    "receiver-pin.json": "80939bbe813c5446699544692df2a1969bccb564e646167bdadfeb97ae59ee1c",
+    "authority-provenance.json": "d16b0e3aa101ba1077d5f731529844d5118f49c7895f28ada52bacec2511adbc",
+    "schema.sql": "aba341217e9b5933bac894e20329f76823ed7dad4d9069fe96f2b5b641f338f0",
+    "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
+    "worker.js": "555df791a82e09c33d6200702d9603b0a2cc658c6e93a79a049a56510aed36bd",
+    "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+    "schema-baseline.json": "c78d3109d741d6e3fce9babd86e026fec07d7c973adc24488a8a6e6518d7f1b8",
+    "receipt_authority.wasm": "cb6d274e71771da2310dcd0e36a4f6c3733cf7bf2d3725fda6164bd0199beb4d",
+    "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1"
+  },
+  "raw_archive": {
+    "path": "/home/ubuntu/formation-foundation/.tmp/exploration-100-ledgers/formation-exploration-100-raw.tar.gz",
+    "bytes": 24582590,
+    "sha256": "9fba90019da0b4705202006db1676bab43ff83314837c133c4daf8ed6bf81268",
+    "files": 1205
+  },
+  "retained_remote": [
+    "frozen archives",
+    "all receiver namespaces",
+    "worker state",
+    "raw results",
+    "receipts"
+  ],
+  "credentials_exported": false,
+  "deployed": false,
+  "remote_migration": false,
+  "local_raw_copy": {
+    "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/.tmp/exploration/formation-exploration-100-raw.tar.gz",
+    "sha256": "9fba90019da0b4705202006db1676bab43ff83314837c133c4daf8ed6bf81268",
+    "bytes": 24582590
+  }
+}

@@ -1,0 +1,54 @@
+
+ ⛅️ wrangler 4.129.0 (update available 4.145.0)
+───────────────────────────────────────────────
+Resource location: remote 
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mProcessing wrangler.toml configuration:[0m
+
+  
+    - "env.production" environment configuration
+      - There is a r2_buckets binding with name "INSTANCE_ASSETS_BUCKET" at the top level, but not on "env.production".
+        This is not what you probably want, since "r2_buckets" configuration is not inherited by environments.
+        Please add a binding for "INSTANCE_ASSETS_BUCKET" to "env.production.r2_buckets.bindings".
+
+
+Migrations to be applied:
+┌───────────────────────────────────────────────┐
+│ Name                                          │
+├───────────────────────────────────────────────┤
+│ 0194_schema_cleanup.sql                       │
+├───────────────────────────────────────────────┤
+│ 0298_runtime_network_source_objects.sql       │
+├───────────────────────────────────────────────┤
+│ 0299_runtime_network_retained_objects.sql     │
+├───────────────────────────────────────────────┤
+│ 0300_formation_search_state.sql               │
+├───────────────────────────────────────────────┤
+│ 0301_formation_search_decisions.sql           │
+├───────────────────────────────────────────────┤
+│ 0302_formation_exploration_actions.sql        │
+├───────────────────────────────────────────────┤
+│ 0303_formation_generation.sql                 │
+├───────────────────────────────────────────────┤
+│ 0304_formation_proposals.sql                  │
+├───────────────────────────────────────────────┤
+│ 0305_formation_provider_calls.sql             │
+├───────────────────────────────────────────────┤
+│ 0306_portable_attempt_lifecycle.sql           │
+├───────────────────────────────────────────────┤
+│ 0307_formation_adaptive_decision_release.sql  │
+├───────────────────────────────────────────────┤
+│ 0308_formation_exploration_rounds.sql         │
+├───────────────────────────────────────────────┤
+│ 0309_formation_exploration_submissions.sql    │
+├───────────────────────────────────────────────┤
+│ 0310_formation_exploration_network_budget.sql │
+├───────────────────────────────────────────────┤
+│ 0311_formation_reasoning_round_timeout.sql    │
+├───────────────────────────────────────────────┤
+│ 0312_formation_variable_bindings.sql          │
+├───────────────────────────────────────────────┤
+│ 0313_runtime_claim_operation.sql              │
+├───────────────────────────────────────────────┤
+│ 0314_formation_provider_transport.sql         │
+└───────────────────────────────────────────────┘

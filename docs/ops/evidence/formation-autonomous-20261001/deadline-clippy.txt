@@ -1,0 +1,5 @@
+    Checking ato-runtime-attempt v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/lib/runtime-attempt)
+   Compiling ato-cli v0.7.9 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/apps/cli)
+    Checking ato-portable-application v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/apps/portable-application)
+    Checking ato-formation-worker v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/apps/formation-worker)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.58s

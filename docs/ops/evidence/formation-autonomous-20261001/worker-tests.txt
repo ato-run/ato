@@ -1,0 +1,64 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running unittests src/lib.rs (target/debug/deps/ato_formation_worker-c682a35398e02bb9)
+
+running 57 tests
+test operations::tests::incomplete_explicit_source_fails_without_discovery_fallback ... ok
+test operations::tests::preserves_declaration_and_modules_without_loading_large_assets ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::explicit_python_import_exposes_only_module_or_initializer ... ok
+test runtime_network::exploration::tests::actual_gate_refusal_is_reported_only_for_its_phase_without_external_dns ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::explicit_workspace_globs_are_bounded_and_recursive_refs_are_reported ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::lowering_capabilities_are_source_independent_and_toolchain_scoped ... ok
+test metered_decision::tests::singleton_bypasses_credential_and_reservation ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::relative_js_imports_use_exact_bounded_files_and_reject_ambiguity ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::root_scope_requires_an_acquired_reference_and_preserves_its_digest ... ok
+test metered_decision::tests::crash_after_reservation_is_charged_and_never_sent_again ... ok
+test runtime_network::proposal::tests::auto_plan_inventory_comes_from_verified_source_and_excludes_credentials ... ok
+test runtime_network::proposal::tests::completed_batch_recompiles_idempotently_but_is_not_a_pass ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::exchange_call_bound_is_frozen_separately_from_rounds ... ok
+test runtime_network::proposal::tests::general::d3_peak_reservation_rounds_each_side_up_and_bounds_total ... ok
+test runtime_network::proposal::tests::auto_source_priority_subset_is_valid_canonical_provider_context ... ok
+test runtime_network::proposal::tests::general::d3_unresolved_reservation_blocks_next_cell_without_refund ... ok
+test runtime_network::proposal::tests::general::general_error_timeout_durable_evidence_without_k_evidence ... ok
+test runtime_network::proposal::tests::corruption_is_rejected_before_any_receipt_or_recipe_admission ... ok
+test runtime_network::proposal::tests::general::historical_cell_response_journal_remains_readable ... ok
+test runtime_network::proposal::tests::general::general_provenance_and_raw_mismatch_fail_before_admission ... ok
+test runtime_network::proposal::tests::general::d3_finish_model_and_usage_fail_closed_and_halt_across_restart ... ok
+test runtime_network::proposal::tests::general::preregistration_uses_exact_frozen_source_without_provider_or_status ... ok
+test runtime_network::proposal::tests::general::production_endpoint_and_mock_credentials_are_separate ... ok
+test runtime_network::proposal::tests::general::r1_dynamic_final_timeout_changes_request_hash ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::operation_retries_are_initial_plus_three_and_survive_restart ... ok
+test runtime_network::proposal::tests::general::r2_same_final_request_has_same_hash ... ok
+test runtime_network::proposal::tests::general::r3_exact_received_http_body_matches_durable_hash ... ok
+test runtime_network::proposal::tests::general::r4_evidence_write_failure_reads_no_credential_and_sends_no_http ... ok
+test runtime_network::proposal::tests::general::r5_duplicate_request_and_legacy_request_mix_reject ... ok
+test runtime_network::deadline_tests::frozen_deadline_caps_source_and_status_timeouts_and_never_expands ... ok
+test runtime_network::proposal::tests::general::r6_response_requires_request_and_is_write_once ... ok
+test runtime_network::proposal::tests::general::r7_crash_reopen_preserves_request_and_consumes_reservation ... ok
+test runtime_network::proposal::tests::general::general_claim_loss_never_calls_or_reclaims ... ok
+test runtime_network::proposal::tests::general::r8_provider_body_never_contains_auth_header_or_key ... ok
+test runtime_network::proposal::tests::general::m13_completion_loss_get_recompile_and_restart_do_not_reinvoke ... ok
+test runtime_network::proposal::tests::general::r9_source_bodies_are_not_stored_in_request_journal ... ok
+test runtime_network::proposal::tests::general::shared_api_uses_exact_input_and_distinct_inspection_call_keys ... ok
+test runtime_network::proposal::tests::general::shared_authentication_failure_is_infrastructure_and_is_not_retried ... ok
+test runtime_network::proposal::tests::general::source_module_utf8_binary_bounds_and_immutable_hash ... ok
+test runtime_network::proposal::tests::general::source_v2_uses_frozen_opt_in_and_never_private_inventory ... ok
+test runtime_network::proposal::tests::general::spend_journal_bounds_restart_concurrency_and_no_second_http ... ok
+test runtime_network::proposal::tests::prompt_v1_bytes_stay_pinned_and_v2_names_the_workspace_operation ... ok
+test runtime_network::proposal::tests::policy_cannot_bypass_enablement_or_change_after_source_verification ... ok
+test runtime_network::proposal::tests::request_projection_contains_no_private_paths_source_or_receipts ... ok
+test runtime_network::proposal::tests::general::transmitted_context_evidence_matches_actual_http_projection_without_text_or_secrets ... ok
+test runtime_network::proposal::tests::source_inventory_ignores_later_original_writes ... ok
+test runtime_network::proposal::tests::module_requires_frozen_files_and_package_parents ... ok
+test runtime_network::proposal::tests::source_refs_cannot_be_replaced_by_receiver_syntax ... ok
+test runtime_network::proposal::tests::raw_provenance_scope_and_member_count_corruption_fail_closed ... ok
+test runtime_network::proposal::tests::symlink_file_and_directory_never_authorize_entrypoint ... ok
+test runtime_network::proposal::tests::workspace_domain_must_equal_the_frozen_source_inventory ... ok
+test runtime_network::proposal::tests::zero_d_has_no_preset_and_source_is_independent ... ok
+test runtime_network::deadline_tests::expired_operation_does_not_dispatch_and_slow_http_read_stops_at_deadline ... ok
+test runtime_network::proposal::tests::general::m0_through_m12_exact_raw_transport_and_validator_authority ... ok
+test runtime_network::proposal::tests::session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer ... ok
+test runtime_network::delivery::tests::lost_runtime_dispatch_stays_the_same_operation_after_restart ... ok
+test runtime_network::proposal::tests::general::shared_transient_calls_are_separate_charged_reservations_and_restart_cannot_reset_retry_three ... ok
+
+test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.43s
+
