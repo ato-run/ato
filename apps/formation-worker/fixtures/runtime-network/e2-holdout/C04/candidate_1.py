@@ -1,0 +1,24 @@
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+READY = False
+
+
+class Gate(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health" and not READY:
+            body = b"hold"
+            self.send_response(503)
+        else:
+            body = b"ok"
+            self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+if __name__ == "__main__":
+    ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Gate).serve_forever()
