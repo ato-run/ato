@@ -816,8 +816,41 @@ fn source_oci_failure(e: source_oci::SourceOciError) -> RealizeFailure {
             resources: vec!["source-oci-builder".into()],
         }
     } else {
-        RealizeFailure::Execution(anyhow::anyhow!(e))
+        let failure = ato_formation::failure::FormationFailure::new(
+            e.code,
+            ato_formation::failure::FailureStage::Build,
+            "The isolated OCI operation failed; the Runtime retained its operator evidence.",
+        );
+        RealizeFailure::Execution(anyhow::anyhow!(failure).context(e))
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn oci_failure_keeps_typed_code_without_exposing_operator_detail() {
+    let failure = source_oci_failure(source_oci::SourceOciError {
+        code: "source_oci_build_failed",
+        detail: "private-path and secret-canary".into(),
+        cleanup: None,
+    });
+    let RealizeFailure::Execution(error) = failure else {
+        panic!("expected finished failure")
+    };
+    let public = ato_runtime_attempt::attempt::failure_of(&error);
+    assert_eq!(public.code, "source_oci_build_failed");
+    assert_eq!(public.stage, "build");
+    assert!(!public.message.contains("private-path"));
+    assert!(!public.message.contains("secret-canary"));
+    let failure = source_oci_failure(source_oci::SourceOciError {
+        code: "source_oci_build_failed",
+        detail: "build failure".into(),
+        cleanup: Some(Box::new(source_oci::SourceOciError {
+            code: "source_oci_cleanup_unconfirmed",
+            detail: "unconfirmed stop".into(),
+            cleanup: None,
+        })),
+    });
+    assert!(matches!(failure, RealizeFailure::Abandoned { .. }));
 }
 
 #[cfg(target_os = "linux")]
