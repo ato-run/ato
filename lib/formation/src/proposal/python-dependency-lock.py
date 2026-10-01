@@ -24,7 +24,11 @@ for path in wheels:
     if size > 512 * 1024**2 or total > 2 * 1024**3:
         raise ValueError('dependency_artifact_byte_limit')
     with zipfile.ZipFile(path) as wheel:
-        metadata = [i for i in wheel.infolist() if i.filename.endswith('.dist-info/METADATA')]
+        # Vendored dependencies may carry nested dist-info directories. Only
+        # the wheel's own root dist-info identifies this artifact.
+        metadata = [i for i in wheel.infolist()
+                    if i.filename.endswith('.dist-info/METADATA')
+                    and len(i.filename.split('/')) == 2]
         if len(metadata) != 1 or metadata[0].file_size > 1024**2:
             raise ValueError('dependency_wheel_metadata_invalid')
         fields = {}
