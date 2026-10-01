@@ -44,6 +44,7 @@ impl ReasoningProviderConfig {
                                 | deepseek::PROMPT_VERSION_V9
                                 | deepseek::PROMPT_VERSION_V10
                                 | deepseek::PROMPT_VERSION_V11
+                                | deepseek::PROMPT_VERSION_V12
                         ),
                     "invalid session provider"
                 );
@@ -78,6 +79,7 @@ impl ReasoningProviderConfig {
                 | deepseek::PROMPT_VERSION_V9
                 | deepseek::PROMPT_VERSION_V10
                 | deepseek::PROMPT_VERSION_V11
+                | deepseek::PROMPT_VERSION_V12
         ) {
             lowering_capabilities_for(auth, runtimes, prompt_version)
         } else {
@@ -158,6 +160,12 @@ impl ReasoningInput {
                         auth,
                         &self.runtime_capabilities,
                         deepseek::PROMPT_VERSION_V10
+                    )
+                || self.lowering_capabilities
+                    == lowering_capabilities_for(
+                        auth,
+                        &self.runtime_capabilities,
+                        deepseek::PROMPT_VERSION_V11
                     ),
             "lowering capability mismatch"
         );
@@ -268,7 +276,7 @@ fn lowering_capabilities(
     let node_bound = bound_toolchains
         .iter()
         .any(|t| t["name"] == "node" && t["bound"] == true);
-    json!({"schema":"ato.formation-lowering-capabilities/3",
+    json!({"schema":"ato.formation-lowering-capabilities/4",
         "static_http":{
             "available":toolchains.is_some_and(|t| t.contains_key("node") && t.contains_key("npm")),
             "entrypoint":"source manifest package.json reference",
@@ -284,7 +292,7 @@ fn lowering_capabilities(
             "recipe":recipe,"single_service":true,"source_rewrite":false,
             "build_network":"explicit HTTPS host/port allowance within frozen ceiling",
             "runtime_network":"isolated internal network; no egress", "state":"explicit isolated writable VOLUME bindings", "variables":"runtime-phase grants only; dependencies/build grants unavailable; no values in D or image"},
-        "http_process":{"guest_port":"1..65535","entrypoint":"actual supported source script reference, or frozen package.json for launch_script","argv":"literal arguments after the interpreter/entrypoint or npm run script","launch_script":"source-owned npm script key; frozen manifest hash checked before launch"},
+        "http_process":{"guest_port":"1..65535","entrypoint":"actual supported source script reference, or frozen package.json for launch_script","argv":"literal arguments after the interpreter/entrypoint or npm run script","launch_script":"source-owned npm script key; frozen manifest hash checked before launch","setup_scripts":"up to four unique source-owned npm script keys; Node launch_script only; execute inside the same Runtime after state/private grants, before launch, under its network/resources/deadline"},
         "network":{"phases":["dependencies","build","runtime"],"inbound_HTTP_requires_egress":false,"within_frozen_ceiling":true},
         "HTTP_authority":{"protocol":"ato.http@1","operation":"bind","phase":"runtime","resource":"frozen K logical HTTP Port"},
         "native_dependencies":{"supported":true,"toolchains":bound_toolchains,
@@ -300,6 +308,13 @@ fn lowering_capabilities_for(
     prompt_version: &str,
 ) -> Value {
     let mut capabilities = lowering_capabilities(auth, runtimes);
+    if prompt_version != deepseek::PROMPT_VERSION_V12 {
+        capabilities["schema"] = json!("ato.formation-lowering-capabilities/3");
+        capabilities["http_process"]
+            .as_object_mut()
+            .expect("process capability object")
+            .remove("setup_scripts");
+    }
     if matches!(
         prompt_version,
         deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9 | deepseek::PROMPT_VERSION_V10
@@ -642,6 +657,11 @@ mod autonomous_tests {
         assert_eq!(caps["static_http"]["available"], true);
         assert_eq!(caps["static_http"]["guest_port"], 0);
         assert_eq!(caps["network"]["inbound_HTTP_requires_egress"], false);
+        assert_eq!(caps["schema"], "ato.formation-lowering-capabilities/4");
+        assert!(caps["http_process"]["setup_scripts"].is_string());
+        let legacy = lowering_capabilities_for(&auth, &[], deepseek::PROMPT_VERSION_V11);
+        assert_eq!(legacy["schema"], "ato.formation-lowering-capabilities/3");
+        assert!(legacy["http_process"].get("setup_scripts").is_none());
         assert!(
             !serde_json::to_string(&caps)
                 .unwrap()

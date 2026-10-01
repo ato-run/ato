@@ -53,3 +53,17 @@ for functionality/state/fault/credential cases. No new live provider call,
 deployment, remote migration or flag enablement has occurred in this change.
 Historical measurements and WBO UNKNOWN are preserved. The 100-app rerun requires
 the small gates and an explicitly available aggregate call/cost allocation.
+
+## Temporary binding across rounds
+
+The first Kutt Search at Ato `3f07cd8e` / API `c7f990ce` created a temporary
+JWT with the first round deadline. A later round stopped before native execution
+with `variable_registration_conflict`; the original expired value and failed
+measurement are retained. New temporary values expire at the original Search
+deadline; each redemption remains bounded by the current fenced attempt/round.
+Existing expired/revoked rows return `needs_input` and are never re-registered
+with a later expiry. Eight encrypted-store tests and five relevant Coordinator
+route tests passed. Retained replay now redeems the same fenced Runtime grants
+instead of launching with an empty private input list. No credential value is
+added to the descriptor or derivation. Actual scope/fault/cleanup acceptance
+remains required separately from these boundary tests.

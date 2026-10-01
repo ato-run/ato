@@ -1152,6 +1152,55 @@ fn source_owned_startup_script_keeps_k_and_cannot_select_an_unbound_manifest() {
             "8000"
         ]
     );
+    let mut empty_setup = p.clone();
+    empty_setup["setup_scripts"] = json!([]);
+    let empty = compile(&s, empty_setup);
+    let ProposalOutcome::Admitted(empty) = &empty[0] else {
+        panic!("{empty:?}")
+    };
+    assert_eq!(empty.compiled(), d.compiled());
+
+    let mut prepared = p.clone();
+    prepared["setup_scripts"] = json!(["initialize"]);
+    let compiled = compile(&s, prepared.clone());
+    let ProposalOutcome::Admitted(prepared_d) = &compiled[0] else {
+        panic!("{compiled:?}")
+    };
+    assert_eq!(
+        prepared_d.compiled().base_contract_ref,
+        s.frozen.contract_ref
+    );
+    let serve = prepared_d.compiled().derivation.steps.last().unwrap();
+    assert_eq!(serve.argv.len(), 4);
+    assert!(serve.argv[2].contains("source_runtime_setup_failed"));
+    let spec: serde_json::Value = serde_json::from_str(&serve.argv[3]).unwrap();
+    assert_eq!(spec["setup_scripts"], json!(["initialize"]));
+    assert_eq!(spec["argv"], p["argv"]);
+    assert!(
+        !prepared_d
+            .compiled()
+            .derivation
+            .steps
+            .iter()
+            .any(|step| step.id.starts_with("setup-") || step.id == "check-launch-script")
+    );
+    for names in [
+        json!(["initialize", "initialize"]),
+        json!(["run; shell"]),
+        json!(["a", "b", "c", "d", "e"]),
+    ] {
+        prepared["setup_scripts"] = names;
+        assert!(matches!(
+            &compile(&s, prepared.clone())[0],
+            ProposalOutcome::Rejected(ProposalError("unsupported_setup_scripts"))
+        ));
+    }
+    prepared["setup_scripts"] = json!(["initialize"]);
+    prepared.as_object_mut().unwrap().remove("launch_script");
+    assert!(matches!(
+        &compile(&s, prepared)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_setup_scripts"))
+    ));
     p["entrypoint"] = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
     assert!(matches!(
         &compile(&s, p)[0],

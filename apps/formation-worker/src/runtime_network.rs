@@ -2812,6 +2812,34 @@ fn execute_retained_ticket(
     attested.effects = Some(effects_name(planned.derivation.effects));
     attested.requirements = requirements;
     attested.provisions = provisions;
+    let resolved_variables = if planned.derivation.variable_bindings.is_empty() {
+        vec![]
+    } else {
+        match context
+            .publisher
+            .context("variable_resolver_unavailable")
+            .and_then(|client| {
+                client.resolve_variables(
+                    ticket,
+                    &planned.derivation.variable_bindings,
+                    &config.out_dir,
+                )
+            }) {
+            Ok(variables) => variables,
+            Err(error) => {
+                return refused(
+                    ticket,
+                    attested.clone(),
+                    if error.chain().any(|e| e.to_string().contains("deadline")) {
+                        "round_deadline_exceeded"
+                    } else {
+                        "infrastructure_failure"
+                    },
+                    &format!("{error:#}"),
+                );
+            }
+        }
+    };
     let scoped = match ticket
         .exploration
         .as_ref()
@@ -2895,6 +2923,7 @@ fn execute_retained_ticket(
                         ceiling: &g.ceiling,
                         runtime_gate: &s.sockets
                             [&ato_formation::requirements::ExecutionPhase::Runtime],
+                        variables: &resolved_variables,
                     },
                 ),
         },

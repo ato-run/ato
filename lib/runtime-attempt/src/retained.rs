@@ -26,6 +26,7 @@ use std::{fs, path::Path};
 pub struct RetainedExploration<'a> {
     pub ceiling: &'a ato_formation::requirements::ExecutionRequirements,
     pub runtime_gate: &'a Path,
+    pub variables: &'a [crate::variables::ResolvedVariable],
 }
 
 pub struct RetainedCandidateRealizer<'a> {
@@ -59,7 +60,10 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
             {
                 return Some(e);
             }
-        } else if !d.requirements.is_empty() || d.source_oci.is_some() {
+        } else if !d.requirements.is_empty()
+            || d.source_oci.is_some()
+            || !d.variable_bindings.is_empty()
+        {
             return refuse("exploration_requirement_enforcement_unavailable","a retained descriptor never carries a previous exploration grant into ordinary replay".into());
         }
         if let Err(error) = self
@@ -207,7 +211,7 @@ impl RetainedCandidateRealizer<'_> {
             attempt_id,
             attempt_root,
             self.exploration.as_ref().map(|e| e.runtime_gate),
-            &[],
+            self.exploration.as_ref().map_or(&[], |e| e.variables),
             control,
         )?;
         // This is an existing immutable object, not a new publication. A fresh
