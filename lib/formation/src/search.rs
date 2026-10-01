@@ -904,7 +904,21 @@ fn default_next(
                 && r.inspection_requests.is_empty()
                 && r.diagnostics.is_empty()
         };
-        if empty_decline(round) && s.proposal_history.last().is_some_and(empty_decline) {
+        let shared_decline = s
+            .frozen
+            .policy
+            .exploration
+            .as_ref()
+            .is_some_and(|p| p.reasoning.is_some())
+            && round.outcome == Some(crate::proposal::ProposalRoundOutcome::Completed)
+            && round.candidates.is_empty()
+            && round
+                .diagnostics
+                .iter()
+                .all(|d| d == "source_inspection_requested");
+        if shared_decline
+            || (empty_decline(round) && s.proposal_history.last().is_some_and(empty_decline))
+        {
             return Ok(finish(if passed {
                 Termination::Submitted
             } else {

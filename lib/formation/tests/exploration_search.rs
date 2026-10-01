@@ -814,3 +814,96 @@ fn reasoning_limits_are_positive_bounded_and_frozen() {
     let json = serde_json::to_string(&p).unwrap();
     assert!(!json.contains("reasoning"));
 }
+
+#[test]
+fn shared_decline_after_inspection_stops_without_another_round() {
+    use ato_formation::exploration::ReasoningLimits;
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(ReasoningLimits {
+        goal: None,
+        round_timeout_ms: 600_000,
+        inspection_timeout_ms: 300_000,
+        inspection_source_bytes: 32768,
+    });
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 0,
+        expires_at_ms: s.deadline_ms,
+        outcome: Some(ProposalRoundOutcome::Completed),
+        candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec!["source_inspection_requested".into()],
+        inspection_requests: vec![SourceReference {
+            file_id: "server".into(),
+            digest: format!("sha256:{}", "b".repeat(64)),
+        }],
+    });
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .policy
+        .allow_source_text = true;
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .policy
+        .max_source_bytes = 16384;
+    assert!(matches!(
+        decide_next(&s, &[], 1).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::NoProgress,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn python_source_requirements_resolve_hash_and_install_offline_without_changing_k() {
+    let mut s = state();
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .files
+        .insert(
+            "requirements".into(),
+            VerifiedSourceFile {
+                path: "requirements.txt".into(),
+                digest: format!("sha256:{}", "c".repeat(64)),
+            },
+        );
+    let mut p = plan();
+    p["dependencies"] = json!([{"kind":"python_resolve_requirements", "requirements":{
+        "file_id":"requirements", "digest":format!("sha256:{}", "c".repeat(64))}}]);
+    let outcome = compile(&s, p);
+    let ProposalOutcome::Admitted(d) = &outcome[0] else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.contract_ref);
+    let steps = &d.compiled().derivation.steps;
+    assert_eq!(steps.len(), 5);
+    assert!(steps[1].argv.contains(&"download".into()));
+    assert_eq!(
+        steps[1].network,
+        ato_formation::authoring::StepNetwork::ScopedDependencies
+    );
+    assert!(
+        steps[2]
+            .argv
+            .iter()
+            .any(|a| a.contains("hashlib.file_digest"))
+    );
+    assert!(steps[3].argv.contains(&"--require-hashes".into()));
+    assert!(steps[3].argv.contains(&"--no-index".into()));
+    assert!(steps[2].network.is_denied() && steps[3].network.is_denied());
+    let config: FormationConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(config.max_rounds.get(), 3);
+    assert_eq!(config.max_retries, 3);
+}

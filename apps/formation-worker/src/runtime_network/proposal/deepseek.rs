@@ -25,6 +25,8 @@ pub const PROMPT_VERSION_V4: &str = "ato.formation-candidate-producer-prompt/4";
 pub const PROMPT_V4: &str = include_str!("prompt-v4.txt");
 pub const PROMPT_VERSION_V5: &str = "ato.formation-candidate-producer-prompt/5";
 pub const PROMPT_V5: &str = include_str!("prompt-v5.txt");
+pub const PROMPT_VERSION_V6: &str = "ato.formation-candidate-producer-prompt/6";
+pub const PROMPT_V6: &str = include_str!("prompt-v6.txt");
 pub fn prompt_sha256() -> String {
     format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))
 }
@@ -35,6 +37,7 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
         PROMPT_VERSION_V3 => Some(PROMPT_V3),
         PROMPT_VERSION_V4 => Some(PROMPT_V4),
         PROMPT_VERSION_V5 => Some(PROMPT_V5),
+        PROMPT_VERSION_V6 => Some(PROMPT_V6),
         _ => None,
     }
 }
