@@ -64,7 +64,17 @@ pub fn artifact_guard_values<'a>(
 /// Scan a process artifact before it can become reusable materialization.
 /// Values stay in private spawn context; bounds fail closed without printing bytes.
 pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
+    scan_artifact_controlled(root, secrets, None)
+}
+pub fn scan_artifact_controlled(
+    root: &std::path::Path,
+    secrets: &[&[u8]],
+    control: Option<&crate::control::ExecutionControl>,
+) -> Result<()> {
     use std::io::Read;
+    if let Some(c) = control {
+        c.remaining(crate::control::AttemptPhase::Build)?;
+    }
     if secrets.is_empty() {
         return Ok(());
     }
@@ -78,6 +88,9 @@ pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
     let mut entries = 0u64;
     let mut bytes = 0u64;
     while let Some(path) = pending.pop() {
+        if let Some(c) = control {
+            c.remaining(crate::control::AttemptPhase::Build)?;
+        }
         let metadata = std::fs::symlink_metadata(&path)?;
         entries += 1;
         ensure!(
@@ -86,6 +99,9 @@ pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
         );
         if metadata.is_dir() {
             for entry in std::fs::read_dir(path)? {
+                if let Some(c) = control {
+                    c.remaining(crate::control::AttemptPhase::Build)?;
+                }
                 pending.push(entry?.path());
             }
         } else {
@@ -96,6 +112,9 @@ pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
             let mut buffer = vec![0u8; 65536 + overlap];
             let mut retained = 0;
             loop {
+                if let Some(c) = control {
+                    c.remaining(crate::control::AttemptPhase::Build)?;
+                }
                 let read = file.read(&mut buffer[retained..])?;
                 if read == 0 {
                     break;
@@ -116,6 +135,14 @@ pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expired_artifact_guard_stops_even_without_redeemed_values() {
+        let control =
+            crate::control::ExecutionControl::new(crate::control::now_ms().saturating_sub(1));
+        assert!(
+            scan_artifact_controlled(std::path::Path::new("unused"), &[], Some(&control)).is_err()
+        );
+    }
     #[test]
     fn process_artifact_secret_is_refused_across_chunk_boundary() {
         let root = tempfile::tempdir().unwrap();

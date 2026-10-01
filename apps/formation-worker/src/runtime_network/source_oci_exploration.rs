@@ -112,6 +112,7 @@ impl SourceOciSandbox {
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) struct SourceOciRealizer<'a> {
+    pub variables: &'a [ato_runtime_attempt::variables::ResolvedVariable],
     pub planned: &'a PlannedCandidate,
     pub archive: &'a std::fs::File,
     pub artifact_root: &'a Path,
@@ -137,6 +138,15 @@ impl CandidateRealizer for SourceOciRealizer<'_> {
         _: &ato_formation::request::RuntimeProfile,
     ) -> Option<ato_formation::request::AttemptFailure> {
         let d = &self.planned.derivation;
+        if d.variable_bindings
+            .iter()
+            .any(|r| r.phase != ExecutionPhase::Runtime)
+        {
+            return refusal(
+                "unsupported_source_oci_variable_phase",
+                "OCI accepts Runtime grants only; image acquisition/build bindings are unavailable",
+            );
+        }
         if let Err(e) = d.requirements.within(&self.ticket.ceiling) {
             return refusal(e.0, "outside frozen exploration ceiling");
         }
@@ -179,10 +189,10 @@ impl CandidateRealizer for SourceOciRealizer<'_> {
                     "bound OCI image platform is unavailable on this Runtime",
                 );
             }
-            if !d.requirements.network.is_empty() || !d.variable_bindings.is_empty() {
+            if !d.requirements.network.is_empty() {
                 return refusal(
                     "unsupported_capability",
-                    "this image Runtime does not yet enforce runtime egress or variable bindings",
+                    "this image Runtime does not yet enforce runtime egress",
                 );
             }
             return None;
@@ -636,7 +646,20 @@ impl SourceOciRealizer<'_> {
                     facts.working_dir
                 },
                 workspace_mount_path: source_oci::SOURCE_OCI_WORKSPACE_MOUNT.into(),
-                environment: BTreeMap::new(),
+                environment: self
+                    .planned
+                    .plan
+                    .serving(d)
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .chain(self.variables.iter().map(|v| {
+                        (
+                            v.value.name().to_owned(),
+                            v.value.expose_for_spawn().to_owned(),
+                        )
+                    }))
+                    .collect(),
                 endpoints: vec![OciEndpoint {
                     host_port,
                     guest_port: d.ports[0].guest_port.context("OCI guest port missing")?,
