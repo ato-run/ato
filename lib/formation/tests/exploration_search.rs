@@ -87,7 +87,7 @@ fn plan() -> serde_json::Value {
 fn compile(s: &SearchStateV1, plan: serde_json::Value) -> Vec<ProposalOutcome> {
     let bytes = serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,"proposals":[
         {"kind":"propose_derivation","operations":[{"operation":"execution_plan@1","plan":plan}]}]})).unwrap();
-    CandidateRegistry::new(&s.frozen)
+    let outcomes = CandidateRegistry::new(&s.frozen)
         .unwrap()
         .validate_batch(
             &BTreeMap::new(),
@@ -100,7 +100,31 @@ fn compile(s: &SearchStateV1, plan: serde_json::Value) -> Vec<ProposalOutcome> {
             )
             .unwrap(),
         )
-        .unwrap()
+        .unwrap();
+    for outcome in &outcomes {
+        if let ProposalOutcome::Admitted(candidate) = outcome {
+            validate_candidate_scope(&s.frozen, &[candidate.candidate().clone()]).unwrap();
+        }
+    }
+    outcomes
+}
+
+#[test]
+fn structural_candidate_scope_rejects_unbound_native_facts_and_metadata_changes() {
+    let s = state();
+    let outcomes = compile(&s, plan());
+    let ProposalOutcome::Admitted(c) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    let mut forged = c.candidate().clone();
+    forged.requirements.push(Requirement {
+        fact: "toolchain.gcc.99.0.0".into(),
+        one_of: Some(vec!["present".into()]),
+    });
+    assert!(validate_candidate_scope(&s.frozen, &[forged]).is_err());
+    let mut forged = c.candidate().clone();
+    forged.effects = "privileged".into();
+    assert!(validate_candidate_scope(&s.frozen, &[forged]).is_err());
 }
 
 #[test]

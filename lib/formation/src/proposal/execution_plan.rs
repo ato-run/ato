@@ -220,6 +220,52 @@ impl PlanAuthorization {
             materialization: source.materialization(),
         }
     }
+
+    /// Validate the bounded scheduler read model. Admission still recompiles
+    /// the source-owned proposal and compares its complete canonical D.
+    pub(super) fn candidate_scope(&self, source: &InitialSource, c: &SearchCandidate) -> bool {
+        let mut expected = self.candidate(source, c.derivation_ref.clone());
+        let provisions_valid = !c.provisions.is_empty()
+            && c.provisions.iter().all(|p| expected.provisions.contains(p))
+            && c.provisions.windows(2).all(|p| p[0] < p[1]);
+        let process_valid = provisions_valid
+            && [false, true].into_iter().any(|process| {
+                let base = execution_requirements(process, true);
+                let Some(extra) = c.requirements.strip_prefix(base.as_slice()) else {
+                    return false;
+                };
+                extra.windows(2).all(|p| p[0].fact < p[1].fact)
+                    && extra.iter().all(|r| {
+                        r.one_of.as_deref() == Some(&["present".to_owned()][..])
+                            && self.toolchains.iter().any(|(name, version)| {
+                                matches!(name.as_str(), "python" | "gcc" | "make" | "pkg-config")
+                                    && r.fact == format!("toolchain.{name}.{version}")
+                            })
+                    })
+            });
+        let oci_valid = c.provisions.is_empty()
+            && self.source_oci.as_ref().is_some_and(|recipe| {
+                let fact = |name: String| crate::search::Requirement {
+                    fact: name,
+                    one_of: Some(vec!["true".into()]),
+                };
+                let base = fact("runtime.oci".into());
+                c.requirements == vec![base.clone(), fact("formation.source_oci.available".into())]
+                    || recipe.base_images.iter().any(|image| {
+                        c.requirements
+                            == vec![
+                                base.clone(),
+                                fact(format!(
+                                    "formation.oci.image.{}",
+                                    image.pinned_digest.trim_start_matches("sha256:")
+                                )),
+                            ]
+                    })
+            });
+        expected.requirements = c.requirements.clone();
+        expected.provisions = c.provisions.clone();
+        (process_valid || oci_valid) && *c == expected
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

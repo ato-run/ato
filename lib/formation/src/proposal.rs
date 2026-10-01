@@ -719,21 +719,14 @@ pub fn validate_candidate_scope(
         return Err(ProposalError("proposal_registry_full"));
     }
     for candidate in generated {
-        let new_scope =
-            authorization.execution_plan.as_ref().is_some_and(|t| {
-                let ceiling = t.candidate(source, candidate.derivation_ref.clone());
-                let mut compared = candidate.clone();
-                compared.provisions = ceiling.provisions.clone();
-                compared == ceiling
-                    && (!candidate.provisions.is_empty() || t.source_oci.is_some())
-                    && candidate
-                        .provisions
-                        .iter()
-                        .all(|p| ceiling.provisions.contains(p))
-                    && candidate.provisions.windows(2).all(|p| p[0] < p[1])
-            }) || authorization.python_http_process.as_ref().is_some_and(|t| {
+        let new_scope = authorization
+            .execution_plan
+            .as_ref()
+            .is_some_and(|t| t.candidate_scope(source, candidate))
+            || authorization.python_http_process.as_ref().is_some_and(|t| {
                 t.candidate(source, candidate.derivation_ref.clone()) == *candidate
-            }) || authorization
+            })
+            || authorization
                 .node_static_workspace
                 .as_ref()
                 .is_some_and(|t| {
