@@ -16,7 +16,9 @@ pub fn runtime_requirements(
         if step.protocol != "ato.process@1" || step.op != "exec" || step.argv.len() != 5 {
             continue;
         }
-        let schema = if step.argv[2] == include_str!("python-native-dependencies.py") {
+        let schema = if step.argv[2] == include_str!("python-native-operation.py")
+            || step.argv[2] == include_str!("python-native-dependencies.py")
+        {
             "ato.python-build-plan/1"
         } else if step.argv[2] == include_str!("node-native-dependencies.cjs") {
             "ato.npm-native-plan/1"
@@ -144,7 +146,7 @@ pub(super) fn compile_operation(
             let plan = json!({"schema":"ato.python-build-plan/1","python_version":proposal.runtime.version,"requirements":format!("/app/{path}"),
                 "requirements_sha256":requirements.digest,"root":root,"build_dependencies":build_dependencies,
                 "toolchains":tools(toolchains,authorization)?,"build_network":build_network(*network),
-                "lock_operation":include_str!("python-dependency-lock.py")});
+                "lock_operation":include_str!("python-lock-operation.py")});
             for (mode, phase) in [
                 ("check", "denied"),
                 ("build-dependencies", "scoped-dependencies"),
@@ -158,7 +160,7 @@ pub(super) fn compile_operation(
                     vec![
                         executable.into(),
                         "-c".into(),
-                        include_str!("python-native-dependencies.py").into(),
+                        include_str!("python-native-operation.py").into(),
                         mode.into(),
                         plan.to_string(),
                     ],
@@ -198,7 +200,7 @@ pub(super) fn compile_operation(
                 vec![
                     executable.into(),
                     "-c".into(),
-                    include_str!("python-native-dependencies.py").into(),
+                    include_str!("python-native-operation.py").into(),
                     "cleanup".into(),
                     plan.to_string(),
                 ],

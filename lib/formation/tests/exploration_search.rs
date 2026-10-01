@@ -1059,6 +1059,7 @@ fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
     let ProposalOutcome::Admitted(d) = &result[0] else {
         panic!("{result:?}")
     };
+    assert!(d.compiled().capsule_toml.len() <= 65_536);
     assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
     let steps = &d.compiled().derivation.steps;
     assert_eq!(steps.len(), 10);
@@ -1077,6 +1078,12 @@ fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
             .iter()
             .any(|r| r.fact == "toolchain.gcc.13.3.0")
     );
+    let mut oversized = p.clone();
+    oversized["dependencies"] = json!(vec![p["dependencies"][0].clone(); 4]);
+    assert!(matches!(
+        &compile(&s, oversized)[0],
+        ProposalOutcome::Rejected(ProposalError("proposal_recipe_byte_limit"))
+    ));
     p["dependencies"][0]["toolchains"][0]["version"] = json!("14.1.0");
     assert!(matches!(
         &compile(&s, p.clone())[0],

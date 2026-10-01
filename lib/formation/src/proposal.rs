@@ -687,6 +687,11 @@ fn compile_proposal(
             (compiled, base.clone())
         }
     };
+    // Match the existing Coordinator storage boundary before producing an
+    // admitted verdict. An oversized recipe is a typed refusal, never SQL 500.
+    if compiled.capsule_toml.len() > 65_536 {
+        return Err(ProposalError("proposal_recipe_byte_limit"));
+    }
     candidate.derivation_ref = compiled.derivation_ref.clone();
     // Content key ONLY within the frozen search domain (opaque IDs are local).
     // It is not a global semantic Ref; persistence must pair it with search_id.
