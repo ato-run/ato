@@ -604,3 +604,38 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
     assert_eq!(answer.output.raw(), cached.output.raw());
     assert_eq!(restarted.accounting().unwrap()["call_count"], 3);
 }
+
+#[test]
+fn native_helper_bytes_do_not_block_failure_feedback_or_success_context() {
+    use ato_formation::authoring::{BindingContext, bind};
+    use ato_formation::preset::{AppPreset, synthesize_authoring};
+    let (_, mut d) = bind(
+        &synthesize_authoring(AppPreset::StaticFiles),
+        &BindingContext {
+            source_closure_ref: &format!("sha256:{}", "a".repeat(64)),
+        },
+    )
+    .unwrap();
+    let helper =
+        include_str!("../../../../../lib/formation/src/proposal/node-native-dependencies.cjs");
+    d.steps[0].argv = vec![helper.repeat(4)];
+    let identity = d.derivation_ref().unwrap();
+    let manifest = json!({"file_id":"manifest","digest":format!("sha256:{}","b".repeat(64))});
+    let plan = json!({"runtime":{"name":"node","version":"22.14.0"},"entrypoint":manifest,
+        "static_output":"build","argv":[],"cwd":".","guest_port":0,"dependencies":[],
+        "build_scripts":["build"],"requirements":{},"basis":[],"unknowns":[]});
+    let mut context: ato_formation::proposal::ExplorationContext = serde_json::from_value(json!({
+        "effective_max_rounds":3,"ceiling":{},"previous_derivations":[d],"previous_plan":plan,
+        "failures":[{"derivation_ref":identity,"stage":"build","code":"npm_lifecycle_plan_required",
+            "exit_code":1,"log_tail":"required native lifecycle was not completed","artifacts":[]}],
+        "successful_derivation_ref":identity,"successful_derivation":d,"proposal_diagnostics":[]
+    }))
+    .unwrap();
+    assert!(serde_jcs::to_vec(&context).unwrap().len() > 16 * 1024);
+    bound_exploration_context(&mut context).unwrap();
+    assert!(serde_jcs::to_vec(&context).unwrap().len() <= 16 * 1024);
+    assert_eq!(context.omitted_derivation_refs, vec![identity.clone()]);
+    assert_eq!(context.successful_derivation_ref, Some(identity));
+    assert_eq!(serde_json::to_value(context.previous_plan).unwrap(), plan);
+    assert_eq!(context.failures[0].code, "npm_lifecycle_plan_required");
+}
