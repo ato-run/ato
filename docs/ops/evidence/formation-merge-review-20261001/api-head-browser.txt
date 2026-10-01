@@ -1,0 +1,86 @@
+
+> ato-api@0.1.0 test:instance-state-sync /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001
+> node tests/instance-state-sync/run.mjs
+
+[storage] write telemetry failed TypeError: nodeCrypto.randomBytes is not a function
+    at file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20244:31
+    at randomChar (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20195:25)
+    at encodeRandom (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20226:11)
+    at ulid4 (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20265:45)
+    at persistTelemetryClientEvent (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20710:5)
+    at recordStorageWriteTelemetry (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:21538:11)
+    at async writeInstanceStateDelta (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:138089:9)
+    at async handleInstanceStateWrite (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:146850:19)
+PASS [webkit]: 128 KiB normal flush persists and reload restores it
+[storage] write telemetry failed TypeError: nodeCrypto.randomBytes is not a function
+    at file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20244:31
+    at randomChar (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20195:25)
+    at encodeRandom (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20226:11)
+    at ulid4 (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20265:45)
+    at persistTelemetryClientEvent (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20710:5)
+    at recordStorageWriteTelemetry (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:21538:11)
+    at async writeInstanceStateDelta (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:138089:9)
+    at async handleInstanceStateWrite (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:146850:19)
+[storage] write telemetry failed TypeError: nodeCrypto.randomBytes is not a function
+    at file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20244:31
+    at randomChar (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20195:25)
+    at encodeRandom (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20226:11)
+    at ulid4 (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20265:45)
+    at persistTelemetryClientEvent (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20710:5)
+    at recordStorageWriteTelemetry (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:21538:11)
+    at async writeInstanceStateDelta (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:138089:9)
+    at async handleInstanceStateWrite (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:146850:19)
+[storage] write telemetry failed TypeError: nodeCrypto.randomBytes is not a function
+    at file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20244:31
+    at randomChar (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20195:25)
+    at encodeRandom (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20226:11)
+    at ulid4 (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20265:45)
+    at persistTelemetryClientEvent (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20710:5)
+    at recordStorageWriteTelemetry (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:21538:11)
+    at async writeInstanceStateDelta (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:138089:9)
+    at async handleInstanceStateWrite (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:146850:19)
+PASS [webkit]: pagehide keepalive uses UTF-8 bytes (small=244, boundary=59242, Japanese=60242)
+Opening http://cinst-sync.localhost:56634
+Opening http://cinst-sync.localhost:56634
+Opening http://cinst-sync.localhost:56634
+Opening http://cinst-other.localhost:56634
+[storage] write telemetry failed TypeError: nodeCrypto.randomBytes is not a function
+    at file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20244:31
+    at randomChar (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20195:25)
+    at encodeRandom (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20226:11)
+    at ulid4 (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20265:45)
+    at persistTelemetryClientEvent (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20710:5)
+    at recordStorageWriteTelemetry (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:21538:11)
+    at async writeInstanceStateDelta (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:138089:9)
+    at async handleInstanceStateWrite (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:146850:19)
+PASS: no sharing, owner 2 tabs + separate mobile context; separate instance isolated
+[storage] write telemetry failed TypeError: nodeCrypto.randomBytes is not a function
+    at file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20244:31
+    at randomChar (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20195:25)
+    at encodeRandom (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20226:11)
+    at ulid4 (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20265:45)
+    at persistTelemetryClientEvent (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:20710:5)
+    at recordStorageWriteTelemetry (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:21538:11)
+    at async writeInstanceStateDelta (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:138089:9)
+    at async handleInstanceStateWrite (file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/.tmp/instance-state-sync/worker.js:146850:19)
+PASS: no loops, redundant saves, or dependency on first tab
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+404 !== 403
+
+    at file:///Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/tests/instance-state-sync/run.mjs:310:10
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: 404,
+  expected: 403,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v25.6.0
+ ELIFECYCLE  Command failed with exit code 1.
