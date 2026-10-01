@@ -140,17 +140,10 @@ impl LocalAttemptExecutor {
         match candidate.plan.lane {
             ato_formation::intent::Lane::PythonProcess | ato_formation::intent::Lane::Process => {
                 let root = output_root(&built, "")?;
-                let secrets = variables
-                    .iter()
-                    .filter(|v| {
-                        candidate
-                            .derivation
-                            .variable_bindings
-                            .iter()
-                            .any(|r| r.name == v.value.name() && r.secret)
-                    })
-                    .map(|v| v.value.expose_for_spawn().as_bytes())
-                    .collect::<Vec<_>>();
+                let secrets = crate::variables::artifact_guard_values(
+                    &candidate.derivation.variable_bindings,
+                    variables,
+                );
                 crate::variables::scan_artifact(&root, &secrets)?;
                 Ok(ExecutedCandidate::Process {
                     workspace_root: root,
@@ -166,17 +159,10 @@ impl LocalAttemptExecutor {
                     &attempt_root.join("bundle"),
                     &format!("swm_{attempt_id}"),
                     // Redeemed values may not become reusable artifact bytes.
-                    &variables
-                        .iter()
-                        .filter(|v| {
-                            candidate
-                                .derivation
-                                .variable_bindings
-                                .iter()
-                                .any(|r| r.name == v.value.name() && r.secret)
-                        })
-                        .map(|v| v.value.expose_for_spawn().as_bytes())
-                        .collect::<Vec<_>>(),
+                    &crate::variables::artifact_guard_values(
+                        &candidate.derivation.variable_bindings,
+                        variables,
+                    ),
                 )?;
                 Ok(ExecutedCandidate::StaticWeb {
                     output: Box::new(produced),
