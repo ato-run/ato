@@ -91,6 +91,7 @@ fn replay_case(kind: &str) {
         continuation: Continuation::Stop,
         receipt: ReceiptContext::formation(),
         interrupt: None,
+        control: None,
     };
     let first = run_attempt(
         &request,
@@ -233,6 +234,7 @@ fn replay_case(kind: &str) {
             continuation: Continuation::Stop,
             receipt: ReceiptContext::formation(),
             interrupt: None,
+            control: None,
         },
         &RetainedCandidateRealizer {
             exploration: None,

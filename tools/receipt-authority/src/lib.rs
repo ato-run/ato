@@ -384,7 +384,10 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                         ProposalOutcome::InspectionRequested(sources) => serde_json::json!({"status":"rejected","code":"source_inspection_requested","inspection_refs":sources}),
                     })
                     .collect();
-                Ok(serde_json::json!({"status": "proposals_validated", "outcomes": outcomes}))
+                Ok(
+                    serde_json::json!({"status": "proposals_validated", "outcomes": outcomes,
+                    "decline_reasons": registry.decline_reasons()}),
+                )
             }
             SearchRequest::CompileGeneration {
                 policy,

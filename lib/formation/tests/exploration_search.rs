@@ -961,3 +961,108 @@ fn shared_provider_infrastructure_failure_preserves_one_round_on_restart() {
     );
     assert!(restored.proposal_history.is_empty());
 }
+
+#[test]
+fn validated_declines_have_distinct_terminal_reasons_without_changing_outcome_rows() {
+    use ato_formation::exploration::ReasoningLimits;
+    for (reason, terminal, evidence) in [
+        (
+            "unsupported_toolchain",
+            Termination::UnsupportedCapability,
+            json!([]),
+        ),
+        ("needs_input", Termination::NeedsInput, json!([])),
+        (
+            "source_broken",
+            Termination::SourceBroken,
+            json!([{"code":"source_change_required","detail":"the referenced entrypoint is missing"}]),
+        ),
+        ("no_progress", Termination::NoProgress, json!([])),
+    ] {
+        let mut s = state();
+        s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(ReasoningLimits {
+            goal: None,
+            round_timeout_ms: 600000,
+            inspection_timeout_ms: 30000,
+            inspection_source_bytes: 32768,
+        });
+        let output = ProducerOutput::new(
+            serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,
+            "proposals":[{"kind":"unsupported","reason":reason,"evidence":evidence}]}))
+            .unwrap(),
+            ProducerProvenance {
+                provider: "fixed".into(),
+                model: None,
+            },
+        )
+        .unwrap();
+        let mut registry = CandidateRegistry::new(&s.frozen).unwrap();
+        assert!(matches!(
+            registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0],
+            ProposalOutcome::Unsupported
+        ));
+        let diagnostics = registry
+            .decline_reasons()
+            .iter()
+            .map(|r| format!("decline_{r}"))
+            .collect();
+        drop(registry);
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms: 100,
+            expires_at_ms: 60000,
+            outcome: Some(ProposalRoundOutcome::Completed),
+            candidates: vec![],
+            derivations: vec![],
+            diagnostics,
+            inspection_requests: vec![],
+        });
+        let restored: SearchStateV1 =
+            serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+        assert_eq!(
+            decide_next(&restored, &[], 6000).unwrap(),
+            SearchAction::Finish { reason: terminal }
+        );
+    }
+}
+
+#[test]
+fn deadline_is_distinct_from_budget_and_never_extends_on_resume() {
+    let s = state();
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&restored, &[], s.deadline_ms).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::DeadlineExceeded
+        }
+    );
+    assert_eq!(restored.deadline_ms, s.deadline_ms);
+    let mut exhausted = state();
+    exhausted.budget.attempts_used = exhausted.frozen.policy.budget.max_attempts;
+    assert_eq!(
+        decide_next(&exhausted, &[], 100).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::BudgetExhausted
+        }
+    );
+}
+
+#[test]
+fn invalid_source_broken_evidence_cannot_set_a_decline_reason() {
+    let s = state();
+    let output = ProducerOutput::new(
+        serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,
+        "proposals":[{"kind":"unsupported","reason":"source_broken"}]}))
+        .unwrap(),
+        ProducerProvenance {
+            provider: "fixed".into(),
+            model: None,
+        },
+    )
+    .unwrap();
+    let mut registry = CandidateRegistry::new(&s.frozen).unwrap();
+    assert!(matches!(
+        registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0],
+        ProposalOutcome::Rejected(_)
+    ));
+    assert!(registry.decline_reasons().is_empty());
+}

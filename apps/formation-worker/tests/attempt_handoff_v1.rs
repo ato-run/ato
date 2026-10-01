@@ -173,6 +173,7 @@ fn attempt(
             continuation,
             receipt: ReceiptContext::formation(),
             interrupt: None,
+            control: None,
         },
         &FormationRealizer {
             planned: &fixture.planned,
