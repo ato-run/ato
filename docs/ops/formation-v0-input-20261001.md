@@ -67,3 +67,23 @@ route tests passed. Retained replay now redeems the same fenced Runtime grants
 instead of launching with an empty private input list. No credential value is
 added to the descriptor or derivation. Actual scope/fault/cleanup acceptance
 remains required separately from these boundary tests.
+
+## Contained process artifact aliases
+
+The actual Kutt trial at Ato `90e09582` / API `b027f1c8` completed the typed
+rebuild/audit of better-sqlite3 and msgpackr-extract, then failed Runtime artifact
+protection before launch. The scanner unconditionally refused symlinks, including
+ordinary npm command aliases. Reuse the same contained-relative-link validator
+used by source and retained archives; inspect link target bytes for protected
+values without following aliases. The normal tree walk still scans all regular
+files under the original entry/byte/deadline bounds. Escapes and secret values
+in paths, link targets or file bytes fail closed. Seven guard regressions and
+all-targets Runtime clippy PASS locally. Real Kutt launch remains pending.
+
+The same trial's persisted local Coordinator shows two D assignments referencing
+one temporary credential with its original Search expiry `1790890134677`. After
+known terminal infrastructure failure, the value row was deleted and metadata
+revoked at `1790889138945`. This verifies private grant reuse and cleanup through
+the actual Coordinator/Runtime transport; workload injection, owner CLI/UI
+input, scope boundaries, revocation and persistence still require acceptance.
+No value, ciphertext or credential identifier is included in this record.
