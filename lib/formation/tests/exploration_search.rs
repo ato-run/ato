@@ -913,7 +913,7 @@ fn bindings_change_d_without_changing_k_and_never_carry_values() {
     let r = serde_json::json!({"name":"JWT_SECRET","kind":"signing_secret","purpose":"Sign local sessions","resource":"session.signing","operation":"execute","phase":"runtime","secret":true,"temporary":true});
     let req: ato_formation::variables::VariableRequirement =
         serde_json::from_value(r.clone()).unwrap();
-    assert!(ato_formation::variables::validate(&[req.clone()]).is_ok());
+    assert!(ato_formation::variables::validate(std::slice::from_ref(&req)).is_ok());
     assert!(
         ato_formation::variables::validate(&[ato_formation::variables::VariableRequirement {
             service: Some("external".into()),
