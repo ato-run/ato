@@ -530,9 +530,13 @@ fn general_claim_loss_never_calls_or_reclaims() {
     });
     let client = Client::new(&coordinator.endpoint, "mock-requester-token").unwrap();
     let initial = status(&sub);
+    let error =
+        serve_general_proposal(&client, "id", &initial, &mut sub, "owner", producer.clone())
+            .unwrap_err();
     assert!(
-        !serve_general_proposal(&client, "id", &initial, &mut sub, "owner", producer.clone())
-            .unwrap()
+        error
+            .to_string()
+            .contains("claim failed before provider send; no retry")
     );
     assert!(!serve_general_proposal(&client, "id", &initial, &mut sub, "owner", producer).unwrap());
     assert_eq!(model.count(), 0);
@@ -562,7 +566,11 @@ fn general_provenance_and_raw_mismatch_fail_before_admission() {
     let mut saved = general_completed(&sub, &identity);
     let observed: ProviderCall =
         serde_json::from_value(saved["proposal_round"]["provider_call"].clone()).unwrap();
-    sub.proposal_state.as_mut().unwrap().observed_call = Some(observed);
+    sub.proposal_state
+        .as_mut()
+        .unwrap()
+        .observed_calls
+        .insert(1, observed);
     saved["proposal_round"]["provider_call"]["provenance"]["usage"]["input_tokens"] = json!(456);
     saved["proposal_round"]["provenance"]["usage"]["input_tokens"] = json!(456);
     assert!(sub.accept_proposal_round(&saved).is_err());
@@ -697,6 +705,7 @@ fn request_evidence(cell: &str) -> RequestEvidence {
         timeout_ms: 29481,
         proposal_request_bytes: 1837,
         provider_body_bytes: 4261,
+        transmitted_context: None,
     }
 }
 fn response_evidence(cell: &str) -> ResponseEvidence {
@@ -866,7 +875,8 @@ fn r9_source_bodies_are_not_stored_in_request_journal() {
     let event: Value = serde_json::from_str(journal.lines().nth(1).unwrap()).unwrap();
     assert!(event["request"]["proposal_request_bytes"].is_u64());
     assert!(event["request"]["provider_body_bytes"].is_u64());
-    assert_eq!(event["request"].as_object().unwrap().len(), 6);
+    assert_eq!(event["request"].as_object().unwrap().len(), 7);
+    assert!(event["request"]["transmitted_context"]["source_entries"].is_array());
 }
 #[test]
 fn historical_cell_response_journal_remains_readable() {
@@ -884,4 +894,190 @@ fn historical_cell_response_journal_remains_readable() {
     let saved = CallBudget::reopen(&path, plan()).unwrap();
     assert!(saved.snapshot().unwrap().cells["G0"].response.is_some());
     assert!(saved.inspect_request("G0").is_err());
+}
+
+#[test]
+fn transmitted_context_evidence_matches_actual_http_projection_without_text_or_secrets() {
+    let (_root, sub) = enabled();
+    let request = sub.proposal_request_v2(&status(&sub)).unwrap();
+    let (evidence, raw, journal) = capture_request(&request);
+    let body: Value = serde_json::from_slice(&raw).unwrap();
+    let sent: ato_formation::proposal::ProposalRequestV2 =
+        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let actual = super::super::budget::TransmittedContextEvidence::from_request(&sent);
+    assert_eq!(evidence.transmitted_context.as_ref(), Some(&actual));
+    assert_eq!(actual.source_entries.len(), sent.source_context.len());
+    for entry in &sent.source_context {
+        assert!(!journal.contains(&entry.text));
+    }
+    assert!(!journal.contains("synthetic-mock-key"));
+    let old = request_evidence("old");
+    assert!(
+        !serde_json::to_string(&old)
+            .unwrap()
+            .contains("transmitted_context")
+    );
+}
+
+#[test]
+fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
+    use super::super::reasoning::{INPUT_SCHEMA, ReasoningInput, SourceIdentity};
+    let (root, sub) = enabled();
+    let view = status(&sub);
+    let request = sub.proposal_request_v2(&view).unwrap();
+    let mut input = ReasoningInput {
+        lowering_capabilities: Value::Null,
+        available_variables: vec![],
+        runtime_capabilities: vec![],
+        max_retries: 3,
+        catalog_sources_in_inventory: false,
+        goal: None,
+        schema: INPUT_SCHEMA.into(),
+        call_id: "shared_r1_s1".into(),
+        frozen_contract_ref: sub.request.contract_ref.clone(),
+        source_identity: SourceIdentity {
+            archive_digest: sub.request.source.archive_digest.clone(),
+            closure_ref: sub.request.source.closure_ref.clone(),
+        },
+        inventory: vec![],
+        request,
+        projection: vec![],
+        rounds_remaining: 3,
+        calls_remaining: 2,
+        inspections_remaining: 4,
+        inspection_source_bytes_remaining: 32768,
+        inspection_feedback: vec![],
+    };
+    let mock = Mock::new(|_, _| {
+        Reply::json(envelope(
+            r#"{"schema":"ato.formation-proposal/1","proposals":[{"kind":"unsupported","reason":"insufficient_source"}]}"#,
+        ))
+    });
+    let mut c = config(&mock.endpoint);
+    c.prompt_version = PROMPT_VERSION_V5.into();
+    let mut p = plan();
+    p.max_calls = 2;
+    p.input_token_cap = 24576;
+    let budget = Arc::new(CallBudget::create(&root.path().join("shared-budget.jsonl"), p).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(c, budget.clone()).unwrap();
+    for step in 1..=2 {
+        input.call_id = format!("shared_r1_s{step}");
+        let output = adapter.propose_reasoning(&input).unwrap();
+        assert_eq!(output.provenance.usage.input_tokens, Some(123));
+        assert!(output.provenance.latency_ms.is_some());
+        let seen = mock.seen.lock().unwrap();
+        assert_eq!(
+            seen.last().unwrap().1["messages"][1]["content"],
+            serde_jcs::to_string(&input).unwrap()
+        );
+    }
+    assert_eq!(mock.count(), 2);
+    assert_eq!(budget.snapshot().unwrap().cells.len(), 2);
+}
+
+fn recovery_input(sub: &Submission) -> super::super::reasoning::ReasoningInput {
+    super::super::reasoning::ReasoningInput {
+        lowering_capabilities: Value::Null,
+        schema: super::super::reasoning::INPUT_SCHEMA.into(),
+        catalog_sources_in_inventory: false,
+        goal: None,
+        available_variables: vec![],
+        runtime_capabilities: vec![],
+        max_retries: 3,
+        call_id: "recovery_r1_s1".into(),
+        frozen_contract_ref: sub.request.contract_ref.clone(),
+        source_identity: super::super::reasoning::SourceIdentity {
+            archive_digest: sub.request.source.archive_digest.clone(),
+            closure_ref: sub.request.source.closure_ref.clone(),
+        },
+        inventory: vec![],
+        request: sub.proposal_request_v2(&status(sub)).unwrap(),
+        projection: vec![],
+        rounds_remaining: 3,
+        calls_remaining: 6,
+        inspections_remaining: 4,
+        inspection_source_bytes_remaining: 32768,
+        inspection_feedback: vec![],
+    }
+}
+#[test]
+fn shared_transient_calls_are_separate_charged_reservations_and_restart_cannot_reset_retry_three() {
+    let (root, sub) = enabled();
+    let input = recovery_input(&sub);
+    let mock = Mock::new(|_, _| {
+        let mut reply = Reply::json(json!({"error":"temporary"}));
+        reply.status = 503;
+        reply
+    });
+    let mut config = config(&mock.endpoint);
+    config.prompt_version = PROMPT_VERSION_V6.into();
+    let mut plan = plan();
+    plan.max_calls = 6;
+    plan.input_token_cap = 24576;
+    let path = root.path().join("retry-budget.jsonl");
+    let budget = Arc::new(CallBudget::create(&path, plan.clone()).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(config.clone(), budget.clone()).unwrap();
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 30000;
+    assert_eq!(
+        adapter
+            .propose_reasoning_recover(&input, expires, 3)
+            .err()
+            .unwrap()
+            .class,
+        ErrorClass::ProviderUnavailable
+    );
+    assert_eq!(mock.count(), 4);
+    assert!(
+        budget
+            .snapshot()
+            .unwrap()
+            .cells
+            .values()
+            .all(|c| c.charged_unknown && c.transport.as_ref().unwrap().http_status == Some(503))
+    );
+    let reopened = Arc::new(CallBudget::reopen(&path, plan).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(config, reopened).unwrap();
+    assert!(
+        adapter
+            .propose_reasoning_recover(&input, expires, 3)
+            .is_err()
+    );
+    assert_eq!(mock.count(), 4);
+}
+#[test]
+fn shared_authentication_failure_is_infrastructure_and_is_not_retried() {
+    let (root, sub) = enabled();
+    let input = recovery_input(&sub);
+    let mock = Mock::new(|_, _| {
+        let mut reply = Reply::json(json!({"error":"authentication"}));
+        reply.status = 401;
+        reply
+    });
+    let mut config = config(&mock.endpoint);
+    config.prompt_version = PROMPT_VERSION_V6.into();
+    let mut plan = plan();
+    plan.max_calls = 6;
+    plan.input_token_cap = 24576;
+    let budget =
+        Arc::new(CallBudget::create(&root.path().join("auth-budget.jsonl"), plan).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(config, budget.clone()).unwrap();
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 30000;
+    assert_eq!(
+        adapter
+            .propose_reasoning_recover(&input, expires, 3)
+            .err()
+            .unwrap()
+            .class,
+        ErrorClass::ProviderAuthentication
+    );
+    assert_eq!(mock.count(), 1);
+    assert!(budget.snapshot().unwrap().stopped);
 }
