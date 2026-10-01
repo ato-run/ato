@@ -100,9 +100,29 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
         admit_isolated_authority(d, self.ceiling)
     }
     fn realize(&self, attempt_id: &str, root: &Path) -> Result<Realized, RealizeFailure> {
+        self.realize_inner(attempt_id, root, None)
+    }
+
+    fn realize_controlled(
+        &self,
+        attempt_id: &str,
+        root: &Path,
+        control: &crate::control::ExecutionControl,
+    ) -> Result<Realized, RealizeFailure> {
+        self.realize_inner(attempt_id, root, Some(control))
+    }
+}
+
+impl ExplorationRealizer<'_> {
+    fn realize_inner(
+        &self,
+        attempt_id: &str,
+        root: &Path,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Realized, RealizeFailure> {
         let executed = self
             .builder
-            .execute_with_variables(
+            .execute_controlled(
                 &AttemptExecution {
                     attempt_id,
                     candidate: self.planned,
@@ -114,9 +134,12 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
                     attempt_id: attempt_id.into(),
                     attempt_fence: 1,
                 },
-                self.gates,
-                self.network_refusal,
-                self.variables,
+                &crate::build::BuildContext {
+                    gates: self.gates,
+                    refusal: self.network_refusal,
+                    variables: self.variables,
+                    control,
+                },
             )
             .map_err(
                 |error| match error.downcast_ref::<crate::build::BuildStopUnconfirmed>() {
@@ -133,17 +156,21 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
             shim: self.shim,
             network: NetworkPolicy::Scoped,
         }
-        .realize_scoped_with_variables(
+        .realize_controlled(
             executed,
             attempt_id,
             root,
-            self.gates
-                .get(&ExecutionPhase::Runtime)
-                .ok_or_else(|| RealizeFailure::Launch {
-                    error: anyhow::anyhow!("runtime phase gate missing"),
-                    evidence: None,
-                })?,
+            Some(
+                self.gates
+                    .get(&ExecutionPhase::Runtime)
+                    .ok_or_else(|| RealizeFailure::Launch {
+                        error: anyhow::anyhow!("runtime phase gate missing"),
+                        evidence: None,
+                    })?
+                    .as_path(),
+            ),
             self.variables,
+            control,
         )
     }
 }

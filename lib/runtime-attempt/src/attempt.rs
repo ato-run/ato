@@ -84,6 +84,9 @@ pub struct AttemptRequest<'a> {
     /// Set when the caller is being stopped: observation gives up instead of
     /// waiting out its deadline.
     pub interrupt: Option<&'a AtomicBool>,
+    /// Frozen Search/round execution control; result recording and cleanup do
+    /// not inherit this deadline.
+    pub control: Option<&'a crate::control::ExecutionControl>,
 }
 
 /// What happens to the running candidate once it has been verified.
@@ -212,6 +215,13 @@ pub fn run_reserved_attempt(
         return not_run(attempt, AttemptRecordState::NotStarted);
     }
 
+    if let Some(control) = request.control
+        && let Err(error) = control.remaining(crate::control::AttemptPhase::Build)
+    {
+        attempt.failure = Some(failure_of(&error));
+        return not_run(attempt, AttemptRecordState::NotStarted);
+    }
+
     // ── start record ────────────────────────────────────────────────────────
     //
     // Before the first thing that could have an effect: staging, a build
@@ -294,7 +304,13 @@ fn realize_and_verify(
         stop: None,
     };
 
-    let realized = match realizer.realize(request.attempt_id, request.attempt_root) {
+    let realization = match request.control {
+        Some(control) => {
+            realizer.realize_controlled(request.attempt_id, request.attempt_root, control)
+        }
+        None => realizer.realize(request.attempt_id, request.attempt_root),
+    };
+    let realized = match realization {
         Ok(realized) => realized,
         Err(RealizeFailure::Execution(error)) => {
             let failure = failure_of(&error);
@@ -351,15 +367,29 @@ fn realize_and_verify(
     let mut candidate = realized.candidate;
 
     // ── observe ─────────────────────────────────────────────────────────────
-    let http = match observe_http(
-        candidate.as_mut(),
-        &required_http_observations(spec),
-        request.interrupt,
-    ) {
+    let (verification_timing, observed) = match request
+        .control
+        .map(|c| c.phase(crate::control::AttemptPhase::Verification))
+        .transpose()
+    {
+        Ok(timing) => (
+            timing,
+            observe_http(
+                candidate.as_mut(),
+                &required_http_observations(spec),
+                request.interrupt,
+                request.control,
+            ),
+        ),
+        Err(error) => (None, Err(error)),
+    };
+    let http = match observed {
         Ok(http) => http,
         Err(error) => {
             // A candidate was realized: its stop is recorded whatever the
             // realizer reported as evidence.
+            drop(verification_timing);
+            let _cleanup = request.control.map(|c| c.cleanup());
             let stopped = candidate.stop();
             if let Some(evidence) = attempt.realization.as_mut() {
                 evidence.destroyed = stopped.is_ok();
@@ -380,30 +410,60 @@ fn realize_and_verify(
     // The browser drives the SAME candidate, and only one that already
     // satisfies the typed observations: a candidate that fails its HTTP
     // Contract has nothing to show a browser.
+    let mut deadline_failure = None;
     if let Some(browser) = request.browser
         && verification.fully_satisfied()
     {
-        attempt.browser_verification = Some(browse(
-            candidate.endpoints(),
-            browser,
-            request.runtime_id,
-            request.attempt_id,
-        ));
+        let mut bounded_browser = browser.clone();
+        let allowed = request
+            .control
+            .map(|control| {
+                control.cap(
+                    crate::control::AttemptPhase::Verification,
+                    Duration::from_millis(browser.budget.wall_clock_ms),
+                )
+            })
+            .transpose();
+        match allowed {
+            Ok(remaining) => {
+                if let Some(remaining) = remaining {
+                    bounded_browser.budget.wall_clock_ms = remaining.as_millis().max(1) as u64;
+                }
+                attempt.browser_verification = Some(browse(
+                    candidate.endpoints(),
+                    &bounded_browser,
+                    request.runtime_id,
+                    request.attempt_id,
+                ));
+                if let Some(control) = request.control
+                    && let Err(error) =
+                        control.remaining(crate::control::AttemptPhase::Verification)
+                {
+                    deadline_failure = Some(failure_of(&error));
+                }
+            }
+            Err(error) => deadline_failure = Some(failure_of(&error)),
+        }
     }
 
-    let failure =
-        verification_failure(&verification).or_else(|| browser_failure(request.browser, &attempt));
+    let failure = deadline_failure
+        .or_else(|| verification_failure(&verification))
+        .or_else(|| browser_failure(request.browser, &attempt));
     let error = failure
         .as_ref()
         .map(|failure| anyhow::anyhow!("{}: {}", failure.code, failure.message));
     attempt.verification = Some(verification);
     attempt.receipt = Some(receipt);
+    drop(verification_timing);
     let (verified, live, stop) = after_verification(
         &mut attempt,
         failure,
         candidate,
         request.continuation,
-        |candidate| candidate.stop(),
+        |candidate| {
+            let _cleanup = request.control.map(|c| c.cleanup());
+            candidate.stop()
+        },
     );
     AttemptOutcome {
         error: match (&attempt.failure, error) {
@@ -450,11 +510,20 @@ fn not_observable(
         (None, None) => (Outcome::not_applicable("no candidate was realized"), None),
     };
     attempt.outcomes.cleanup = cleanup;
-    attempt.failure = Some(AttemptFailure {
-        code: "candidate_not_observable".to_owned(),
-        stage: FailureStage::Verification.as_str().to_owned(),
-        message: bounded(&format!("{error:#}")),
-    });
+    attempt.failure = Some(
+        error
+            .downcast_ref::<FormationFailure>()
+            .map(|failure| AttemptFailure {
+                code: failure.code.clone(),
+                stage: failure.stage.as_str().to_owned(),
+                message: failure.bounded_message(1024),
+            })
+            .unwrap_or_else(|| AttemptFailure {
+                code: "candidate_not_observable".to_owned(),
+                stage: FailureStage::Verification.as_str().to_owned(),
+                message: bounded(&format!("{error:#}")),
+            }),
+    );
     AttemptOutcome {
         attempt,
         // The start is durable; run_attempt records the finish.
@@ -475,6 +544,7 @@ fn observe_http(
     candidate: &mut dyn RunningCandidate,
     required: &[RequiredObservation],
     interrupt: Option<&AtomicBool>,
+    control: Option<&crate::control::ExecutionControl>,
 ) -> Result<Vec<RuntimeHttpObservation>> {
     let client = reqwest::blocking::Client::builder()
         // A candidate has no business redirecting its Contract observation
@@ -493,7 +563,11 @@ fn observe_http(
             if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                 anyhow::bail!("interrupted before the Contract observations completed");
             }
-            match client.get(&url).send() {
+            let timeout = match control {
+                Some(c) => c.cap(crate::control::AttemptPhase::Verification, REQUEST_TIMEOUT)?,
+                None => REQUEST_TIMEOUT,
+            };
+            match client.get(&url).timeout(timeout).send() {
                 Ok(response) => break response,
                 Err(error) => {
                     if let Some(exit) = candidate.exited()? {
@@ -510,6 +584,9 @@ fn observe_http(
         };
         let status = response.status().as_u16();
         let body = response.bytes().context("cannot read the response body")?;
+        if let Some(control) = control {
+            control.remaining(crate::control::AttemptPhase::Verification)?;
+        }
         if body.len() > MAX_BODY_BYTES {
             anyhow::bail!(
                 "GET {} returned more than {MAX_BODY_BYTES} bytes",
@@ -907,6 +984,7 @@ mod tests {
                     continuation: Continuation::HandOff,
                     receipt: ReceiptContext::formation(),
                     interrupt: None,
+                    control: None,
                 },
                 &realizer,
                 &AttemptJournal::new(&records),
@@ -1222,6 +1300,7 @@ mod tests {
                 continuation,
                 receipt: ReceiptContext::formation(),
                 interrupt: None,
+                control: None,
             },
             realizer,
             journal,
@@ -1291,6 +1370,7 @@ mod tests {
                     continuation: Continuation::Stop,
                     receipt: context,
                     interrupt: None,
+                    control: None,
                 },
                 &AnsweringRealizer::default(),
                 &AttemptJournal::new(records.path()),

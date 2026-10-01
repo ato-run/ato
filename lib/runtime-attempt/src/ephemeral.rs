@@ -29,6 +29,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::control::{AttemptPhase, ExecutionControl};
 use crate::launch::process_executor::{
     LaunchedProcess, LoopbackReadinessProbe, ProcessLaunchHost, ReadinessProbe,
     launch_process_with, launch_process_with_scoped_network, wait_until_ready,
@@ -45,8 +46,6 @@ use ato_ipc::runtime_launch::{
     LifecycleV1, ProcessRealizationV1, PublicEnvV1, RUNTIME_LAUNCH_SPEC_V1_PROTOCOL, ReadinessV1,
     RuntimeLaunchSpecV1, SecretGrantV1, StateAccessV1, StateAttachmentV1,
 };
-
-use crate::plan::copy_tree;
 
 /// How long a candidate gets to come up before the attempt is failed.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -167,14 +166,14 @@ impl TemporaryRealization {
     /// Launch the candidate through the Runtime's process executor and wait
     /// until every required port accepts connections.
     pub fn launch(request: &TemporaryRealizationRequest<'_>) -> Result<Self> {
-        Self::launch_inner(request, None, &[])
+        Self::launch_inner(request, None, &[], None)
     }
 
     pub fn launch_scoped(
         request: &TemporaryRealizationRequest<'_>,
         runtime_gate: &Path,
     ) -> Result<Self> {
-        Self::launch_inner(request, Some(runtime_gate), &[])
+        Self::launch_inner(request, Some(runtime_gate), &[], None)
     }
 
     pub fn launch_scoped_with_variables(
@@ -182,13 +181,25 @@ impl TemporaryRealization {
         runtime_gate: &Path,
         variables: &[crate::variables::ResolvedVariable],
     ) -> Result<Self> {
-        Self::launch_inner(request, Some(runtime_gate), variables)
+        Self::launch_inner(request, Some(runtime_gate), variables, None)
+    }
+
+    pub fn launch_controlled(
+        request: &TemporaryRealizationRequest<'_>,
+        runtime_gate: Option<&Path>,
+        variables: &[crate::variables::ResolvedVariable],
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Self> {
+        Self::launch_inner(request, runtime_gate, variables, control)
     }
     fn launch_inner(
         request: &TemporaryRealizationRequest<'_>,
         runtime_gate: Option<&Path>,
         variables: &[crate::variables::ResolvedVariable],
+        control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Self> {
+        let check = || control.map_or(Ok(()), |c| c.remaining(AttemptPhase::Launch).map(|_| ()));
+        check()?;
         #[cfg(not(unix))]
         if runtime_gate.is_some() {
             bail!("scoped runtime requires Unix");
@@ -225,7 +236,7 @@ impl TemporaryRealization {
         let workspace_root = scratch.join("workspace");
         std::fs::create_dir_all(&workspace_root)
             .context("cannot create the realization workspace")?;
-        copy_tree(request.workspace, &workspace_root)
+        crate::plan::copy_tree_with_guard(request.workspace, &workspace_root, &check)
             .context("cannot copy the build output into the realization")?;
         let runtime_root = scratch.join("runtime");
         std::fs::create_dir_all(&runtime_root)
@@ -333,6 +344,9 @@ impl TemporaryRealization {
             bail!("exploration_state_grant_required");
         }
 
+        let launch_timeout = control.map_or(Ok(LAUNCH_TIMEOUT), |c| {
+            c.cap(AttemptPhase::Launch, LAUNCH_TIMEOUT)
+        })?;
         let spec = RuntimeLaunchSpecV1 {
             protocol: RUNTIME_LAUNCH_SPEC_V1_PROTOCOL.to_owned(),
             context: LaunchContextV1 {
@@ -367,7 +381,7 @@ impl TemporaryRealization {
             state_attachments,
             endpoints: declared,
             readiness: ReadinessV1::Process {
-                timeout_ms: LAUNCH_TIMEOUT.as_millis() as u64,
+                timeout_ms: launch_timeout.as_millis().max(1) as u64,
             },
             lifecycle: LIFECYCLE,
         };
@@ -396,6 +410,7 @@ impl TemporaryRealization {
             output: Some((realization.output.clone(), OUTPUT_LIMIT_BYTES)),
         };
         let ingress_root = host.runtime_root.join("ingress");
+        check()?;
         let launched = match runtime_gate {
             Some(socket) => {
                 std::fs::create_dir_all(&ingress_root)?;
@@ -425,10 +440,13 @@ impl TemporaryRealization {
         // probe and its "exited before ready" check, one endpoint at a time.
         let probe = LoopbackReadinessProbe::new(http_client()?);
         for endpoint in &spec.endpoints {
+            let remaining = control.map_or(Ok(LAUNCH_TIMEOUT), |c| {
+                c.cap(AttemptPhase::Launch, LAUNCH_TIMEOUT)
+            })?;
             let mut per_endpoint = spec.clone();
             per_endpoint.readiness = ReadinessV1::Tcp {
                 endpoint_name: endpoint.name.clone(),
-                timeout_ms: LAUNCH_TIMEOUT.as_millis() as u64,
+                timeout_ms: remaining.as_millis().max(1) as u64,
             };
             let launched = realization
                 .launched
@@ -447,7 +465,13 @@ impl TemporaryRealization {
             };
             #[cfg(not(unix))]
             let selected_probe: &dyn ReadinessProbe = &probe;
-            if let Err(error) = wait_until_ready(&per_endpoint, &context, launched, selected_probe)
+            let controlled_probe = ControlledReadiness {
+                fallback: selected_probe,
+                control,
+                loopback: runtime_gate.is_none(),
+            };
+            if let Err(error) =
+                wait_until_ready(&per_endpoint, &context, launched, &controlled_probe)
             {
                 // The port explanation first: the output tail is long, and
                 // a bounded report must not lose the actionable part.
@@ -487,6 +511,9 @@ impl TemporaryRealization {
                 }
                 detail.push_str(&format!("candidate output: {tail}"));
                 return Err(error.context(detail));
+            }
+            if let Some(control) = control {
+                control.remaining(AttemptPhase::Launch)?;
             }
         }
         Ok(realization)
@@ -571,6 +598,46 @@ impl TemporaryRealization {
 struct ScopedReadiness<'a> {
     bridges: &'a [crate::network_bridge::IngressBridge],
     endpoints: &'a [RealizedEndpoint],
+}
+
+struct ControlledReadiness<'a> {
+    fallback: &'a dyn ReadinessProbe,
+    control: Option<&'a ExecutionControl>,
+    loopback: bool,
+}
+impl ReadinessProbe for ControlledReadiness<'_> {
+    fn probe(&self, host_port: u16, path: &str) -> std::result::Result<(), String> {
+        let Some(control) = self.control else {
+            return self.fallback.probe(host_port, path);
+        };
+        let budget = control
+            .cap(AttemptPhase::Launch, REQUEST_TIMEOUT)
+            .map_err(|e| e.to_string())?;
+        let result = if self.loopback {
+            if path.is_empty() {
+                let address = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
+                std::net::TcpStream::connect_timeout(
+                    &address,
+                    budget.min(Duration::from_millis(100)),
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            } else {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(budget)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                LoopbackReadinessProbe::new(client).probe(host_port, path)
+            }
+        } else {
+            self.fallback.probe(host_port, path)
+        };
+        control
+            .remaining(AttemptPhase::Launch)
+            .map_err(|e| e.to_string())?;
+        result
+    }
 }
 #[cfg(unix)]
 impl ReadinessProbe for ScopedReadiness<'_> {

@@ -125,6 +125,50 @@ impl CallBudget {
     pub fn snapshot(&self) -> Result<BudgetSnapshot> {
         self.transact(None)
     }
+    /// One row per actual transport reservation, including sent calls whose
+    /// response disappeared. Never substitute a reasoning exchange or round.
+    pub fn accounting(&self) -> Result<serde_json::Value> {
+        let snapshot = self.snapshot()?;
+        let reservation = self
+            .plan
+            .cost(self.plan.input_token_cap, self.plan.output_token_cap)?;
+        let mut spent = 0u64;
+        let mut unsettled = 0u64;
+        let mut calls = Vec::new();
+        for (id, call) in &snapshot.cells {
+            let (status, cost) = if let Some(response) = &call.response {
+                (
+                    "responded",
+                    self.plan
+                        .cost(response.input_tokens, response.output_tokens)?,
+                )
+            } else if call.not_sent {
+                ("not_sent", 0)
+            } else if call.charged_unknown {
+                ("charged_unknown", reservation)
+            } else {
+                unsettled = unsettled.saturating_add(reservation);
+                ("unsettled", 0)
+            };
+            spent = spent.saturating_add(cost);
+            calls.push(serde_json::json!({"call_id":id,"status":status,
+                "usage":call.response.as_ref().map(|r| serde_json::json!({
+                    "input_tokens":r.input_tokens,"output_tokens":r.output_tokens})),
+                "latency_ms":call.response.as_ref().and_then(|r|r.latency_ms)
+                    .or_else(||call.transport.as_ref().and_then(|t|t.latency_ms)),
+                "estimated_cost_usd_micros":cost,
+                "unsettled_reservation_usd_micros":if call.is_settled(){0}else{reservation},
+                "request":call.request,"transport":call.transport}));
+        }
+        Ok(
+            serde_json::json!({"schema":"ato.provider-call-accounting/1", "calls":calls,
+            "reserved_call_slots":snapshot.cells.len(),
+            "remaining_call_slots":self.plan.max_calls.saturating_sub(snapshot.cells.len() as u32),
+            "estimated_cost_usd_micros":spent,"unsettled_reservation_usd_micros":unsettled,
+            "remaining_budget_usd_micros":self.plan.ceiling_usd_micros.saturating_sub(spent.saturating_add(unsettled)),
+            "plan":self.plan,"stopped":snapshot.stopped}),
+        )
+    }
     pub fn inspect_request(&self, cell: &str) -> Result<RequestInspection> {
         let state = self.snapshot()?;
         let saved = state
@@ -443,6 +487,8 @@ pub struct ResponseEvidence {
     pub model_matches: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 impl ResponseEvidence {
     pub fn within(&self, plan: &BudgetPlan) -> bool {
@@ -486,4 +532,6 @@ pub struct TransportEvidence {
     pub retry_after_ms: u64,
     pub recorded_at_ms: u64,
     pub error_class: super::provenance::ErrorClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }

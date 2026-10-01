@@ -109,7 +109,14 @@ pub fn stage_workspace(source_root: &Path, workspace_root: &Path) -> Result<()> 
 }
 
 pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    copy_tree_with_guard(from, to, &|| Ok(()))
+}
+
+pub fn copy_tree_with_guard(from: &Path, to: &Path, check: &dyn Fn() -> Result<()>) -> Result<()> {
+    use std::io::{Read, Write};
+    check()?;
     for entry in std::fs::read_dir(from)? {
+        check()?;
         let entry = entry?;
         let metadata = std::fs::symlink_metadata(entry.path())?;
         let target = to.join(entry.file_name());
@@ -123,9 +130,20 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
         }
         if metadata.is_dir() {
             std::fs::create_dir_all(&target)?;
-            copy_tree(&entry.path(), &target)?;
+            copy_tree_with_guard(&entry.path(), &target, check)?;
         } else if metadata.is_file() {
-            std::fs::copy(entry.path(), &target)?;
+            let mut source = std::fs::File::open(entry.path())?;
+            let mut destination = std::fs::File::create(&target)?;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                check()?;
+                let count = source.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                destination.write_all(&buffer[..count])?;
+            }
+            std::fs::set_permissions(&target, metadata.permissions())?;
         }
     }
     Ok(())

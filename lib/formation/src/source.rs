@@ -102,6 +102,8 @@ pub const RESOLVER_CONTRACT_V2: &str = "ato.source-resolver.v2";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
+    #[error("the frozen source operation deadline elapsed")]
+    DeadlineExceeded,
     #[error("archive bytes do not match the pinned revision: expected {expected}, got {actual}")]
     ArchiveDigestMismatch { expected: String, actual: String },
     #[error("archive contents do not match the pinned tree: expected {expected}, got {actual}")]
@@ -133,6 +135,7 @@ impl SourceError {
     /// A stable code, so a diagnostic can be matched without parsing prose.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::DeadlineExceeded => "round_deadline_exceeded",
             Self::ArchiveDigestMismatch { .. } => "source_archive_digest_mismatch",
             Self::TreeDigestMismatch { .. } => "source_tree_digest_mismatch",
             Self::PathEscape { .. } => "source_path_escape",
@@ -305,10 +308,22 @@ pub struct FileVerifiedArchive {
 
 impl FileVerifiedArchive {
     pub fn verify(
+        file: std::fs::File,
+        expected: &str,
+        expected_size: u64,
+        limits: SourceLimits,
+    ) -> Result<Self, SourceError> {
+        Self::verify_with_guard(file, expected, expected_size, limits, &|| true)
+    }
+
+    /// Check the caller's frozen deadline before every archive/decompression
+    /// read. The verified tree and resolver identity are unchanged.
+    pub fn verify_with_guard(
         mut file: std::fs::File,
         expected: &str,
         expected_size: u64,
         limits: SourceLimits,
+        can_continue: &dyn Fn() -> bool,
     ) -> Result<Self, SourceError> {
         use std::io::Seek;
         file.rewind().map_err(source_io)?;
@@ -316,6 +331,9 @@ impl FileVerifiedArchive {
         let mut size = 0u64;
         let mut buffer = [0u8; 64 * 1024];
         loop {
+            if !can_continue() {
+                return Err(SourceError::DeadlineExceeded);
+            }
             let count = file.read(&mut buffer).map_err(source_io)?;
             if count == 0 {
                 break;
@@ -338,7 +356,15 @@ impl FileVerifiedArchive {
         if size != expected_size {
             return Err(SourceError::Unusable("source archive size mismatch".into()));
         }
-        let measured = measure_readers(|| file_reader(&file, limits), limits)?;
+        let measured = measure_readers(
+            || {
+                Ok(GuardedArchiveReader {
+                    inner: file_reader(&file, limits)?,
+                    can_continue,
+                })
+            },
+            limits,
+        )?;
         Ok(Self { file, measured })
     }
     pub fn expanded_bytes(&self) -> u64 {
@@ -359,8 +385,43 @@ impl FileVerifiedArchive {
         subdirectory: &str,
         limits: SourceLimits,
     ) -> Result<PathBuf, SourceError> {
-        let root = expand_readers(|| file_reader(&self.file, limits), destination, limits)?;
+        self.materialize_with_guard(destination, subdirectory, limits, &|| true)
+    }
+
+    pub fn materialize_with_guard(
+        &mut self,
+        destination: &Path,
+        subdirectory: &str,
+        limits: SourceLimits,
+        can_continue: &dyn Fn() -> bool,
+    ) -> Result<PathBuf, SourceError> {
+        let root = expand_readers(
+            || {
+                Ok(GuardedArchiveReader {
+                    inner: file_reader(&self.file, limits)?,
+                    can_continue,
+                })
+            },
+            destination,
+            limits,
+        )?;
         select_subdirectory(&root, subdirectory)
+    }
+}
+
+struct GuardedArchiveReader<'a> {
+    inner: Box<dyn Read>,
+    can_continue: &'a dyn Fn() -> bool,
+}
+impl Read for GuardedArchiveReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if !(self.can_continue)() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the frozen source deadline elapsed",
+            ));
+        }
+        self.inner.read(bytes)
     }
 }
 
@@ -469,7 +530,11 @@ fn read_file_entry<R: Read>(
 }
 
 fn source_io(error: std::io::Error) -> SourceError {
-    SourceError::Unusable(error.to_string())
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        SourceError::DeadlineExceeded
+    } else {
+        SourceError::Unusable(error.to_string())
+    }
 }
 
 fn file_reader(file: &std::fs::File, limits: SourceLimits) -> Result<Box<dyn Read>, SourceError> {
@@ -1888,6 +1953,43 @@ mod tests {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(bytes).unwrap();
         FileVerifiedArchive::verify(file, digest, size, limits)
+    }
+
+    #[test]
+    fn file_archive_deadline_stops_before_hashing_or_expansion_and_preserves_identity() {
+        use std::io::Write;
+        std::fs::create_dir_all(".tmp").unwrap();
+        let owned = tempfile::tempdir_in(".tmp").unwrap();
+        let bytes = archive(&[("server.py", b"print(1)\n")], 0);
+        let digest = content_ref(&bytes);
+        let mut file = tempfile::tempfile_in(owned.path()).unwrap();
+        file.write_all(&bytes).unwrap();
+        assert!(matches!(
+            FileVerifiedArchive::verify_with_guard(
+                file.try_clone().unwrap(),
+                &digest,
+                bytes.len() as u64,
+                LIMITS,
+                &|| false
+            ),
+            Err(SourceError::DeadlineExceeded)
+        ));
+        let mut verified = FileVerifiedArchive::verify_with_guard(
+            file,
+            &digest,
+            bytes.len() as u64,
+            LIMITS,
+            &|| true,
+        )
+        .unwrap();
+        let expected = measure_source_tree(&bytes, LIMITS).unwrap();
+        assert_eq!(verified.tree_digest(), expected);
+        let destination = owned.path().join("expired");
+        assert!(matches!(
+            verified.materialize_with_guard(&destination, "", LIMITS, &|| false),
+            Err(SourceError::DeadlineExceeded)
+        ));
+        assert!(!destination.join("server.py").exists());
     }
 
     // Deliberately write the payload independently of the regular header size.
