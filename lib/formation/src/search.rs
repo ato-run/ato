@@ -9,6 +9,7 @@ use crate::{
         InspectionKind,
     },
     generation::{GenerationOutcome, GenerationPolicy, GenerationRecord},
+    proposal::{ProposalAuthorization, ProposalRoundOutcome, ProposalRoundRecord},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +25,24 @@ pub struct FrozenSearchV1 {
     pub policy: SearchPolicy,
     /// Input order is frozen, independently of Runtime availability/ranking.
     pub candidates: Vec<SearchCandidate>,
+    /// Opt-in Formation input, independent of any known D. Absent on legacy
+    /// searches; omission preserves their canonical bytes and interpretation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_source: Option<InitialSource>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialSource {
+    pub closure_ref: String,
+    pub archive_digest: String,
+}
+impl InitialSource {
+    pub fn materialization(&self) -> CandidateInput {
+        CandidateInput::Source {
+            closure_ref: self.closure_ref.clone(),
+            archive_digest: self.archive_digest.clone(),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +59,8 @@ pub struct SearchPolicy {
     pub decision: Option<DecisionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ProposalAuthorization>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +161,8 @@ pub struct SearchStateV1 {
     pub evidence: Vec<InspectionEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_round: Option<ProposalRoundRecord>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -265,6 +288,14 @@ pub enum SearchAction {
         expires_at_ms: u64,
     },
     ExpireGeneration {},
+    OpenProposalRound {
+        opened_at_ms: u64,
+        expires_at_ms: u64,
+    },
+    WaitForProposalRound {
+        expires_at_ms: u64,
+    },
+    ExpireProposalRound {},
     Finish {
         reason: Termination,
     },
@@ -354,7 +385,16 @@ impl FrozenSearchV1 {
                 return Err(SearchError("generation_base_unauthorized"));
             }
         }
-        if self.candidates.is_empty() || self.candidates.len() > 64 {
+        if let Some(authorization) = &self.policy.proposal {
+            authorization
+                .validate_search(self)
+                .map_err(|e| SearchError(e.0))?;
+        } else if self.initial_source.is_some() {
+            return Err(SearchError("initial_source_without_proposal_policy"));
+        }
+        if (self.candidates.is_empty() && self.policy.proposal.is_none())
+            || self.candidates.len() > 64
+        {
             return Err(SearchError("candidate_count"));
         }
         let mut ids = BTreeSet::new();
@@ -369,20 +409,29 @@ impl FrozenSearchV1 {
     }
 }
 impl SearchStateV1 {
-    /// The frozen initial domain followed by at most one validated generated D.
+    /// The frozen initial domain followed by separately admitted generated D.
     /// Generated candidates never rewrite the frozen search bytes.
     pub fn candidates(&self) -> impl Iterator<Item = &SearchCandidate> {
-        self.frozen.candidates.iter().chain(
-            self.generation
-                .as_ref()
-                .filter(|g| g.outcome == Some(GenerationOutcome::Admitted))
-                .and_then(|g| g.candidate.as_ref()),
-        )
+        self.frozen
+            .candidates
+            .iter()
+            .chain(
+                self.generation
+                    .as_ref()
+                    .filter(|g| g.outcome == Some(GenerationOutcome::Admitted))
+                    .and_then(|g| g.candidate.as_ref()),
+            )
+            .chain(
+                self.proposal_round
+                    .iter()
+                    .filter(|r| r.outcome == Some(ProposalRoundOutcome::Completed))
+                    .flat_map(|r| &r.candidates),
+            )
     }
 
-    fn generation_parent_failed(&self, policy: &GenerationPolicy) -> bool {
+    fn generation_parent_failed(&self, base_derivation_ref: &str) -> bool {
         self.attempts.iter().any(|a| {
-            a.derivation_ref == policy.base_derivation_ref
+            a.derivation_ref == base_derivation_ref
                 && a.status == DurableAttemptStatus::Fail
                 && a.record == Some(ExecutionRecord::Finished)
                 && a.effects.as_deref() == Some("pure")
@@ -404,7 +453,7 @@ impl SearchStateV1 {
     /// Generation changes the frontier, never the owner's placement constraint.
     /// No-policy behavior is kept byte/behavior compatible with the prior core.
     pub(crate) fn generation_placement_allowed(&self, p: &Placement) -> bool {
-        if self.frozen.policy.generation.is_none() {
+        if self.frozen.policy.generation.is_none() && self.frozen.policy.proposal.is_none() {
             return true;
         }
         match &self.frozen.policy.runtime_constraint {
@@ -437,7 +486,7 @@ impl SearchStateV1 {
                     .opened_at_ms
                     .saturating_add(policy.timeout_ms)
                     .min(self.deadline_ms)
-            || !self.generation_parent_failed(policy)
+            || !self.generation_parent_failed(&policy.base_derivation_ref)
             || ((record.outcome == Some(GenerationOutcome::Admitted)) != record.candidate.is_some())
         {
             return Err(SearchError("generation_record_invalid"));
@@ -479,6 +528,28 @@ impl SearchStateV1 {
         }
         self.frozen.canonical_bytes()?;
         self.validate_generation()?;
+        if let Some(round) = &self.proposal_round {
+            let authorization = self
+                .frozen
+                .policy
+                .proposal
+                .as_ref()
+                .ok_or(SearchError("proposal_without_policy"))?;
+            if round.opened_at_ms >= self.deadline_ms
+                || round.expires_at_ms
+                    != round
+                        .opened_at_ms
+                        .saturating_add(authorization.policy.timeout_ms)
+                        .min(self.deadline_ms)
+                || (round.outcome != Some(ProposalRoundOutcome::Completed)
+                    && !round.candidates.is_empty())
+                || round.candidates.len() > authorization.policy.max_proposals
+            {
+                return Err(SearchError("proposal_round_invalid"));
+            }
+            crate::proposal::validate_candidate_scope(&self.frozen, &round.candidates)
+                .map_err(|e| SearchError(e.0))?;
+        }
         let mut ids = BTreeSet::new();
         for a in &self.attempts {
             if !ids.insert(&a.attempt_id)
@@ -600,6 +671,7 @@ fn default_next(
             s.frozen.policy.runtime_constraint,
             RuntimeConstraint::Exact { .. }
         ) && s.frozen.policy.generation.is_none()
+            && s.frozen.policy.proposal.is_none()
         {
             return Ok(finish(if passed {
                 Termination::Verified
@@ -613,6 +685,8 @@ fn default_next(
     if now_ms >= s.deadline_ms
         || available(l.max_attempts, b.attempts_used, b.attempts_reserved) == 0
         || available(l.max_expanded_bytes, b.expanded_used, b.expanded_reserved) == 0
+        || (s.frozen.policy.proposal.is_some()
+            && available(l.max_stored_bytes, b.stored_used, b.stored_reserved) == 0)
     {
         return Ok(finish(if passed {
             Termination::Verified
@@ -630,6 +704,17 @@ fn default_next(
         } else {
             SearchAction::WaitForGeneration {
                 expires_at_ms: record.expires_at_ms,
+            }
+        });
+    }
+    if let Some(round) = &s.proposal_round
+        && round.outcome.is_none()
+    {
+        return Ok(if now_ms >= round.expires_at_ms {
+            SearchAction::ExpireProposalRound {}
+        } else {
+            SearchAction::WaitForProposalRound {
+                expires_at_ms: round.expires_at_ms,
             }
         });
     }
@@ -683,11 +768,21 @@ fn default_next(
             });
         }
     }
-    if !passed
-        && let Some(policy) = &s.frozen.policy.generation
-        && s.generation.is_none()
-        && s.generation_parent_failed(policy)
-    {
+    let pending_generation = s
+        .frozen
+        .policy
+        .generation
+        .as_ref()
+        .filter(|p| s.generation.is_none() && s.generation_parent_failed(&p.base_derivation_ref))
+        .map(|p| (false, p.timeout_ms));
+    let pending_proposal = s
+        .frozen
+        .policy
+        .proposal
+        .as_ref()
+        .filter(|_| s.proposal_round.is_none())
+        .map(|p| (true, p.policy.timeout_ms));
+    if !passed && let Some((is_proposal, timeout_ms)) = pending_proposal.or(pending_generation) {
         // Never skip an unanswered decision or an unconsumed inspection/stop.
         if let Some(d) = s.decisions.last() {
             if d.outcome.is_none()
@@ -736,6 +831,9 @@ fn default_next(
                         .iter()
                         .any(|e| e.kind == *inspection && e.target_ref == *target_ref),
                     Some(ChoiceAction::Attempt { .. }) => s.attempts.len() as u64 == d.attempt_seq,
+                    // This decision releases the very proposal action whose
+                    // fences are checked below; it is not a pending attempt.
+                    Some(ChoiceAction::EscalateToCandidateProducer {}) => false,
                     None => false,
                 }
         });
@@ -752,9 +850,17 @@ fn default_next(
             {
                 return Ok(finish(Termination::BudgetExhausted));
             }
-            return Ok(SearchAction::OpenGeneration {
-                opened_at_ms: now_ms,
-                expires_at_ms: now_ms.saturating_add(policy.timeout_ms).min(s.deadline_ms),
+            let expires_at_ms = now_ms.saturating_add(timeout_ms).min(s.deadline_ms);
+            return Ok(if is_proposal {
+                SearchAction::OpenProposalRound {
+                    opened_at_ms: now_ms,
+                    expires_at_ms,
+                }
+            } else {
+                SearchAction::OpenGeneration {
+                    opened_at_ms: now_ms,
+                    expires_at_ms,
+                }
             });
         }
     }
@@ -880,4 +986,27 @@ fn attempt_events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> 
         events.push(SearchEvent::OwnerStopped);
     }
     events
+}
+
+/// Runtime capability requirements shared by requester planning and the Ato
+/// base-free constructor. These are admission facts, not K observations.
+pub fn execution_requirements(process: bool, has_actions: bool) -> Vec<Requirement> {
+    let mut requirements = Vec::new();
+    if process {
+        requirements.push(Requirement {
+            fact: "runtime.process".into(),
+            one_of: Some(vec!["true".into()]),
+        });
+    }
+    if process || has_actions {
+        requirements.push(Requirement {
+            fact: "containment".into(),
+            one_of: Some(vec!["bwrap+landlock".into()]),
+        });
+        requirements.push(Requirement {
+            fact: "toolchain.root".into(),
+            one_of: None,
+        });
+    }
+    requirements
 }

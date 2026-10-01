@@ -48,6 +48,8 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 
+pub mod proposal;
+
 pub const PROTOCOL: &str = "ato.runtime-network/0";
 /// The one execution environment a host advertises in Phase 1: itself.
 pub const NATIVE_ENVIRONMENT: &str = "native";
@@ -199,6 +201,8 @@ pub struct SatisfyPolicy {
     /// Owner-authorized, frozen typed draft domain. No policy means no generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<ato_formation::generation::GenerationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ato_formation::proposal::ProposalAuthorization>,
 }
 
 /// The budget of the whole search the request belongs to (ADR-031). The
@@ -315,6 +319,8 @@ pub struct SatisfyRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_contract: Option<BrowserContractV0>,
     pub source: SourceTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_source: Option<ato_formation::search::InitialSource>,
     pub authorized_derivations: Vec<AuthorizedDerivation>,
     pub runtime_constraint: RuntimeConstraintWire,
     pub bindings: BTreeMap<String, String>,
@@ -547,22 +553,17 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             ),
         });
     }
-    if planned.plan.lane.is_process() {
-        requirements.push(Requirement {
-            fact: "runtime.process".to_owned(),
-            one_of: Some(vec!["true".to_owned()]),
-        });
-    }
-    if !planned.plan.actions.is_empty() || planned.plan.lane.is_process() {
-        requirements.push(Requirement {
-            fact: "containment".to_owned(),
-            one_of: Some(vec!["bwrap+landlock".to_owned()]),
-        });
-        requirements.push(Requirement {
-            fact: "toolchain.root".to_owned(),
-            one_of: None,
-        });
-    }
+    requirements.extend(
+        ato_formation::search::execution_requirements(
+            planned.plan.lane.is_process(),
+            !planned.plan.actions.is_empty(),
+        )
+        .into_iter()
+        .map(|r| Requirement {
+            fact: r.fact,
+            one_of: r.one_of,
+        }),
+    );
     let mut provisions: Vec<String> = planned
         .plan
         .toolchains
@@ -584,6 +585,7 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
 // ──────────────────────────────────────────────────────────── requesting
 
 pub struct Submission {
+    proposal_state: Option<proposal::RequesterProposal>,
     archive: File,
     source_entries: BTreeSet<String>,
     frozen_source: local::FrozenSource,
@@ -957,6 +959,35 @@ pub fn prepare_submission(
     budget: SatisfyBudget,
     search_id: &str,
 ) -> Result<Submission> {
+    anyhow::ensure!(
+        policy.proposal.is_none(),
+        "enable CandidateProducer explicitly after freezing source"
+    );
+    prepare_submission_inner(
+        dir,
+        routes,
+        browser_contract,
+        work_root,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_submission_inner(
+    dir: &Path,
+    routes: &[PathBuf],
+    browser_contract: Option<BrowserContractV0>,
+    work_root: &Path,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    explicit_contract: Option<ato_formation::authoring::BoundContract>,
+) -> Result<Submission> {
     budget.validate()?;
     std::fs::create_dir_all(work_root)?;
     anyhow::ensure!(
@@ -980,12 +1011,17 @@ pub fn prepare_submission(
     )?;
     let evidence = detect(&frozen.root).context("detection failed")?;
 
-    let route_files: Vec<PathBuf> = if routes.is_empty() {
+    let route_files: Vec<PathBuf> = if explicit_contract.is_some() {
+        Vec::new()
+    } else if routes.is_empty() {
         vec![frozen.root.join("capsule.toml")]
     } else {
         routes.to_vec()
     };
-    let mut base_contract_ref: Option<String> = None;
+    let mut base_contract_ref = explicit_contract
+        .as_ref()
+        .map(|k| k.contract_ref())
+        .transpose()?;
     let mut authorized = Vec::new();
     let mut contracts = BTreeMap::new();
     for file in &route_files {
@@ -1029,6 +1065,7 @@ pub fn prepare_submission(
     let project_summary =
         ato_formation::generation_context::project_project(&evidence, &source_entries);
     Ok(Submission {
+        proposal_state: None,
         source_entries,
         project_summary,
         generation_context: None,
@@ -1039,11 +1076,9 @@ pub fn prepare_submission(
             search_id: search_id.to_owned(),
             contract_ref,
             base_contract_ref,
-            base_contract: contracts
-                .values()
-                .next()
-                .context("no frozen Contract")?
-                .clone(),
+            base_contract: explicit_contract
+                .or_else(|| contracts.values().next().cloned())
+                .context("no frozen Contract")?,
             browser_contract,
             source: SourceTransport {
                 archive_base64: None,
@@ -1052,6 +1087,7 @@ pub fn prepare_submission(
                 archive_digest,
                 closure_ref: frozen.closure_ref.as_str().to_owned(),
             },
+            initial_source: None,
             authorized_derivations: authorized,
             runtime_constraint: constraint,
             bindings: BTreeMap::new(),
@@ -1378,6 +1414,7 @@ impl Client {
     }
 
     pub fn submit(&self, submission: &Submission) -> Result<serde_json::Value> {
+        submission.validate_proposal_submission()?;
         let source = &submission.request.source;
         let pending: serde_json::Value = self.send(self.http.post(self.url("/sources")).json(&serde_json::json!({
             "archive_digest": source.archive_digest, "archive_bytes": source.archive_bytes,
@@ -2315,6 +2352,7 @@ impl Client {
                     allow_managed: false,
                     decision: None,
                     generation: None,
+                    proposal: None,
                 },
                 budget,
             },

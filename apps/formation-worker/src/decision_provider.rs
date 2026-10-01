@@ -25,6 +25,8 @@ const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OfferedAction {
+    /// Release the already authorized, one-round CandidateProducer path.
+    EscalateToCandidateProducer {},
     /// Issue the next attempt: a frozen D on a placement.
     Attempt {
         #[serde(default)]
@@ -177,6 +179,9 @@ pub fn decision_request(model: &str, point: &DecisionPoint) -> serde_json::Value
                     "action": "inspect",
                     "inspection": inspection,
                     "target_ref": target_ref,
+                }),
+                OfferedAction::EscalateToCandidateProducer {} => serde_json::json!({
+                    "action": "escalate_to_candidate_producer",
                 }),
                 OfferedAction::Stop { reason_class } => serde_json::json!({
                     "action": "stop",

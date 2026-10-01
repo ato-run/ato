@@ -84,6 +84,12 @@ pub struct NodeEvidence {
     /// Corepack's `packageManager`, verbatim — `"pnpm@9.1.0"`, not `"pnpm"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_manager: Option<String>,
+    /// Source fact only. Preserve malformed/ambiguous declarations for refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_engines_package_manager: Option<serde_json::Value>,
+    /// Presence of package workspaces or pnpm workspace configuration; no target inference.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_workspace: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volta_node: Option<String>,
     /// `engines.node`, verbatim. A RANGE, reported unresolved.
@@ -278,6 +284,15 @@ pub fn detect(root: &Path) -> std::io::Result<DetectorEvidence> {
             node_version_file: read_trimmed(".nvmrc"),
             node_version_alt_file: read_trimmed(".node-version"),
             package_manager: string_at(&["packageManager"]),
+            dev_engines_package_manager: package_json
+                .as_ref()
+                .and_then(|p| p.get("devEngines"))
+                .and_then(|d| d.get("packageManager"))
+                .cloned(),
+            has_workspace: package_json
+                .as_ref()
+                .is_some_and(|p| p.get("workspaces").is_some())
+                || has("pnpm-workspace.yaml"),
             volta_node: string_at(&["volta", "node"]),
             engines_node: string_at(&["engines", "node"]),
             script_build: string_at(&["scripts", "build"]),

@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "name": "workspace-fixture",
+  "packageManager": "yarn@1.22.22",
+  "workspaces": ["apps/*", "tools/*"],
+  "scripts": {
+    "build": "yarn --cwd ./apps/web build"
+  }
+}
