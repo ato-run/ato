@@ -100,6 +100,8 @@ provider側では実TCP transport testsで503初回＋3 retryの4 dispatch、429
 - Atoの直前code head `1da5b31a2948fdca443f3918982512afb6104670`の[CI](https://github.com/ato-run/ato/actions/runs/36844595521): Ubuntu PASS、macOS/Windows FAIL。macOSはInstance worker activation、Windowsは既存Unix参照の13 compile errors。開始時base `b3327e159dff92d0e23ad1887848efe50f6509df`の[CI](https://github.com/ato-run/ato/actions/runs/36813243845)でも同じ失敗分類を確認。全CI成功とは報告しない。
 - API `fcbdf8881f3e61bfed7ca4375b9e937adad29d65`の[CI](https://github.com/ato-run/ato-api/actions/runs/36829455062): activity-control-plane/instance-state-sync FAIL、full-serial SKIP。CORS/Activitiesの対象2 test filesはexact base `f00fa300142d45434be2417db2f7ae415517255e`とheadを同条件で検証し、どちらも13 FAIL/40 PASS。coop-presence WebSocket handshakeのCI失敗はbrowser base比較未実施。課金由来ではない。
 
+ローカルの[Worker test出力](evidence/formation-autonomous-20261001/worker-tests.txt)、[deadline clippy](evidence/formation-autonomous-20261001/deadline-clippy.txt)、[Ato CI](evidence/formation-autonomous-20261001/ato-ci-1da.txt)、[API CI](evidence/formation-autonomous-20261001/api-ci-fcb.txt)、[API base](evidence/formation-autonomous-20261001/api-base-tests.txt)／[head比較](evidence/formation-autonomous-20261001/api-head-tests.txt)を保存した。最終code head a1e2f30cと証跡追補headの新CIは、この記録時点では実行中。
+
 ## 実行pin・証跡
 
 | 実測 | native Ato/Worker source | API JS | Rust WASM authority source |
