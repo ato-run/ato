@@ -81,7 +81,10 @@ impl std::fmt::Display for OciVolumeUnauthorized {
 impl std::error::Error for OciVolumeUnauthorized {}
 
 /// Remove a container a failed launch may have left, and confirm it is gone.
-fn discard_failed_launch(docker: &Path, container: &str) -> std::result::Result<(), String> {
+fn discard_failed_launch(
+    docker: &DockerClient,
+    container: &str,
+) -> std::result::Result<(), String> {
     let removed = stop::docker_output(
         docker,
         ["rm", "--force", container],
@@ -120,7 +123,7 @@ fn discard_failed_launch(docker: &Path, container: &str) -> std::result::Result<
 
 /// The launch error, or — when the container it may have created cannot be
 /// confirmed removed — [`SpawnCleanupUnconfirmed`] carrying both.
-fn failed_launch(docker: &Path, container: &str, error: anyhow::Error) -> anyhow::Error {
+fn failed_launch(docker: &DockerClient, container: &str, error: anyhow::Error) -> anyhow::Error {
     match discard_failed_launch(docker, container) {
         Ok(()) => error,
         Err(reason) => anyhow::Error::new(SpawnCleanupUnconfirmed {
@@ -192,8 +195,35 @@ pub struct OciAdmission {
     pub platform: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct DockerClient {
+    executable: std::sync::Arc<PathBuf>,
+    owner: Option<std::sync::Arc<(PathBuf, PathBuf)>>,
+}
+impl DockerClient {
+    fn ambient(executable: PathBuf) -> Self {
+        Self {
+            executable: std::sync::Arc::new(executable),
+            owner: None,
+        }
+    }
+    pub(crate) fn command(&self) -> Command {
+        let mut c = Command::new(self.executable.as_ref());
+        if let Some(owner) = &self.owner {
+            let (socket, config) = owner.as_ref();
+            c.env_clear()
+                .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+                .arg("--host")
+                .arg(format!("unix://{}", socket.display()))
+                .arg("--config")
+                .arg(config);
+        }
+        c
+    }
+}
+
 pub struct DockerOciAdapter {
-    docker: PathBuf,
+    docker: DockerClient,
     spec: OciSpec,
     offline_image: Option<OfflineImage>,
 }
@@ -210,7 +240,7 @@ impl DockerOciAdapter {
             cfg!(target_os = "linux") || spec.endpoints.is_empty(),
             "OCI runtime admission failed: isolated HTTP endpoints currently require a native Linux host; Docker Desktop keeps the internal bridge inside its VM"
         );
-        let docker = find_on_path("docker").context(
+        let docker = find_on_path("docker").map(DockerClient::ambient).context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
         Ok(Self {
@@ -239,6 +269,24 @@ impl DockerOciAdapter {
             config_reference,
         });
         Ok(adapter)
+    }
+
+    /// Bind exploration to an explicit local owner daemon and an empty
+    /// configuration directory. Ambient contexts, registry credentials and
+    /// DOCKER_* environment do not reach this client or its cleanup calls.
+    pub fn with_isolated_owner(mut self, socket: &Path, config: &Path) -> Result<Self> {
+        ensure!(
+            socket.is_absolute() && config.is_absolute(),
+            "OCI owner binding must be absolute"
+        );
+        std::fs::create_dir(config).context("create fresh empty OCI owner config")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o700))?;
+        }
+        self.docker.owner = Some(std::sync::Arc::new((socket.into(), config.into())));
+        Ok(self)
     }
 
     /// Admit the route and acquire its immutable image. Pulling is explicit:
@@ -292,7 +340,7 @@ impl DockerOciAdapter {
             &self.spec.id,
             &self.spec.labels,
             "ator",
-            !direct_egress_enabled(),
+            self.docker.owner.is_some() || !direct_egress_enabled(),
         )?;
         match self.spawn_in_network(workspace, runtime_root, &network, None) {
             Ok(mut handle) => {
@@ -403,7 +451,7 @@ impl DockerOciAdapter {
             }))?,
         )
         .context("record OCI launch identity")?;
-        let launched = Command::new(&self.docker).args(&argv).output();
+        let launched = self.docker.command().args(&argv).output();
         // Docker has consumed the file once `docker run` returns. It may hold
         // runtime Binding values, so it must not become part of a durable Run
         // directory or survive a failed launch.
@@ -484,7 +532,9 @@ impl DockerOciAdapter {
     }
 
     fn inspect_image(&self) -> Result<()> {
-        let output = Command::new(&self.docker)
+        let output = self
+            .docker
+            .command()
             .args([
                 "image",
                 "inspect",
@@ -511,7 +561,9 @@ impl DockerOciAdapter {
         // produce a rootfs-less container. Prefer config; retain the manifest
         // fallback for daemons that expose only the loaded manifest alias.
         for reference in offline_image_reference_candidates(&self.spec.image, config_reference)? {
-            let output = Command::new(&self.docker)
+            let output = self
+                .docker
+                .command()
                 .args([
                     "image",
                     "inspect",
@@ -634,7 +686,7 @@ fn network_create_arguments(bridge_name: &str, internal: bool) -> Vec<String> {
 /// hatch is enabled. Removed on [`OciNetwork::remove`] or,
 /// best effort, on drop — so a failed launch never leaks a network.
 pub struct OciNetwork {
-    docker: PathBuf,
+    docker: DockerClient,
     name: String,
     bridge_name: String,
     removed: bool,
@@ -643,7 +695,7 @@ pub struct OciNetwork {
 impl OciNetwork {
     /// Create the network a group of services shares.
     pub fn create(label: &str, labels: &BTreeMap<String, String>) -> Result<Self> {
-        let docker = find_on_path("docker").context(
+        let docker = find_on_path("docker").map(DockerClient::ambient).context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
         Self::create_with(&docker, label, labels, "ator", !direct_egress_enabled())
@@ -653,14 +705,14 @@ impl OciNetwork {
     /// egress broker. Its interface prefix is part of the firewall admission
     /// contract and is deliberately distinct from ordinary Run bridges.
     pub fn create_egress(label: &str, labels: &BTreeMap<String, String>) -> Result<Self> {
-        let docker = find_on_path("docker").context(
+        let docker = find_on_path("docker").map(DockerClient::ambient).context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
         Self::create_with(&docker, label, labels, "atoe", true)
     }
 
     fn create_with(
-        docker: &Path,
+        docker: &DockerClient,
         label: &str,
         labels: &BTreeMap<String, String>,
         bridge_prefix: &str,
@@ -688,7 +740,7 @@ impl OciNetwork {
             "create isolated OCI network",
         )?;
         Ok(Self {
-            docker: docker.to_path_buf(),
+            docker: docker.clone(),
             name,
             bridge_name,
             removed: false,
@@ -911,7 +963,7 @@ impl Drop for OciServiceGroup {
 }
 
 pub struct OciHandle {
-    docker: PathBuf,
+    docker: DockerClient,
     container_id: String,
     container_address: IpAddr,
     container_name: String,
@@ -959,7 +1011,9 @@ impl OciHandle {
     }
 
     pub fn exit_code(&self) -> Result<Option<i32>> {
-        let output = Command::new(&self.docker)
+        let output = self
+            .docker
+            .command()
             .args([
                 "inspect",
                 "--format",
@@ -1102,7 +1156,7 @@ fn forward_connection(client: TcpStream, target: SocketAddr) {
     let _ = upload.join();
 }
 
-fn inspect_container_address(docker: &Path, container_id: &str) -> Result<IpAddr> {
+fn inspect_container_address(docker: &DockerClient, container_id: &str) -> Result<IpAddr> {
     let value = run_checked(
         docker,
         [
@@ -1237,8 +1291,9 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
     Ok(())
 }
 
-fn image_volumes(docker: &Path, image: &str) -> Result<Vec<String>> {
-    let output = Command::new(docker)
+fn image_volumes(docker: &DockerClient, image: &str) -> Result<Vec<String>> {
+    let output = docker
+        .command()
         .args([
             "image",
             "inspect",
@@ -1409,7 +1464,7 @@ fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
     Ok(None)
 }
 
-pub(crate) fn remove_network(docker: &Path, network: &str) -> Result<()> {
+pub(crate) fn remove_network(docker: &DockerClient, network: &str) -> Result<()> {
     let output = stop::docker_output(
         docker,
         ["network", "rm", network],
@@ -1425,11 +1480,12 @@ pub(crate) fn remove_network(docker: &Path, network: &str) -> Result<()> {
 }
 
 fn run_checked<'a>(
-    executable: &Path,
+    executable: &DockerClient,
     arguments: impl IntoIterator<Item = &'a str>,
     operation: &str,
 ) -> Result<String> {
-    let output = Command::new(executable)
+    let output = executable
+        .command()
         .args(arguments)
         .output()
         .with_context(|| operation.to_owned())?;
@@ -1486,6 +1542,34 @@ pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn exploration_docker_command_has_only_explicit_owner_bindings() {
+        let client = DockerClient {
+            executable: std::sync::Arc::new(PathBuf::from("/usr/bin/docker")),
+            owner: Some(std::sync::Arc::new((
+                PathBuf::from("/isolated/docker.sock"),
+                PathBuf::from("/isolated/empty-config"),
+            ))),
+        };
+        let command = client.command();
+        let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--host",
+                "unix:///isolated/docker.sock",
+                "--config",
+                "/isolated/empty-config"
+            ]
+        );
+        let env: Vec<_> = command
+            .get_envs()
+            .map(|(k, v)| (k.to_str().unwrap(), v.unwrap().to_str().unwrap()))
+            .collect();
+        assert_eq!(env, [("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")]);
+        assert_eq!(command.get_program(), "/usr/bin/docker");
+    }
 
     fn spec() -> OciSpec {
         OciSpec {
@@ -1920,13 +2004,13 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn fake_docker(script: &str) -> (tempfile::TempDir, PathBuf) {
+    fn fake_docker(script: &str) -> (tempfile::TempDir, DockerClient) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("docker");
         std::fs::write(&fake, script).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        (dir, fake)
+        (dir, DockerClient::ambient(fake))
     }
 
     #[cfg(unix)]

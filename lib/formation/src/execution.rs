@@ -159,6 +159,43 @@ pub fn lower_execution(
         }
         .into());
     }
+    if serve.protocol == crate::source_oci_plan::OCI_PROTOCOL {
+        let recipe = d
+            .source_oci
+            .as_ref()
+            .ok_or_else(|| refuse("source OCI recipe missing".into()))?;
+        recipe.validate().map_err(|e| refuse(e.into()))?;
+        if serving_step != 0
+            || !serve.argv.is_empty()
+            || !serve.env.is_empty()
+            || !serve.network.is_denied()
+            || !d.runtimes.is_empty()
+            || d.workspace_build.is_some()
+            || d.workspace_compiler.is_some()
+            || serve
+                .source
+                .as_ref()
+                .is_none_or(|id| !d.inputs.iter().any(|i| &i.id == id))
+            || d.ports.len() != 1
+            || d.ports[0].from != serve.id
+            || d.ports[0].guest_port.is_none()
+        {
+            return Err(refuse("source OCI supports the image default command, one port and the frozen root Dockerfile only".into()).into());
+        }
+        return Ok(ExecutionPlan {
+            lane: Lane::Process,
+            serving_step,
+            workspace_guest_root: binding.workspace_guest_root.trim_end_matches('/').into(),
+            toolchains: BTreeMap::new(),
+            package_manager: None,
+            actions: vec![],
+            toolchain_path: vec![],
+            environment_bindings: BTreeMap::new(),
+        });
+    }
+    if d.source_oci.is_some() {
+        return Err(refuse("source OCI recipe requires its registered OCI adapter".into()).into());
+    }
     for step in &d.steps[..serving_step] {
         if step.op != "exec" || step.protocol != PROCESS_PROTOCOL {
             return Err(ProjectionError::UnsupportedStep {

@@ -23,6 +23,11 @@ use std::{fs, path::Path};
 /// Construct only after the transport caller checks owner, ready state, current
 /// ticket assignment and fence. This type independently verifies all bytes and
 /// canonical K/D provenance; a descriptor is not a capability.
+pub struct RetainedExploration<'a> {
+    pub ceiling: &'a ato_formation::requirements::ExecutionRequirements,
+    pub runtime_gate: &'a Path,
+}
+
 pub struct RetainedCandidateRealizer<'a> {
     pub descriptor: &'a RetainedCandidateV1,
     pub archive: &'a Path,
@@ -30,6 +35,7 @@ pub struct RetainedCandidateRealizer<'a> {
     pub expected_derivation_ref: &'a str,
     pub expanded_limit: u64,
     pub shim: &'a Path,
+    pub exploration: Option<RetainedExploration<'a>>,
 }
 impl CandidateRealizer for RetainedCandidateRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
@@ -40,6 +46,22 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
                 message,
             })
         };
+        let d = &self.descriptor.derivation;
+        if let Some(exploration) = &self.exploration {
+            if let Err(e) = d.requirements.within(exploration.ceiling) {
+                return refuse(
+                    e.0,
+                    "retained requirements exceed exploration ceiling".into(),
+                );
+            }
+            if let Some(e) =
+                crate::exploration_realizer::admit_isolated_authority(d, exploration.ceiling)
+            {
+                return Some(e);
+            }
+        } else if !d.requirements.is_empty() || d.source_oci.is_some() {
+            return refuse("exploration_requirement_enforcement_unavailable","a retained descriptor never carries a previous exploration grant into ordinary replay".into());
+        }
         if let Err(error) = self
             .descriptor
             .match_assignment(self.expected_contract_ref, self.expected_derivation_ref)
@@ -135,12 +157,21 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
             )
         })?;
         let (executed, planned) = result;
-        let mut realized = CandidateLauncher {
+        let launcher = CandidateLauncher {
             planned: &planned,
             shim: self.shim,
-            network: NetworkPolicy::Denied,
-        }
-        .realize(executed, attempt_id, attempt_root)?;
+            network: if self.exploration.is_some() {
+                NetworkPolicy::Scoped
+            } else {
+                NetworkPolicy::Denied
+            },
+        };
+        let mut realized = match &self.exploration {
+            Some(e) => {
+                launcher.realize_scoped(executed, attempt_id, attempt_root, e.runtime_gate)?
+            }
+            None => launcher.realize(executed, attempt_id, attempt_root)?,
+        };
         // This is an existing immutable object, not a new publication. A fresh
         // receipt still comes exclusively from the enclosing common attempt.
         realized.kept = None;

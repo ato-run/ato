@@ -44,6 +44,7 @@ fn submission_with_source(edit: impl FnOnce(&Path)) -> (tempfile::TempDir, Submi
             decision: None,
             generation: None,
             proposal: None,
+            exploration: None,
         },
         SatisfyBudget::ceilings(2, "first_pass"),
         "generation_requester_test",

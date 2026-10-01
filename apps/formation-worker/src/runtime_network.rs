@@ -19,6 +19,8 @@
 //! refs, environment, effects or platform do not hold, and attests what it
 //! established. The coordinator decides fallback from that attestation.
 
+mod exploration;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,14 +43,19 @@ use crate::job::{PlannedCandidate, digest, plan_candidate};
 use crate::journal::{AttemptJournal, AttemptLedger, AttemptPermit, AttemptRecordState};
 use crate::local::{self, host_triple};
 use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
+use anyhow::ensure;
 use ato_formation::source::FileVerifiedArchive;
 use ato_runtime_attempt::admission::EffectAuthorization;
 use ato_runtime_attempt::formation_realizer::FormationRealizer;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+mod delivery;
 pub mod proposal;
+mod source_oci_exploration;
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
 /// The one execution environment a host advertises in Phase 1: itself.
@@ -203,6 +210,8 @@ pub struct SatisfyPolicy {
     pub generation: Option<ato_formation::generation::GenerationPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ato_formation::proposal::ProposalAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ato_formation::exploration::ExplorationPolicy>,
 }
 
 /// The budget of the whole search the request belongs to (ADR-031). The
@@ -344,9 +353,32 @@ pub struct AttemptTicket {
     pub browser_contract: Option<BrowserContractV0>,
     pub bindings: BTreeMap<String, String>,
     pub network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ExplorationTicket>,
     /// This attempt's caps. A ticket without them is not one this Runtime
     /// runs: it would have nothing to hold the attempt to.
     pub resource_budget: TicketResourceBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationTicket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    pub search_id: String,
+    pub ceiling: ato_formation::requirements::ExecutionRequirements,
+    pub network_transfer_bytes: u64,
+}
+
+/// Operator configuration, read once at worker start and never projected as
+/// normal user authority. Tickets can narrow this ceiling, never expand it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationSandbox {
+    pub ceiling: ato_formation::requirements::ExecutionRequirements,
+    pub max_network_transfer_bytes_per_attempt: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_oci: Option<source_oci_exploration::SourceOciSandbox>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1011,7 +1043,7 @@ fn prepare_submission_inner(
     )?;
     let evidence = detect(&frozen.root).context("detection failed")?;
 
-    let route_files: Vec<PathBuf> = if explicit_contract.is_some() {
+    let route_files: Vec<PathBuf> = if explicit_contract.is_some() && routes.is_empty() {
         Vec::new()
     } else if routes.is_empty() {
         vec![frozen.root.join("capsule.toml")]
@@ -1024,26 +1056,55 @@ fn prepare_submission_inner(
         .transpose()?;
     let mut authorized = Vec::new();
     let mut contracts = BTreeMap::new();
-    for file in &route_files {
-        let text = std::fs::read_to_string(file)
-            .with_context(|| format!("cannot read the route {}", file.display()))?;
-        let draft: AuthoringDraft =
-            parse_capsule_toml(&text).map_err(ato_formation::failure::FormationFailure::from)?;
-        let planned = plan_candidate(
+    let auto_known = policy.exploration.is_some() && routes.is_empty();
+    let mut recipes: Vec<(String, String)> = route_files
+        .iter()
+        .map(|file| {
+            std::fs::read_to_string(file)
+                .map(|text| (file.display().to_string(), text))
+                .with_context(|| format!("cannot read route {}", file.display()))
+        })
+        .collect::<Result<_>>()?;
+    if auto_known {
+        if let Some(text) = ato_formation::capsule_toml::read_capsule_toml(&frozen.root)? {
+            recipes.push(("source capsule.toml".into(), text));
+        } else if let Ok(drafts) = ato_formation::preset::candidate_authoring(&evidence) {
+            for draft in drafts {
+                if let Ok(text) = ato_formation::capsule_toml::render_capsule_toml(&draft) {
+                    recipes.push(("known preset".into(), text));
+                }
+            }
+        }
+    }
+    for (label, text) in recipes {
+        let draft: AuthoringDraft = match parse_capsule_toml(&text) {
+            Ok(d) => d,
+            Err(_) if auto_known => continue,
+            Err(e) => return Err(ato_formation::failure::FormationFailure::from(e).into()),
+        };
+        let planned = match plan_candidate(
             &draft,
             &frozen.closure_ref,
             &evidence,
             BTreeMap::new(),
             "/app",
             &host_triple(),
-        )?;
+        ) {
+            Ok(p) => p,
+            Err(_) if auto_known => continue,
+            Err(e) => return Err(e),
+        };
         match &base_contract_ref {
             None => base_contract_ref = Some(planned.contract_ref.clone()),
-            Some(existing) if existing != &planned.contract_ref => bail!(
-                "{} binds to Contract {}, not {existing}: one request satisfies one K",
-                file.display(),
-                planned.contract_ref
-            ),
+            Some(existing) if existing != &planned.contract_ref => {
+                if auto_known {
+                    continue;
+                }
+                bail!(
+                    "{label} binds to Contract {}, not {existing}: one request satisfies one K",
+                    planned.contract_ref
+                );
+            }
             Some(_) => {}
         }
         let (requirements, provisions) = derivation_requirements(&planned);
@@ -1292,10 +1353,12 @@ pub fn accept_routes_for_assignment(
 
 // ──────────────────────────────────────────────────────────────── client
 
+#[derive(Clone)]
 pub struct Client {
     api: String,
     token: String,
     http: reqwest::blocking::Client,
+    deadline_ms: Option<u64>,
 }
 
 impl Client {
@@ -1303,6 +1366,7 @@ impl Client {
         Ok(Self {
             api: api.trim_end_matches('/').to_owned(),
             token: token.trim().to_owned(),
+            deadline_ms: None,
             http: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()?,
@@ -1313,11 +1377,43 @@ impl Client {
         format!("{}/v1/runtime-network{path}", self.api)
     }
 
+    /// Narrow an existing client without resetting the Search or round clock.
+    /// Heartbeats and delivery of already-saved results use the parent client.
+    pub fn with_deadline(&self, deadline_ms: u64) -> Self {
+        let mut bounded = self.clone();
+        bounded.deadline_ms = Some(
+            self.deadline_ms
+                .map_or(deadline_ms, |old| old.min(deadline_ms)),
+        );
+        bounded
+    }
+
+    fn prepare(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Request> {
+        let mut request = request.bearer_auth(&self.token).build()?;
+        if let Some(deadline) = self.deadline_ms {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            ensure!(
+                now < deadline,
+                "coordinator request deadline elapsed; operation preserved"
+            );
+            let remaining = Duration::from_millis(deadline - now);
+            let configured = request
+                .timeout()
+                .copied()
+                .unwrap_or(Duration::from_secs(60));
+            *request.timeout_mut() = Some(configured.min(remaining));
+        }
+        Ok(request)
+    }
+
     fn send<T: serde::de::DeserializeOwned>(
         &self,
         request: reqwest::blocking::RequestBuilder,
     ) -> Result<Option<T>> {
-        let response = request.bearer_auth(&self.token).send()?;
+        let response = self.http.execute(self.prepare(request)?)?;
         let status = response.status();
         if status == reqwest::StatusCode::NO_CONTENT {
             return Ok(None);
@@ -1348,6 +1444,117 @@ impl Client {
         Ok(())
     }
 
+    pub fn variable_metadata(&self, application: &str, search_id: &str) -> Result<Vec<Value>> {
+        let reply: Value = self
+            .send(self.http.get(self.url("/variables")))?
+            .context("variable_metadata_empty")?;
+        let metadata = reply
+            .get("variables")
+            .and_then(Value::as_array)
+            .context("variable_metadata_invalid")?;
+        let metadata = metadata
+            .iter()
+            .filter(|v| {
+                v["metadata"]["applications"]
+                    .as_array()
+                    .is_some_and(|apps| apps.iter().any(|a| a == application))
+                    && (v["metadata"]["reuse"] == "reusable"
+                        || v["metadata"]["formation_id"] == search_id)
+            })
+            .collect::<Vec<_>>();
+        ensure!(metadata.len() <= 128, "variable_metadata_bounds");
+        Ok(metadata.iter().map(|v|serde_json::json!({"metadata":v["metadata"],"revoked_at_ms":v["revoked_at_ms"]})).collect())
+    }
+    pub fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>> {
+        let reply: Value = self
+            .send(self.http.get(self.url("/runtimes")))?
+            .context("runtime_capabilities_empty")?;
+        let rows = reply["runtimes"]
+            .as_array()
+            .context("runtime_capabilities_invalid")?;
+        let capabilities = rows.iter().filter(|v| match constraint { RuntimeConstraintWire::Any => true, RuntimeConstraintWire::Exact{runtime_id,..} => v["descriptor"]["runtime_id"] == runtime_id.as_str() }).take(16).map(|v| {
+            let environments = v["descriptor"]["execution_environments"].as_array().into_iter().flatten().map(|e| {
+                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.")) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
+                serde_json::json!({"environment_id":e["environment_id"],"facts_ref":e["facts_ref"],"facts":facts})
+            }).collect::<Vec<_>>();
+            serde_json::json!({"runtime_id":v["descriptor"]["runtime_id"], "environments": environments, "availability": v["availability"]})
+        }).collect::<Vec<_>>();
+        Ok(capabilities)
+    }
+    fn resolve_variables(
+        &self,
+        ticket: &AttemptTicket,
+        requirements: &[ato_formation::variables::VariableRequirement],
+    ) -> Result<Vec<ato_runtime_attempt::variables::ResolvedVariable>> {
+        #[derive(Deserialize)]
+        struct Reply {
+            status: String,
+            #[serde(default)]
+            variables: Vec<Value>,
+        }
+        let reply = loop {
+            let reply: Reply = self
+                .send(
+                    self.http
+                        .post(self.url(&format!(
+                            "/attempts/{}/variables/resolve",
+                            ticket.attempt_id
+                        )))
+                        .json(&json!({"fence":ticket.fence,"requirements":requirements})),
+                )?
+                .context("variable_resolution_empty")?;
+            if reply.status == "resolved" {
+                break reply;
+            }
+            ensure!(reply.status == "needs_input", "variable_resolution_invalid");
+            let deadline = ticket
+                .exploration
+                .as_ref()
+                .and_then(|e| e.deadline_ms)
+                .context("binding_wait_requires_deadline")?;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            ensure!(
+                now < deadline,
+                "needs_input: round deadline elapsed awaiting scoped variable information"
+            );
+            std::thread::sleep(Duration::from_millis(
+                deadline.saturating_sub(now).min(5000),
+            ));
+        };
+        ensure!(
+            reply.variables.len() == requirements.len(),
+            "variable_resolution_mismatch"
+        );
+        let mut variables = Vec::new();
+        for (r, v) in requirements.iter().zip(reply.variables) {
+            ensure!(
+                v.get("name").and_then(Value::as_str) == Some(&r.name)
+                    && v.get("phase") == Some(&serde_json::to_value(r.phase)?),
+                "variable_resolution_mismatch"
+            );
+            variables.push(ato_runtime_attempt::variables::ResolvedVariable::new(
+                r,
+                v.get("grant_ref")
+                    .and_then(Value::as_str)
+                    .context("variable_grant_missing")?
+                    .to_owned(),
+                v.get("value")
+                    .and_then(Value::as_str)
+                    .context("variable_value_missing")?
+                    .to_owned(),
+            )?);
+        }
+        Ok(variables)
+    }
+    fn claim_operation(&self, id: &str) -> Result<Option<AttemptTicket>> {
+        self.send::<Value>(
+            self.http
+                .post(self.url("/attempts/claim"))
+                .json(&json!({"operation_id":id})),
+        )?
+        .map(AttemptTicket::from_wire)
+        .transpose()
+    }
     pub fn claim(&self) -> Result<Option<AttemptTicket>> {
         self.send::<serde_json::Value>(self.http.post(self.url("/attempts/claim")))?
             .map(AttemptTicket::from_wire)
@@ -1383,13 +1590,12 @@ impl Client {
             fs2::available_space(work_root)? >= max_bytes + SourceLimits::default().max_total_bytes,
             "insufficient Runtime scratch capacity"
         );
-        let response = self
+        let request = self
             .http
             .get(self.url(&format!("/attempts/{attempt_id}/{kind}")))
             .header("x-ato-attempt-fence", fence)
-            .bearer_auth(&self.token)
-            .timeout(SOURCE_TRANSFER_TIMEOUT)
-            .send()?;
+            .timeout(SOURCE_TRANSFER_TIMEOUT);
+        let response = self.http.execute(self.prepare(request)?)?;
         anyhow::ensure!(
             response.status().is_success(),
             "source unavailable ({})",
@@ -1493,6 +1699,31 @@ impl Client {
         self.send(self.http.get(self.url(&format!("/satisfy/{id}"))))?
             .context("empty status answer")
     }
+
+    /// Reattach to the same owner's durable exploration. Never resubmit an
+    /// active request, allocate a second search, or reset any frozen budget.
+    pub fn resume_exploration(&self, submission: &Submission) -> Result<serde_json::Value> {
+        let id = &submission.request.search_id;
+        anyhow::ensure!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')),
+            "invalid search id"
+        );
+        let value: serde_json::Value = self
+            .send(
+                self.http
+                    .get(self.url(&format!("/exploration/{id}/resume"))),
+            )?
+            .context("missing exploration restart locator")?;
+        let frozen: ato_formation::search::FrozenSearchV1 =
+            serde_json::from_value(value["frozen"].clone())?;
+        anyhow::ensure!(
+            value["search_id"] == id.as_str()
+                && frozen == proposal::frozen_request(&submission.request)?,
+            "exploration restart identity mismatch"
+        );
+        Ok(value)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────── serving
@@ -1507,6 +1738,7 @@ pub struct ServeConfig {
     pub poll: Duration,
     /// Handle at most this many tickets, then return.
     pub max_tickets: Option<u32>,
+    pub exploration: Option<ExplorationSandbox>,
 }
 
 /// Join the Runtime Network: advertise, report availability, and execute the
@@ -1561,13 +1793,14 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
         })
     };
 
+    let delivery = delivery::Delivery::open(&config.out_dir.join("delivery"))?;
     let mut handled = 0_u32;
     let outcome = (|| -> Result<()> {
         loop {
             if config.max_tickets.is_some_and(|max| handled >= max) {
                 return Ok(());
             }
-            let ticket = match client.claim() {
+            let ticket = match delivery.claim(&client) {
                 Ok(Some(ticket)) => ticket,
                 Ok(None) => {
                     std::thread::sleep(config.poll);
@@ -1576,9 +1809,7 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 // A coordinator or link that drops a request is not a reason
                 // to leave the network; the next poll tries again.
                 Err(error) => {
-                    eprintln!("[runtime-network] claim failed, retrying: {error:#}");
-                    std::thread::sleep(config.poll * 5);
-                    continue;
+                    return Err(error);
                 }
             };
             busy.store(1, Ordering::Relaxed);
@@ -1587,23 +1818,35 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
             );
-            let report = execute_ticket_with_publication(
-                config,
-                &ticket,
-                || {
-                    client.download_input(
-                        &ticket.attempt_id,
-                        ticket.resource_budget.transfer_bytes,
-                        ticket.fence,
-                        &config.work_root,
-                        match ticket.input {
-                            AttemptInput::Source { .. } => "source",
-                            AttemptInput::Retained { .. } => "retained-content",
-                        },
-                    )
-                },
-                Some(&client),
-            );
+            let report = if let Some(saved) = delivery.saved_report()? {
+                saved
+            } else {
+                let attempt_client = ticket
+                    .exploration
+                    .as_ref()
+                    .and_then(|e| e.deadline_ms)
+                    .map_or_else(
+                        || client.as_ref().clone(),
+                        |deadline| client.with_deadline(deadline),
+                    );
+                execute_ticket_with_publication(
+                    config,
+                    &ticket,
+                    || {
+                        attempt_client.download_input(
+                            &ticket.attempt_id,
+                            ticket.resource_budget.transfer_bytes,
+                            ticket.fence,
+                            &config.work_root,
+                            match ticket.input {
+                                AttemptInput::Source { .. } => "source",
+                                AttemptInput::Retained { .. } => "retained-content",
+                            },
+                        )
+                    },
+                    Some(&attempt_client),
+                )
+            };
             eprintln!(
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
@@ -1615,18 +1858,7 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
             // A result that cannot be delivered is retried; if it never is,
             // the coordinator records the attempt as UNKNOWN: it was claimed,
             // and nobody can say what it did.
-            for retry in 0..5 {
-                match client.report(&ticket.attempt_id, &report) {
-                    Ok(()) => break,
-                    Err(error) => {
-                        eprintln!(
-                            "[runtime-network] report failed (try {}): {error:#}",
-                            retry + 1
-                        );
-                        std::thread::sleep(Duration::from_secs(3));
-                    }
-                }
-            }
+            delivery.report(&client, &ticket, &report)?;
             handled += 1;
         }
     })();
@@ -1823,6 +2055,17 @@ fn execute_planned_ticket(
             .min(ticket.resource_budget.expanded_bytes),
         ..ceiling
     };
+    let source_oci_archive = match archive.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "source_unavailable",
+                &error.to_string(),
+            );
+        }
+    };
     let verified = match FileVerifiedArchive::verify(
         archive,
         archive_digest,
@@ -1914,9 +2157,78 @@ fn execute_planned_ticket(
         );
     }
 
-    let network = match ticket.network.as_str() {
-        "dependency-resolution" => NetworkPolicy::DependencyResolution,
-        _ => NetworkPolicy::Denied,
+    if ticket
+        .exploration
+        .as_ref()
+        .and_then(|e| e.deadline_ms)
+        .is_some_and(|deadline| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+                >= deadline
+        })
+    {
+        return refused_after_expansion(
+            attested.clone(),
+            "round_deadline_exceeded",
+            "the round deadline elapsed before execution",
+        );
+    }
+    let resolved_variables = if planned.derivation.variable_bindings.is_empty() {
+        vec![]
+    } else {
+        match publisher
+            .context("variable_resolver_unavailable")
+            .and_then(|client| {
+                client.resolve_variables(ticket, &planned.derivation.variable_bindings)
+            }) {
+            Ok(v) => v,
+            Err(error) => {
+                return refused_after_expansion(
+                    attested.clone(),
+                    "needs_input",
+                    &format!("{error:#}"),
+                );
+            }
+        }
+    };
+    let scoped = ticket
+        .exploration
+        .as_ref()
+        .map(|exploration| {
+            exploration::ScopedGates::start(
+                exploration,
+                config.exploration.as_ref(),
+                &planned.derivation.requirements,
+                &attempt_root.join("network"),
+            )
+        })
+        .transpose();
+    let scoped = match scoped {
+        Ok(scoped) => scoped,
+        Err(error) => {
+            let code = error.to_string();
+            return refused_after_expansion(
+                attested.clone(),
+                if code.starts_with("exploration_") {
+                    code.split(':')
+                        .next()
+                        .unwrap_or("exploration_admission_failed")
+                } else {
+                    "exploration_admission_failed"
+                },
+                &code,
+            );
+        }
+    };
+    let network = if scoped.is_some() {
+        NetworkPolicy::Scoped
+    } else {
+        match ticket.network.as_str() {
+            "dependency-resolution" => NetworkPolicy::DependencyResolution,
+            _ => NetworkPolicy::Denied,
+        }
     };
     // A Runtime Network attempt is never verified outside the verifier
     // sandbox, whatever the worker was started with.
@@ -1932,42 +2244,133 @@ fn execute_planned_ticket(
             budget: Default::default(),
         });
     let spec = planned.attempt_spec();
-    let outcome = run_reserved_attempt(
-        &AttemptRequest {
-            // Every attempt of one satisfy request spends from it: a
-            // redelivered ticket, or another route after an UNKNOWN one, is
-            // held by the same record.
-            request_id: &ticket.satisfy_id,
-            attempt_id: &ticket.attempt_id,
-            label: "authored",
-            spec: &spec,
-            contract_ref: &contract_ref,
-            runtime_id: &ticket.runtime_id,
-            profile: &local::probe_local_runtime(),
-            // A ticket runs unattended, and may be retried elsewhere.
-            authorization: EffectAuthorization::Unattended,
-            network,
-            browser: browser.as_ref(),
-            attempt_root,
-            // The Runtime keeps the artifact for the coordinator, not the
-            // running candidate.
-            continuation: Continuation::Stop,
-            receipt: ReceiptContext::formation(),
-            interrupt: None,
+    let builder = LocalAttemptExecutor {
+        shim: config.shim.clone(),
+        network,
+        limits: BuildLimits {
+            wall_clock_seconds: ticket
+                .exploration
+                .as_ref()
+                .and_then(|e| e.deadline_ms)
+                .map_or(900, |deadline| {
+                    deadline
+                        .saturating_sub(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        )
+                        .saturating_sub(45_000)
+                        / 1000
+                }),
+            ..BuildLimits::default()
         },
-        &FormationRealizer {
-            planned: &planned,
-            source_root: &frozen.root,
-            builder: &LocalAttemptExecutor {
-                shim: config.shim.clone(),
-                network,
-                limits: BuildLimits::default(),
+    };
+    let legacy = FormationRealizer {
+        planned: &planned,
+        source_root: &frozen.root,
+        builder: &builder,
+        shim: &config.shim,
+        network,
+    };
+    let network_refusal = |phase| scoped.as_ref().and_then(|gates| gates.first_refusal(phase));
+    let exploring = ticket
+        .exploration
+        .as_ref()
+        .zip(scoped.as_ref())
+        .map(
+            |(grant, gates)| ato_runtime_attempt::exploration_realizer::ExplorationRealizer {
+                variables: &resolved_variables,
+                planned: &planned,
+                source_root: &frozen.root,
+                builder: &builder,
+                shim: &config.shim,
+                ceiling: &grant.ceiling,
+                gates: &gates.sockets,
+                network_refusal: Some(&network_refusal),
             },
-            shim: &config.shim,
-            network,
-        },
-        Ok(permit),
-    );
+        );
+    let source_oci = ticket
+        .exploration
+        .as_ref()
+        .filter(|_| planned.derivation.source_oci.is_some())
+        .map(|grant| source_oci_exploration::SourceOciRealizer {
+            planned: &planned,
+            archive: &source_oci_archive,
+            archive_digest,
+            source_root: &frozen.root,
+            artifact_root: &config.out_dir,
+            stored_limit: ticket.resource_budget.stored_bytes,
+            ticket: grant,
+            configured: config
+                .exploration
+                .as_ref()
+                .and_then(|c| c.source_oci.as_ref()),
+            artifact: std::cell::RefCell::new(None),
+        });
+    let realizer: &dyn ato_runtime_attempt::realize::CandidateRealizer = source_oci
+        .as_ref()
+        .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
+        .or_else(|| {
+            exploring
+                .as_ref()
+                .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
+        })
+        .unwrap_or(&legacy);
+    let deadline = ticket.exploration.as_ref().and_then(|e| e.deadline_ms);
+    let expired = std::sync::atomic::AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        let (cancel, wait) = std::sync::mpsc::channel();
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_sub(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
+            let expired = &expired;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_millis(remaining)).is_err() {
+                    expired.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        let outcome = run_reserved_attempt(
+            &AttemptRequest {
+                // Every attempt of one satisfy request spends from it: a
+                // redelivered ticket, or another route after an UNKNOWN one, is
+                // held by the same record.
+                request_id: &ticket.satisfy_id,
+                attempt_id: &ticket.attempt_id,
+                label: "authored",
+                spec: &spec,
+                contract_ref: &contract_ref,
+                runtime_id: &ticket.runtime_id,
+                profile: &local::probe_local_runtime(),
+                // A ticket runs unattended, and may be retried elsewhere.
+                authorization: ticket
+                    .exploration
+                    .as_ref()
+                    .map(|grant| EffectAuthorization::Exploration {
+                        derivation_ref: &ticket.derivation_ref,
+                        grant: &grant.ceiling,
+                    })
+                    .unwrap_or(EffectAuthorization::Unattended),
+                network,
+                browser: browser.as_ref(),
+                attempt_root,
+                // The Runtime keeps the artifact for the coordinator, not the
+                // running candidate.
+                continuation: Continuation::Stop,
+                receipt: ReceiptContext::formation(),
+                interrupt: deadline.map(|_| &expired),
+            },
+            realizer,
+            Ok(permit),
+        );
+        let _ = cancel.send(());
+        outcome
+    });
     attested.execution_started = outcome.execution_started();
     attested.attempt_record = outcome.attempt_record;
     let mut attempt = outcome.attempt;
@@ -2021,8 +2424,43 @@ fn execute_planned_ticket(
     };
 
     let mut report = attempt_report(ticket, &attempt, attested, materialization_ref, None, usage);
+    if let Some(artifact) = source_oci.and_then(|r| r.artifact.into_inner()) {
+        report.resource_usage.stored_bytes = report
+            .resource_usage
+            .stored_bytes
+            .saturating_add(artifact["stored_bytes"].as_u64().unwrap_or(0));
+        report.verifier_receipts.push(artifact);
+    }
+    if let Some(gates) = scoped.as_ref() {
+        report.verifier_receipts.push(gates.evidence());
+        if let Ok(facts) = ato_runtime_attempt::execution_facts::read(
+            &attempt_root.join("control/execution-facts.jsonl"),
+        ) {
+            report
+                .verifier_receipts
+                .push(serde_json::json!({"kind":"exploration_execution_facts","facts":facts}));
+        }
+    }
+    if ticket.exploration.is_some()
+        && report
+            .failure
+            .as_ref()
+            .is_some_and(|f| f.code == "authority_denied")
+    {
+        let denied = ato_runtime_attempt::exploration_realizer::required_isolated_authority(
+            &planned.derivation,
+        )
+        .into_iter()
+        .filter(|a| !planned.derivation.requirements.authority.contains(a))
+        .collect::<Vec<_>>();
+        report
+            .verifier_receipts
+            .push(serde_json::json!({"kind":"exploration_authority_evidence","refused":denied}));
+    }
+
     if let Some(publisher) = publisher
         && report.outcome == "pass"
+        && planned.derivation.source_oci.is_none()
     {
         let publication = (|| -> Result<String> {
             let executed = outcome
@@ -2132,6 +2570,36 @@ fn execute_retained_ticket(
     attested.effects = Some(effects_name(planned.derivation.effects));
     attested.requirements = requirements;
     attested.provisions = provisions;
+    let scoped = match ticket
+        .exploration
+        .as_ref()
+        .map(|grant| {
+            exploration::ScopedGates::start(
+                grant,
+                config.exploration.as_ref(),
+                &planned.derivation.requirements,
+                &attempt_root.join("control"),
+            )
+        })
+        .transpose()
+    {
+        Ok(gates) => gates,
+        Err(e) => {
+            let code = e.to_string();
+            return refused(
+                ticket,
+                attested.clone(),
+                if code.starts_with("exploration_") {
+                    code.split(':')
+                        .next()
+                        .unwrap_or("exploration_admission_failed")
+                } else {
+                    "exploration_admission_failed"
+                },
+                &format!("{e:#}"),
+            );
+        }
+    };
     let browser = ticket
         .browser_contract
         .as_ref()
@@ -2153,7 +2621,14 @@ fn execute_retained_ticket(
             contract_ref: &ticket.contract_ref,
             runtime_id: &ticket.runtime_id,
             profile: &local::probe_local_runtime(),
-            authorization: EffectAuthorization::Unattended,
+            authorization: ticket
+                .exploration
+                .as_ref()
+                .map(|g| EffectAuthorization::Exploration {
+                    derivation_ref: &ticket.derivation_ref,
+                    grant: &g.ceiling,
+                })
+                .unwrap_or(EffectAuthorization::Unattended),
             network: NetworkPolicy::Denied,
             browser: browser.as_ref(),
             attempt_root,
@@ -2168,6 +2643,17 @@ fn execute_retained_ticket(
             expected_derivation_ref: &ticket.derivation_ref,
             expanded_limit: ticket.resource_budget.expanded_bytes,
             shim: &config.shim,
+            exploration: ticket
+                .exploration
+                .as_ref()
+                .zip(scoped.as_ref())
+                .map(
+                    |(g, s)| ato_runtime_attempt::retained::RetainedExploration {
+                        ceiling: &g.ceiling,
+                        runtime_gate: &s.sockets
+                            [&ato_formation::requirements::ExecutionPhase::Runtime],
+                    },
+                ),
         },
         Ok(permit),
     );
@@ -2304,9 +2790,7 @@ impl Client {
         budget.validate()?;
         let response = self
             .http
-            .get(self.url(&format!("/retained/{reference}")))
-            .bearer_auth(&self.token)
-            .send()?;
+            .execute(self.prepare(self.http.get(self.url(&format!("/retained/{reference}"))))?)?;
         anyhow::ensure!(
             response.status().is_success(),
             "retained descriptor unavailable ({})",
@@ -2353,6 +2837,7 @@ impl Client {
                     decision: None,
                     generation: None,
                     proposal: None,
+                    exploration: None,
                 },
                 budget,
             },
@@ -2408,5 +2893,86 @@ fn attempt_report(
         verifier_receipts: receipts,
         attestation: attested.clone(),
         resource_usage: usage,
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn frozen_deadline_caps_source_and_status_timeouts_and_never_expands() {
+        let client = Client::new("http://127.0.0.1:1", "private").unwrap();
+        let bounded = client
+            .with_deadline(now_ms() + 1000)
+            .with_deadline(now_ms() + 60_000);
+        let source = bounded
+            .prepare(
+                bounded
+                    .http
+                    .get(bounded.url("/source"))
+                    .timeout(SOURCE_TRANSFER_TIMEOUT),
+            )
+            .unwrap();
+        assert!(source.timeout().unwrap() <= &Duration::from_secs(1));
+        let status = bounded
+            .prepare(bounded.http.get(bounded.url("/status")))
+            .unwrap();
+        assert!(status.timeout().unwrap() <= &Duration::from_secs(1));
+        let short = bounded
+            .prepare(
+                bounded
+                    .http
+                    .get(bounded.url("/status"))
+                    .timeout(Duration::from_millis(1)),
+            )
+            .unwrap();
+        assert_eq!(short.timeout(), Some(&Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn expired_operation_does_not_dispatch_and_slow_http_read_stops_at_deadline() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = Client::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "private",
+        )
+        .unwrap();
+        let expired = client.with_deadline(now_ms().saturating_sub(1));
+        let error = expired
+            .send::<Value>(expired.http.get(expired.url("/status")))
+            .unwrap_err();
+        assert!(error.to_string().contains("deadline elapsed"));
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        listener.set_nonblocking(false).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(350));
+            let _ = stream.write_all(b"{}");
+        });
+        let bounded = client.with_deadline(now_ms() + 100);
+        let started = std::time::Instant::now();
+        let error = bounded
+            .send::<Value>(bounded.http.get(bounded.url("/status")))
+            .unwrap_err();
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
     }
 }

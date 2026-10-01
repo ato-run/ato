@@ -11,6 +11,7 @@ pub const MAX_SOURCE_ENTRY_BYTES: usize = 8 * 1024;
 pub enum SourceContextKind {
     Entrypoint,
     Module,
+    VerifiedFile,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceEncoding {
@@ -48,6 +49,11 @@ pub enum ProposalRequestV2Schema {
 pub struct ProposalRequestV2 {
     pub schema: ProposalRequestV2Schema,
     pub search_id: String,
+    /// Only opt-in exploration uses multi-round call keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_seq: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration_context: Option<ExplorationContext>,
     pub frozen_contract: crate::authoring::BoundContract,
     pub runtime_constraint: crate::search::RuntimeConstraint,
     pub known_derivations: Vec<String>,
@@ -57,10 +63,83 @@ pub struct ProposalRequestV2 {
     pub remaining_budget: ProposalBudget,
     pub source_context: Vec<SourceContextEntry>,
 }
+/// Bounded public execution evidence. No Runtime identity, secret, host path,
+/// binding or private source-ID resolution is included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationFailure {
+    pub derivation_ref: String,
+    pub stage: String,
+    pub code: String,
+    pub exit_code: Option<i32>,
+    pub log_tail: String,
+    pub artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_denials: Vec<crate::requirements::NetworkRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authority_denials: Vec<crate::requirements::AuthorityRequirement>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationContext {
+    pub effective_max_rounds: u32,
+    pub ceiling: crate::requirements::ExecutionRequirements,
+    pub previous_derivations: Vec<crate::authoring::BoundDerivation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_plan: Option<super::ExecutionPlanProposal>,
+    pub failures: Vec<ExplorationFailure>,
+    pub successful_derivation_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successful_derivation: Option<crate::authoring::BoundDerivation>,
+    pub proposal_diagnostics: Vec<String>,
+}
+impl ExplorationContext {
+    fn validate(&self) -> Result<(), ProposalError> {
+        self.ceiling.validate().map_err(|e| ProposalError(e.0))?;
+        if self.effective_max_rounds == 0
+            || self
+                .successful_derivation
+                .as_ref()
+                .is_some_and(|d| d.derivation_ref().ok() != self.successful_derivation_ref)
+            || self
+                .previous_plan
+                .as_ref()
+                .is_some_and(|p| serde_json::to_vec(p).map_or(true, |b| b.len() > 8192))
+            || self.previous_derivations.len() > 3
+            || self.failures.len() > 4
+            || self.proposal_diagnostics.len() > 4
+            || self.failures.iter().any(|f| {
+                !crate::generation::is_sha256(&f.derivation_ref)
+                    || f.stage.len() > 32
+                    || f.code.len() > 96
+                    || f.log_tail.len() > 2048
+                    || f.artifacts.len() > 8
+                    || f.artifacts.iter().any(|a| !crate::generation::is_sha256(a))
+                    || f.network_denials.len() > 16
+                    || f.authority_denials.len() > 16
+                    || (crate::requirements::ExecutionRequirements {
+                        network: f.network_denials.clone(),
+                        authority: f.authority_denials.clone(),
+                    })
+                    .validate()
+                    .is_err()
+            })
+            || self.proposal_diagnostics.iter().any(|c| c.len() > 96)
+            || serde_jcs::to_vec(self).map_or(true, |b| b.len() > 16 * 1024)
+        {
+            return Err(ProposalError("exploration_context_bounds"));
+        }
+        Ok(())
+    }
+}
 fn authorized(auth: &ProposalAuthorization, kind: SourceContextKind, id: &str) -> bool {
     match kind {
         SourceContextKind::Entrypoint => auth.source_domain.entrypoints.contains_key(id),
         SourceContextKind::Module => auth.source_domain.modules.contains_key(id),
+        SourceContextKind::VerifiedFile => auth
+            .execution_plan
+            .as_ref()
+            .is_some_and(|p| p.files.contains_key(id)),
     }
 }
 fn text(bytes: &[u8]) -> Option<&str> {
@@ -137,6 +216,8 @@ impl ProposalRequestV2 {
         let value = Self {
             schema: ProposalRequestV2Schema::V2,
             search_id: request.search_id,
+            round_seq: None,
+            exploration_context: None,
             frozen_contract: request.frozen_contract,
             runtime_constraint: request.runtime_constraint,
             known_derivations: request.known_derivations,
@@ -151,6 +232,20 @@ impl ProposalRequestV2 {
     }
     pub fn validate(&self, auth: &ProposalAuthorization) -> Result<(), ProposalError> {
         auth.validate()?;
+        if let Some(context) = &self.exploration_context {
+            context.validate()?;
+        }
+        if self.exploration_context.is_some() != self.round_seq.is_some()
+            || self.round_seq.is_some_and(|r| {
+                r == 0
+                    || self
+                        .exploration_context
+                        .as_ref()
+                        .is_none_or(|c| r > c.effective_max_rounds)
+            })
+        {
+            return Err(ProposalError("exploration_round_invalid"));
+        }
         if !auth.policy.allow_source_text {
             return Err(ProposalError("source_text_disabled"));
         }

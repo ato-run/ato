@@ -1,0 +1,342 @@
+
+ RUN  v3.2.4 /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mProcessing wrangler.toml configuration:[0m
+
+    - Unexpected fields found in observability field: "persist"
+    - Unexpected fields found in observability field: "persist"
+
+
+[vpw:info] Starting isolated runtimes for 0...
+ ✓ |workers| src/tests/runtime-network-search-state.test.ts (17 tests) 3574ms
+   ✓ shared Rust SearchState canonical fixtures in real bounded WASM > unknown  1350ms
+   ✓ exploration wire through the exact Rust authority > uses the frozen reasoning timeout and goal through the actual Worker WASM  694ms
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+ ✓ |workers| src/tests/runtime-network-exploration-network-budget.test.ts (3 tests) 3892ms
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+ ✓ |workers| src/tests/formation-variable-bindings.test.ts (5 tests) 4074ms
+workerd/jsg/util.c++:395: info: exception = kj/async-io.c++:1713: disconnected: fixed-length pipe ended prematurely
+stack: 104c8e3a3 104c8e593 104c733db 103047ef0 1032edd7c 10324e5d3 1031520bb 102e1c158 102f73300 1026d209c
+workerd/io/worker.c++:2168: info: uncaught exception; source = Uncaught (in promise); stack = Error: Network connection lost.
+workerd/jsg/util.c++:395: info: exception = kj/async-io.c++:1713: disconnected: fixed-length pipe ended prematurely
+stack: 104c8e3a3 104c8e593 104c733db 103047ef0 1032edd7c 10324e5d3 1031520bb 102e1c158 102f73300 1026d209c
+workerd/io/worker.c++:2168: info: uncaught exception; source = Uncaught (in promise); stack = Error: Network connection lost.
+workerd/io/worker.c++:2168: info: uncaught exception; source = Uncaught (in promise); stack = TypeError: Can't read from request stream because client disconnected.
+ ✓ |workers| src/tests/runtime-network-proposal-migration.test.ts (28 tests) 5609ms
+ ✓ |workers| src/tests/runtime-network-exploration-upgrade.test.ts (2 tests) 7139ms
+   ✓ lost claim and completion responses recover the same fence and revision  3734ms
+   ✓ 0308 preserves exact historical raw/candidate/provider rows and foreign keys  3403ms
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > hardening: polling repairs a crash after pass CAS before route insert exactly once
+DrizzleQueryError: Failed query: insert into "verified_routes" ("id", "effective_contract_ref", "derivation_ref", "runtime_id", "environment_id", "capability_profile_ref", "agent_version", "retained_ref", "verifier_receipts_json", "satisfy_id", "attempt_id", "verified_at") values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict ("verified_routes"."attempt_id") do nothing
+params: 01M3VG3YQ77XGNTGZK8Z57HJDP,sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5,sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,rnr_01M3VG3YN43XVNTTVTDYZ7BAH6,native,sha256:c5b8a546d7505b59e24f536776d07246390040109e3a73d9017294796c9a23f1,0.0.0-test,,[{"kind":"contract_verification","receipt":{"contract_ref":"sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5","derivation_ref":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","execution":{"attempt_id":"01M3VG3YPGY6ZAHWFF3GKFX82F","realization":"process","request_id":"01M3VG3YNZJP2ASZ3HCZJ7GTKQ"},"fully_satisfied":true,"observations":[{"evidence":{"body_sha256":"sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4","method":"GET","path":"/","status":200},"id":"root","outcome":"satisfied"}],"schema":"ato.contract-verification-receipt/1","target":{"kind":"formation-runtime"}}}],01M3VG3YNZJP2ASZ3HCZJ7GTKQ,01M3VG3YPGY6ZAHWFF3GKFX82F,2026-10-01T10:28:17.243Z
+    at D1PreparedQuery.queryWithCache (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/sqlite-core/session.js:43:15)
+    at D1PreparedQuery.run (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/d1/session.js:119:12)
+    ... 5 lines matching cause stack trace ...
+    at bodyLimit2 (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/middleware/body-limit/index.js:54:5)
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25 {
+  query: 'insert into "verified_routes" ("id", "effective_contract_ref", "derivation_ref", "runtime_id", "environment_id", "capability_profile_ref", "agent_version", "retained_ref", "verifier_receipts_json", "satisfy_id", "attempt_id", "verified_at") values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict ("verified_routes"."attempt_id") do nothing',
+  params: [
+    '01M3VG3YQ77XGNTGZK8Z57HJDP',
+    'sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5',
+    'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+    'rnr_01M3VG3YN43XVNTTVTDYZ7BAH6',
+    'native',
+    'sha256:c5b8a546d7505b59e24f536776d07246390040109e3a73d9017294796c9a23f1',
+    '0.0.0-test',
+    null,
+    '[{"kind":"contract_verification","receipt":{"contract_ref":"sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5","derivation_ref":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","execution":{"attempt_id":"01M3VG3YPGY6ZAHWFF3GKFX82F","realization":"process","request_id":"01M3VG3YNZJP2ASZ3HCZJ7GTKQ"},"fully_satisfied":true,"observations":[{"evidence":{"body_sha256":"sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4","method":"GET","path":"/","status":200},"id":"root","outcome":"satisfied"}],"schema":"ato.contract-verification-receipt/1","target":{"kind":"formation-runtime"}}}]',
+    '01M3VG3YNZJP2ASZ3HCZJ7GTKQ',
+    '01M3VG3YPGY6ZAHWFF3GKFX82F',
+    '2026-10-01T10:28:17.243Z'
+  ],
+  cause: Error: D1_ERROR: injected crash before route: SQLITE_CONSTRAINT
+      at D1DatabaseSessionAlwaysPrimary._sendOrThrow (cloudflare-internal:d1-api:127:19)
+      at D1PreparedStatement.run (cloudflare-internal:d1-api:311:29)
+      ... 7 lines matching cause stack trace ...
+      at bodyLimit2 (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/middleware/body-limit/index.js:54:5) {
+    [cause]: Error: injected crash before route: SQLITE_CONSTRAINT
+        at D1DatabaseSessionAlwaysPrimary._sendOrThrow (cloudflare-internal:d1-api:128:24)
+        at D1PreparedStatement.run (cloudflare-internal:d1-api:311:29)
+        at D1PreparedQuery.queryWithCache (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/sqlite-core/session.js:41:16)
+        at D1PreparedQuery.run (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/d1/session.js:119:12)
+        at restorePassedRoute (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:1927:3)
+        at advance (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:1333:18)
+        at recordResult (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2121:3)
+        at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:225:9
+        at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+        at bodyLimit2 (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/middleware/body-limit/index.js:54:5)
+  }
+}
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > hardening: redelivery repairs a crash after pass CAS before route insert exactly once
+DrizzleQueryError: Failed query: insert into "verified_routes" ("id", "effective_contract_ref", "derivation_ref", "runtime_id", "environment_id", "capability_profile_ref", "agent_version", "retained_ref", "verifier_receipts_json", "satisfy_id", "attempt_id", "verified_at") values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict ("verified_routes"."attempt_id") do nothing
+params: 01M3VG3YXZDGP4NXSH7WHF2AZZ,sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5,sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,rnr_01M3VG3YVRW6YQX9BC2VMPZS6T,native,sha256:c5b8a546d7505b59e24f536776d07246390040109e3a73d9017294796c9a23f1,0.0.0-test,,[{"kind":"contract_verification","receipt":{"contract_ref":"sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5","derivation_ref":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","execution":{"attempt_id":"01M3VG3YX43VXN5VRRH9KA881E","realization":"process","request_id":"01M3VG3YWPN1JG1951ZV008M5X"},"fully_satisfied":true,"observations":[{"evidence":{"body_sha256":"sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4","method":"GET","path":"/","status":200},"id":"root","outcome":"satisfied"}],"schema":"ato.contract-verification-receipt/1","target":{"kind":"formation-runtime"}}}],01M3VG3YWPN1JG1951ZV008M5X,01M3VG3YX43VXN5VRRH9KA881E,2026-10-01T10:28:17.455Z
+    at D1PreparedQuery.queryWithCache (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/sqlite-core/session.js:43:15)
+    at D1PreparedQuery.run (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/d1/session.js:119:12)
+    ... 5 lines matching cause stack trace ...
+    at bodyLimit2 (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/middleware/body-limit/index.js:54:5)
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25 {
+  query: 'insert into "verified_routes" ("id", "effective_contract_ref", "derivation_ref", "runtime_id", "environment_id", "capability_profile_ref", "agent_version", "retained_ref", "verifier_receipts_json", "satisfy_id", "attempt_id", "verified_at") values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict ("verified_routes"."attempt_id") do nothing',
+  params: [
+    '01M3VG3YXZDGP4NXSH7WHF2AZZ',
+    'sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5',
+    'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+    'rnr_01M3VG3YVRW6YQX9BC2VMPZS6T',
+    'native',
+    'sha256:c5b8a546d7505b59e24f536776d07246390040109e3a73d9017294796c9a23f1',
+    '0.0.0-test',
+    null,
+    '[{"kind":"contract_verification","receipt":{"contract_ref":"sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5","derivation_ref":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","execution":{"attempt_id":"01M3VG3YX43VXN5VRRH9KA881E","realization":"process","request_id":"01M3VG3YWPN1JG1951ZV008M5X"},"fully_satisfied":true,"observations":[{"evidence":{"body_sha256":"sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4","method":"GET","path":"/","status":200},"id":"root","outcome":"satisfied"}],"schema":"ato.contract-verification-receipt/1","target":{"kind":"formation-runtime"}}}]',
+    '01M3VG3YWPN1JG1951ZV008M5X',
+    '01M3VG3YX43VXN5VRRH9KA881E',
+    '2026-10-01T10:28:17.455Z'
+  ],
+  cause: Error: D1_ERROR: injected crash before route: SQLITE_CONSTRAINT
+      at D1DatabaseSessionAlwaysPrimary._sendOrThrow (cloudflare-internal:d1-api:127:19)
+      at D1PreparedStatement.run (cloudflare-internal:d1-api:311:29)
+      ... 7 lines matching cause stack trace ...
+      at bodyLimit2 (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/middleware/body-limit/index.js:54:5) {
+    [cause]: Error: injected crash before route: SQLITE_CONSTRAINT
+        at D1DatabaseSessionAlwaysPrimary._sendOrThrow (cloudflare-internal:d1-api:128:24)
+        at D1PreparedStatement.run (cloudflare-internal:d1-api:311:29)
+        at D1PreparedQuery.queryWithCache (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/sqlite-core/session.js:41:16)
+        at D1PreparedQuery.run (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/drizzle-orm@0.45.2_@cloudflare+workers-types@4.20260206.0_@opentelemetry+api@1.9.0_gel@2.2.0_kysely@0.29.5/node_modules/drizzle-orm/d1/session.js:119:12)
+        at restorePassedRoute (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:1927:3)
+        at advance (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:1333:18)
+        at recordResult (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2121:3)
+        at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:225:9
+        at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+        at bodyLimit2 (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/middleware/body-limit/index.js:54:5)
+  }
+}
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > 5b-a: ignored generation insert at the same revision fails visibly and can recover
+Error: generation_open_refused
+    at advance (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:1265:13)
+    at recordResult (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2121:3)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:225:9
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at bodyLimit2 (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/middleware/body-limit/index.js:54:5)
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:3796:15
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20
+
+workerd/jsg/setup.c++:579: info: CODE_MOVED for unknown code block?
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > D1 rehydration fails closed on corrupt call_row
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:232:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > D1 rehydration fails closed on corrupt missing_call
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:232:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > D1 rehydration fails closed on corrupt round_envelope
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:232:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > C1 restart recompilation refuses corrupted recipe without issuing more work
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:303:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > C1 restart recompilation refuses corrupted derivation without issuing more work
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:303:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > C1 restart recompilation refuses corrupted candidate without issuing more work
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:303:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > C1 restart recompilation refuses corrupted raw without issuing more work
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:257:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > C1 restart recompilation refuses corrupted digest without issuing more work
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:257:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > C1 restart recompilation refuses corrupted provenance without issuing more work
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:268:13)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+stderr | src/tests/runtime-network.test.ts > Runtime Network coordinator > C1 restart recompilation refuses corrupted missing_member without issuing more work
+Error: proposal_persisted_mismatch
+    at rehydrateProposal (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:286:11)
+    at rehydrateProposalHistory (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/proposal_storage.ts:322:19)
+    at loadSatisfy (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:888:21)
+    at satisfyView (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/services/runtime_network/coordinator.ts:2942:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/routes/runtime_network.ts:385:18
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/middleware/auth.ts:209:5
+    at dispatch (Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/compose.js:22:17)
+    at Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/formation-proposal-receiver/node_modules/.pnpm/hono@4.11.8/node_modules/hono/dist/hono-base.js:301:25
+    at call (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001/src/tests/runtime-network.test.ts:94:20)
+
+ ✓ |workers| src/tests/runtime-network.test.ts (155 tests) 48764ms
+   ✓ Runtime Network coordinator > 3d: readiness, owner and assignment gates; immutable publication and idempotent concurrency  506ms
+   ✓ Runtime Network coordinator > 3d: ready object replay uses fresh assignment, charges transfer, and cannot fetch source  354ms
+   ✓ Runtime Network coordinator > A: the same K and D verified on Linux x86_64 and Linux ARM64 gives two routes  322ms
+   ✓ Runtime Network coordinator > a pass is not a route unless the Runtime attests it ran this ticket, here, as a disposable route  402ms
+   ✓ Runtime Network coordinator > 3b L: concurrent expiration, result and advance cannot issue after UNKNOWN  1052ms
+   ✓ Runtime Network coordinator > J: no ticket is issued to a candidate once it is full  402ms
+   ✓ Runtime Network coordinator > K: concurrent advances issue one ticket, and the database refuses a second  342ms
+   ✓ Runtime Network coordinator > Stage5a: a chosen answer reorders the frozen default once and is reused, never re-asked  497ms
+   ✓ Runtime Network coordinator > Stage5a: out-of-set, provider failure and silence all take the deterministic default  1650ms
+   ✓ Runtime Network coordinator > Stage5a: malformed answers and another account are refused without recording  900ms
+   ✓ Runtime Network coordinator > Stage5a: a spent decision budget issues the default without opening a point  724ms
+   ✓ Runtime Network coordinator > Stage5a: the database refuses a ticket past an open point and a second or unoffered answer  955ms
+   ✓ Runtime Network coordinator > Stage5a: an answer after the deadline never becomes the decision: timeout, then the default  462ms
+   ✓ Runtime Network coordinator > Stage5a: timeout and a racing choice at the deadline settle exactly one outcome  1977ms
+   ✓ Runtime Network coordinator > Stage5a: provider failures spend the decision budget; no point past max_decisions  1577ms
+   ✓ Runtime Network coordinator > 5b-a: real WASM admits D beside frozen candidates through existing ticket/receipt (exact=false)  424ms
+   ✓ Runtime Network coordinator > 5b-a: real WASM admits D beside frozen candidates through existing ticket/receipt (exact=true)  365ms
+   ✓ Runtime Network coordinator > 5b-b: Exact exhausts both known Ds before generation (parent_first)  473ms
+   ✓ Runtime Network coordinator > 5b-b: Exact exhausts both known Ds before generation (parent_last)  523ms
+   ✓ Runtime Network coordinator > 5b-b: Exact known-D success never opens generation (parent_last)  346ms
+   ✓ Runtime Network coordinator > 5b-a: concurrent claims authorize only one model invocation, restart preserves claim and snapshot  400ms
+   ✓ Runtime Network coordinator > 5b-a: provider_error consumes the single point without issuing another ticket  448ms
+   ✓ Runtime Network coordinator > 5b-a: declined consumes the single point without issuing another ticket  417ms
+   ✓ Runtime Network coordinator > 5b-a: timeout consumes the single point without issuing another ticket  352ms
+   ✓ Runtime Network coordinator > 5b-b: invalid durably preserves bounded observed usage without a draft or D  313ms
+   ✓ Runtime Network coordinator > 5b-b: timeout durably preserves bounded observed usage without a draft or D  395ms
+   ✓ Runtime Network coordinator > 5b-a: invalid consumes the sole point without adding D  316ms
+   ✓ Runtime Network coordinator > 5b-a: stale/unclaimed/non-owner results and arbitrary payload fields cannot become a D  516ms
+   ✓ Runtime Network coordinator > 5b-a: wrapped DB completion conflict returns 409 and leaves the point writable  321ms
+   ✓ Runtime Network coordinator > 5b-a: claimed provider crash times out after restart, and late output never admits D  339ms
+   ✓ Runtime Network coordinator > Stage5b: a chosen Inspect records durable evidence and a new point opens with no attempt  333ms
+   ✓ Runtime Network coordinator > Stage5b: attempt_failures evidence records the typed failure and a later attempt still passes  582ms
+   ✓ Runtime Network coordinator > Stage5a: concurrent answers record exactly one  446ms
+   ✓ Runtime Network coordinator > 3c-a G/H: concurrent recovery cannot double-reserve or double-charge  341ms
+   ✓ Runtime Network coordinator > C1 zero/known frontier durably admits mixed batch with same K and normal recipe ticket (known=false)  558ms
+   ✓ Runtime Network coordinator > C1 zero/known frontier durably admits mixed batch with same K and normal recipe ticket (known=true)  571ms
+   ✓ Runtime Network coordinator > C1 concurrent advance/claim has one winner, lost claim response cannot be recovered for another call  336ms
+   ✓ Runtime Network coordinator > D2-B R1/R6 zero-D source-enabled policy opens a round and preserves fixed completion  314ms
+   ✓ Runtime Network coordinator > D1 success keeps operational provenance on restart without K authority  416ms
+   ✓ Runtime Network coordinator > D1 invalid_output keeps operational provenance on restart without K authority  384ms
+   ✓ Runtime Network coordinator > D1 refuses lost-claim completion, and fixed completion creates no provider call row or wire field  310ms
+   ✓ Runtime Network coordinator > C1 owner auth, revision and private fence reject stale or unauthorized writes  310ms
+   ✓ Runtime Network coordinator > C1 completion is one-winner even when its successful response is lost  343ms
+
+ Test Files  6 passed (6)
+      Tests  210 passed (210)
+   Start at  19:27:04
+   Duration  111.30s (transform 15.77s, setup 0ms, collect 280.01s, tests 73.05s, environment 1ms, prepare 8.11s)
+
+[vpw:debug] Shutting down runtimes...

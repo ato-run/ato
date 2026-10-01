@@ -79,6 +79,61 @@ fn resolve_python_with(plan: &mut ExecutionPlan, triple: &str, installed: impl F
     }
 }
 
+/// Node's npm is part of the exact Node distribution, never a host executable.
+/// Only the entire compiler-owned prerequisite is replaced by an offline check.
+pub(crate) fn resolve_node(plan: &mut ExecutionPlan, triple: &str) {
+    let Some(version) = plan.toolchains.get("node") else {
+        return;
+    };
+    let executable = format!("{}/bin/node", ato_formation::intent::node_home(version));
+    #[cfg(unix)]
+    let installed = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&executable)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    #[cfg(not(unix))]
+    let installed = false;
+    if !installed {
+        return;
+    }
+    let runtime = BTreeMap::from([("node".to_owned(), version.clone())]);
+    let Ok((steps, _)) = provision_steps(
+        &Provisioning {
+            lane: Lane::Process,
+            runtime: &runtime,
+            dependencies: &DependencyPlan::None,
+            static_build: None,
+            static_compile: None,
+            package_manager: None,
+        },
+        &plan.workspace_guest_root,
+        triple,
+    ) else {
+        return;
+    };
+    let [expected] = steps.as_slice() else {
+        return;
+    };
+    for action in &mut plan.actions {
+        if let BuildAction::Prerequisite(step) = action
+            && step == expected
+        {
+            step.name = "verify-provisioned-node".into();
+            step.argv = vec![
+                executable.clone(),
+                "-e".into(),
+                format!(
+                    "if (process.versions.node !== '{}') process.exit(1)",
+                    version
+                ),
+            ];
+            step.needs_network = false;
+            step.toolchain_access = ToolchainAccess::ReadOnly;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

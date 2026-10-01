@@ -17,6 +17,8 @@ name = "ato-formation-worker"
 path = "src/bin/ato-formation-worker.rs"
 
 [dependencies]
+ato-portable-application = { path = "../portable-application", version = "0.1.0" }
+ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "0.1.0" }
 anyhow = "1"
 ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }
 ato-formation = { path = "../../lib/formation", version = "0.1.0" }
@@ -26,7 +28,9 @@ ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
 ato-sandbox = { path = "../../lib/sandbox", version = "0.1.0" }
 clap = { version = "4.5", features = ["derive", "env"] }
 libc = "0.2"
+netd = { path = "../../services/netd", version = "0.5.2" }
 fs2 = "0.4"
+httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
