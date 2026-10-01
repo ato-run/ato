@@ -50,6 +50,11 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
  return name
 '''
     wheel(backend, 'ato_fixture_backend', 'ato_fixture_backend', backend_code)
+    # Real setuptools wheels also contain vendored dist-info metadata. It must
+    # not be mistaken for a second identity of the outer wheel.
+    with zipfile.ZipFile(backend, 'a') as archive:
+        archive.writestr('ato_fixture_backend/_vendor/packaging-1.0.dist-info/METADATA',
+                         'Metadata-Version: 2.1\nName: packaging\nVersion: 1.0\n')
     sdist = source / 'ato_fixture_app-1.0.0.tar.gz'
     pyproject = b'[build-system]\nrequires=["ato-fixture-backend==1.0.0"]\nbuild-backend="ato_fixture_backend"\n'
     with tarfile.open(sdist, 'w:gz') as archive:
