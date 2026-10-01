@@ -918,3 +918,53 @@ fn transmitted_context_evidence_matches_actual_http_projection_without_text_or_s
             .contains("transmitted_context")
     );
 }
+
+#[test]
+fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
+    use super::super::reasoning::{INPUT_SCHEMA, ReasoningInput, SourceIdentity};
+    let (root, sub) = enabled();
+    let view = status(&sub);
+    let request = sub.proposal_request_v2(&view).unwrap();
+    let mut input = ReasoningInput {
+        schema: INPUT_SCHEMA.into(),
+        call_id: "shared_r1_s1".into(),
+        frozen_contract_ref: sub.request.contract_ref.clone(),
+        source_identity: SourceIdentity {
+            archive_digest: sub.request.source.archive_digest.clone(),
+            closure_ref: sub.request.source.closure_ref.clone(),
+        },
+        inventory: vec![],
+        request,
+        projection: vec![],
+        rounds_remaining: 3,
+        calls_remaining: 2,
+        inspections_remaining: 4,
+        inspection_source_bytes_remaining: 32768,
+        inspection_feedback: vec![],
+    };
+    let mock = Mock::new(|_, _| {
+        Reply::json(envelope(
+            r#"{"schema":"ato.formation-proposal/1","proposals":[{"kind":"unsupported","reason":"insufficient_source"}]}"#,
+        ))
+    });
+    let mut c = config(&mock.endpoint);
+    c.prompt_version = PROMPT_VERSION_V5.into();
+    let mut p = plan();
+    p.max_calls = 2;
+    p.input_token_cap = 24576;
+    let budget = Arc::new(CallBudget::create(&root.path().join("shared-budget.jsonl"), p).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(c, budget.clone()).unwrap();
+    for step in 1..=2 {
+        input.call_id = format!("shared_r1_s{step}");
+        let output = adapter.propose_reasoning(&input).unwrap();
+        assert_eq!(output.provenance.usage.input_tokens, Some(123));
+        assert!(output.provenance.latency_ms.is_some());
+        let seen = mock.seen.lock().unwrap();
+        assert_eq!(
+            seen.last().unwrap().1["messages"][1]["content"],
+            serde_jcs::to_string(&input).unwrap()
+        );
+    }
+    assert_eq!(mock.count(), 2);
+    assert_eq!(budget.snapshot().unwrap().cells.len(), 2);
+}

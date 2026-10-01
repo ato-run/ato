@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub const PROPOSAL_SCHEMA: &str = "ato.formation-proposal/1";
+pub const REASONING_BATCH_SCHEMA: &str = "ato.formation-proposal/2";
 pub const CATALOG_SCHEMA: &str = "ato.formation-operation-catalog/1";
 pub const MAX_PROPOSALS: usize = 4;
 pub const MAX_BATCH_BYTES: usize = 16 * 1024;
@@ -160,6 +161,8 @@ struct RawBatch<'a> {
     schema: String,
     #[serde(borrow)]
     proposals: Vec<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    inspection_history: Vec<SourceReference>,
 }
 
 impl ProposalAuthorization {
@@ -392,44 +395,43 @@ impl<'a> CandidateRegistry<'a> {
         }
         let batch: RawBatch<'_> =
             serde_json::from_slice(bytes).map_err(|_| ProposalError("proposal_batch_schema"))?;
-        if batch.schema != PROPOSAL_SCHEMA
+        if (batch.schema != PROPOSAL_SCHEMA && batch.schema != REASONING_BATCH_SCHEMA)
+            || (batch.schema == REASONING_BATCH_SCHEMA
+                && self
+                    .frozen
+                    .policy
+                    .exploration
+                    .as_ref()
+                    .is_none_or(|p| p.reasoning.is_none()))
+            || (batch.schema == PROPOSAL_SCHEMA && !batch.inspection_history.is_empty())
             || batch.proposals.len() > authorization.policy.max_proposals
         {
             return Err(ProposalError("proposal_batch_bounds"));
         }
-        let mut outcomes = Vec::with_capacity(batch.proposals.len());
+        let mut outcomes = Vec::with_capacity(batch.proposals.len() + 1);
+        if !batch.inspection_history.is_empty() {
+            let sources = validate_inspection_sources(
+                authorization,
+                &batch.inspection_history,
+                self.inspection_remaining,
+                16,
+            )?;
+            self.inspection_remaining -= sources.len() as u32;
+            outcomes.push(ProposalOutcome::InspectionRequested(sources));
+        }
         for raw in batch.proposals {
             let parsed = serde_json::from_str::<Proposal>(raw.get())
                 .map_err(|_| ProposalError("proposal_schema"));
             if let Ok(Proposal::InspectSource { sources }) = &parsed {
-                let validated = (|| {
-                    if sources.is_empty() || sources.len() > 4 {
-                        return Err(ProposalError("source_inspection_bounds"));
-                    }
-                    let domain = authorization
-                        .execution_plan
-                        .as_ref()
-                        .ok_or(ProposalError("source_inspection_unauthorized"))?;
-                    if !authorization.policy.allow_source_text {
-                        return Err(ProposalError("source_text_disabled"));
-                    }
-                    let mut ids = BTreeSet::new();
-                    for source in sources {
-                        if !ids.insert(&source.file_id)
-                            || domain
-                                .files
-                                .get(&source.file_id)
-                                .is_none_or(|f| f.digest != source.digest)
-                        {
-                            return Err(ProposalError("source_inspection_unauthorized"));
-                        }
-                    }
-                    if sources.len() > self.inspection_remaining as usize {
-                        return Err(ProposalError("inspection_budget_exhausted"));
-                    }
+                let validated = validate_inspection_sources(
+                    authorization,
+                    sources,
+                    self.inspection_remaining,
+                    4,
+                );
+                if let Ok(sources) = &validated {
                     self.inspection_remaining -= sources.len() as u32;
-                    Ok(sources.clone())
-                })();
+                }
                 outcomes.push(match validated {
                     Ok(sources) => ProposalOutcome::InspectionRequested(sources),
                     Err(error) => ProposalOutcome::Rejected(error),
@@ -680,6 +682,41 @@ pub fn validate_candidate_scope(
         }
     }
     Ok(())
+}
+
+/// Common validator for bounded read-only source observations. It grants no
+/// execution, toolchain, network or external resource authority.
+pub fn validate_inspection_sources(
+    authorization: &ProposalAuthorization,
+    sources: &[SourceReference],
+    remaining: u32,
+    per_exchange: usize,
+) -> Result<Vec<SourceReference>, ProposalError> {
+    if sources.is_empty() || sources.len() > per_exchange {
+        return Err(ProposalError("source_inspection_bounds"));
+    }
+    let domain = authorization
+        .execution_plan
+        .as_ref()
+        .ok_or(ProposalError("source_inspection_unauthorized"))?;
+    if !authorization.policy.allow_source_text {
+        return Err(ProposalError("source_text_disabled"));
+    }
+    let mut ids = BTreeSet::new();
+    for source in sources {
+        if !ids.insert(&source.file_id)
+            || domain
+                .files
+                .get(&source.file_id)
+                .is_none_or(|f| f.digest != source.digest)
+        {
+            return Err(ProposalError("source_inspection_unauthorized"));
+        }
+    }
+    if sources.len() > remaining as usize {
+        return Err(ProposalError("inspection_budget_exhausted"));
+    }
+    Ok(sources.to_vec())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

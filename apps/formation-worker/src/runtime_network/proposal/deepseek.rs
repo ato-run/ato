@@ -23,6 +23,8 @@ pub const PROMPT_VERSION_V3: &str = "ato.formation-candidate-producer-prompt/3";
 pub const PROMPT_V3: &str = include_str!("prompt-v3.txt");
 pub const PROMPT_VERSION_V4: &str = "ato.formation-candidate-producer-prompt/4";
 pub const PROMPT_V4: &str = include_str!("prompt-v4.txt");
+pub const PROMPT_VERSION_V5: &str = "ato.formation-candidate-producer-prompt/5";
+pub const PROMPT_V5: &str = include_str!("prompt-v5.txt");
 pub fn prompt_sha256() -> String {
     format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))
 }
@@ -32,6 +34,7 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
         PROMPT_VERSION_V2 => Some(PROMPT_V2),
         PROMPT_VERSION_V3 => Some(PROMPT_V3),
         PROMPT_VERSION_V4 => Some(PROMPT_V4),
+        PROMPT_VERSION_V5 => Some(PROMPT_V5),
         _ => None,
     }
 }
@@ -216,12 +219,58 @@ impl DeepSeekCandidateProducer {
             projected.source_context.retain(|e| !e.text.is_empty());
         }
     }
+    pub fn propose_reasoning(
+        &self,
+        input: &super::reasoning::ReasoningInput,
+    ) -> std::result::Result<GeneralOutput, Box<GeneralFailure>> {
+        let mut provenance = self.identity().unknown_usage();
+        let started = std::time::Instant::now();
+        let result = (|| {
+            if self.config.prompt_version != PROMPT_VERSION_V5
+                || input.schema != super::reasoning::INPUT_SCHEMA
+            {
+                return Err(ErrorClass::MalformedResponse);
+            }
+            let canonical =
+                serde_jcs::to_string(input).map_err(|_| ErrorClass::MalformedResponse)?;
+            self.call_exact(&input.request, &canonical, &input.call_id, &mut provenance)
+        })();
+        provenance.latency_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        match result {
+            Ok(output) => Ok(GeneralOutput { output, provenance }),
+            Err(class) => {
+                if self
+                    .budget
+                    .snapshot()
+                    .ok()
+                    .is_some_and(|s| s.cells.get(&input.call_id).is_some_and(|c| !c.is_settled()))
+                {
+                    let _ = self.budget.charge_unknown(&input.call_id);
+                }
+                let _ = self.budget.halt();
+                Err(Box::new(GeneralFailure { class, provenance }))
+            }
+        }
+    }
     fn call(
         &self,
         request: &ProposalRequestV2,
         provenance: &mut Provenance,
     ) -> std::result::Result<ProducerOutput, ErrorClass> {
         let canonical = serde_jcs::to_string(request).map_err(|_| ErrorClass::MalformedResponse)?;
+        let cell = request.round_seq.map_or_else(
+            || request.search_id.clone(),
+            |seq| format!("{}_r{seq}", request.search_id),
+        );
+        self.call_exact(request, &canonical, &cell, provenance)
+    }
+    fn call_exact(
+        &self,
+        request: &ProposalRequestV2,
+        canonical: &str,
+        cell: &str,
+        provenance: &mut Provenance,
+    ) -> std::result::Result<ProducerOutput, ErrorClass> {
         // Conservative byte upper bound (plus framing reserve) rather than a
         // guessed chars/token ratio. D3 must preregister this input bound.
         let prompt =
@@ -246,10 +295,7 @@ impl DeepSeekCandidateProducer {
         // Serialize once. These exact bytes are both hashed and passed to reqwest.
         let provider_body = serde_json::to_vec(&body).map_err(|_| ErrorClass::MalformedResponse)?;
         let evidence = RequestEvidence {
-            cell: request.round_seq.map_or_else(
-                || request.search_id.clone(),
-                |seq| format!("{}_r{seq}", request.search_id),
-            ),
+            cell: cell.to_owned(),
             proposal_request_sha256: format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())),
             provider_body_sha256: format!("sha256:{:x}", Sha256::digest(&provider_body)),
             timeout_ms: request.remaining_budget.timeout_ms,
@@ -328,10 +374,7 @@ impl DeepSeekCandidateProducer {
             .next()
             .ok_or(ErrorClass::MalformedResponse)?;
         let evidence = ResponseEvidence {
-            cell: request.round_seq.map_or_else(
-                || request.search_id.clone(),
-                |seq| format!("{}_r{seq}", request.search_id),
-            ),
+            cell: cell.to_owned(),
             finish_reason: match choice.finish_reason.as_str() {
                 "stop" => FinishReason::Stop,
                 "length" => FinishReason::Length,

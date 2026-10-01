@@ -611,7 +611,15 @@ impl SearchStateV1 {
                 || round.expires_at_ms
                     != round
                         .opened_at_ms
-                        .saturating_add(authorization.policy.timeout_ms)
+                        .saturating_add(
+                            self.frozen
+                                .policy
+                                .exploration
+                                .as_ref()
+                                .map_or(authorization.policy.timeout_ms, |p| {
+                                    p.round_timeout_ms(authorization.policy.timeout_ms)
+                                }),
+                        )
                         .min(self.deadline_ms)
                 || (round.outcome != Some(ProposalRoundOutcome::Completed)
                     && !round.candidates.is_empty())
@@ -1043,7 +1051,18 @@ fn default_next(
                             .is_some_and(|r| r.outcome.is_some())
                 })
         })
-        .map(|p| (true, p.policy.timeout_ms));
+        .map(|p| {
+            (
+                true,
+                s.frozen
+                    .policy
+                    .exploration
+                    .as_ref()
+                    .map_or(p.policy.timeout_ms, |e| {
+                        e.round_timeout_ms(p.policy.timeout_ms)
+                    }),
+            )
+        });
     if (!passed || s.frozen.policy.exploration.is_some())
         && let Some((is_proposal, timeout_ms)) = pending_proposal.or(pending_generation)
     {

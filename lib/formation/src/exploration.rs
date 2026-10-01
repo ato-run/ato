@@ -32,6 +32,10 @@ pub struct ExplorationPolicy {
     pub ceiling: ExecutionRequirements,
     pub max_provider_calls: u32,
     pub max_inspections: u32,
+    /// Opt-in shared reasoning protocol. Legacy one-call rounds retain their
+    /// original timeout and wire bytes; inspection exchanges are not D rounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningLimits>,
     pub max_provider_cost_usd_micros: u64,
     pub max_provider_input_tokens: u64,
     pub max_provider_output_tokens: u64,
@@ -49,6 +53,14 @@ pub struct ExplorationPolicy {
     pub provider_budget_binding_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningLimits {
+    pub round_timeout_ms: u64,
+    pub inspection_timeout_ms: u64,
+    pub inspection_source_bytes: u64,
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -56,6 +68,13 @@ fn is_zero(value: &u64) -> bool {
 impl ExplorationPolicy {
     pub fn validate(&self) -> Result<(), SearchError> {
         self.ceiling.validate().map_err(|e| SearchError(e.0))?;
+        if self.reasoning.as_ref().is_some_and(|r| {
+            !(1..=900_000).contains(&r.round_timeout_ms)
+                || !(1..=r.round_timeout_ms).contains(&r.inspection_timeout_ms)
+                || !(1..=64 * 1024).contains(&r.inspection_source_bytes)
+        }) {
+            return Err(SearchError("reasoning_budget_invalid"));
+        }
         if self.max_provider_calls == 0
             || self.max_provider_cost_usd_micros == 0
             || self.max_provider_input_tokens == 0
@@ -79,6 +98,12 @@ impl ExplorationPolicy {
             return Err(SearchError("exploration_provider_configuration_invalid"));
         }
         Ok(())
+    }
+
+    pub fn round_timeout_ms(&self, legacy: u64) -> u64 {
+        self.reasoning
+            .as_ref()
+            .map_or(legacy, |r| r.round_timeout_ms)
     }
 }
 
