@@ -1301,6 +1301,7 @@ fn serve_proposal_inner(
         .exploration
         .as_ref()
         .map_or(0, |p| p.formation.max_retries);
+    let client = &client.with_deadline(expires);
     let claim_revision = if point["claimed"] == true {
         state.revision.saturating_sub(1)
     } else {

@@ -1353,10 +1353,12 @@ pub fn accept_routes_for_assignment(
 
 // ──────────────────────────────────────────────────────────────── client
 
+#[derive(Clone)]
 pub struct Client {
     api: String,
     token: String,
     http: reqwest::blocking::Client,
+    deadline_ms: Option<u64>,
 }
 
 impl Client {
@@ -1364,6 +1366,7 @@ impl Client {
         Ok(Self {
             api: api.trim_end_matches('/').to_owned(),
             token: token.trim().to_owned(),
+            deadline_ms: None,
             http: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()?,
@@ -1374,11 +1377,43 @@ impl Client {
         format!("{}/v1/runtime-network{path}", self.api)
     }
 
+    /// Narrow an existing client without resetting the Search or round clock.
+    /// Heartbeats and delivery of already-saved results use the parent client.
+    pub fn with_deadline(&self, deadline_ms: u64) -> Self {
+        let mut bounded = self.clone();
+        bounded.deadline_ms = Some(
+            self.deadline_ms
+                .map_or(deadline_ms, |old| old.min(deadline_ms)),
+        );
+        bounded
+    }
+
+    fn prepare(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Request> {
+        let mut request = request.bearer_auth(&self.token).build()?;
+        if let Some(deadline) = self.deadline_ms {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            ensure!(
+                now < deadline,
+                "coordinator request deadline elapsed; operation preserved"
+            );
+            let remaining = Duration::from_millis(deadline - now);
+            let configured = request
+                .timeout()
+                .copied()
+                .unwrap_or(Duration::from_secs(60));
+            *request.timeout_mut() = Some(configured.min(remaining));
+        }
+        Ok(request)
+    }
+
     fn send<T: serde::de::DeserializeOwned>(
         &self,
         request: reqwest::blocking::RequestBuilder,
     ) -> Result<Option<T>> {
-        let response = request.bearer_auth(&self.token).send()?;
+        let response = self.http.execute(self.prepare(request)?)?;
         let status = response.status();
         if status == reqwest::StatusCode::NO_CONTENT {
             return Ok(None);
@@ -1555,13 +1590,12 @@ impl Client {
             fs2::available_space(work_root)? >= max_bytes + SourceLimits::default().max_total_bytes,
             "insufficient Runtime scratch capacity"
         );
-        let response = self
+        let request = self
             .http
             .get(self.url(&format!("/attempts/{attempt_id}/{kind}")))
             .header("x-ato-attempt-fence", fence)
-            .bearer_auth(&self.token)
-            .timeout(SOURCE_TRANSFER_TIMEOUT)
-            .send()?;
+            .timeout(SOURCE_TRANSFER_TIMEOUT);
+        let response = self.http.execute(self.prepare(request)?)?;
         anyhow::ensure!(
             response.status().is_success(),
             "source unavailable ({})",
@@ -1787,11 +1821,19 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
             let report = if let Some(saved) = delivery.saved_report()? {
                 saved
             } else {
+                let attempt_client = ticket
+                    .exploration
+                    .as_ref()
+                    .and_then(|e| e.deadline_ms)
+                    .map_or_else(
+                        || client.as_ref().clone(),
+                        |deadline| client.with_deadline(deadline),
+                    );
                 execute_ticket_with_publication(
                     config,
                     &ticket,
                     || {
-                        client.download_input(
+                        attempt_client.download_input(
                             &ticket.attempt_id,
                             ticket.resource_budget.transfer_bytes,
                             ticket.fence,
@@ -1802,7 +1844,7 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                             },
                         )
                     },
-                    Some(&client),
+                    Some(&attempt_client),
                 )
             };
             eprintln!(
@@ -2748,9 +2790,7 @@ impl Client {
         budget.validate()?;
         let response = self
             .http
-            .get(self.url(&format!("/retained/{reference}")))
-            .bearer_auth(&self.token)
-            .send()?;
+            .execute(self.prepare(self.http.get(self.url(&format!("/retained/{reference}"))))?)?;
         anyhow::ensure!(
             response.status().is_success(),
             "retained descriptor unavailable ({})",
@@ -2853,5 +2893,86 @@ fn attempt_report(
         verifier_receipts: receipts,
         attestation: attested.clone(),
         resource_usage: usage,
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn frozen_deadline_caps_source_and_status_timeouts_and_never_expands() {
+        let client = Client::new("http://127.0.0.1:1", "private").unwrap();
+        let bounded = client
+            .with_deadline(now_ms() + 1000)
+            .with_deadline(now_ms() + 60_000);
+        let source = bounded
+            .prepare(
+                bounded
+                    .http
+                    .get(bounded.url("/source"))
+                    .timeout(SOURCE_TRANSFER_TIMEOUT),
+            )
+            .unwrap();
+        assert!(source.timeout().unwrap() <= &Duration::from_secs(1));
+        let status = bounded
+            .prepare(bounded.http.get(bounded.url("/status")))
+            .unwrap();
+        assert!(status.timeout().unwrap() <= &Duration::from_secs(1));
+        let short = bounded
+            .prepare(
+                bounded
+                    .http
+                    .get(bounded.url("/status"))
+                    .timeout(Duration::from_millis(1)),
+            )
+            .unwrap();
+        assert_eq!(short.timeout(), Some(&Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn expired_operation_does_not_dispatch_and_slow_http_read_stops_at_deadline() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = Client::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "private",
+        )
+        .unwrap();
+        let expired = client.with_deadline(now_ms().saturating_sub(1));
+        let error = expired
+            .send::<Value>(expired.http.get(expired.url("/status")))
+            .unwrap_err();
+        assert!(error.to_string().contains("deadline elapsed"));
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        listener.set_nonblocking(false).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(350));
+            let _ = stream.write_all(b"{}");
+        });
+        let bounded = client.with_deadline(now_ms() + 100);
+        let started = std::time::Instant::now();
+        let error = bounded
+            .send::<Value>(bounded.http.get(bounded.url("/status")))
+            .unwrap_err();
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
     }
 }

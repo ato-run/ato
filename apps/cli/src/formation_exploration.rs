@@ -358,6 +358,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         )?;
         expires
     };
+    let client = client.with_deadline(expires);
     let accepted = if let Some(producer) = &reasoning {
         producer.coordinator_operation(
             0,
