@@ -37,6 +37,7 @@ pub mod containment;
 pub mod detect;
 #[cfg(feature = "planning")]
 pub mod execution;
+pub mod exploration;
 #[cfg(feature = "planning")]
 pub mod failure;
 #[cfg(feature = "planning")]
@@ -47,9 +48,11 @@ pub mod preset;
 pub mod projection;
 pub mod receipt;
 pub mod request;
+pub mod requirements;
 pub mod retained;
 #[cfg(feature = "planning")]
 pub mod source;
+pub mod variables;
 pub mod verify;
 #[cfg(feature = "planning")]
 pub mod workspace;
@@ -60,3 +63,5 @@ pub mod generation_context;
 pub mod search;
 
 pub mod proposal;
+
+pub mod source_oci_plan;

@@ -6,8 +6,7 @@
 //! gone" and "the application shut down cleanly" are different facts, and a
 //! stop the Runner could not confirm must never be reported as one.
 
-use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -74,13 +73,14 @@ impl StopOutcome {
 /// Output is drained concurrently so a large listing cannot fill the pipe and
 /// stall the CLI until the timeout.
 pub(crate) fn docker_output<'a>(
-    docker: &Path,
+    docker: &super::DockerClient,
     arguments: impl IntoIterator<Item = &'a str>,
     timeout: Duration,
 ) -> Result<Output> {
     use std::io::Read;
 
-    let mut child = Command::new(docker)
+    let mut child = docker
+        .command()
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -128,7 +128,10 @@ pub(crate) fn docker_output<'a>(
 }
 
 /// `(running, exit_code)` of a container.
-pub(crate) fn container_state(docker: &Path, container: &str) -> Result<(bool, i32)> {
+pub(crate) fn container_state(
+    docker: &super::DockerClient,
+    container: &str,
+) -> Result<(bool, i32)> {
     let output = docker_output(
         docker,
         [
@@ -156,7 +159,7 @@ pub(crate) fn container_state(docker: &Path, container: &str) -> Result<(bool, i
     ))
 }
 
-fn stop_signal(docker: &Path, container: &str) -> String {
+fn stop_signal(docker: &super::DockerClient, container: &str) -> String {
     docker_output(
         docker,
         ["inspect", "--format", "{{.Config.StopSignal}}", container],
@@ -175,7 +178,11 @@ fn stop_signal(docker: &Path, container: &str) -> String {
     .unwrap_or_else(|| "SIGTERM".to_owned())
 }
 
-fn wait_until_stopped(docker: &Path, container: &str, budget: Duration) -> Result<Option<i32>> {
+fn wait_until_stopped(
+    docker: &super::DockerClient,
+    container: &str,
+    budget: Duration,
+) -> Result<Option<i32>> {
     let deadline = Instant::now() + budget;
     loop {
         let (running, code) = container_state(docker, container)?;
@@ -191,7 +198,11 @@ fn wait_until_stopped(docker: &Path, container: &str, budget: Duration) -> Resul
 
 /// Stop signal → grace → SIGKILL → confirm. Never removes the container:
 /// removal is only ever done after a confirmed stop, by the caller.
-pub(crate) fn stop_container(docker: &Path, container: &str, budget: StopBudget) -> StopOutcome {
+pub(crate) fn stop_container(
+    docker: &super::DockerClient,
+    container: &str,
+    budget: StopBudget,
+) -> StopOutcome {
     let unconfirmed = |reason: String| StopOutcome::Unconfirmed { reason };
     match container_state(docker, container) {
         Ok((false, exit_code)) => return StopOutcome::AlreadyExited { exit_code },
@@ -225,7 +236,10 @@ pub(crate) fn stop_container(docker: &Path, container: &str, budget: StopBudget)
 
 /// Remove a container already confirmed stopped. `--force` is deliberately
 /// absent: removal must never be what stops it.
-pub(crate) fn remove_stopped_container(docker: &Path, container: &str) -> Result<()> {
+pub(crate) fn remove_stopped_container(
+    docker: &super::DockerClient,
+    container: &str,
+) -> Result<()> {
     let output = docker_output(docker, ["rm", container], DOCKER_CALL_TIMEOUT)?;
     if !output.status.success() {
         bail!(
@@ -270,7 +284,11 @@ mod tests {
         std::fs::write(&fake, "#!/bin/sh\nsleep 60\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let output = docker_output(&fake, ["inspect"], Duration::from_millis(200));
+        let output = docker_output(
+            &super::super::DockerClient::ambient(fake),
+            ["inspect"],
+            Duration::from_millis(200),
+        );
         assert!(output.is_err());
     }
 
@@ -283,7 +301,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
-            stop_container(&fake, "c1", StopBudget::DEFAULT),
+            stop_container(
+                &super::super::DockerClient::ambient(fake),
+                "c1",
+                StopBudget::DEFAULT
+            ),
             StopOutcome::AlreadyExited { exit_code: 3 }
         );
     }
@@ -302,7 +324,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let outcome = stop_container(
-            &fake,
+            &super::super::DockerClient::ambient(fake),
             "c1",
             StopBudget {
                 graceful: Duration::from_millis(200),

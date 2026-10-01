@@ -18,6 +18,12 @@ use anyhow::{Result, anyhow};
 /// Handled before clap in each host binary because it is not a user-facing
 /// subcommand.
 pub fn sandbox_exec(args: &[String]) -> Result<()> {
+    if args == ["--network-relay"] {
+        return crate::network_bridge::namespace_relay();
+    }
+    if args.first().is_some_and(|a| a == "--ingress-relay") {
+        return crate::network_bridge::namespace_ingress(&args[1..]);
+    }
     // The shim's own flags are the ones before `--`; everything after is the
     // workload's argv and is never read as a flag.
     let separator = args.iter().position(|arg| arg == "--");
@@ -57,6 +63,22 @@ pub fn sandbox_exec(args: &[String]) -> Result<()> {
     // exec a workload whose network isolation was asked for and could not be
     // enforced. A build and a Formation candidate are contained by exactly
     // the rules a Run is.
+    // The child is part of bwrap's PID namespace and dies when its init/workload
+    // exits. Start it before Landlock; the source never controls the relay.
+    let _relay = if head.iter().any(|a| a == "--scoped-network") {
+        let shim = flag(head, "--relay-shim").unwrap_or("/.ato/formation");
+        Some(crate::network_bridge::start_namespace_relay(shim)?)
+    } else {
+        None
+    };
+    let _ingress = if head.iter().any(|a| a == "--scoped-ingress") {
+        Some(crate::network_bridge::start_namespace_ingress(
+            flag(head, "--relay-shim").ok_or_else(|| anyhow!("ingress shim missing"))?,
+            head,
+        )?)
+    } else {
+        None
+    };
     crate::launch::sandbox_exec::run_with(
         Path::new(policy_path),
         &workload,

@@ -381,7 +381,15 @@ pub fn project_exec(step: &BoundStep) -> Result<BuildStepV1, ProjectionError> {
     Ok(BuildStepV1 {
         name: step.id.clone(),
         argv: step.argv.clone(),
-        needs_network: step.network == StepNetwork::DependencyResolution,
+        needs_network: !step.network.is_denied(),
+        network_phase: match step.network {
+            StepNetwork::ScopedDependencies => {
+                Some(crate::requirements::ExecutionPhase::Dependencies)
+            }
+            StepNetwork::ScopedBuild => Some(crate::requirements::ExecutionPhase::Build),
+            StepNetwork::ScopedRuntime => Some(crate::requirements::ExecutionPhase::Runtime),
+            _ => None,
+        },
         cwd_relative: workspace_relative_cwd(&step.cwd).map_err(refuse)?,
         env: step.env.clone(),
         toolchain_access: crate::intent::ToolchainAccess::ReadOnly,

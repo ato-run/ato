@@ -181,6 +181,28 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
             "state" => derivation.state = read_state(value)?,
             "contract" => contract.requirements = read_contract(value)?,
             "effects" => derivation.effects = read_effects(value)?,
+            "variable_bindings" => {
+                derivation.variable_bindings = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| malformed("variable_bindings", format!("{e}")))?;
+                crate::variables::validate(&derivation.variable_bindings)
+                    .map_err(|e| malformed("variable_bindings", e))?;
+            }
+            "requirements" => {
+                derivation.requirements = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| malformed("requirements", format!("{e}")))?;
+            }
+            "source_oci" => {
+                let recipe: crate::source_oci_plan::SourceOciRecipe = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| malformed("source_oci", format!("{e}")))?;
+                recipe.validate().map_err(|e| malformed("source_oci", e))?;
+                derivation.source_oci = Some(recipe);
+            }
             "platform" => derivation.platforms = read_platforms(value)?,
             other => {
                 return Err(malformed(
@@ -198,6 +220,75 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
         derivation,
         provenance: AuthoringProvenance::Authored,
     })
+}
+
+/// Lossless rendering for already representable authoring. It deliberately
+/// rejects internal-only preset fields rather than dropping execution behavior.
+pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleTomlError> {
+    use serde_json::{Value as Json, json};
+    let d = &draft.derivation;
+    if d.workspace_build.is_some()
+        || d.workspace_compiler.is_some()
+        || d.ports.iter().any(|p| p.client_address_transport.is_some())
+    {
+        return Err(malformed(
+            "derivation",
+            "internal preset fields are not representable by this authoring grammar",
+        )
+        .into());
+    }
+    let observed = |v: &Observed<String>| match v {
+        Observed::Capture => "capture".to_owned(),
+        Observed::Stated(v) => v.clone(),
+    };
+    let requirements: Vec<_>=draft.contract.requirements.iter().map(|r|match &r.requirement {
+        RequirementDraft::Http(h)=>json!({"id":r.id,"use":USE_HTTP_CONTRACT,"port":h.port,"method":h.method,"path":h.path,"expect":{"status":h.status,"body_digest":h.body_digest.as_ref().map(&observed)}}),
+        RequirementDraft::InputIdentity(i)=>json!({"id":r.id,"use":USE_WORKSPACE_CONTRACT,"input":i.input,"expect":{"digest":observed(&i.digest)}})
+    }).collect();
+    let mut doc = json!({"schema":CAPSULE_SCHEMA_V1,
+        "input":d.inputs.iter().map(|i|json!({"id":i.id,"use":i.protocol,"path":i.path})).collect::<Vec<_>>(),
+        "runtime":d.runtimes.iter().map(|r|json!({"name":r.name,"version":r.version})).collect::<Vec<_>>(),
+        "derive":{"step":d.steps.iter().map(|t|{
+            let mut value=json!({"id":t.id,"use":t.protocol,"op":t.op,"cwd":t.cwd,"env":t.env,"source":t.source,"root":t.root,"entry":t.entry,"spa_fallback":t.spa_fallback});
+            if t.protocol == PROCESS_PROTOCOL {value["argv"]=json!(t.argv);}
+            if !t.network.is_denied() {value["network"]=json!(t.network);}
+            value
+        }).collect::<Vec<_>>()},
+        "port":d.ports.iter().map(|p|json!({"id":p.id,"use":p.protocol,"from":p.from,"guest_port":p.guest_port})).collect::<Vec<_>>(),
+        "state":d.state.iter().map(|s|json!({"id":s.id,"use":s.protocol,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
+        "platform":d.platforms,"effects":{"default":d.effects},"requirements":d.requirements,"source_oci":d.source_oci,
+        "contract":{"require":requirements}});
+    if !d.variable_bindings.is_empty() {
+        doc["variable_bindings"] = json!(d.variable_bindings);
+    }
+    fn omit_nulls(value: &mut Json) {
+        match value {
+            Json::Object(o) => {
+                o.retain(|_, v| !v.is_null());
+                for v in o.values_mut() {
+                    omit_nulls(v);
+                }
+            }
+            Json::Array(a) => {
+                for v in a {
+                    omit_nulls(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    omit_nulls(&mut doc);
+    let value = Value::try_from(doc).map_err(|e| CapsuleTomlError::Syntax {
+        detail: e.to_string(),
+    })?;
+    let text = toml::to_string(&value).map_err(|e| CapsuleTomlError::Syntax {
+        detail: e.to_string(),
+    })?;
+    let restored = parse_capsule_toml(&text)?;
+    if restored.contract != draft.contract || restored.derivation != draft.derivation {
+        return Err(malformed("derivation", "authoring render was not lossless").into());
+    }
+    Ok(text)
 }
 
 // ─────────────────────────────────────────────────────────────────── the tables
@@ -416,6 +507,13 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                     ));
                 }
                 Some(Value::String(value)) if value == "denied" => StepNetwork::Denied,
+                Some(Value::String(value)) if value == "scoped-dependencies" => {
+                    StepNetwork::ScopedDependencies
+                }
+                Some(Value::String(value)) if value == "scoped-build" => StepNetwork::ScopedBuild,
+                Some(Value::String(value)) if value == "scoped-runtime" => {
+                    StepNetwork::ScopedRuntime
+                }
                 Some(Value::String(value)) if value == "dependency-resolution" => {
                     StepNetwork::DependencyResolution
                 }
@@ -439,6 +537,14 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                         return Err(malformed(
                             format!("{what}.argv"),
                             "a launch is declared, never inferred from a framework or a filename",
+                        ));
+                    }
+                }
+                crate::source_oci_plan::OCI_PROTOCOL => {
+                    if op != "serve" || !argv.is_empty() || step.get("source").is_none() {
+                        return Err(malformed(
+                            &what,
+                            "source OCI requires ImageDefault command and a workspace input",
                         ));
                     }
                 }

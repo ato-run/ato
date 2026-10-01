@@ -459,6 +459,7 @@ fn main() -> Result<()> {
             allow_managed: false,
             generation: None,
             proposal: None,
+            exploration: None,
             // ATO_ACCEPTANCE_DECISION_POLICY="MAX_DECISIONS,TIMEOUT_MS"
             decision: std::env::var("ATO_ACCEPTANCE_DECISION_POLICY")
                 .ok()

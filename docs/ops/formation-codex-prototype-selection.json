@@ -1,0 +1,98 @@
+{
+  "schema": "ato.formation-codex-prototype-selection/1",
+  "status": "source and cases preregistered; exact executable/config pins required before execution",
+  "base_ato_head": "7b9ecedd3a17653c754da7708b7d5c3aae627f2f",
+  "live_main": "e494e9375cf1151fc2884d545047dfbdad52c2cc",
+  "live_api_main": "2dceb36b81d2772fe9fc6c87fcfbecb861dc18b8",
+  "applications": [
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "repo": "https://github.com/dgtlmoon/changedetection.io",
+      "ref": "0e0566721b1c483dcf7ae548210ee10532d9b181",
+      "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+      "archive_bytes": 6044832,
+      "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/007.tar.gz",
+      "license": "Apache-2.0",
+      "license_file": "LICENSE",
+      "license_sha256": "94819497b44fbfbbc93198af0eb1b20144098a96c10ab577e9a868bab26d3705",
+      "primary_language": "Python",
+      "broad_source_shape": "python-service",
+      "monorepo": false,
+      "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+      "baseline_terminal": "preset_no_match",
+      "baseline_typed_K_pass": false,
+      "explicit_K_newly_supplied": true
+    },
+    {
+      "index": 57,
+      "name": "SVGOMG",
+      "repo": "https://github.com/jakearchibald/svgomg",
+      "ref": "f925656d40a507c512bf95ee14ad16445a4ad3ed",
+      "archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+      "archive_bytes": 622928,
+      "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/057.tar.gz",
+      "license": "MIT",
+      "license_file": "LICENSE.md",
+      "license_sha256": "fc238e99233704853d397eb25d538edfd5f2ddb2ad86d903bb33af99753897bb",
+      "primary_language": "JavaScript",
+      "broad_source_shape": "frontend-spa",
+      "monorepo": false,
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "baseline_terminal": "network_denied",
+      "baseline_typed_K_pass": false,
+      "explicit_K_newly_supplied": false
+    }
+  ],
+  "substitution_allowed": false,
+  "historical_results_changed": false,
+  "cases": [
+    {
+      "index": 57,
+      "known_D": false,
+      "intent": "frozen npm source build to static serving; round1 closed dependency egress probe; network refusal evidence repair within frozen ceiling; remaining round permission reduction and fresh reverify"
+    },
+    {
+      "index": 7,
+      "known_D": false,
+      "intent": "inspect Python service manifests and startup; propose only representable source-owned operations; classify missing dependency/setup capability explicitly"
+    }
+  ],
+  "providers_order": [
+    "codex_session",
+    "deepseek_after_codex_gate"
+  ],
+  "API_initial_information": "same frozen initial context/schema, not successful Codex D or Codex failure history",
+  "max_rounds": 3,
+  "max_inspections": 4,
+  "max_calls_per_app": 6,
+  "source_context_bytes": 16384,
+  "remaining_API_budget_usd_micros": 564906,
+  "API_max_apps": 2,
+  "API_max_calls": 12,
+  "per_API_call_reservation_usd_micros": 9831,
+  "API_max_reservation_usd_micros": 117972,
+  "Codex_token_usage_and_price": "not exposed by session; no fabricated provider usage",
+  "ceilings": "reuse prior frozen phase-scoped sandbox; no new host/network/resource authority",
+  "constraints": [
+    "no source patch",
+    "no manual source process startup",
+    "no K weakening",
+    "no unconfirmed UNKNOWN retry",
+    "no deploy",
+    "no remote migration",
+    "#1421 untouched",
+    "no E2 72",
+    "no 100 remeasurement"
+  ],
+  "unselected": [
+    {
+      "name": "Kutt",
+      "reason": "previous concrete failure needs secret binding and database/multi-service setup not expressed by current initial adapter"
+    },
+    {
+      "name": "Healthchecks",
+      "reason": "unhashed Python dependency resolution and Django setup require additional adapter work; choose one Python service first"
+    }
+  ]
+}
