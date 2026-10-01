@@ -50,7 +50,7 @@ API adapterは同じ入力schema・inspection protocol・出力schemaを使用�
 
 ## 検証と状態
 
-Core探索22 tests、worker proposal40 tests、関連Clippy/fmt PASS。API関連44 unique tests/typecheck PASS。Linux/aarch64のsource-deleted retained replayはPython/static/Nodeの3件ともPASS。これらはfixture/transport/回帰検証であり、Codexの実OSS fresh receiptではない。
+Core探索22 tests、worker proposal40 tests、関連Clippy/fmt PASS。measured API pinの関連44 unique tests/typecheck PASS。repository同梱WASMの追補更新後はreceipt/SearchState/proposal migrationの64 tests/typecheck PASS。Linux/aarch64のsource-deleted retained replayはPython/static/Nodeの3件ともPASS。これらはfixture/transport/回帰検証であり、Codexの実OSS fresh receiptではない。
 
 ATO evidence head `ff9ecc98e2f9a8724c733c9314b52fd63f4ea13b` の [CI 36809465786](https://github.com/ato-run/ato/actions/runs/36809465786) はUbuntu PASS、Windows Unix API compile error13件、macOS `a_process_run_is_owned_by_its_run_until_stopped` のInstance worker activation failure。既知の観測と同じ失敗名だがexact base実行で再現したとは記載しない。
 
@@ -67,3 +67,5 @@ merged/deployed/remote migration: false。PR #1452/#712はDraft維持。
 `formation-shared-reasoning.json` は `reasoning-evidence.py` により全raw hashを検証して再生成した。公開可能な33ファイルはLinux owned directoryとlocal .tmpに保存。bundle SHA256: `c6be15085e2d0d6de0d6ca3b21b4d2b3a04567557bdf477b63bce75b67739349`。manifest SHA256: `d2d1079e109b3e621a77d881f84e05e4aae2dff9bcd30b38908587f2ac3ff4ac`。
 
 `formation-shared-reasoning-raw-manifest.json` は公開fileのhashと、exportしないowner-only stateのhash/保持場所を区別する。claim/fence、coordinator token/database、private authorization、expanded sourceは推論contextへ出さず、元hostで保全した。source archives、元Search、過去ledger・receipt・stateを削除していない。
+
+検証後のAPI repository追補: 同梱Rust WASMを、実検証hostで用いたfb140026 authorityへ一致させた。head `f00fa300142d45434be2417db2f7ae415517255e`。凍結reasoning timeout/goalのWorker WASM受理、不正budget/goalの拒否、legacy receipt/SearchState回帰を確認した。これは未実行API armの準備であり、既存Codex観測のAPI JS pinを読み替えない。
