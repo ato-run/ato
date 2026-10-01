@@ -777,6 +777,7 @@ mod exploration_submission_tests {
             ceiling: ExecutionRequirements::default(),
             max_provider_calls: 3,
             max_inspections: 3,
+            reasoning: None,
             max_provider_cost_usd_micros: 100000,
             max_provider_input_tokens: 90000,
             max_provider_output_tokens: 6144,
