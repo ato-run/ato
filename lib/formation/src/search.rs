@@ -790,6 +790,7 @@ fn default_next(
                 "search_transfer_budget_exceeded"
                     | "search_expanded_budget_exceeded"
                     | "search_stored_budget_exceeded"
+                    | "exploration_network_budget_exhausted"
             )
         }) {
             return Ok(finish(if passed {
