@@ -185,7 +185,7 @@ fn scoped_inventory(
                         f.path == path
                             || f.path.strip_prefix(&format!("{path}/")).is_some_and(|s| {
                                 !s.contains('/')
-                                    && ato_formation::proposal::source_inspection_priority(s).0 != 6
+                                    && ato_formation::proposal::source_inspection_priority(s).0 <= 5
                             })
                     }
                 })
@@ -921,7 +921,14 @@ impl ReasoningProducer {
                     })
                     .collect();
                 let bytes = serde_jcs::to_vec(&input)?;
-                if (bytes.len() + deepseek::PROMPT_V5.len() + 1024) as u64
+                if (bytes.len()
+                    + deepseek::prompt_for(match &self.config {
+                        ReasoningProviderConfig::Api(c) => &c.prompt_version,
+                        ReasoningProviderConfig::Session(c) => &c.prompt_version,
+                    })
+                    .context("unknown prompt")?
+                    .len()
+                    + 1024) as u64
                     <= self.budget.input_token_cap
                 {
                     break;
