@@ -874,5 +874,879 @@
     "private_credentials_in_context": false,
     "model_budget_reservation_usd_micros": 117972,
     "model_budget_remaining_before_usd_micros": 564906
+  },
+  "infrastructure_correction": {
+    "code_pin": "688eb4a6484bf8e0237c6265a64aa0d590b16488",
+    "scope": "common context before any source program attempt",
+    "original_round_1": "expired while investigating truncated manifest; late inspection response unused",
+    "same_Codex_search": true,
+    "remaining_rounds_before_resume": 2,
+    "budget_and_deadline_reset": false,
+    "API_fresh_initial_information": "same initial acquired files/roles, with corrected common projection; not byte-identical to the pre-fix truncated session input",
+    "fixed_plans": {
+      "codex": {
+        "schema": "ato.formation-shared-reasoning-pilot-plan/1",
+        "wave": "Codex session first then same-initial-information API; not 100 remeasurement",
+        "frozen_at": "2026-10-01T02:57:25.082868+00:00",
+        "ato_pin": "688eb4a6484bf8e0237c6265a64aa0d590b16488",
+        "ato_api_pin": "4ff88c038e095951e2277b759ac7ae012148e02e",
+        "authority_source_pin": "fb140026bb555d01f5446cd1a92f04affac4f9b6",
+        "baseline": {
+          "ledger": "docs/ops/formation-coverage-100.json",
+          "sha256": "560302a51a04fc08d9868a8dfb84bc2ac58666e14a0ee3533f181e502c98d45c",
+          "typed_K_pass": 7,
+          "pin": "e494e9375cf1151fc2884d545047dfbdad52c2cc"
+        },
+        "entry_conditions": {
+          "known_D": false,
+          "K": "same original source-bound StaticFiles; changedetection explicit entrance, no rewriting K",
+          "no_manual_source_startup": true,
+          "Codex_input": "saved common input only",
+          "API_input": "same initial information; no Codex D/history seed"
+        },
+        "preflight_config": {
+          "exploration": {
+            "formation": {
+              "max_rounds": 3
+            },
+            "ceiling": {
+              "network": [
+                {
+                  "phase": "dependencies",
+                  "host": "registry.npmjs.org",
+                  "port": 443
+                },
+                {
+                  "phase": "dependencies",
+                  "host": "pypi.org",
+                  "port": 443
+                },
+                {
+                  "phase": "dependencies",
+                  "host": "files.pythonhosted.org",
+                  "port": 443
+                },
+                {
+                  "phase": "dependencies",
+                  "host": "nodejs.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "registry.npmjs.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "pypi.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "files.pythonhosted.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "nodejs.org",
+                  "port": 443
+                }
+              ],
+              "authority": [
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.http@1",
+                  "resource": "app.http",
+                  "operation": "bind"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.data",
+                  "operation": "read"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.data",
+                  "operation": "write"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.data",
+                  "operation": "create"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.state",
+                  "operation": "read"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.state",
+                  "operation": "write"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.state",
+                  "operation": "create"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.cache",
+                  "operation": "read"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.cache",
+                  "operation": "write"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.cache",
+                  "operation": "create"
+                }
+              ]
+            },
+            "max_provider_calls": 6,
+            "max_inspections": 4,
+            "max_provider_cost_usd_micros": 58986,
+            "max_provider_input_tokens": 147456,
+            "max_provider_output_tokens": 12288,
+            "max_network_transfer_bytes": 536870912,
+            "max_network_transfer_bytes_per_attempt": 134217728,
+            "reasoning": {
+              "goal": "Prerequisite acceptance probe: for a source-owned Node npm_ci plan, the first D uses no dependency-phase network grants; after actual refusal, repair with source/evidence-scoped grants within the frozen ceiling. Do not remove a successful build step or weaken K. After PASS, attempt only justified permission reductions. This is a deliberate least-privilege probe, not an accidental startup error. For unsupported toolchains or missing source-owned operations, inspect then decline concretely.",
+              "round_timeout_ms": 420000,
+              "inspection_timeout_ms": 300000,
+              "inspection_source_bytes": 32768
+            }
+          },
+          "toolchains": {
+            "python": "3.12.7",
+            "node": "22.14.0",
+            "npm": "10.9.2",
+            "oci": "1.0.0"
+          },
+          "policy": {
+            "network": "denied",
+            "allow_managed": false
+          },
+          "budget": {
+            "max_attempts": 4,
+            "mode": "first_pass",
+            "deadline_seconds": 900,
+            "max_transfer_bytes": 1073741824,
+            "max_expanded_bytes": 2147483648,
+            "max_stored_bytes": 1073741824
+          }
+        },
+        "sandbox": {
+          "ceiling": {
+            "network": [
+              {
+                "phase": "dependencies",
+                "host": "registry.npmjs.org",
+                "port": 443
+              },
+              {
+                "phase": "dependencies",
+                "host": "pypi.org",
+                "port": 443
+              },
+              {
+                "phase": "dependencies",
+                "host": "files.pythonhosted.org",
+                "port": 443
+              },
+              {
+                "phase": "dependencies",
+                "host": "nodejs.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "registry.npmjs.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "pypi.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "files.pythonhosted.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "nodejs.org",
+                "port": 443
+              }
+            ],
+            "authority": [
+              {
+                "phase": "runtime",
+                "protocol": "ato.http@1",
+                "resource": "app.http",
+                "operation": "bind"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.data",
+                "operation": "read"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.data",
+                "operation": "write"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.data",
+                "operation": "create"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.state",
+                "operation": "read"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.state",
+                "operation": "write"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.state",
+                "operation": "create"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.cache",
+                "operation": "read"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.cache",
+                "operation": "write"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.cache",
+                "operation": "create"
+              }
+            ]
+          },
+          "max_network_transfer_bytes_per_attempt": 134217728
+        },
+        "producer_budget": {
+          "max_calls": 6,
+          "input_token_cap": 24576,
+          "output_token_cap": 2048,
+          "input_price": 300000,
+          "output_price": 1200000,
+          "ceiling_usd_micros": 58986
+        },
+        "producer_config": {
+          "provider": "codex_session",
+          "model": "codex-session",
+          "prompt_version": "ato.formation-candidate-producer-prompt/5"
+        },
+        "decision_config": null,
+        "prompt_sha256": "2c1b8d901e30d60218b82192f74fae2e1a9751da719656622015baa050999f70",
+        "pricing_snapshots": {
+          "deepseek": "https://api-docs.deepseek.com/quick_start/pricing/",
+          "cache_miss_peak_prices": true,
+          "verified_at": "2026-10-01",
+          "advertised_model_version": "DeepSeek-V4.1-Flash",
+          "peak_cache_miss_input_usd_per_million": "0.30",
+          "peak_output_usd_per_million": "1.20",
+          "immutable_vendor_version_not_exposed": true
+        },
+        "model_budget": {
+          "remaining_before_pilot_usd_micros": 564906,
+          "max_candidate_producer_calls": 0,
+          "max_decision_provider_calls": 0,
+          "per_CP_reservation": 9831,
+          "per_DP_reservation": 2753,
+          "max_requester_invocations": 0,
+          "maximum_cases": 2,
+          "maximum_unique_apps": 2
+        },
+        "maximum_reservation_usd_micros": 0,
+        "small_gate": null,
+        "api": "http://127.0.0.1:29021",
+        "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/receiver",
+        "api_node_modules": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-api/node_modules",
+        "coordinator_script": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-code/scripts/acceptance/proposal/coordinator.mjs",
+        "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-code/scripts/acceptance/coverage/exploration-credential-exec.py",
+        "binaries": {
+          "ato": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/bin/ato",
+            "sha256": "e9b6c12c73853a4affadbba895a8d4e90f981773e2c88055098cc48df02acf7f"
+          },
+          "worker": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/bin/worker",
+            "sha256": "4beaf4d6fd42aa40ad9dd8ab6c281e01d29087e57afdecf3257eca030ce1ca7f"
+          },
+          "preflight": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/bin/preflight",
+            "sha256": "c4a9f8768481221b4c1062c3f4bf63c04d58acc02646b7e3b1ecf5ad574c37be"
+          }
+        },
+        "receiver_hashes": {
+          "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
+          "schema.sql": "7f328fd3ca1b586e50299e97a460cdcb02669cefac99ad172042c65af8181de4",
+          "receipt_authority.wasm": "6313907503f9b18fc01fa212ad7b52b79bafc5d6b2bbec5caf5bcabe933ef28a",
+          "worker.js": "d6c8005616e93fcb2accd9b1a2e49a649d6ae2aa38fb120a74445da80d449c4f",
+          "receiver-pin.json": "c5d26be4a2edf890afc6521e73d2b071c8014b77bd15815fee6035bac74dfbdd",
+          "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
+          "schema-baseline.sql": "9e580ee59cbe7c490eb0e24cb3adcd659ed0db7bb2097ba6d6ed05d79b8c60f9",
+          "authority-provenance.json": "bafee58636da814669b55e1e106a82083d5962e26e383f3d5d6639df6b898b49",
+          "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+          "schema-baseline.json": "e1bff1e10dfe734887e8158e9a42b15576a7a662addb6f907c33333ff92d32da"
+        },
+        "constraints": {
+          "no_source_rewrite": true,
+          "no_K_changes": true,
+          "no_hidden_source_setup": true,
+          "no_ceiling_expansion": true,
+          "no_UNKNOWN_retry": true,
+          "deploy": false,
+          "remote_migration": false,
+          "1421_untouched": true,
+          "100_remeasurement": false
+        },
+        "applications": [
+          {
+            "index": 7,
+            "name": "changedetection.io",
+            "repo": "https://github.com/dgtlmoon/changedetection.io",
+            "ref": "0e0566721b1c483dcf7ae548210ee10532d9b181",
+            "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+            "archive_bytes": 6044832,
+            "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/007.tar.gz",
+            "license": "Apache-2.0",
+            "license_file": "LICENSE",
+            "license_sha256": "94819497b44fbfbbc93198af0eb1b20144098a96c10ab577e9a868bab26d3705",
+            "primary_language": "Python",
+            "broad_source_shape": "python-service",
+            "monorepo": false,
+            "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+            "baseline_terminal": "preset_no_match",
+            "baseline_typed_K_pass": false,
+            "explicit_K_newly_supplied": true
+          },
+          {
+            "index": 57,
+            "name": "SVGOMG",
+            "repo": "https://github.com/jakearchibald/svgomg",
+            "ref": "f925656d40a507c512bf95ee14ad16445a4ad3ed",
+            "archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+            "archive_bytes": 622928,
+            "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/057.tar.gz",
+            "license": "MIT",
+            "license_file": "LICENSE.md",
+            "license_sha256": "fc238e99233704853d397eb25d538edfd5f2ddb2ad86d903bb33af99753897bb",
+            "primary_language": "JavaScript",
+            "broad_source_shape": "frontend-spa",
+            "monorepo": false,
+            "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+            "baseline_terminal": "network_denied",
+            "baseline_typed_K_pass": false,
+            "explicit_K_newly_supplied": false
+          }
+        ],
+        "accounting_roots": [],
+        "source_preflight_timeout_seconds": 600,
+        "build_provenance": {
+          "wasm_sha256": "6313907503f9b18fc01fa212ad7b52b79bafc5d6b2bbec5caf5bcabe933ef28a",
+          "API_JS_source_pin": "4ff88c038e095951e2277b759ac7ae012148e02e",
+          "authority_WASM_source_pin": "fb140026bb555d01f5446cd1a92f04affac4f9b6",
+          "prior_authority_source_pin": "fb6f6bb76d13d0bcef1d64346b623cde0f6b255c"
+        },
+        "host_resource_state": {
+          "disk": "Filesystem        1B-blocks         Used   Available Use% Mounted on\n/dev/sda1      310911414272 231778529280 79116107776  75% /\n",
+          "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+          "kernel": "Linux 6.17.0-1016-oracle aarch64"
+        },
+        "provider_latency": "per-exchange measured; Codex bridge includes response wait; Codex tokens/cost unavailable, API actual usage journal separate",
+        "credential_keys": [],
+        "pre_execution_gates": {
+          "exact_code_and_receiver_pins": true,
+          "same_source_and_K": true,
+          "no_manual_route": true,
+          "no_hidden_source_step": true,
+          "common_context_saved_before_proposal": true,
+          "existing_budget_sufficient": true
+        },
+        "API_gate": "run only after Codex real Runtime PASS; same initial information",
+        "session_exchange_limit": 6,
+        "infrastructure_correction": {
+          "stage": "before any source program attempt",
+          "reason": "duplicate public source refs exhausted input budget; allow omitted acquired files to be re-presented",
+          "same_search_for_Codex": "search_4d4a1f9208a3285e5ce90497386dd124",
+          "rounds_and_deadline_not_reset": true,
+          "API_fresh_search": true,
+          "source_policy_goal_and_limits_unchanged": true
+        }
+      },
+      "api": {
+        "schema": "ato.formation-shared-reasoning-pilot-plan/1",
+        "wave": "Codex session first then same-initial-information API; not 100 remeasurement",
+        "frozen_at": "2026-10-01T02:57:25.082868+00:00",
+        "ato_pin": "688eb4a6484bf8e0237c6265a64aa0d590b16488",
+        "ato_api_pin": "4ff88c038e095951e2277b759ac7ae012148e02e",
+        "authority_source_pin": "fb140026bb555d01f5446cd1a92f04affac4f9b6",
+        "baseline": {
+          "ledger": "docs/ops/formation-coverage-100.json",
+          "sha256": "560302a51a04fc08d9868a8dfb84bc2ac58666e14a0ee3533f181e502c98d45c",
+          "typed_K_pass": 7,
+          "pin": "e494e9375cf1151fc2884d545047dfbdad52c2cc"
+        },
+        "entry_conditions": {
+          "known_D": false,
+          "K": "same original source-bound StaticFiles; changedetection explicit entrance, no rewriting K",
+          "no_manual_source_startup": true,
+          "Codex_input": "saved common input only",
+          "API_input": "same initial information; no Codex D/history seed"
+        },
+        "preflight_config": {
+          "exploration": {
+            "formation": {
+              "max_rounds": 3
+            },
+            "ceiling": {
+              "network": [
+                {
+                  "phase": "dependencies",
+                  "host": "registry.npmjs.org",
+                  "port": 443
+                },
+                {
+                  "phase": "dependencies",
+                  "host": "pypi.org",
+                  "port": 443
+                },
+                {
+                  "phase": "dependencies",
+                  "host": "files.pythonhosted.org",
+                  "port": 443
+                },
+                {
+                  "phase": "dependencies",
+                  "host": "nodejs.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "registry.npmjs.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "pypi.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "files.pythonhosted.org",
+                  "port": 443
+                },
+                {
+                  "phase": "build",
+                  "host": "nodejs.org",
+                  "port": 443
+                }
+              ],
+              "authority": [
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.http@1",
+                  "resource": "app.http",
+                  "operation": "bind"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.data",
+                  "operation": "read"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.data",
+                  "operation": "write"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.data",
+                  "operation": "create"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.state",
+                  "operation": "read"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.state",
+                  "operation": "write"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.state",
+                  "operation": "create"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.cache",
+                  "operation": "read"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.cache",
+                  "operation": "write"
+                },
+                {
+                  "phase": "runtime",
+                  "protocol": "ato.state.filesystem@1",
+                  "resource": "app.cache",
+                  "operation": "create"
+                }
+              ]
+            },
+            "max_provider_calls": 6,
+            "max_inspections": 4,
+            "max_provider_cost_usd_micros": 58986,
+            "max_provider_input_tokens": 147456,
+            "max_provider_output_tokens": 12288,
+            "max_network_transfer_bytes": 536870912,
+            "max_network_transfer_bytes_per_attempt": 134217728,
+            "reasoning": {
+              "goal": "Prerequisite acceptance probe: for a source-owned Node npm_ci plan, the first D uses no dependency-phase network grants; after actual refusal, repair with source/evidence-scoped grants within the frozen ceiling. Do not remove a successful build step or weaken K. After PASS, attempt only justified permission reductions. This is a deliberate least-privilege probe, not an accidental startup error. For unsupported toolchains or missing source-owned operations, inspect then decline concretely.",
+              "round_timeout_ms": 420000,
+              "inspection_timeout_ms": 300000,
+              "inspection_source_bytes": 32768
+            }
+          },
+          "toolchains": {
+            "python": "3.12.7",
+            "node": "22.14.0",
+            "npm": "10.9.2",
+            "oci": "1.0.0"
+          },
+          "policy": {
+            "network": "denied",
+            "allow_managed": false
+          },
+          "budget": {
+            "max_attempts": 4,
+            "mode": "first_pass",
+            "deadline_seconds": 900,
+            "max_transfer_bytes": 1073741824,
+            "max_expanded_bytes": 2147483648,
+            "max_stored_bytes": 1073741824
+          }
+        },
+        "sandbox": {
+          "ceiling": {
+            "network": [
+              {
+                "phase": "dependencies",
+                "host": "registry.npmjs.org",
+                "port": 443
+              },
+              {
+                "phase": "dependencies",
+                "host": "pypi.org",
+                "port": 443
+              },
+              {
+                "phase": "dependencies",
+                "host": "files.pythonhosted.org",
+                "port": 443
+              },
+              {
+                "phase": "dependencies",
+                "host": "nodejs.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "registry.npmjs.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "pypi.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "files.pythonhosted.org",
+                "port": 443
+              },
+              {
+                "phase": "build",
+                "host": "nodejs.org",
+                "port": 443
+              }
+            ],
+            "authority": [
+              {
+                "phase": "runtime",
+                "protocol": "ato.http@1",
+                "resource": "app.http",
+                "operation": "bind"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.data",
+                "operation": "read"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.data",
+                "operation": "write"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.data",
+                "operation": "create"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.state",
+                "operation": "read"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.state",
+                "operation": "write"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.state",
+                "operation": "create"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.cache",
+                "operation": "read"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.cache",
+                "operation": "write"
+              },
+              {
+                "phase": "runtime",
+                "protocol": "ato.state.filesystem@1",
+                "resource": "app.cache",
+                "operation": "create"
+              }
+            ]
+          },
+          "max_network_transfer_bytes_per_attempt": 134217728
+        },
+        "producer_budget": {
+          "max_calls": 6,
+          "input_token_cap": 24576,
+          "output_token_cap": 2048,
+          "input_price": 300000,
+          "output_price": 1200000,
+          "ceiling_usd_micros": 58986
+        },
+        "producer_config": {
+          "provider": "deepseek",
+          "model": "deepseek-flash",
+          "endpoint": "https://api.deepseek.com",
+          "prompt_version": "ato.formation-candidate-producer-prompt/5",
+          "max_output_tokens": 2048,
+          "timeout_ms": 30000,
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "decision_config": null,
+        "prompt_sha256": "2c1b8d901e30d60218b82192f74fae2e1a9751da719656622015baa050999f70",
+        "pricing_snapshots": {
+          "deepseek": "https://api-docs.deepseek.com/quick_start/pricing/",
+          "cache_miss_peak_prices": true,
+          "verified_at": "2026-10-01",
+          "advertised_model_version": "DeepSeek-V4.1-Flash",
+          "peak_cache_miss_input_usd_per_million": "0.30",
+          "peak_output_usd_per_million": "1.20",
+          "immutable_vendor_version_not_exposed": true
+        },
+        "model_budget": {
+          "remaining_before_pilot_usd_micros": 564906,
+          "max_candidate_producer_calls": 12,
+          "max_decision_provider_calls": 0,
+          "per_CP_reservation": 9831,
+          "per_DP_reservation": 2753,
+          "max_requester_invocations": 2,
+          "maximum_cases": 2,
+          "maximum_unique_apps": 2
+        },
+        "maximum_reservation_usd_micros": 117972,
+        "small_gate": null,
+        "api": "http://127.0.0.1:29022",
+        "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/receiver",
+        "api_node_modules": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-api/node_modules",
+        "coordinator_script": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-code/scripts/acceptance/proposal/coordinator.mjs",
+        "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-code/scripts/acceptance/coverage/exploration-credential-exec.py",
+        "binaries": {
+          "ato": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/bin/ato",
+            "sha256": "e9b6c12c73853a4affadbba895a8d4e90f981773e2c88055098cc48df02acf7f"
+          },
+          "worker": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/bin/worker",
+            "sha256": "4beaf4d6fd42aa40ad9dd8ab6c281e01d29087e57afdecf3257eca030ce1ca7f"
+          },
+          "preflight": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/bin/preflight",
+            "sha256": "c4a9f8768481221b4c1062c3f4bf63c04d58acc02646b7e3b1ecf5ad574c37be"
+          }
+        },
+        "receiver_hashes": {
+          "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
+          "schema.sql": "7f328fd3ca1b586e50299e97a460cdcb02669cefac99ad172042c65af8181de4",
+          "receipt_authority.wasm": "6313907503f9b18fc01fa212ad7b52b79bafc5d6b2bbec5caf5bcabe933ef28a",
+          "worker.js": "d6c8005616e93fcb2accd9b1a2e49a649d6ae2aa38fb120a74445da80d449c4f",
+          "receiver-pin.json": "c5d26be4a2edf890afc6521e73d2b071c8014b77bd15815fee6035bac74dfbdd",
+          "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
+          "schema-baseline.sql": "9e580ee59cbe7c490eb0e24cb3adcd659ed0db7bb2097ba6d6ed05d79b8c60f9",
+          "authority-provenance.json": "bafee58636da814669b55e1e106a82083d5962e26e383f3d5d6639df6b898b49",
+          "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+          "schema-baseline.json": "e1bff1e10dfe734887e8158e9a42b15576a7a662addb6f907c33333ff92d32da"
+        },
+        "constraints": {
+          "no_source_rewrite": true,
+          "no_K_changes": true,
+          "no_hidden_source_setup": true,
+          "no_ceiling_expansion": true,
+          "no_UNKNOWN_retry": true,
+          "deploy": false,
+          "remote_migration": false,
+          "1421_untouched": true,
+          "100_remeasurement": false
+        },
+        "applications": [
+          {
+            "index": 7,
+            "name": "changedetection.io",
+            "repo": "https://github.com/dgtlmoon/changedetection.io",
+            "ref": "0e0566721b1c483dcf7ae548210ee10532d9b181",
+            "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+            "archive_bytes": 6044832,
+            "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/007.tar.gz",
+            "license": "Apache-2.0",
+            "license_file": "LICENSE",
+            "license_sha256": "94819497b44fbfbbc93198af0eb1b20144098a96c10ab577e9a868bab26d3705",
+            "primary_language": "Python",
+            "broad_source_shape": "python-service",
+            "monorepo": false,
+            "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+            "baseline_terminal": "preset_no_match",
+            "baseline_typed_K_pass": false,
+            "explicit_K_newly_supplied": true
+          },
+          {
+            "index": 57,
+            "name": "SVGOMG",
+            "repo": "https://github.com/jakearchibald/svgomg",
+            "ref": "f925656d40a507c512bf95ee14ad16445a4ad3ed",
+            "archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+            "archive_bytes": 622928,
+            "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/057.tar.gz",
+            "license": "MIT",
+            "license_file": "LICENSE.md",
+            "license_sha256": "fc238e99233704853d397eb25d538edfd5f2ddb2ad86d903bb33af99753897bb",
+            "primary_language": "JavaScript",
+            "broad_source_shape": "frontend-spa",
+            "monorepo": false,
+            "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+            "baseline_terminal": "network_denied",
+            "baseline_typed_K_pass": false,
+            "explicit_K_newly_supplied": false
+          }
+        ],
+        "accounting_roots": [
+          "/home/ubuntu/formation-foundation/.tmp/formation-reasoning-api"
+        ],
+        "source_preflight_timeout_seconds": 600,
+        "build_provenance": {
+          "wasm_sha256": "6313907503f9b18fc01fa212ad7b52b79bafc5d6b2bbec5caf5bcabe933ef28a",
+          "API_JS_source_pin": "4ff88c038e095951e2277b759ac7ae012148e02e",
+          "authority_WASM_source_pin": "fb140026bb555d01f5446cd1a92f04affac4f9b6",
+          "prior_authority_source_pin": "fb6f6bb76d13d0bcef1d64346b623cde0f6b255c"
+        },
+        "host_resource_state": {
+          "disk": "Filesystem        1B-blocks         Used   Available Use% Mounted on\n/dev/sda1      310911414272 231778529280 79116107776  75% /\n",
+          "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+          "kernel": "Linux 6.17.0-1016-oracle aarch64"
+        },
+        "provider_latency": "per-exchange measured; Codex bridge includes response wait; Codex tokens/cost unavailable, API actual usage journal separate",
+        "credential_keys": [
+          "DEEPSEEK_API_KEY"
+        ],
+        "pre_execution_gates": {
+          "exact_code_and_receiver_pins": true,
+          "same_source_and_K": true,
+          "no_manual_route": true,
+          "no_hidden_source_step": true,
+          "common_context_saved_before_proposal": true,
+          "existing_budget_sufficient": true
+        },
+        "API_gate": "run only after Codex real Runtime PASS; same initial information",
+        "infrastructure_correction": {
+          "stage": "before any source program attempt",
+          "reason": "duplicate public source refs exhausted input budget; allow omitted acquired files to be re-presented",
+          "same_search_for_Codex": "search_4d4a1f9208a3285e5ce90497386dd124",
+          "rounds_and_deadline_not_reset": true,
+          "API_fresh_search": true,
+          "source_policy_goal_and_limits_unchanged": true
+        }
+      }
+    },
+    "fixed_plan_sha256": {
+      "codex": "5ea43a2bee963e026a6a0af0a1857f7a274cfac4e0cfeafeeaba90ab313641c8",
+      "api": "3428b1c130e8485cab8980b8270b3194fd624fd6e315a70b70df27842b273e77"
+    }
   }
 }
