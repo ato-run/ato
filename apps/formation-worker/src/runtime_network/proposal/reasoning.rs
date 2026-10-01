@@ -141,6 +141,7 @@ pub(super) fn save(path: &Path, bytes: &[u8]) -> Result<()> {
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
     staged.persist_noclobber(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
     std::fs::File::open(path.parent().context("evidence parent")?)?.sync_all()?;
     Ok(())
 }
@@ -469,7 +470,11 @@ impl ReasoningProducer {
                 );
             }
         }
-        let prior_inspection_ms: u64 = records.iter().map(|(_, _, r)| r.elapsed_ms).sum();
+        let prior_inspection_ms: u64 = records
+            .iter()
+            .filter(|(_, _, r)| !r.inspected.is_empty() || r.inspection_error.is_some())
+            .map(|(_, _, r)| r.elapsed_ms)
+            .sum();
         let started = Instant::now();
         let prior_in_round = records
             .iter()
@@ -715,7 +720,7 @@ impl ReasoningProducer {
                         auth, &sources, remaining, 4,
                     )?;
                     ensure!(
-                        refs.iter().any(|r| !acquired.contains_key(&r.file_id)),
+                        refs.iter().all(|r| !acquired.contains_key(&r.file_id)),
                         "no new inspection"
                     );
                     for reference in &refs {
