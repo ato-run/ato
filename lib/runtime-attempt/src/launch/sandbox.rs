@@ -275,6 +275,55 @@ pub fn sandboxed_command(
     })
 }
 
+/// Isolated network namespace with owner-only ingress and a single
+/// phase-bound egress broker. Never grants access to the host network.
+pub fn sandboxed_command_scoped(
+    context: &ResolvedRuntimeLaunchContext,
+    workload_argv: &[String],
+    shim: &Path,
+    policy_host_path: &Path,
+    egress_socket: &Path,
+    ingress_root: &Path,
+) -> Result<SandboxedCommand> {
+    let mut command = sandboxed_command(context, workload_argv, shim, policy_host_path, false)?;
+    let at = command
+        .argv
+        .windows(2)
+        .position(|v| v == [GUEST_SHIM, "sandbox-exec"])
+        .context("sandbox shim missing")?;
+    command.argv.splice(
+        at..at,
+        [
+            "--ro-bind".into(),
+            egress_socket.to_string_lossy().into_owned(),
+            crate::network_bridge::GUEST_SOCKET.into(),
+            "--bind".into(),
+            ingress_root.to_string_lossy().into_owned(),
+            crate::network_bridge::INGRESS_ROOT.into(),
+        ],
+    );
+    let separator = command
+        .argv
+        .iter()
+        .enumerate()
+        .find_map(|(i, v)| (i > at + 6 && v == "--").then_some(i))
+        .context("workload boundary missing")?;
+    let mut options = vec![
+        "--scoped-network".into(),
+        "--scoped-ingress".into(),
+        "--relay-shim".into(),
+        GUEST_SHIM.into(),
+    ];
+    for endpoint in context.endpoints() {
+        options.extend(["--ingress-port".into(), endpoint.host_port.to_string()]);
+    }
+    command.argv.splice(separator..separator, options);
+    command.policy = command
+        .policy
+        .allow_tcp_connect([crate::network_bridge::PROXY_PORT]);
+    Ok(command)
+}
+
 /// Where the workload starts, as a GUEST path.
 ///
 /// The resolved context already placed `effective_cwd` inside the workspace

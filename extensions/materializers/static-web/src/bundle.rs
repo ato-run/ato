@@ -27,7 +27,7 @@ pub const MAX_TOTAL_SIZE: u64 = 1024 * 1024 * 1024;
 pub const MAX_DIRECTORY_COUNT: usize = 10_000;
 pub const MAX_RECURSION_DEPTH: usize = 32;
 
-fn blob_is_clean(blob: &[u8], secrets: &[&[u8]]) -> bool {
+pub fn blob_is_clean(blob: &[u8], secrets: &[&[u8]]) -> bool {
     !secrets
         .iter()
         .any(|secret| !secret.is_empty() && blob.windows(secret.len()).any(|part| part == *secret))
