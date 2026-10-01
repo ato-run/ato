@@ -160,16 +160,37 @@ pub fn lower_execution(
         .into());
     }
     if serve.protocol == crate::source_oci_plan::OCI_PROTOCOL {
-        let recipe = d
-            .source_oci
-            .as_ref()
-            .ok_or_else(|| refuse("source OCI recipe missing".into()))?;
-        recipe.validate().map_err(|e| refuse(e.into()))?;
+        let image_route = if let Some(recipe) = &d.source_oci {
+            recipe.validate().map_err(|e| refuse(e.into()))?;
+            false
+        } else {
+            let image = d
+                .runtimes
+                .get("oci.image")
+                .ok_or_else(|| refuse("bound OCI image missing".into()))?;
+            let digest = image
+                .rsplit_once('@')
+                .map(|(_, d)| d)
+                .filter(|d| crate::generation::is_sha256(d));
+            if digest.is_none()
+                || d.runtimes.len() != 2
+                || !d
+                    .runtimes
+                    .get("oci.platform")
+                    .is_some_and(|p| matches!(p.as_str(), "linux/amd64" | "linux/arm64"))
+            {
+                return Err(refuse(
+                    "OCI image must be digest pinned with an explicit platform".into(),
+                )
+                .into());
+            }
+            true
+        };
         if serving_step != 0
             || !serve.argv.is_empty()
             || !serve.env.is_empty()
             || !serve.network.is_denied()
-            || !d.runtimes.is_empty()
+            || (!image_route && !d.runtimes.is_empty())
             || d.workspace_build.is_some()
             || d.workspace_compiler.is_some()
             || serve
@@ -180,7 +201,7 @@ pub fn lower_execution(
             || d.ports[0].from != serve.id
             || d.ports[0].guest_port.is_none()
         {
-            return Err(refuse("source OCI supports the image default command, one port and the frozen root Dockerfile only".into()).into());
+            return Err(refuse("OCI supports the image default command, one port and an explicit frozen image or Dockerfile".into()).into());
         }
         return Ok(ExecutionPlan {
             lane: Lane::Process,
