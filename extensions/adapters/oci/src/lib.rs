@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
+pub mod command_control;
 mod ownership;
 mod stop;
 
@@ -124,7 +125,7 @@ fn discard_failed_launch(
 /// The launch error, or — when the container it may have created cannot be
 /// confirmed removed — [`SpawnCleanupUnconfirmed`] carrying both.
 fn failed_launch(docker: &DockerClient, container: &str, error: anyhow::Error) -> anyhow::Error {
-    match discard_failed_launch(docker, container) {
+    match discard_failed_launch(&docker.for_cleanup(), container) {
         Ok(()) => error,
         Err(reason) => anyhow::Error::new(SpawnCleanupUnconfirmed {
             launch_error: format!("{error:#}"),
@@ -199,15 +200,17 @@ pub struct OciAdmission {
 pub(crate) struct DockerClient {
     executable: std::sync::Arc<PathBuf>,
     owner: Option<std::sync::Arc<(PathBuf, PathBuf)>>,
+    control: Option<command_control::CommandControl>,
 }
 impl DockerClient {
     fn ambient(executable: PathBuf) -> Self {
         Self {
             executable: std::sync::Arc::new(executable),
             owner: None,
+            control: None,
         }
     }
-    pub(crate) fn command(&self) -> Command {
+    pub(crate) fn command(&self) -> DockerCommand {
         let mut c = Command::new(self.executable.as_ref());
         if let Some(owner) = &self.owner {
             let (socket, config) = owner.as_ref();
@@ -218,7 +221,54 @@ impl DockerClient {
                 .arg("--config")
                 .arg(config);
         }
-        c
+        DockerCommand {
+            command: c,
+            control: self.control.clone(),
+        }
+    }
+
+    fn for_cleanup(&self) -> Self {
+        let mut cleanup = self.clone();
+        cleanup.control = Some(command_control::CommandControl::cleanup(
+            Duration::from_secs(20),
+        ));
+        cleanup
+    }
+}
+
+pub(crate) struct DockerCommand {
+    command: Command,
+    control: Option<command_control::CommandControl>,
+}
+impl std::ops::Deref for DockerCommand {
+    type Target = Command;
+    fn deref(&self) -> &Command {
+        &self.command
+    }
+}
+impl std::ops::DerefMut for DockerCommand {
+    fn deref_mut(&mut self) -> &mut Command {
+        &mut self.command
+    }
+}
+impl DockerCommand {
+    fn stdin(&mut self, stdio: std::process::Stdio) -> &mut Self {
+        self.command.stdin(stdio);
+        self
+    }
+    fn args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.command.args(args);
+        self
+    }
+    fn output(&mut self) -> std::io::Result<Output> {
+        match &self.control {
+            Some(c) => c.output(&mut self.command),
+            None => self.command.output(),
+        }
     }
 }
 
@@ -234,15 +284,31 @@ struct OfflineImage {
 }
 
 impl DockerOciAdapter {
+    pub fn with_control(mut self, control: command_control::CommandControl) -> Self {
+        self.docker.control = Some(control);
+        self
+    }
+    pub fn with_deadline(mut self, deadline_ms: u64) -> Self {
+        self.docker.control = Some(command_control::CommandControl::new(deadline_ms));
+        self
+    }
     pub fn new(spec: OciSpec) -> Result<Self> {
+        let executable = find_on_path("docker").context(
+            "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
+        )?;
+        Self::new_at(spec, executable)
+    }
+    fn new_at(spec: OciSpec, executable: PathBuf) -> Result<Self> {
         validate_spec(&spec)?;
+        ensure!(
+            executable.is_absolute() && executable.is_file(),
+            "OCI owner client is not an absolute executable file"
+        );
         ensure!(
             cfg!(target_os = "linux") || spec.endpoints.is_empty(),
             "OCI runtime admission failed: isolated HTTP endpoints currently require a native Linux host; Docker Desktop keeps the internal bridge inside its VM"
         );
-        let docker = find_on_path("docker").map(DockerClient::ambient).context(
-            "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
-        )?;
+        let docker = DockerClient::ambient(executable);
         Ok(Self {
             docker,
             spec,
@@ -264,6 +330,29 @@ impl DockerOciAdapter {
             "offline OCI config reference is invalid"
         );
         let mut adapter = Self::new(spec)?;
+        adapter.offline_image = Some(OfflineImage {
+            archive,
+            config_reference,
+        });
+        Ok(adapter)
+    }
+
+    /// Owner-bound exploration uses the configured client, never an ambient PATH.
+    pub fn new_offline_at(
+        spec: OciSpec,
+        archive: Vec<u8>,
+        config_reference: String,
+        executable: PathBuf,
+    ) -> Result<Self> {
+        ensure!(
+            config_reference
+                .strip_prefix("sha256:")
+                .is_some_and(|d| d.len() == 64
+                    && d.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())),
+            "offline OCI config reference is invalid"
+        );
+        let mut adapter = Self::new_at(spec, executable)?;
         adapter.offline_image = Some(OfflineImage {
             archive,
             config_reference,
@@ -601,6 +690,47 @@ fn offline_image_reference_candidates<'a>(
 /// would make the scheduler issue a lease that can only fail. The Connected
 /// Runner uses this probe for its heartbeat capability advertisement; launch
 /// admission still repeats the check and validates the pinned platform/image.
+/// Probe a bound management socket without inheriting ambient Docker credentials.
+/// No image is acquired and no container is started by this read-only request.
+pub fn isolated_runtime_available(socket: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        if !cfg!(target_os = "linux") {
+            return false;
+        }
+        let Ok(mut connection) = UnixStream::connect(socket) else {
+            return false;
+        };
+        if connection
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .is_err()
+            || connection
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .is_err()
+        {
+            return false;
+        }
+        if connection
+            .write_all(b"GET /version HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .is_err()
+        {
+            return false;
+        }
+        let mut response = Vec::new();
+        if connection.take(8192).read_to_end(&mut response).is_err() {
+            return false;
+        }
+        response.starts_with(b"HTTP/1.0 200 ") || response.starts_with(b"HTTP/1.1 200 ")
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        false
+    }
+}
+
 pub fn docker_runtime_available() -> bool {
     if !cfg!(target_os = "linux") {
         return false;
@@ -608,9 +738,8 @@ pub fn docker_runtime_available() -> bool {
     let Some(docker) = find_on_path("docker") else {
         return false;
     };
-    Command::new(docker)
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .output()
+    command_control::CommandControl::cleanup(Duration::from_secs(2))
+        .output(Command::new(docker).args(["version", "--format", "{{.Server.Version}}"]))
         .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
@@ -1060,6 +1189,7 @@ impl OciHandle {
             return outcome;
         }
         self.forwarders.clear();
+        self.docker = self.docker.for_cleanup();
         let outcome = stop::stop_container(&self.docker, &self.container_id, budget);
         if outcome.is_confirmed() {
             let _ = stop::remove_stopped_container(&self.docker, &self.container_id);
@@ -1466,7 +1596,7 @@ fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
 
 pub(crate) fn remove_network(docker: &DockerClient, network: &str) -> Result<()> {
     let output = stop::docker_output(
-        docker,
+        &docker.for_cleanup(),
         ["network", "rm", network],
         stop::DOCKER_CALL_TIMEOUT,
     )
@@ -1546,6 +1676,7 @@ mod tests {
     #[test]
     fn exploration_docker_command_has_only_explicit_owner_bindings() {
         let client = DockerClient {
+            control: None,
             executable: std::sync::Arc::new(PathBuf::from("/usr/bin/docker")),
             owner: Some(std::sync::Arc::new((
                 PathBuf::from("/isolated/docker.sock"),

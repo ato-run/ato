@@ -184,6 +184,7 @@ pub fn admit_isolated_authority(
         // declaration. Preserve those exact bytes while checking that
         // implicit authority against the SAME exploration ceiling.
         let legacy = d.source_oci.is_none()
+            && !d.runtimes.contains_key("oci.image")
             && d.requirements.is_empty()
             && d.steps.iter().all(|s| s.network.is_denied());
         if legacy {

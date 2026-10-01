@@ -17,6 +17,7 @@ name = "ato-portable-validator"
 path = "src/bin/ato-portable-validator.rs"
 
 [dependencies]
+ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 ato-formation = { path = "../../lib/formation", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }

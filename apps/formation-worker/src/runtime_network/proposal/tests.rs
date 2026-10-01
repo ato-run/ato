@@ -448,7 +448,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
         for (name, text) in [
             (
                 "setup.py",
-                "# explicitly referenced config: src/requirements.txt\n",
+                "# explicitly referenced entrypoint: app.py\n# explicitly referenced config: src/requirements.txt\n",
             ),
             ("README.md", "# application\n"),
             ("settings.py", "PORT=8000\n"),

@@ -62,6 +62,32 @@ pub fn source_inspection_priority(path: &str) -> (u8, usize) {
     (priority, depth)
 }
 
+/// Initial v0 discovery starts at root declarations. Programs and nested
+/// manifests require an explicit reference; directory existence is no grant.
+pub fn is_discovery_root(path: &str) -> bool {
+    if path.contains('/') || !source_file_allowed(path) {
+        return false;
+    }
+    let name = path.to_ascii_lowercase();
+    matches!(source_inspection_priority(path).0, 0 | 1 | 3 | 4 | 5)
+        || matches!(
+            name.as_str(),
+            "pnpm-lock.yaml"
+                | "yarn.lock"
+                | "bun.lock"
+                | "bun.lockb"
+                | "setup.cfg"
+                | "pipfile"
+                | "pipfile.lock"
+                | "poetry.lock"
+                | "uv.lock"
+                | "docker-compose.yml"
+                | "docker-compose.yaml"
+                | "compose.yml"
+                | "compose.yaml"
+        )
+}
+
 impl PlanAuthorization {
     pub fn catalog_sources(&self) -> Vec<CatalogSource> {
         let mut sources: Vec<_> = self.files.iter().collect();
@@ -233,6 +259,9 @@ pub struct ExecutionPlanProposal {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub runtime: RuntimeSelection,
+    /// Explicit alternative OCI D; only a frozen approved image is selectable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci_image: Option<String>,
     pub entrypoint: SourceReference,
     /// Source-owned build output served by the existing browser adapter. The
     /// entrypoint ref must be the manifest, never a browser script run as Node.
@@ -368,6 +397,9 @@ impl ExecutionPlanProposal {
         let entrypoint = authorization.resolve(&self.entrypoint)?;
         if self.runtime.name == "oci" {
             return self.compile_oci(frozen, authorization, entrypoint);
+        }
+        if self.oci_image.is_some() {
+            return Err(ProposalError("unsupported_oci_image_selection"));
         }
         if let Some(output) = &self.static_output {
             let manifest = if self.cwd == "." {
@@ -667,8 +699,7 @@ impl ExecutionPlanProposal {
         authorization: &PlanAuthorization,
         entrypoint: &str,
     ) -> Result<(CompiledGeneration, SearchCandidate), ProposalError> {
-        if entrypoint != "Dockerfile"
-            || self.cwd != "."
+        if self.cwd != "."
             || !self.argv.is_empty()
             || self.module.is_some()
             || !self.environment.is_empty()
@@ -682,6 +713,9 @@ impl ExecutionPlanProposal {
             .source_oci
             .as_ref()
             .ok_or(ProposalError("source_oci_builder_unavailable"))?;
+        let mut recipe = recipe.clone();
+        recipe.dockerfile = entrypoint.into();
+        recipe.validate().map_err(ProposalError)?;
         let source = frozen
             .initial_source
             .as_ref()
@@ -697,13 +731,28 @@ impl ExecutionPlanProposal {
             return Err(ProposalError("proposal_contract_unsupported"));
         };
         validate_http_contract(&frozen.base_contract, source, port)?;
-        let document = json!({"schema":"ato.capsule/1",
+        let mut document = json!({"schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
             "derive":{"step":[{"id":"app","use":crate::source_oci_plan::OCI_PROTOCOL,"op":"serve","source":"workspace"}]},
             "port":[{"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port}],
             "source_oci":recipe,"requirements":self.requirements,
             "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
             "contract":{"require":contract_requirements(&frozen.base_contract)}});
+        if let Some(image) = &self.oci_image {
+            let approved = recipe.base_images.iter().any(|b| {
+                let pinned = if b.reference.contains('@') {
+                    b.reference.clone()
+                } else {
+                    format!("{}@{}", b.reference, b.pinned_digest)
+                };
+                image == &pinned
+            });
+            if !approved {
+                return Err(ProposalError("oci_image_unbound"));
+            }
+            document.as_object_mut().unwrap().remove("source_oci");
+            document["runtime"] = json!([{ "name":"oci.image","version":image},{"name":"oci.platform","version":recipe.platform}]);
+        }
         let value = toml::Value::try_from(document)
             .map_err(|_| ProposalError("proposal_compilation_failed"))?;
         let capsule_toml =
@@ -724,6 +773,16 @@ impl ExecutionPlanProposal {
             .derivation_ref()
             .map_err(|_| ProposalError("proposal_canonicalization"))?;
         let mut candidate = authorization.candidate(source, derivation_ref.clone());
+        candidate.requirements = vec![crate::search::Requirement {
+            fact: "runtime.oci".into(),
+            one_of: Some(vec!["true".into()]),
+        }];
+        if self.oci_image.is_none() {
+            candidate.requirements.push(crate::search::Requirement {
+                fact: "formation.source_oci.available".into(),
+                one_of: Some(vec!["true".into()]),
+            });
+        }
         candidate.provisions.clear();
         Ok((
             CompiledGeneration {
