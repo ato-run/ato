@@ -84,14 +84,19 @@ def node_case(root):
         return dict(status='unavailable', reason='local Node/npm test prerequisite')
     source = root / 'node'; source.mkdir()
     manifest = source / 'package.json'
-    manifest.write_text(json.dumps(dict(name='fixture-app', version='1.0.0', dependencies={'fixture-native':'1.0.0'})))
+    dependencies={'fixture-native':'1.0.0','fixture-packed':'1.0.0'}
+    manifest.write_text(json.dumps(dict(name='fixture-app', version='1.0.0', dependencies=dependencies)))
     lock = source / 'package-lock.json'
     lock.write_text(json.dumps(dict(name='fixture-app', version='1.0.0', lockfileVersion=3,
-        packages={'':dict(name='fixture-app', version='1.0.0', dependencies={'fixture-native':'1.0.0'}),
-                  'node_modules/fixture-native':dict(version='1.0.0',hasInstallScript=True)})))
+        packages={'':dict(name='fixture-app', version='1.0.0', dependencies=dependencies),
+                  'node_modules/fixture-native':dict(version='1.0.0',hasInstallScript=True),
+                  'node_modules/fixture-packed':dict(version='1.0.0')})))
     package = source / 'node_modules/fixture-native'; package.mkdir(parents=True)
     (package / 'package.json').write_text(json.dumps(dict(name='fixture-native',version='1.0.0',
         scripts={'install':"node -e \"require('fs').writeFileSync('native-ready','ready')\""})))
+    packed=source/'node_modules/fixture-packed';packed.mkdir()
+    (packed/'package.json').write_text(json.dumps(dict(name='fixture-packed',version='1.0.0',
+        scripts={'prepare':"node -e \"require('fs').writeFileSync('publish-only','unexpected')\""})))
     plan = dict(schema='ato.npm-native-plan/1', manifest=str(manifest),lockfile=str(lock),
                 manifest_sha256=sha(manifest),lockfile_sha256=sha(lock),npm=npm,
                 npm_version=subprocess.check_output([npm,'--version'],text=True).strip(),
@@ -106,12 +111,15 @@ def node_case(root):
 
     assert execute('initialize').returncode == 0
     ignored = execute('audit'); assert ignored.returncode != 0 and 'npm_lifecycle_plan_required' in ignored.stderr
+    assert 'fixture-packed' not in ignored.stderr
     assert not (package / 'native-ready').exists()
     rebuilt = execute('rebuild'); assert rebuilt.returncode == 0, rebuilt.stderr
     assert (package / 'native-ready').read_text() == 'ready'
     assert execute('audit').returncode == 0
+    assert not (packed/'publish-only').exists()
     assert execute('initialize').returncode != 0  # source/old receipts cannot stand in for fresh completion
-    return dict(ignored_scripts_refused=True, typed_rebuild=True, completion_audited=True, stale_receipt_refused=True)
+    return dict(ignored_scripts_refused=True, typed_rebuild=True, completion_audited=True,
+                stale_receipt_refused=True, packed_prepare_not_an_install_prerequisite=True)
 
 
 def main():
