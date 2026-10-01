@@ -19,6 +19,14 @@ read, write, sha, require = wave.read, wave.write, wave.sha, wave.require
 
 
 class Pilot(wave.Wave):
+    def __init__(self, a):
+        super().__init__(a)
+        # Explicit, preregistered faults wrap the real Coordinator. The public
+        # configuration contains no credentials; the proxy never logs bodies.
+        faults = self.plan.get('coordinator_faults')
+        if faults:
+            self.env['ATO_FORMATION_COORDINATOR_FAULTS'] = json.dumps(faults)
+
     def budget_gate(self):
         if self.plan['producer_config']['provider'] == 'codex_session':
             require(not self.a.credential_socket, 'session must not receive API credentials')
