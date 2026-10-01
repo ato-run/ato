@@ -11,9 +11,9 @@ mod output;
 mod receipt;
 
 pub use bundle::{
-    MAX_DIRECTORY_COUNT, MAX_FILE_COUNT, MAX_FILE_SIZE, MAX_RECURSION_DEPTH, MAX_TOTAL_SIZE,
-    ProducedStaticWebBundle, blob_is_clean, media_type_for, produce_static_web_bundle,
-    produce_static_web_bundle_guarded,
+    ArtifactEmbeddingRefused, MAX_DIRECTORY_COUNT, MAX_FILE_COUNT, MAX_FILE_SIZE,
+    MAX_RECURSION_DEPTH, MAX_TOTAL_SIZE, ProducedStaticWebBundle, blob_is_clean, media_type_for,
+    produce_static_web_bundle, produce_static_web_bundle_guarded,
 };
 pub use manifest::{
     STATIC_WEB_FRAME_ANCESTORS_V1, STATIC_WEB_MANIFEST_V1_SCHEMA, StaticWebFileV1,
