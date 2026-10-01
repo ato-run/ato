@@ -92,13 +92,12 @@ pub fn scan_artifact_controlled(
             c.remaining(crate::control::AttemptPhase::Build)?;
         }
         let relative = path.strip_prefix(root).unwrap_or(std::path::Path::new(""));
-        ensure!(
-            ato_materializer_static_web::blob_is_clean(
-                relative.as_os_str().as_encoded_bytes(),
-                secrets
-            ),
-            "secret_artifact_embedding_refused"
-        );
+        if !ato_materializer_static_web::blob_is_clean(
+            relative.as_os_str().as_encoded_bytes(),
+            secrets,
+        ) {
+            return Err(ato_materializer_static_web::ArtifactEmbeddingRefused.into());
+        }
         let metadata = std::fs::symlink_metadata(&path)?;
         entries += 1;
         ensure!(entries <= 100_000, "variable_artifact_scan_bound");
@@ -108,10 +107,9 @@ pub fn scan_artifact_controlled(
             // target, while checking link bytes also protects their identity.
             let target = std::fs::read_link(&path)?;
             let target_bytes = target.as_os_str().as_encoded_bytes();
-            ensure!(
-                ato_materializer_static_web::blob_is_clean(target_bytes, secrets),
-                "secret_artifact_embedding_refused"
-            );
+            if !ato_materializer_static_web::blob_is_clean(target_bytes, secrets) {
+                return Err(ato_materializer_static_web::ArtifactEmbeddingRefused.into());
+            }
             ensure!(
                 ato_formation::containment::validate_contained_symlink_target(
                     relative,
@@ -145,10 +143,9 @@ pub fn scan_artifact_controlled(
                     break;
                 }
                 let end = retained + read;
-                ensure!(
-                    ato_materializer_static_web::blob_is_clean(&buffer[..end], secrets),
-                    "secret_artifact_embedding_refused"
-                );
+                if !ato_materializer_static_web::blob_is_clean(&buffer[..end], secrets) {
+                    return Err(ato_materializer_static_web::ArtifactEmbeddingRefused.into());
+                }
                 retained = overlap.min(end);
                 buffer.copy_within(end - retained..end, 0);
             }
@@ -228,11 +225,15 @@ mod tests {
         let mut bytes = vec![b'x'; 65534];
         bytes.extend_from_slice(b"synthetic-secret");
         std::fs::write(root.path().join("output"), bytes).unwrap();
+        let error = scan_artifact(root.path(), &[b"synthetic-secret"]).unwrap_err();
         assert!(
-            scan_artifact(root.path(), &[b"synthetic-secret"])
-                .unwrap_err()
-                .to_string()
-                .contains("secret_artifact_embedding_refused")
+            error
+                .downcast_ref::<ato_materializer_static_web::ArtifactEmbeddingRefused>()
+                .is_some()
+        );
+        assert_eq!(
+            crate::attempt::failure_of(&error).code,
+            "secret_artifact_embedding_refused"
         );
     }
     #[test]
