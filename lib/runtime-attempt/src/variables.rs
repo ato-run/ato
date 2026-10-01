@@ -43,6 +43,24 @@ pub fn redact(text: &str, variables: &[ResolvedVariable]) -> String {
     text
 }
 
+/// Both secret values and explicitly non-embeddable public configuration stay
+/// out of reusable artifacts. Missing declarations fail closed as protected.
+pub fn artifact_guard_values<'a>(
+    requirements: &[VariableRequirement],
+    variables: &'a [ResolvedVariable],
+) -> Vec<&'a [u8]> {
+    variables
+        .iter()
+        .filter(|v| {
+            requirements
+                .iter()
+                .find(|r| r.name == v.value.name())
+                .is_none_or(|r| r.secret || !r.artifact_embedding)
+        })
+        .map(|v| v.value.expose_for_spawn().as_bytes())
+        .collect()
+}
+
 /// Scan a process artifact before it can become reusable materialization.
 /// Values stay in private spawn context; bounds fail closed without printing bytes.
 pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
@@ -110,6 +128,26 @@ mod tests {
                 .to_string()
                 .contains("secret_artifact_embedding_refused")
         );
+    }
+    #[test]
+    fn public_configuration_embedding_requires_explicit_permission() {
+        std::fs::create_dir_all(".tmp").unwrap();
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        std::fs::write(root.path().join("client.js"), b"configuration-sample-value").unwrap();
+        for allowed in [false, true] {
+            let r:VariableRequirement=serde_json::from_value(serde_json::json!({"name":"CLIENT_ORIGIN","kind":"configuration","purpose":"Client build configuration","resource":"client.configuration","operation":"read","phase":"build","secret":false,"temporary":false,"artifact_embedding":allowed})).unwrap();
+            let variables = vec![
+                ResolvedVariable::new(
+                    &r,
+                    "formation-variable:test".into(),
+                    "configuration-sample-value".into(),
+                )
+                .unwrap(),
+            ];
+            let values = artifact_guard_values(&[r], &variables);
+            assert_eq!(scan_artifact(root.path(), &values).is_ok(), allowed);
+            assert!(scan_artifact(root.path(), &artifact_guard_values(&[], &variables)).is_err());
+        }
     }
     #[test]
     fn redeemed_values_are_not_debuggable_and_output_redaction_is_exact() {
