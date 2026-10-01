@@ -436,3 +436,162 @@ fn auto_source_priority_subset_is_valid_canonical_provider_context() {
             .contains("PROVIDER_KEY=excluded")
     );
 }
+
+#[test]
+fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() {
+    use reasoning::{
+        ReasoningInput, ReasoningProducer, ReasoningProviderConfig, SESSION_RESPONSE_SCHEMA,
+        SessionConfig,
+    };
+    let (root, mut sub) = prepared(|path| {
+        for (name, text) in [
+            ("setup.py", "# manifest\n"),
+            ("README.md", "# application\n"),
+            ("settings.py", "PORT=8000\n"),
+            ("requirements.txt", "# requirements\n"),
+        ] {
+            std::fs::write(path.join(name), text).unwrap();
+        }
+    });
+    sub.request.policy.exploration=Some(serde_json::from_value(json!({"ceiling":{},"max_provider_calls":6,"max_inspections":4,
+        "max_provider_cost_usd_micros":1000000,"max_provider_input_tokens":200000,"max_provider_output_tokens":100000,
+        "reasoning":{"round_timeout_ms":60000,"inspection_timeout_ms":30000,"inspection_source_bytes":32768}})).unwrap());
+    let source = root.path().join("input");
+    let files = [
+        ("entry", "app.py"),
+        ("manifest", "setup.py"),
+        ("readme", "README.md"),
+        ("config", "settings.py"),
+        ("requirements", "requirements.txt"),
+    ]
+    .into_iter()
+    .map(|(id, path)| {
+        (
+            id.into(),
+            ato_formation::proposal::VerifiedSourceFile {
+                path: path.into(),
+                digest: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(std::fs::read(source.join(path)).unwrap())
+                ),
+            },
+        )
+    })
+    .collect();
+    let domain = ato_formation::proposal::PlanAuthorization {
+        files,
+        toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
+        source_oci: None,
+    };
+    let mut a = authorization();
+    a.execution_plan = Some(domain);
+    a.python_http_process = None;
+    a.source_domain.entrypoints.clear();
+    a.policy.allow_source_text = true;
+    a.policy.max_source_bytes = 16384;
+    a.policy.max_proposals = 1;
+    sub.enable_candidate_producer(a).unwrap();
+    let mut status = status(&sub);
+    let opened = status["search_state"]["proposal_round"]["opened_at_ms"]
+        .as_u64()
+        .unwrap();
+    status["search_state"]["proposal_round"]["expires_at_ms"] = json!(opened + 60000);
+    let request = sub.proposal_request_v2(&status).unwrap();
+    let config = ReasoningProviderConfig::Session(SessionConfig {
+        provider: "codex_session".into(),
+        model: "codex-session".into(),
+        prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+    });
+    let budget = budget::BudgetPlan {
+        max_calls: 6,
+        input_token_cap: 24576,
+        output_token_cap: 2048,
+        input_price: 300000,
+        output_price: 1200000,
+        ceiling_usd_micros: 100000,
+    };
+    let dir = root.path().join("reasoning");
+    let producer =
+        ReasoningProducer::new(config.clone(), budget.clone(), dir.clone(), None).unwrap();
+    let thread_dir = dir.clone();
+    let private_root = root.path().to_string_lossy().to_string();
+    let responder = std::thread::spawn(move || {
+        for step in 1..=2 {
+            let name = format!("r001_s{step:03}");
+            let input_path = thread_dir.join(format!("{name}.input.json"));
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            while !input_path.exists() {
+                assert!(std::time::Instant::now() < end);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let bytes = std::fs::read(&input_path).unwrap();
+            let input: ReasoningInput = serde_json::from_slice(&bytes).unwrap();
+            assert!(!std::str::from_utf8(&bytes).unwrap().contains(&private_root));
+            assert!(
+                input
+                    .request
+                    .source_context
+                    .iter()
+                    .any(|e| e.logical_id == "manifest")
+            );
+            assert!(
+                input
+                    .request
+                    .source_context
+                    .iter()
+                    .any(|e| e.logical_id == "entry")
+            );
+            let output = if step == 1 {
+                let source = input
+                    .inventory
+                    .iter()
+                    .find(|s| s.source_relative_path == "requirements.txt")
+                    .unwrap();
+                json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"inspect_source","sources":[source.reference]}]})
+            } else {
+                assert!(
+                    input
+                        .request
+                        .source_context
+                        .iter()
+                        .any(|e| e.logical_id == "requirements")
+                );
+                assert_eq!(input.request.round_seq, Some(1));
+                assert_eq!(input.rounds_remaining, 3);
+                assert_eq!(input.calls_remaining, 5);
+                let entry = input
+                    .inventory
+                    .iter()
+                    .find(|s| s.source_relative_path == "app.py")
+                    .unwrap();
+                json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"propose_derivation","operations":[{"operation":"execution_plan@1","plan":{
+                    "runtime":{"name":"python","version":"3.12.7"},"entrypoint":entry.reference,"argv":[],"cwd":".","guest_port":8000,
+                    "dependencies":[],"build_scripts":[],"requirements":{},"basis":[],"unknowns":[]}}]}]})
+            };
+            let response = json!({"schema":SESSION_RESPONSE_SCHEMA,"input_sha256":format!("sha256:{:x}",Sha256::digest(&bytes)),"output":output});
+            reasoning::save(
+                &thread_dir.join(format!("{name}.response.json")),
+                &serde_jcs::to_vec(&response).unwrap(),
+            )
+            .unwrap();
+        }
+    });
+    let answer = producer
+        .run_round(&sub, &status, request.clone(), opened + 60000)
+        .unwrap();
+    responder.join().unwrap();
+    let outcomes = CandidateRegistry::new(&frozen_request(&sub.request).unwrap())
+        .unwrap()
+        .validate_batch(&BTreeMap::new(), &answer.output)
+        .unwrap();
+    assert!(matches!(&outcomes[0],ProposalOutcome::InspectionRequested(refs) if refs.len()==1));
+    assert!(matches!(&outcomes[1], ProposalOutcome::Admitted(_)));
+    assert_eq!(producer.accounting().unwrap()["call_count"], 2);
+    assert_eq!(producer.accounting().unwrap()["API_calls"], 0);
+    let restarted = ReasoningProducer::new(config, budget, dir, None).unwrap();
+    let cached = restarted
+        .run_round(&sub, &status, request, opened + 60000)
+        .unwrap();
+    assert_eq!(answer.output.raw(), cached.output.raw());
+    assert_eq!(restarted.accounting().unwrap()["call_count"], 2);
+}

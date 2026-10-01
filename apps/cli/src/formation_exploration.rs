@@ -9,8 +9,10 @@ use ato_formation_worker::runtime_network::{
     Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement, new_search_id,
     proposal::{
         budget::{BudgetPlan, CallBudget},
-        deepseek::{DeepSeekCandidateProducer, DeepSeekConfig},
-        prepare_exploration_submission_auto, serve_general_proposal,
+        deepseek::DeepSeekCandidateProducer,
+        prepare_exploration_submission_auto,
+        reasoning::{ReasoningProducer, ReasoningProviderConfig},
+        serve_general_proposal, serve_reasoning_proposal,
     },
 };
 use ato_formation_worker::{
@@ -35,8 +37,9 @@ struct Config {
     authorization: Option<ProposalAuthorization>,
     #[serde(default)]
     toolchains: std::collections::BTreeMap<String, String>,
-    provider: DeepSeekConfig,
+    provider: ReasoningProviderConfig,
     provider_budget: BudgetPlan,
+    #[serde(default)]
     credential_environment: String,
     #[serde(default)]
     decision: Option<MeteredDecisionConfig>,
@@ -57,7 +60,10 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         serde_json::from_slice(&bytes)?
     };
     ensure!(
-        config.schema == "ato.formation-exploration-config/1",
+        matches!(
+            config.schema.as_str(),
+            "ato.formation-exploration-config/1" | "ato.formation-exploration-config/2"
+        ),
         "unsupported exploration config"
     );
     ensure!(
@@ -69,6 +75,15 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             .as_deref()
             .is_none_or(|p| p == "jev" && config.decision.is_some()),
         "exploration uses the pinned metered decision configuration"
+    );
+    let shared = config.schema == "ato.formation-exploration-config/2";
+    ensure!(
+        shared == config.exploration.reasoning.is_some(),
+        "shared reasoning requires frozen limits and config/2"
+    );
+    ensure!(
+        shared || !config.provider.is_session(),
+        "session requires shared reasoning"
     );
     config.exploration.validate()?;
     let reserve = config.provider_budget.validate()?;
@@ -226,11 +241,15 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         config.authorization,
         config.toolchains,
     )?;
-    let budget = Arc::new(if continuation {
-        CallBudget::reopen(&config.provider_journal, config.provider_budget)?
+    let budget = if config.provider.is_session() {
+        None
     } else {
-        CallBudget::create(&config.provider_journal, config.provider_budget)?
-    });
+        Some(Arc::new(if continuation {
+            CallBudget::reopen(&config.provider_journal, config.provider_budget.clone())?
+        } else {
+            CallBudget::create(&config.provider_journal, config.provider_budget.clone())?
+        }))
+    };
     // Owner-side restart metadata, separate from reusable K/D. Never replace
     // an existing checkpoint or allocate another search against its journal.
     let checkpoint = journal.with_extension("search.json");
@@ -252,12 +271,28 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         saved.write_all(&serde_jcs::to_vec(&identity)?)?;
         saved.sync_all()?;
     }
-    let producer = Arc::new(DeepSeekCandidateProducer::new(
-        config.provider,
-        &config.credential_environment,
-        budget.clone(),
-    )?);
-    submission.configure_general_producer(producer.identity())?;
+    let api_producer = if let ReasoningProviderConfig::Api(provider) = &config.provider {
+        Some(Arc::new(DeepSeekCandidateProducer::new(
+            provider.clone(),
+            &config.credential_environment,
+            budget.as_ref().context("API budget missing")?.clone(),
+        )?))
+    } else {
+        None
+    };
+    let reasoning = if shared {
+        Some(Arc::new(ReasoningProducer::new(
+            config.provider.clone(),
+            config.provider_budget.clone(),
+            journal.with_extension("reasoning"),
+            api_producer.clone(),
+        )?))
+    } else {
+        None
+    };
+    if let Some(producer) = &api_producer {
+        submission.configure_general_producer(producer.identity())?;
+    }
     let decision = config
         .decision
         .map(|decision| -> Result<_> {
@@ -307,17 +342,39 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         if let Some(decision) = &decision {
             serve_decision(&client, &id, &status, decision, &mut answered);
         }
-        serve_general_proposal(
-            &client,
-            &id,
-            &status,
-            &mut submission,
-            &claimant_id,
-            producer.clone(),
-        )?;
+        if let Some(producer) = &reasoning {
+            serve_reasoning_proposal(
+                &client,
+                &id,
+                &status,
+                &mut submission,
+                &claimant_id,
+                producer.clone(),
+            )?;
+        } else {
+            serve_general_proposal(
+                &client,
+                &id,
+                &status,
+                &mut submission,
+                &claimant_id,
+                api_producer
+                    .as_ref()
+                    .context("API producer missing")?
+                    .clone(),
+            )?;
+        }
         if Settlement::of(&status)? != Settlement::Running {
             let mut result = submission.exploration_result(&status)?;
-            result["candidate_producer_accounting"] = serde_json::to_value(budget.snapshot()?)?;
+            result["candidate_producer_accounting"] = match &budget {
+                Some(b) => serde_json::to_value(b.snapshot()?)?,
+                None => {
+                    serde_json::json!({"provider":"codex_session","API_calls":0,"token_usage":"not_exposed","cost":"not_exposed"})
+                }
+            };
+            if let Some(p) = &reasoning {
+                result["reasoning_accounting"] = p.accounting()?;
+            }
             result["decision_provider_accounting"] = match &decision {
                 Some(d) => d.accounting()?,
                 None => {
@@ -326,7 +383,9 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&result)?);
             ensure!(
-                budget.snapshot()?.cells.values().all(|c| c.is_settled()),
+                budget.as_ref().map_or(Ok(true), |b| b
+                    .snapshot()
+                    .map(|s| s.cells.values().all(|c| c.is_settled())))?,
                 "provider reservation unresolved; no call is retried"
             );
             if let Some(d) = &decision {

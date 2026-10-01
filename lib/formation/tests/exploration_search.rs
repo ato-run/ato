@@ -37,6 +37,7 @@ fn state() -> SearchStateV1 {
         ceiling: ExecutionRequirements::default(),
         max_provider_calls: 3,
         max_inspections: 3,
+        reasoning: None,
         max_provider_cost_usd_micros: 100_000,
         max_provider_input_tokens: 90_000,
         max_provider_output_tokens: 6144,
@@ -714,4 +715,100 @@ fn a_generated_d_waits_for_placement_without_spending_another_round_after_restar
         resumed.proposal_history.len() + usize::from(resumed.proposal_round.is_some()),
         1
     );
+}
+
+#[test]
+fn shared_inspection_and_generated_d_share_one_frozen_round() {
+    use ato_formation::exploration::ReasoningLimits;
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(ReasoningLimits {
+        round_timeout_ms: 60_000,
+        inspection_timeout_ms: 20_000,
+        inspection_source_bytes: 16384,
+    });
+    let auth = s.frozen.policy.proposal.as_mut().unwrap();
+    auth.policy.allow_source_text = true;
+    auth.policy.max_source_bytes = 16384;
+    let reference = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
+    let bytes=serde_json::to_vec(&json!({"schema":REASONING_BATCH_SCHEMA,"inspection_history":[reference],
+        "proposals":[{"kind":"propose_derivation","operations":[{"operation":"execution_plan@1","plan":plan()}]}]})).unwrap();
+    let output = ProducerOutput::new(
+        bytes,
+        ProducerProvenance {
+            provider: "fixed".into(),
+            model: None,
+        },
+    )
+    .unwrap();
+    let outcomes = CandidateRegistry::new(&s.frozen)
+        .unwrap()
+        .validate_batch(&BTreeMap::new(), &output)
+        .unwrap();
+    assert!(matches!(&outcomes[0],ProposalOutcome::InspectionRequested(refs) if refs.len()==1));
+    let ProposalOutcome::Admitted(d) = &outcomes[1] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.contract_ref);
+    let SearchAction::OpenProposalRound {
+        opened_at_ms,
+        expires_at_ms,
+    } = decide_next(&s, &[], 100).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(expires_at_ms, (opened_at_ms + 60_000).min(s.deadline_ms));
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms,
+        expires_at_ms,
+        outcome: Some(ProposalRoundOutcome::Completed),
+        candidates: vec![d.candidate().clone()],
+        derivations: vec![d.compiled().derivation.clone()],
+        diagnostics: vec![],
+        inspection_requests: vec![serde_json::from_value(reference).unwrap()],
+    });
+    s.validate().unwrap();
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(restored.proposal_history.len(), 0);
+    assert_eq!(restored.proposal_round, s.proposal_round);
+    assert_eq!(
+        restored
+            .frozen
+            .policy
+            .exploration
+            .unwrap()
+            .formation
+            .max_rounds
+            .get(),
+        3
+    );
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = None;
+    assert!(
+        CandidateRegistry::new(&s.frozen)
+            .unwrap()
+            .validate_batch(&BTreeMap::new(), &output)
+            .is_err()
+    );
+}
+
+#[test]
+fn reasoning_limits_are_positive_bounded_and_frozen() {
+    use ato_formation::exploration::ReasoningLimits;
+    let mut p = state().frozen.policy.exploration.unwrap();
+    for (round, inspection, bytes) in [
+        (0, 1, 1),
+        (900001, 1, 1),
+        (100, 101, 1),
+        (100, 1, 0),
+        (100, 1, 65537),
+    ] {
+        p.reasoning = Some(ReasoningLimits {
+            round_timeout_ms: round,
+            inspection_timeout_ms: inspection,
+            inspection_source_bytes: bytes,
+        });
+        assert_eq!(p.validate().unwrap_err().0, "reasoning_budget_invalid");
+    }
+    p.reasoning = None;
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(!json.contains("reasoning"));
 }

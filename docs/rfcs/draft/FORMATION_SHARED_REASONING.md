@@ -50,3 +50,16 @@ Success remains k_reached_awaiting_assessment. Reductions consume later rounds
 and replace the success only with a fresh same-K PASS. No approval, normal Run
 grant, publication or deployment follows. App-specific presets, source rewrites,
 hidden setup and out-of-ceiling authority are prohibited in this prototype.
+
+Prototype configuration uses `ato.formation-exploration-config/2` and optional
+`exploration.reasoning` with frozen `round_timeout_ms`, `inspection_timeout_ms`
+and `inspection_source_bytes`. Legacy config/1 cannot extend its timeout.
+An inspection exchange counts toward the owner-local call and inspection budgets,
+not toward another proposal round. Total session exchange latency includes the
+file bridge wait; API latency is measured around each actual transport call.
+`reasoning-pilot.py` reuses the existing real Coordinator/Runtime controller.
+`reasoning-session.py` atomically delivers one input-digest-bound typed response;
+it never starts an app. Exact inputs and response records are hash checked on
+restart, including source/K identity and verified source text prefixes. API
+protocol/transport failures halt sends and preserve the journal's settlement;
+the recorded failure is replayed as evidence, never resent to the model.

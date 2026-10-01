@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inject exactly two keys into the short-lived Requester, through sealed RAM."""
+"""Inject explicitly scoped keys into the short-lived Requester, through sealed RAM."""
 import array
 import fcntl
 import json
@@ -25,13 +25,15 @@ def main():
         raise ValueError('unsealed')
     raw = os.pread(fd, 32769, 0); os.close(fd)
     keys = json.loads(raw); del raw
-    if set(keys) != {'DEEPSEEK_API_KEY', 'ATO_DECISION_JEV_API_KEY'}:
+    if set(keys) not in ({'DEEPSEEK_API_KEY'}, {'DEEPSEEK_API_KEY', 'ATO_DECISION_JEV_API_KEY'}):
         raise ValueError('key scope')
     if not all(isinstance(v, str) and 1 <= len(v) <= 8192 and all(33 <= ord(c) <= 126 for c in v)
                for v in keys.values()):
         raise ValueError('format')
     environment = {name: os.environ[name] for name in ('PATH', 'HOME', 'TMPDIR')}
-    environment.update(keys); environment['ATO_DECISION_JEV_MODEL'] = 'jev-1.13.0'
+    environment.update(keys)
+    if 'ATO_DECISION_JEV_API_KEY' in keys:
+        environment['ATO_DECISION_JEV_MODEL'] = 'jev-1.13.0'
     os.execve(sys.argv[2], sys.argv[2:], environment)
 
 if __name__ == '__main__':
