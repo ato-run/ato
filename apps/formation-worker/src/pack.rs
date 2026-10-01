@@ -31,6 +31,27 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ato_formation::containment::validate_contained_symlink_target;
 
+/// Large process workspaces keep the same complete tree in a deterministic
+/// gzip transport. The common archive validator still bounds expanded bytes.
+/// Small archives preserve their existing byte identity.
+pub fn pack_process_artifact(root: &Path) -> Result<Vec<u8>> {
+    let raw = pack_tree(root)?;
+    if raw.len() < 8 * 1024 * 1024 {
+        return Ok(raw);
+    }
+    use std::io::Write;
+    let mut encoder = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&raw)?;
+    let compressed = encoder.finish()?;
+    Ok(if compressed.len() < raw.len() {
+        compressed
+    } else {
+        raw
+    })
+}
+
 /// Pack `root` into a deterministic archive.
 pub fn pack_tree(root: &Path) -> Result<Vec<u8>> {
     let mut files = BTreeSet::new();
