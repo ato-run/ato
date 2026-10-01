@@ -710,6 +710,7 @@ fn request_evidence(cell: &str) -> RequestEvidence {
 }
 fn response_evidence(cell: &str) -> ResponseEvidence {
     ResponseEvidence {
+        latency_ms: None,
         cell: cell.into(),
         finish_reason: FinishReason::Stop,
         model_matches: true,
@@ -1080,4 +1081,39 @@ fn shared_authentication_failure_is_infrastructure_and_is_not_retried() {
     );
     assert_eq!(mock.count(), 1);
     assert!(budget.snapshot().unwrap().stopped);
+}
+
+#[test]
+fn actual_call_accounting_keeps_unknown_usage_and_unsettled_reservations() {
+    std::fs::create_dir_all(".tmp").unwrap();
+    let root = tempfile::tempdir_in(".tmp").unwrap();
+    let accounting_plan = BudgetPlan {
+        max_calls: 3,
+        ..plan()
+    };
+    let budget =
+        CallBudget::create(&root.path().join("actual.jsonl"), accounting_plan.clone()).unwrap();
+    budget.reserve_request(request_evidence("known")).unwrap();
+    budget.record_response(response_evidence("known")).unwrap();
+    budget.reserve_request(request_evidence("unknown")).unwrap();
+    budget.settle_retry("unknown", false).unwrap();
+    budget.reserve_request(request_evidence("pending")).unwrap();
+    let view = budget.accounting().unwrap();
+    let rows = view["calls"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    let unknown = rows.iter().find(|r| r["call_id"] == "unknown").unwrap();
+    assert!(unknown["usage"].is_null());
+    assert_eq!(unknown["status"], "charged_unknown");
+    let pending = rows.iter().find(|r| r["call_id"] == "pending").unwrap();
+    assert_eq!(pending["status"], "unsettled");
+    assert_eq!(
+        view["unsettled_reservation_usd_micros"],
+        plan().validate().unwrap()
+    );
+    assert_eq!(
+        view["estimated_cost_usd_micros"],
+        plan().cost(123, 45).unwrap() + plan().validate().unwrap()
+    );
+    let reopened = CallBudget::reopen(&root.path().join("actual.jsonl"), accounting_plan).unwrap();
+    assert_eq!(reopened.accounting().unwrap(), view);
 }

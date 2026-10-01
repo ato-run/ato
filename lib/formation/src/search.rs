@@ -236,6 +236,10 @@ pub enum Termination {
     NoProgress,
     /// Provider/transport infrastructure exhausted its durable operation retries.
     InfrastructureFailure,
+    UnsupportedCapability,
+    NeedsInput,
+    SourceBroken,
+    DeadlineExceeded,
     ExplorationAuthorityExceeded,
     CandidatesExhausted,
     BudgetExhausted,
@@ -867,7 +871,11 @@ fn default_next(
                 Termination::Verified
             }
         } else {
-            Termination::BudgetExhausted
+            if now_ms >= s.deadline_ms && s.frozen.policy.exploration.is_some() {
+                Termination::DeadlineExceeded
+            } else {
+                Termination::BudgetExhausted
+            }
         }));
     }
     // A durable open generation point owns the frontier until it settles.
@@ -913,7 +921,11 @@ fn default_next(
             return Ok(finish(if passed {
                 Termination::Submitted
             } else {
-                Termination::InfrastructureFailure
+                if now_ms >= round.expires_at_ms {
+                    Termination::DeadlineExceeded
+                } else {
+                    Termination::InfrastructureFailure
+                }
             }));
         }
         // Two completed declines without a D, inspection or validator feedback
@@ -943,7 +955,23 @@ fn default_next(
             return Ok(finish(if passed {
                 Termination::Submitted
             } else {
-                Termination::NoProgress
+                if round.diagnostics.iter().any(|d| d == "decline_needs_input") {
+                    Termination::NeedsInput
+                } else if round
+                    .diagnostics
+                    .iter()
+                    .any(|d| d == "decline_source_broken")
+                {
+                    Termination::SourceBroken
+                } else if round
+                    .diagnostics
+                    .iter()
+                    .any(|d| d == "decline_unsupported_capability")
+                {
+                    Termination::UnsupportedCapability
+                } else {
+                    Termination::NoProgress
+                }
             }));
         }
         if round.outcome.is_some()

@@ -91,6 +91,25 @@ pub trait CandidateRealizer {
     /// Bring the candidate up, ready to be observed. Called after the start
     /// record is durable.
     fn realize(&self, attempt_id: &str, attempt_root: &Path) -> Result<Realized, RealizeFailure>;
+
+    /// A controlled attempt must not silently enter an adapter that cannot
+    /// enforce its deadline. Registered realizers opt in explicitly.
+    fn realize_controlled(
+        &self,
+        _attempt_id: &str,
+        _attempt_root: &Path,
+        control: &crate::control::ExecutionControl,
+    ) -> Result<Realized, RealizeFailure> {
+        control.remaining(crate::control::AttemptPhase::Launch)?;
+        Err(RealizeFailure::Execution(
+            ato_formation::failure::FormationFailure::new(
+                "unsupported_capability",
+                ato_formation::failure::FailureStage::Admission,
+                "this realizer cannot enforce the frozen execution deadline",
+            )
+            .into(),
+        ))
+    }
 }
 
 /// A verified candidate still running, handed to the caller. Dropping it

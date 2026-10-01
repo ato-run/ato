@@ -129,28 +129,19 @@ impl CandidateLauncher<'_> {
         attempt_id: &str,
         attempt_root: &Path,
     ) -> Result<Realized, RealizeFailure> {
-        self.realize_inner(executed, attempt_id, attempt_root, None, &[])
+        self.realize_inner(executed, attempt_id, attempt_root, None, &[], None)
     }
 
-    pub(crate) fn realize_scoped(
+    pub(crate) fn realize_controlled(
         &self,
         executed: ExecutedCandidate,
         attempt_id: &str,
         attempt_root: &Path,
-        gate: &Path,
-    ) -> Result<Realized, RealizeFailure> {
-        self.realize_inner(executed, attempt_id, attempt_root, Some(gate), &[])
-    }
-
-    pub(crate) fn realize_scoped_with_variables(
-        &self,
-        executed: ExecutedCandidate,
-        attempt_id: &str,
-        attempt_root: &Path,
-        gate: &Path,
+        gate: Option<&Path>,
         variables: &[crate::variables::ResolvedVariable],
+        control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
-        self.realize_inner(executed, attempt_id, attempt_root, Some(gate), variables)
+        self.realize_inner(executed, attempt_id, attempt_root, gate, variables, control)
     }
     fn realize_inner(
         &self,
@@ -159,7 +150,11 @@ impl CandidateLauncher<'_> {
         attempt_root: &Path,
         gate: Option<&Path>,
         variables: &[crate::variables::ResolvedVariable],
+        control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
+        let _launch = control
+            .map(|c| c.phase(crate::control::AttemptPhase::Launch))
+            .transpose()?;
         let (candidate, evidence, realization) = match &executed {
             ExecutedCandidate::Process { workspace_root } => {
                 let (candidate, evidence) = self.realize_process(
@@ -168,6 +163,7 @@ impl CandidateLauncher<'_> {
                     attempt_root,
                     gate,
                     variables,
+                    control,
                 )?;
                 (candidate, evidence, "process")
             }
@@ -206,6 +202,7 @@ impl CandidateLauncher<'_> {
         attempt_root: &Path,
         runtime_gate: Option<&Path>,
         variables: &[crate::variables::ResolvedVariable],
+        control: Option<&crate::control::ExecutionControl>,
     ) -> Result<(Box<dyn RunningCandidate>, RealizationEvidence), RealizeFailure> {
         let planned = self.planned;
         let mut ports: Vec<RequiredPort> = Vec::new();
@@ -253,12 +250,8 @@ impl CandidateLauncher<'_> {
             shim: self.shim,
             attempt_id,
         };
-        let launched = match runtime_gate {
-            Some(gate) => {
-                TemporaryRealization::launch_scoped_with_variables(&request, gate, variables)
-            }
-            None => TemporaryRealization::launch(&request),
-        };
+        let launched =
+            TemporaryRealization::launch_controlled(&request, runtime_gate, variables, control);
         let realization = match launched {
             Ok(realization) => realization,
             Err(error) => {
