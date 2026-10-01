@@ -37,7 +37,9 @@ impl ReasoningProviderConfig {
                         && c.model == "codex-session"
                         && matches!(
                             c.prompt_version.as_str(),
-                            deepseek::PROMPT_VERSION_V5 | deepseek::PROMPT_VERSION_V6
+                            deepseek::PROMPT_VERSION_V5
+                                | deepseek::PROMPT_VERSION_V6
+                                | deepseek::PROMPT_VERSION_V7
                         ),
                     "invalid session provider"
                 );
@@ -524,7 +526,9 @@ struct StepRecord {
 struct SessionResponse {
     schema: String,
     input_sha256: String,
-    output: ProposalBatch,
+    // Parse proposal schema at the shared validation/repair boundary, just as
+    // API outputs are parsed. Invalid authoring is not a bridge outage.
+    output: Value,
 }
 
 pub struct ReasoningProducer {
@@ -1013,8 +1017,8 @@ impl ReasoningProducer {
                 .min(expires - now)
                 .min(30_000);
             let mut entries: Vec<_> = acquired.values().cloned().collect();
-            if matches!(&self.config, ReasoningProviderConfig::Session(c) if c.prompt_version != deepseek::PROMPT_VERSION_V6)
-                || matches!(&self.config, ReasoningProviderConfig::Api(c) if c.prompt_version != deepseek::PROMPT_VERSION_V6)
+            if matches!(&self.config, ReasoningProviderConfig::Session(c) if !deepseek::is_autonomous_prompt(&c.prompt_version))
+                || matches!(&self.config, ReasoningProviderConfig::Api(c) if !deepseek::is_autonomous_prompt(&c.prompt_version))
             {
                 entries.sort_by_key(|e| {
                     (
@@ -1051,8 +1055,8 @@ impl ReasoningProducer {
                 });
             }
             let priority_order: Vec<_> = entries.iter().map(|e| e.logical_id.clone()).collect();
-            let modern = matches!(&self.config, ReasoningProviderConfig::Session(c) if c.prompt_version == deepseek::PROMPT_VERSION_V6)
-                || matches!(&self.config, ReasoningProviderConfig::Api(c) if c.prompt_version == deepseek::PROMPT_VERSION_V6);
+            let modern = matches!(&self.config, ReasoningProviderConfig::Session(c) if deepseek::is_autonomous_prompt(&c.prompt_version))
+                || matches!(&self.config, ReasoningProviderConfig::Api(c) if deepseek::is_autonomous_prompt(&c.prompt_version));
             request.source_context = if modern {
                 priority_context(
                     entries.into_iter().take(4).collect(),
@@ -1341,8 +1345,16 @@ impl ReasoningProducer {
                 {
                     validation_error = Some(code.to_owned());
                     feedback.push(code.to_owned());
-                    if code == "unsupported_entrypoint" || code == "unsupported_node_entrypoint" {
-                        feedback.push("The selected entrypoint is not a process script. If the source manifest declares a frontend build and output directory, use static_output with manifest entrypoint, argv:[], guest_port:0, and the declared source-owned build_scripts. No new operation or K change is needed.".into());
+                    if matches!(
+                        code,
+                        "unsupported_entrypoint"
+                            | "unsupported_node_entrypoint"
+                            | "unsupported_static_output"
+                    ) {
+                        feedback.push("For static_output use the source manifest entrypoint, argv:[], guest_port:0, no module/environment/state/variable_bindings, and source-owned build_scripts. Process entrypoints must be actual supported script files. A rejected field combination does not mean the static operation is unavailable.".into());
+                    }
+                    if code == "execution_plan_bounds" {
+                        feedback.push("Process guest_port must be nonzero. cwd is source-relative or '.'. state.id is a logical resource; state.mount is an absolute guest path under /data, /state or /app/<subdirectory>, never the resource name or a host path. access is 'read-only' or 'read-write'. Check the declared array/string bounds and reserved environment names.".into());
                     }
                     if let Some(detail) = details.take() {
                         feedback.push(detail.chars().take(512).collect());

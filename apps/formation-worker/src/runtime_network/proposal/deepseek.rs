@@ -31,6 +31,11 @@ pub const PROMPT_VERSION_V5: &str = "ato.formation-candidate-producer-prompt/5";
 pub const PROMPT_V5: &str = include_str!("prompt-v5.txt");
 pub const PROMPT_VERSION_V6: &str = "ato.formation-candidate-producer-prompt/6";
 pub const PROMPT_V6: &str = include_str!("prompt-v6.txt");
+pub const PROMPT_VERSION_V7: &str = "ato.formation-candidate-producer-prompt/7";
+pub const PROMPT_V7: &str = include_str!("prompt-v7.txt");
+pub fn is_autonomous_prompt(version: &str) -> bool {
+    matches!(version, PROMPT_VERSION_V6 | PROMPT_VERSION_V7)
+}
 pub fn prompt_sha256() -> String {
     format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))
 }
@@ -42,6 +47,7 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
         PROMPT_VERSION_V4 => Some(PROMPT_V4),
         PROMPT_VERSION_V5 => Some(PROMPT_V5),
         PROMPT_VERSION_V6 => Some(PROMPT_V6),
+        PROMPT_VERSION_V7 => Some(PROMPT_V7),
         _ => None,
     }
 }
@@ -235,7 +241,7 @@ impl DeepSeekCandidateProducer {
         let result = (|| {
             if !matches!(
                 self.config.prompt_version.as_str(),
-                PROMPT_VERSION_V5 | PROMPT_VERSION_V6
+                PROMPT_VERSION_V5 | PROMPT_VERSION_V6 | PROMPT_VERSION_V7
             ) || input.schema != super::reasoning::INPUT_SCHEMA
             {
                 return Err(ErrorClass::MalformedResponse);
@@ -272,7 +278,7 @@ impl DeepSeekCandidateProducer {
         expires: u64,
         max_retries: u32,
     ) -> std::result::Result<GeneralOutput, Box<GeneralFailure>> {
-        if self.config.prompt_version != PROMPT_VERSION_V6 {
+        if !is_autonomous_prompt(&self.config.prompt_version) {
             return self.propose_reasoning(input);
         }
         let mut final_class = ErrorClass::TransportError;
@@ -504,14 +510,14 @@ impl DeepSeekCandidateProducer {
         let response = match sent {
             Ok(response) => response,
             Err(error) => {
-                let class = if error.is_connect() && self.config.prompt_version == PROMPT_VERSION_V6
-                {
-                    ErrorClass::ConnectBeforeSend
-                } else if error.is_timeout() {
-                    ErrorClass::Timeout
-                } else {
-                    ErrorClass::TransportError
-                };
+                let class =
+                    if error.is_connect() && is_autonomous_prompt(&self.config.prompt_version) {
+                        ErrorClass::ConnectBeforeSend
+                    } else if error.is_timeout() {
+                        ErrorClass::Timeout
+                    } else {
+                        ErrorClass::TransportError
+                    };
                 let _ = self
                     .budget
                     .record_transport(super::budget::TransportEvidence {
@@ -527,7 +533,7 @@ impl DeepSeekCandidateProducer {
         };
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let class = if self.config.prompt_version != PROMPT_VERSION_V6 {
+            let class = if !is_autonomous_prompt(&self.config.prompt_version) {
                 ErrorClass::ProviderRefused
             } else {
                 match status {
