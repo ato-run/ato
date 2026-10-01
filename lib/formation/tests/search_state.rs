@@ -129,6 +129,28 @@ fn uncertainty_budget_and_candidate_exhaustion_are_distinct() {
         }
     );
 }
+
+#[test]
+fn attempt_network_budget_exhaustion_is_terminal_without_another_attempt_or_round() {
+    let mut state = fixture("d1-failed");
+    state.attempts[0].failure_code = Some("exploration_network_budget_exhausted".into());
+    state.attempts[0].record = Some(ExecutionRecord::Finished);
+    let restarted: SearchStateV1 =
+        serde_json::from_slice(&state.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&restarted, &placements(&restarted), 1).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::BudgetExhausted
+        }
+    );
+    assert_eq!(restarted.budget, state.budget);
+    assert_eq!(restarted.deadline_ms, state.deadline_ms);
+    state.attempts[0].status = DurableAttemptStatus::Unknown;
+    assert!(matches!(
+        decide_next(&state, &placements(&state), 1).unwrap(),
+        SearchAction::WaitForUnknownResolution { .. }
+    ));
+}
 /// Runtime refused an unsafe attested effect class and proved nothing started:
 /// policy refusal, not uncertainty. Started or unrecorded stays EffectUnknown.
 #[test]
