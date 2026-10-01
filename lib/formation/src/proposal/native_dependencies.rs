@@ -159,6 +159,7 @@ pub(super) fn compile_operation(
                     steps,
                     vec![
                         executable.into(),
+                        "-I".into(),
                         "-c".into(),
                         include_str!("python-native-operation.py").into(),
                         mode.into(),
@@ -178,11 +179,13 @@ pub(super) fn compile_operation(
                 steps,
                 vec![
                     executable.into(),
+                    "-I".into(),
                     "-m".into(),
                     "pip".into(),
                     "install".into(),
                     "--no-input".into(),
                     "--no-index".into(),
+                    "--no-compile".into(),
                     "--only-binary=:all:".into(),
                     "--require-hashes".into(),
                     "--find-links".into(),
@@ -199,6 +202,7 @@ pub(super) fn compile_operation(
                 steps,
                 vec![
                     executable.into(),
+                    "-I".into(),
                     "-c".into(),
                     include_str!("python-native-operation.py").into(),
                     "cleanup".into(),
