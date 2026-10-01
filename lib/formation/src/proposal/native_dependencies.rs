@@ -6,6 +6,46 @@ use super::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+/// The same canonical registered operations supply scheduler claims and the
+/// Runtime attestation. Tools are prebound requirements, never provisions.
+pub fn runtime_requirements(
+    d: &crate::authoring::BoundDerivation,
+) -> Vec<crate::search::Requirement> {
+    let mut facts = BTreeSet::new();
+    for step in &d.steps {
+        if step.protocol != "ato.process@1" || step.op != "exec" || step.argv.len() != 5 {
+            continue;
+        }
+        let schema = if step.argv[2] == include_str!("python-native-dependencies.py") {
+            "ato.python-build-plan/1"
+        } else if step.argv[2] == include_str!("node-native-dependencies.cjs") {
+            "ato.npm-native-plan/1"
+        } else {
+            continue;
+        };
+        let Ok(plan) = serde_json::from_str::<Value>(&step.argv[4]) else {
+            continue;
+        };
+        if plan["schema"] != schema {
+            continue;
+        }
+        let Ok(tools) = serde_json::from_value::<Vec<RuntimeSelection>>(plan["toolchains"].clone())
+        else {
+            continue;
+        };
+        for tool in tools {
+            facts.insert(format!("toolchain.{}.{}", tool.name, tool.version));
+        }
+    }
+    facts
+        .into_iter()
+        .map(|fact| crate::search::Requirement {
+            fact,
+            one_of: Some(vec!["present".into()]),
+        })
+        .collect()
+}
+
 fn step(steps: &mut Vec<Value>, argv: Vec<String>, cwd: &str, network: &str) {
     steps.push(
         json!({"id":format!("native-{}",steps.len()),"use":"ato.process@1",
