@@ -1,0 +1,440 @@
+{
+  "schema": "ato.formation-oci-candidate-comparison/1",
+  "date": "2026-09-30",
+  "code_pin": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+  "scope": "exactly three existing D1/cohort pins; static archive reads and bounded manifest metadata only",
+  "registry_metadata": "formation-oci-candidates-registry-2026-09-30.json",
+  "metadata_only_response_body_bytes": 62759,
+  "platforms": [
+    "linux/amd64 (sugamo candidate target)",
+    "linux/arm64 (comparison)"
+  ],
+  "selection_priorities": "single base, CMD and VOLUME make authoring simpler; they are not universal OCI requirements",
+  "profile_rules_checked": [
+    "source_oci.rs parse_reference/SourceOciRequest::validate: max one authorized state slot",
+    "materialize: nonempty image Cmd; exact VOLUME=authorized_state",
+    "Adapter: readonly root, cap-drop ALL, no-new-privileges; /tmp is transient tmpfs"
+  ],
+  "selected_app": null,
+  "reason": "every candidate has hard input/state gaps; size/network closure unestablished; neither ENTRYPOINT-only nor VOLUME-external state alone establishes a viable app",
+  "generic_gap_implementation": "none; keep ENTRYPOINT-only and VOLUME-external explicit state as separate candidates",
+  "online_builds": 0,
+  "image_pulls": 0,
+  "bounds_or_hosts_added": false,
+  "model_calls": 0,
+  "deploy": false,
+  "remote_migration": false,
+  "entries": [
+    {
+      "index": 20,
+      "name": "File Browser",
+      "repo": "https://github.com/filebrowser/filebrowser",
+      "ref": "833d908884d5c801f30f5c098d7977177eb3a36b",
+      "archive_sha256": "605bc6166fd38cc7429478f55b0f50ceea1ab1eb1ba7da8936d0d480a3c159ef",
+      "archive_verified": true,
+      "dockerfile": "root Dockerfile unchanged",
+      "dockerfile_sha256": "ce7acb8a7dce0d9e69911b54a097bb113bf7a34e0d2f314ece8756620e16074e",
+      "target": "docker-default final stage",
+      "syntax_frontend": "none declared; implicit default BuildKit frontend",
+      "external_images": [
+        {
+          "reference": "docker.io/library/alpine:3.23",
+          "root_digest": "sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0",
+          "platforms": {
+            "linux/amd64": {
+              "manifest_digest": "sha256:1f3591b8a02ea153f41c5bba878ad477f63ab3d19349762cb77504db02a23e15",
+              "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+              },
+              "compressed_layer_bytes": 3848507,
+              "config_bytes": 611,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:d0c1d894c237d8192cbcd37e435031ad4eddec173299568a5a05869c2e40dfa3",
+                  "size": 3848507
+                }
+              ]
+            },
+            "linux/arm64": {
+              "manifest_digest": "sha256:ae959799024a09da597284763c417a6e820e020fad0634c5267cf4f125e682bf",
+              "platform": {
+                "architecture": "arm64",
+                "os": "linux",
+                "variant": "v8"
+              },
+              "compressed_layer_bytes": 4186056,
+              "config_bytes": 627,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:ace1621be7ff15b54252f68393ac33181df7f3e095e36a5d9a9892031b357d31",
+                  "size": 4186056
+                }
+              ]
+            }
+          }
+        },
+        {
+          "reference": "docker.io/library/busybox:1.37.0-musl",
+          "root_digest": "sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092",
+          "platforms": {
+            "linux/amd64": {
+              "manifest_digest": "sha256:dc88b80842580654294472735332ec7c7789a4010ec9a68b69f9b88c19abede6",
+              "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+              },
+              "compressed_layer_bytes": 871090,
+              "config_bytes": 462,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:f4255029a25bc97fe31c78724f2972e1ad162354163517d2bf202005a1c3c906",
+                  "size": 871090
+                }
+              ]
+            },
+            "linux/arm64": {
+              "manifest_digest": "sha256:c542a2b3cb3c982440890284aac884e89dbf468d5ff1c206fd2ba8ea23257420",
+              "platform": {
+                "architecture": "arm64",
+                "os": "linux",
+                "variant": "v8"
+              },
+              "compressed_layer_bytes": 899665,
+              "config_bytes": 480,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:4cf0e1ea6158c6e9d26a3c01b704b7d0eb913d9f2f47324a6b05e8468bae4d5d",
+                  "size": 899665
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "unique_base_compressed_layer_bytes": {
+        "linux/amd64": 4719597,
+        "linux/arm64": 5085721
+      },
+      "acquisition_hosts": [
+        "auth.docker.io",
+        "registry-1.docker.io"
+      ],
+      "acquisition_auth": "anonymous Docker Hub token; no saved credential read",
+      "blob_redirects": "not queried; an unapproved redirect must stop future acquisition",
+      "facts_from_source_only": {
+        "stage_count": 2,
+        "build_args": "none required; UID/GID are image ENV defaults 1000/1000",
+        "CMD": null,
+        "ENTRYPOINT": [
+          "tini",
+          "--",
+          "/init.sh"
+        ],
+        "WorkingDir": "not declared; inherited image value not fetched",
+        "USER": "user (created with UID/GID 1000/1000)",
+        "port": 80,
+        "state": [
+          "/srv",
+          "/config",
+          "/database"
+        ],
+        "VOLUME": [
+          "/srv",
+          "/config",
+          "/database"
+        ],
+        "external_DB": "none; /database/filebrowser.db is SQLite",
+        "additional_process": "tini -> init.sh -> filebrowser",
+        "required_source_input": "COPY filebrowser /bin/filebrowser: filebrowser binary absent in pinned archive",
+        "build_download_hosts": [
+          "dl-cdn.alpinelinux.org (apk)",
+          "raw.githubusercontent.com (pinned JSON.sh source)"
+        ],
+        "gaps": [
+          "prebuilt binary absent; root Dockerfile packages a release binary rather than compiling this source",
+          "ENTRYPOINT-only: source_oci_cmd_absent",
+          "three VOLUMEs but SourceOciRequest authorizes at most one state slot",
+          "new app-specific build permission and dependency/redirect inventory required"
+        ]
+      },
+      "capability_privilege": "no setcap/privileged/host-network directive in root Dockerfile; inherited file capabilities and effective runtime UID/GID unverified without final artifact/state",
+      "expected_image_archive_bytes": null,
+      "size_basis": "no saved final artifact; base compressed descriptors do not bound expanded docker-save archive, build dependencies or job disk usage",
+      "build_executed": false,
+      "container_started": false,
+      "functional_established": false,
+      "selection": "not selected under current source-to-OCI route and authorization"
+    },
+    {
+      "index": 28,
+      "name": "Kutt",
+      "repo": "https://github.com/thedevs-network/kutt",
+      "ref": "279b491b53bbd01fbae70f603222526962772061",
+      "archive_sha256": "6fd86408c5ec917506aa0b081e72532dfaf78542855c1b9e1d984c1b6d2f52ae",
+      "archive_verified": true,
+      "dockerfile": "root Dockerfile unchanged",
+      "dockerfile_sha256": "4005533f837e15d791856c2a77e401f9582ab9dffbcd288b3a55ee02b1c09e79",
+      "target": "docker-default final stage",
+      "syntax_frontend": "none declared; implicit default BuildKit frontend",
+      "external_images": [
+        {
+          "reference": "docker.io/library/node:22-alpine",
+          "root_digest": "sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+          "platforms": {
+            "linux/amd64": {
+              "manifest_digest": "sha256:2c752226d477b4a886378baa95b9af252be59301b725fdb0b7e15208131505a8",
+              "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+              },
+              "compressed_layer_bytes": 60697390,
+              "config_bytes": 6480,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5",
+                  "size": 3849738
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:f7f2d304681aaa935c9cfd180850cf616ae843efce7682873d6521ded7268937",
+                  "size": 55585204
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:e554276b05e6306c5ad33cd85bfa7f0693083e21f6114db5abf60a20fb413039",
+                  "size": 1262001
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:d39db1cf9caa4f49c5a2e67111fbe6e0d5eea8ede550cb82f3dc2b79712688d6",
+                  "size": 447
+                }
+              ]
+            },
+            "linux/arm64": {
+              "manifest_digest": "sha256:85cdd100016a2e09927c0776bb7ebebcfefce5cd0af49893ada91cbc4d78ee22",
+              "platform": {
+                "architecture": "arm64",
+                "os": "linux",
+                "variant": "v8"
+              },
+              "compressed_layer_bytes": 61053420,
+              "config_bytes": 6496,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:a9986cd6f37dbddae7862a6d4be71683472e7c2ea708e87db14f8a6393c00f00",
+                  "size": 4187659
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:87919ed734a39bc185155d715bdcf2ce6c52d112ff642650d9e0e35502b481e9",
+                  "size": 55602437
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:74849c662da757b89cfe8b5406d7beaaf491727ea6843cbba85b8889d1543956",
+                  "size": 1262880
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:66fa63c7a061939c4346f9c3c1ada45434b276dd4e4274721d6bf13cb8adec6e",
+                  "size": 444
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "unique_base_compressed_layer_bytes": {
+        "linux/amd64": 60697390,
+        "linux/arm64": 61053420
+      },
+      "acquisition_hosts": [
+        "auth.docker.io",
+        "registry-1.docker.io"
+      ],
+      "acquisition_auth": "anonymous Docker Hub token; no saved credential read",
+      "blob_redirects": "not queried; an unapproved redirect must stop future acquisition",
+      "facts_from_source_only": {
+        "stage_count": 1,
+        "build_args": "none required; predefined proxy args only if separately approved",
+        "CMD": "shell form: npm run migrate && npm start",
+        "ENTRYPOINT": "inherited node base entrypoint; config not fetched",
+        "WorkingDir": "/kutt",
+        "USER": "not declared; inherited UID/GID unverified",
+        "port": 3000,
+        "state": [
+          "/kutt/db (default DB_FILENAME=db/data)"
+        ],
+        "VOLUME": [],
+        "alternate_state": "Dockerfile creates /var/lib/kutt; DB_FILENAME can point there, but neither path is a VOLUME",
+        "external_DB": "none required; default better-sqlite3; Redis optional and disabled",
+        "additional_process": "shell/npm migration before the single Node service",
+        "runtime_inputs": "production JWT_SECRET required; default login/registration settings also need an explicit functional plan. Generated source-OCI authoring has no environment bindings.",
+        "build_download_hosts": [
+          "registry.npmjs.org (all 431 resolved lock URLs)",
+          "better-sqlite3/msgpackr-extract install scripts: prebuilt download or native-build requirements not inventoried; possible GitHub endpoints are unapproved and were not contacted"
+        ],
+        "gaps": [
+          "VOLUME-external explicit persistent state rejected by the equality rule",
+          "production runtime env/binding must be authored explicitly; no secret captured as identity",
+          "native dependency install scripts, total transfer and final archive bounds unestablished",
+          "new app-specific online permission required"
+        ]
+      },
+      "capability_privilege": "no setcap/privileged/host-network directive in root Dockerfile; inherited file capabilities and effective runtime UID/GID unverified without final artifact/state",
+      "expected_image_archive_bytes": null,
+      "size_basis": "no saved final artifact; base compressed descriptors do not bound expanded docker-save archive, build dependencies or job disk usage",
+      "build_executed": false,
+      "container_started": false,
+      "functional_established": false,
+      "selection": "not selected under current source-to-OCI route and authorization"
+    },
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "repo": "https://github.com/dgtlmoon/changedetection.io",
+      "ref": "0e0566721b1c483dcf7ae548210ee10532d9b181",
+      "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+      "archive_verified": true,
+      "dockerfile": "root Dockerfile unchanged",
+      "dockerfile_sha256": "d78a83439ba820bbd000d14a872befe51381fe067a6e5672cc4708b6de66a423",
+      "target": "docker-default final stage",
+      "syntax_frontend": "none declared; implicit default BuildKit frontend",
+      "external_images": [
+        {
+          "reference": "docker.io/library/python:3.11-slim-bookworm",
+          "root_digest": "sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b",
+          "platforms": {
+            "linux/amd64": {
+              "manifest_digest": "sha256:4b4c524dc3dce996864e030c7bd9c6b0e517597189fee48f48e05b499442444b",
+              "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+              },
+              "compressed_layer_bytes": 47795628,
+              "config_bytes": 5505,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:774043ccc8ccd0d0833a9ee0792142ab7ad93df971e59dd248fbf82db16d0150",
+                  "size": 28238443
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:246ac8b7cadc4ee7c220a2d4e02a37a296797f40648480115ae41e083aa60b6e",
+                  "size": 3533387
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:dc22b8c341d91e21b901b9eb1e414c18b487f4de1a165c539ecb32bb590acbd4",
+                  "size": 16023549
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:f57cecf87087697ab89776daeb60b1b2b2149c876d4aa69ae6765ae7ad66a470",
+                  "size": 249
+                }
+              ]
+            },
+            "linux/arm64": {
+              "manifest_digest": "sha256:bbc491ed39611eede47b1058ad4afb9ea957fb3bf4a7f1b442c6a5628ab93bdc",
+              "platform": {
+                "architecture": "arm64",
+                "os": "linux",
+                "variant": "v8"
+              },
+              "compressed_layer_bytes": 47450590,
+              "config_bytes": 5520,
+              "layers": [
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:333125b5cee9fb6718bdcb523fc93b4adc71b7c37ada6146a20c193430e549b9",
+                  "size": 28123680
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:334fd14c39adb83480436892e56aa211014782243b55408dd5ca16418558ed5c",
+                  "size": 3368476
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:7c42f9fb8730e8334dbcca90a5b8a35f26abf121de2a8c2ba7b5066b21e82d38",
+                  "size": 15958184
+                },
+                {
+                  "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                  "digest": "sha256:b6687636e84a5c01f433d8ee9b9a0431c870223ddf0ce6e44a8be89cf44c3581",
+                  "size": 250
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "unique_base_compressed_layer_bytes": {
+        "linux/amd64": 47795628,
+        "linux/arm64": 47450590
+      },
+      "acquisition_hosts": [
+        "auth.docker.io",
+        "registry-1.docker.io"
+      ],
+      "acquisition_auth": "anonymous Docker Hub token; no saved credential read",
+      "blob_redirects": "not queried; an unapproved redirect must stop future acquisition",
+      "facts_from_source_only": {
+        "stage_count": 2,
+        "same_base_in_both_stages": true,
+        "build_args": "PYTHON_VERSION=3.11 and LOGGER_LEVEL=\"\" default; TARGETPLATFORM supplied by BuildKit; no caller override required by source",
+        "FROM_text": "python:${PYTHON_VERSION}-slim-bookworm (default resolved for metadata only; actual frozen named-context binding not exercised)",
+        "CMD": [
+          "python",
+          "./changedetection.py",
+          "-d",
+          "/datastore"
+        ],
+        "ENTRYPOINT": [
+          "/docker-entrypoint.sh"
+        ],
+        "WorkingDir": "/app",
+        "USER": "not declared; inherited UID/GID unverified",
+        "port": 5000,
+        "state": [
+          "/datastore"
+        ],
+        "VOLUME": [],
+        "external_DB": "none required; application stores its data under /datastore",
+        "additional_process": "one Python service with threads; Selenium/Playwright/browser alternatives optional and not provisioned",
+        "runtime_inputs": "EXTRA_PACKAGES must stay unset; general monitored external sites require separately authorized runtime egress",
+        "build_download_hosts": [
+          "deb.debian.org (base apt configuration and redirects not fetched)",
+          "pypi.org",
+          "files.pythonhosted.org",
+          "www.piwheels.org",
+          "pypi.anaconda.org",
+          "index redirects and transitive build/toolchain endpoints incomplete; no query to these hosts"
+        ],
+        "gaps": [
+          "VOLUME-external /datastore rejected by the equality rule",
+          "apt/pip optional and transitive dependencies, redirect set, total transfer and final archive bounds unestablished",
+          "monitoring external sites requires runtime egress outside the denied profile",
+          "new app-specific online permission required"
+        ]
+      },
+      "capability_privilege": "no setcap/privileged/host-network directive in root Dockerfile; inherited file capabilities and effective runtime UID/GID unverified without final artifact/state",
+      "expected_image_archive_bytes": null,
+      "size_basis": "no saved final artifact; base compressed descriptors do not bound expanded docker-save archive, build dependencies or job disk usage",
+      "build_executed": false,
+      "container_started": false,
+      "functional_established": false,
+      "selection": "not selected under current source-to-OCI route and authorization"
+    }
+  ]
+}

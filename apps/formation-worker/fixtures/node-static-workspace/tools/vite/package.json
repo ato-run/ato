@@ -1,0 +1,9 @@
+{
+  "name": "vite",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture-local stand-in: not Vite. Copies index.html into dist/ so install and build need no registry.",
+  "bin": {
+    "vite": "bin.js"
+  }
+}

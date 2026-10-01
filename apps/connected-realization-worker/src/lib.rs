@@ -146,6 +146,9 @@ fn runner_capabilities(
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a quarantined/recovering slot re-runs reconciliation. Kept slow:
+/// each pass may stop containers and report to the control plane.
+const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(15);
 #[cfg(unix)]
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(unix)]
@@ -155,6 +158,72 @@ const TERMINAL_REPORT_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(250),
     Duration::from_secs(1),
 ];
+
+/// Why a control-plane call failed — the worker's reaction depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommErrorKind {
+    /// Timeout, connect failure, 408, 429 or 5xx: worth retrying, never proof
+    /// the request did not happen.
+    Transient,
+    /// 401/403: the runner credential is gone or revoked. No retry heals it;
+    /// surfacing the exit is the correct alarm.
+    Unauthorized,
+    /// Any other definitive response: a protocol error the Runner cannot
+    /// repair by waiting.
+    Rejected,
+}
+
+fn classify_comm_error(error: &anyhow::Error) -> CommErrorKind {
+    for cause in error.chain() {
+        let Some(reqwest_error) = cause.downcast_ref::<reqwest::Error>() else {
+            continue;
+        };
+        return classify_reqwest(reqwest_error);
+    }
+    CommErrorKind::Rejected
+}
+
+fn classify_reqwest(error: &reqwest::Error) -> CommErrorKind {
+    if error.is_timeout() || error.is_connect() {
+        return CommErrorKind::Transient;
+    }
+    if let Some(status) = error.status() {
+        return match status.as_u16() {
+            401 | 403 => CommErrorKind::Unauthorized,
+            408 | 429 => CommErrorKind::Transient,
+            code if code >= 500 => CommErrorKind::Transient,
+            _ => CommErrorKind::Rejected,
+        };
+    }
+    // DNS, TLS and body errors: no definitive answer arrived.
+    CommErrorKind::Transient
+}
+
+/// Bounded-exponential backoff with jitter for control-plane polling. One
+/// place owns the retry budget so transient outages cannot amplify load by
+/// stacking retries at several layers.
+struct ControlPlaneBackoff {
+    attempt: u32,
+}
+
+impl ControlPlaneBackoff {
+    fn new() -> Self {
+        Self { attempt: 0 }
+    }
+
+    fn reset(&mut self) {
+        self.attempt = 0;
+    }
+
+    fn next(&mut self) -> Duration {
+        const CAP_MS: u64 = 30_000;
+        let shift = self.attempt.min(5);
+        self.attempt = self.attempt.saturating_add(1);
+        let base = (1_000u64 << shift).min(CAP_MS);
+        let jitter = rand::random::<u64>() % (base / 2 + 1);
+        Duration::from_millis(base / 2 + jitter)
+    }
+}
 const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
 const BROWSER_PRESENTATION_PATH: &str = "/.well-known/ato/browser/frame.jpg";
 const RUN_CONTROL_MAX_FRAME_BYTES: usize = 32 * 1024;
@@ -1043,10 +1112,31 @@ pub struct WorkerConfig {
 }
 
 /// How a runtime launch ended, and whether its workloads are confirmed
-/// stopped (the journal entry may then go).
+/// stopped. The journal entry may go only when BOTH hold: the host proved the
+/// stop AND the terminal report reached the control plane. A dropped entry
+/// whose report never arrived leaves the lease open and the Run's state
+/// writer held forever — nothing else links the dead Run back to this lease.
 struct RuntimeLaunchOutcome {
     result: Result<()>,
     stop_confirmed: bool,
+}
+
+/// What the journal records for a finished Run, or `None` when the entry may
+/// go. `stop_confirmed` alone is not enough to drop it: the API still
+/// believes the workload may be running — its lease stays open and the Run's
+/// state writer stays held, so every relaunch of the Instance wedges.
+/// Keeping the entry lets recovery deliver the `stopped` report the control
+/// plane needs to release the grants.
+fn journal_phase_after_run(
+    outcome: &RuntimeLaunchOutcome,
+) -> Option<runtime_launch::recovery::RunPhase> {
+    if outcome.stop_confirmed && outcome.result.is_ok() {
+        None
+    } else if outcome.stop_confirmed {
+        Some(runtime_launch::recovery::RunPhase::StopConfirmedUnreported)
+    } else {
+        Some(runtime_launch::recovery::RunPhase::StopUnconfirmed)
+    }
 }
 
 struct RuntimeServeControls<'a> {
@@ -1099,12 +1189,13 @@ impl ConnectedWorker {
     }
 
     /// Stop and report whatever this slot left running before it advertises
-    /// runtime work. A failure leaves the slot unrecovered, not the worker
-    /// dead: other lease kinds keep working and recovery is retried.
+    /// new work. Reconciles three sources of truth — the Run journal, the
+    /// labelled resources still present, and leftover `leases/` directories —
+    /// and only a confirmed stop whose report the control plane acknowledged
+    /// frees the lease. A failure leaves the slot unrecovered, not the worker
+    /// dead: recovery is retried every poll while the worker stays alive.
     fn recover_runtime_launch(&self) {
-        if runtime_launch::recovery::slot_recovered()
-            || !runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
-        {
+        if runtime_launch::recovery::slot_recovered() {
             return;
         }
         let journal = match runtime_launch::recovery::RunJournal::new(
@@ -1129,6 +1220,7 @@ impl ConnectedWorker {
             scanner.as_ref(),
             &self.api,
             ato_adapter_oci::StopBudget::DEFAULT,
+            &self.config.work_root.join("leases"),
         ) {
             Ok(result) => {
                 for report in &result.reports {
@@ -1137,7 +1229,22 @@ impl ConnectedWorker {
                         serde_json::to_string(report).unwrap_or_default()
                     );
                 }
-                runtime_launch::recovery::mark_slot_recovered(result.clean);
+                for name in &result.quarantined {
+                    eprintln!(
+                        "[runtime-launch-recovery] quarantined unidentifiable lease residue: {name}"
+                    );
+                }
+                for name in &result.foreign {
+                    eprintln!(
+                        "[runtime-launch-recovery] left sibling-or-live lease residue untouched: {name}"
+                    );
+                }
+                let control_plane_clean = if result.clean {
+                    self.recover_control_plane_leases(&journal)
+                } else {
+                    false
+                };
+                runtime_launch::recovery::mark_slot_recovered(result.clean && control_plane_clean);
             }
             Err(error) => {
                 eprintln!("[runtime-launch-recovery] blocked: {error:#}");
@@ -1146,22 +1253,227 @@ impl ConnectedWorker {
         }
     }
 
+    /// Reconcile leases that survived only in the control plane. The local
+    /// journal/resource pass cannot discover these after a work-root loss.
+    /// Persist an intent first so a crash anywhere in this pass resumes safely.
+    fn recover_control_plane_leases(&self, journal: &runtime_launch::recovery::RunJournal) -> bool {
+        use runtime_launch::recovery::{LeaseRecoveryReport, RecoveryReporter, RunJournalEntry};
+
+        // runner_leases currently records the Runner but not the owning slot.
+        // With more than one slot, an API-only lease could still belong to a
+        // live sibling and this slot must not infer ownership. Single-slot
+        // Runners have an unambiguous ownership boundary and can self-heal.
+        if self.config.max_slots != 1 {
+            return true;
+        }
+
+        let leases = match self.api.open_leases() {
+            Ok(leases) => leases,
+            Err(error) => {
+                eprintln!(
+                    "[runtime-launch-recovery] could not list control-plane leases: {error:#}"
+                );
+                return false;
+            }
+        };
+        let mut clean = true;
+        for lease in leases {
+            let owner = ato_adapter_oci::OciOwner {
+                runner_id: self.config.runner_id.clone(),
+                slot_id: self.config.slot_id.clone(),
+                lease_id: lease.id.clone(),
+                run_id: lease.run_id.clone(),
+                incarnation: runtime_launch::recovery::incarnation().to_owned(),
+            };
+            let mut entry = RunJournalEntry::new(&owner);
+            entry.phase = runtime_launch::recovery::RunPhase::StopUnconfirmed;
+            entry.process_identity_required = lease.recovery_kind != "oci_labeled";
+            if let Err(error) = journal.record(&entry) {
+                eprintln!(
+                    "[runtime-launch-recovery] could not journal API-only lease {}: {error:#}",
+                    lease.id
+                );
+                clean = false;
+                continue;
+            }
+
+            let stop = if lease.recovery_kind == "oci_labeled" {
+                runtime_launch::recovery::settle_lease(&owner, ato_adapter_oci::StopBudget::DEFAULT)
+            } else {
+                ato_adapter_oci::StopOutcome::Unconfirmed {
+                    reason: if lease.recovery_kind == "process_requires_journal" {
+                        "process recovery requires the missing pid/start-time journal".to_owned()
+                    } else {
+                        format!(
+                            "control plane returned unsupported recovery kind {:?}",
+                            lease.recovery_kind
+                        )
+                    },
+                }
+            };
+            let report = LeaseRecoveryReport {
+                lease_id: lease.id.clone(),
+                run_id: Some(lease.run_id),
+                incarnation: runtime_launch::recovery::incarnation().to_owned(),
+                outcome: if stop.is_confirmed() {
+                    "stopped"
+                } else {
+                    "unconfirmed"
+                },
+                stop: stop.clone(),
+                writer_fences: std::collections::BTreeMap::new(),
+            };
+            eprintln!(
+                "[runtime-launch-recovery] API-only lease {}",
+                serde_json::to_string(&report).unwrap_or_default()
+            );
+            if let Err(error) = self.api.report_recovery(&report) {
+                eprintln!(
+                    "[runtime-launch-recovery] report for API-only lease {} was not accepted: {error:#}",
+                    lease.id
+                );
+                clean = false;
+                continue;
+            }
+            if stop.is_confirmed() {
+                if let Err(error) = journal.remove(&lease.id) {
+                    eprintln!(
+                        "[runtime-launch-recovery] could not retire API-only lease {}: {error:#}",
+                        lease.id
+                    );
+                    clean = false;
+                }
+            } else {
+                clean = false;
+            }
+        }
+        clean
+    }
+
+    /// Heartbeat that rides out a control-plane outage. A transient failure
+    /// retries with capped backoff+jitter instead of killing the worker: the
+    /// Runner's authority to execute comes from the lease's execution
+    /// authorization, never from heartbeat reachability. Only a definitive
+    /// answer — revoked credential, protocol rejection — stops the worker.
+    fn heartbeat_with_retry(&self, active_slots: u32) -> Result<()> {
+        let mut backoff = ControlPlaneBackoff::new();
+        loop {
+            match self.api.heartbeat(&self.config, active_slots) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if self.config.once {
+                        return Err(error);
+                    }
+                    match classify_comm_error(&error) {
+                        CommErrorKind::Transient => {
+                            let delay = backoff.next();
+                            eprintln!(
+                                "[heartbeat] transient control-plane failure; retrying in {}ms: {error:#}",
+                                delay.as_millis()
+                            );
+                            thread::sleep(delay);
+                        }
+                        _ => return Err(error),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Inside an active Run a heartbeat is liveness reporting, not authority:
+    /// a missed one must neither kill the Run nor block the authorization
+    /// deadline that bounds it.
+    fn heartbeat_best_effort(&self, active_slots: u32) {
+        if let Err(error) = self.api.heartbeat(&self.config, active_slots) {
+            eprintln!(
+                "[heartbeat] report missed; the run stays bounded by its execution authorization: {error:#}"
+            );
+        }
+    }
+
+    /// A transient control-plane poll failure is not a stop answer — keep the
+    /// Run within its authorization window and ask again next tick. A
+    /// definitive rejection still ends the Run.
+    fn control_stop_requested(&self, lease_id: &str) -> Result<bool> {
+        match self.api.control(lease_id) {
+            Ok(control) => Ok(control.stop_requested),
+            Err(error) => match classify_comm_error(&error) {
+                CommErrorKind::Transient => {
+                    eprintln!(
+                        "[control] transient poll failure for lease {lease_id}; polling again next tick: {error:#}"
+                    );
+                    Ok(false)
+                }
+                _ => Err(error),
+            },
+        }
+    }
+
     pub fn run(&self) -> Result<()> {
-        let _slot = slot_state::SlotGuard::acquire(&self.config.work_root)?;
-        self.recover_runtime_launch();
-        self.api.heartbeat(&self.config, 0)?;
+        // One process owns this slot on the work root. Sibling slots may
+        // share the root — the lock is scoped by slot id. Leftover lease
+        // state is NOT a reason to refuse to start: only a running worker
+        // can settle it. The slot stays recovering — no new claims — until
+        // recovery proves every leftover stopped and its report reached the
+        // control plane.
+        let _slot = slot_state::SlotGuard::acquire(&self.config.work_root, &self.config.slot_id)?;
+        {
+            // Lease directories are shared. Serialize only the startup pass
+            // so sibling processes cannot race to settle the same legacy,
+            // markerless residue; release it before normal serving begins.
+            let _recovery = slot_state::RecoveryGuard::acquire(&self.config.work_root)?;
+            self.recover_runtime_launch();
+        }
+        // Advertise capabilities before the first claim — the scheduler only
+        // dispatches what the last heartbeat proved this Runner can do.
+        self.heartbeat_with_retry(0)?;
+        let mut claim_backoff = ControlPlaneBackoff::new();
         loop {
             self.recover_runtime_launch();
-            let claim = self.api.claim_next()?;
+            if !runtime_launch::recovery::slot_recovered() {
+                self.heartbeat_with_retry(0)?;
+                // One-shot callers still get the old fail-fast contract: they
+                // cannot wait out a quarantine.
+                ensure!(
+                    !self.config.once,
+                    "worker slot has unresolved lease state; recovery could not confirm it clean"
+                );
+                thread::sleep(RECOVERY_POLL_INTERVAL);
+                continue;
+            }
+            let claim = match self.api.claim_next() {
+                Ok(claim) => {
+                    claim_backoff.reset();
+                    claim
+                }
+                Err(error) => {
+                    if self.config.once {
+                        return Err(error);
+                    }
+                    match classify_comm_error(&error) {
+                        CommErrorKind::Transient => {
+                            let delay = claim_backoff.next();
+                            eprintln!(
+                                "[claim] transient control-plane failure; next poll in {}ms: {error:#}",
+                                delay.as_millis()
+                            );
+                            thread::sleep(delay);
+                            self.heartbeat_best_effort(0);
+                            continue;
+                        }
+                        _ => return Err(error),
+                    }
+                }
+            };
             let Some(lease) = claim.lease else {
                 if self.config.once {
                     return Ok(());
                 }
                 thread::sleep(Duration::from_secs(claim.next_poll_seconds.clamp(1, 30)));
-                self.api.heartbeat(&self.config, 0)?;
+                self.heartbeat_with_retry(0)?;
                 continue;
             };
-            self.api.heartbeat(&self.config, 1)?;
+            self.heartbeat_best_effort(1);
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
                 let code = if message.contains("execution authorization") {
@@ -1178,11 +1490,21 @@ impl ConnectedWorker {
                         lease.id
                     );
                 }
-                // A failed state commit or physical teardown must not be followed
-                // by a new claim. The retained lease directory fences restarts.
-                return Err(error).context("worker slot requires recovery");
+                if self.config.once {
+                    return Err(error).context("connected Realization failed");
+                }
+                // A failed state commit or physical teardown must not be
+                // followed by a new claim. Quarantine the slot and keep the
+                // worker alive: recovery retries until the leftover is
+                // provably settled or a human inspects the quarantine.
+                eprintln!(
+                    "connected Realization failed; slot held for recovery lease_id={}: {error:#}",
+                    lease.id
+                );
+                runtime_launch::recovery::mark_slot_recovered(false);
+                continue;
             }
-            self.api.heartbeat(&self.config, 0)?;
+            self.heartbeat_best_effort(0);
             if self.config.once {
                 return Ok(());
             }
@@ -1195,6 +1517,17 @@ impl ConnectedWorker {
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
         fs::create_dir(&lease_root)?;
+        // Persist which slot owns this directory before anything else can
+        // land in it: several slots share one work root, so a leftover dir
+        // without a marker cannot be attributed by a restarting sibling.
+        runtime_launch::recovery::write_lease_owner(
+            &lease_root,
+            &runtime_launch::recovery::LeaseOwner::new(
+                &self.config.runner_id,
+                &self.config.slot_id,
+                &lease.id,
+            ),
+        )?;
         let result = match &lease.command {
             LeaseCommand::Portable(command) => {
                 self.execute_portable_lease(lease, command, &lease_root)
@@ -1380,13 +1713,20 @@ impl ConnectedWorker {
                 self.fixed_tcp.deactivate(&lease.run_id, allocation);
             }
         }
-        if outcome.stop_confirmed {
-            // Confirmed stopped, or never started: nothing left to recover.
-            journal.remove(&lease.id)?;
-        } else {
-            // Kept for recovery; the slots are quarantined, not released.
-            entry.phase = runtime_launch::recovery::RunPhase::StopUnconfirmed;
-            journal.record(&entry)?;
+        match journal_phase_after_run(&outcome) {
+            // Confirmed stopped AND the terminal report was delivered, or the
+            // Run never started: nothing left to recover.
+            None => journal.remove(&lease.id)?,
+            // StopUnconfirmed: the workload may still be running, so recovery
+            // must confirm the stop before the slot can be released.
+            // StopConfirmedUnreported: provably gone, but the control plane
+            // never learned it — the lease stays open and the Run's state
+            // grants stay held until a later incarnation delivers the
+            // `stopped` recovery this entry preserves.
+            Some(phase) => {
+                entry.phase = phase;
+                journal.record(&entry)?;
+            }
         }
         outcome.result
     }
@@ -1717,11 +2057,11 @@ impl ConnectedWorker {
                 bail!("OCI service `{name}` exited while the group was active with code {code}");
             }
             if last_heartbeat.get().elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
-                self.api.heartbeat(&self.config, 1)?;
+                self.heartbeat_best_effort(1);
                 last_heartbeat.set(Instant::now());
             }
             poll_runtime_launch_control(
-                || Ok(self.api.control(&lease.id)?.stop_requested),
+                || self.control_stop_requested(&lease.id),
                 || {
                     self.refresh_execution_authorization(
                         &lease.id,
@@ -1873,8 +2213,7 @@ impl ConnectedWorker {
                 last_frame = Instant::now();
             }
             if last_control.elapsed() >= Duration::from_secs(1) {
-                let control = self.api.control(&lease.id)?;
-                if control.stop_requested {
+                if self.control_stop_requested(&lease.id)? {
                     if let Some(browser) = browser.take() {
                         browser.stop()?;
                     }
@@ -1886,7 +2225,7 @@ impl ConnectedWorker {
                 last_control = Instant::now();
             }
             if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
-                self.api.heartbeat(&self.config, 1)?;
+                self.heartbeat_best_effort(1);
                 last_heartbeat = Instant::now();
             }
             thread::sleep(Duration::from_millis(50));
@@ -2080,13 +2419,13 @@ impl ConnectedWorker {
                     }
                 }
                 if last_control.elapsed() >= Duration::from_secs(1) {
-                    if self.api.control(&lease.id)?.stop_requested {
+                    if self.control_stop_requested(&lease.id)? {
                         break Ok(());
                     }
                     last_control = Instant::now();
                 }
                 if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
-                    self.api.heartbeat(&self.config, 1)?;
+                    self.heartbeat_best_effort(1);
                     last_heartbeat = Instant::now();
                 }
             }
@@ -3517,6 +3856,18 @@ struct ClaimResponse {
     next_poll_seconds: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenLeasesResponse {
+    leases: Vec<OpenLease>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenLease {
+    id: String,
+    run_id: String,
+    recovery_kind: String,
+}
+
 fn default_poll_seconds() -> u64 {
     2
 }
@@ -3671,11 +4022,6 @@ struct RuntimeBindingsResponse {
 }
 
 #[derive(Serialize)]
-struct StatusReport<'a> {
-    status: &'a str,
-}
-
-#[derive(Serialize)]
 struct ComputationHeadReport<'a> {
     operation_id: &'a str,
     run_seq: u64,
@@ -3769,10 +4115,48 @@ impl HttpRunnerApi {
             "max_slots": config.max_slots,
             "active_slots": active_slots,
             "agent_version": env!("CARGO_PKG_VERSION"),
+            // Observability, not scheduling truth: whether this slot finished
+            // reconciling its previous incarnation's leftovers. An
+            // unrecovered slot claims nothing, so the control plane can tell
+            // "alive but quarantined" apart from "alive and ready".
+            "slot_recovered": runtime_launch::recovery::slot_recovered(),
         }))
         .send()?
         .error_for_status()?;
         Ok(())
+    }
+
+    /// POST JSON to a control-plane endpoint with one bounded retry policy.
+    /// Only transient failures retry — a definitive 4xx is returned as-is so
+    /// a refused report is never mistaken for a lost one. Callers pass the
+    /// SAME body on every attempt, so a request whose response was lost is
+    /// resent identically rather than mutating state twice.
+    fn post_control_plane<T: serde::Serialize + ?Sized>(
+        &self,
+        url: String,
+        body: &T,
+    ) -> Result<()> {
+        let mut last_error = None;
+        for delay in TERMINAL_REPORT_RETRY_DELAYS {
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            match self
+                .authorized(self.client.post(&url))
+                .json(body)
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => match classify_reqwest(&error) {
+                    CommErrorKind::Transient => last_error = Some(error),
+                    _ => return Err(error.into()),
+                },
+            }
+        }
+        Err(last_error
+            .context("control-plane report retry set is empty")?
+            .into())
     }
 
     fn claim_next(&self) -> Result<ClaimResponse> {
@@ -3786,15 +4170,23 @@ impl HttpRunnerApi {
             .json()?)
     }
 
+    fn open_leases(&self) -> Result<Vec<OpenLease>> {
+        Ok(self
+            .authorized(self.client.get(format!(
+                "{}/v1/runners/{}/leases/open",
+                self.base, self.runner_id
+            )))
+            .send()?
+            .error_for_status()?
+            .json::<OpenLeasesResponse>()?
+            .leases)
+    }
+
     fn report_status(&self, lease_id: &str, status: &str) -> Result<()> {
-        self.authorized(
-            self.client
-                .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
+        self.post_control_plane(
+            format!("{}/v1/runner-leases/{lease_id}/status", self.base),
+            &serde_json::json!({ "status": status }),
         )
-        .json(&StatusReport { status })
-        .send()?
-        .error_for_status()?;
-        Ok(())
     }
 
     fn redeem_runtime_bindings(
@@ -3829,56 +4221,31 @@ impl HttpRunnerApi {
     }
 
     fn report_activity_ready(&self, lease_id: &str, execution_id: &str) -> Result<()> {
-        self.authorized(
-            self.client
-                .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
+        self.post_control_plane(
+            format!("{}/v1/runner-leases/{lease_id}/status", self.base),
+            &serde_json::json!({
+                "status": "ready",
+                "execution_id": execution_id,
+            }),
         )
-        .json(&serde_json::json!({
-            "status": "ready",
-            "execution_id": execution_id,
-        }))
-        .send()?
-        .error_for_status()?;
-        Ok(())
     }
 
     fn report_failed(&self, lease_id: &str, code: &str, message: &str) -> Result<()> {
         let message = truncate(message, 2000);
-        let mut last_error = None;
-        for delay in TERMINAL_REPORT_RETRY_DELAYS {
-            if !delay.is_zero() {
-                thread::sleep(delay);
-            }
-            match self
-                .authorized(
-                    self.client
-                        .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
-                )
-                .json(&serde_json::json!({
-                    "status": "failed",
-                    "error": { "code": code, "message": message }
-                }))
-                .send()
-                .and_then(reqwest::blocking::Response::error_for_status)
-            {
-                Ok(_) => return Ok(()),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error
-            .context("terminal failure report retry set is empty")?
-            .into())
+        self.post_control_plane(
+            format!("{}/v1/runner-leases/{lease_id}/status", self.base),
+            &serde_json::json!({
+                "status": "failed",
+                "error": { "code": code, "message": message }
+            }),
+        )
     }
 
     fn report_ready(&self, lease_id: &str, report: ReadyReport<'_>) -> Result<()> {
-        self.authorized(
-            self.client
-                .post(format!("{}/v1/runner-leases/{lease_id}/ready", self.base)),
+        self.post_control_plane(
+            format!("{}/v1/runner-leases/{lease_id}/ready", self.base),
+            &report,
         )
-        .json(&report)
-        .send()?
-        .error_for_status()?;
-        Ok(())
     }
 
     pub fn persist_computation_head(
@@ -3887,19 +4254,16 @@ impl HttpRunnerApi {
         operation_id: &str,
         pending: &ato_kernel::PendingHeadPersistence,
     ) -> Result<()> {
-        self.authorized(self.client.post(format!(
-            "{}/v1/runner-leases/{lease_id}/computation-head",
-            self.base
-        )))
-        .json(&ComputationHeadReport {
-            operation_id,
-            run_seq: pending.run_seq,
-            head_before: pending.transition.from.as_str(),
-            head_after: pending.transition.to.as_str(),
-        })
-        .send()?
-        .error_for_status()?;
-        Ok(())
+        // Same operation_id on every retry: a lost response cannot double-commit.
+        self.post_control_plane(
+            format!("{}/v1/runner-leases/{lease_id}/computation-head", self.base),
+            &ComputationHeadReport {
+                operation_id,
+                run_seq: pending.run_seq,
+                head_before: pending.transition.from.as_str(),
+                head_after: pending.transition.to.as_str(),
+            },
+        )
     }
 
     fn control(&self, lease_id: &str) -> Result<ControlResponse> {
@@ -3958,27 +4322,10 @@ impl HttpRunnerApi {
     }
 
     fn report_stopped(&self, lease_id: &str, execution_id: &str) -> Result<()> {
-        let mut last_error = None;
-        for delay in TERMINAL_REPORT_RETRY_DELAYS {
-            if !delay.is_zero() {
-                thread::sleep(delay);
-            }
-            match self
-                .authorized(
-                    self.client
-                        .post(format!("{}/v1/runner-leases/{lease_id}/stopped", self.base)),
-                )
-                .json(&serde_json::json!({ "execution_id": execution_id }))
-                .send()
-                .and_then(reqwest::blocking::Response::error_for_status)
-            {
-                Ok(_) => return Ok(()),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error
-            .context("terminal stopped report retry set is empty")?
-            .into())
+        self.post_control_plane(
+            format!("{}/v1/runner-leases/{lease_id}/stopped", self.base),
+            &serde_json::json!({ "execution_id": execution_id }),
+        )
     }
 
     fn activity_executor_session(
@@ -4021,21 +4368,74 @@ impl runtime_launch::recovery::RecoveryReporter for HttpRunnerApi {
         &self,
         report: &runtime_launch::recovery::LeaseRecoveryReport,
     ) -> Result<()> {
+        let url = format!(
+            "{}/v1/runner-leases/{}/recovery",
+            self.base, report.lease_id
+        );
+        let mut last_error = None;
+        for delay in TERMINAL_REPORT_RETRY_DELAYS {
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            match self.authorized(self.client.post(&url)).json(report).send() {
+                // Indistinguishable on purpose: unknown or another Runner's
+                // lease has nothing of ours to release.
+                Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                    return Ok(());
+                }
+                Ok(response) => match response.error_for_status() {
+                    Ok(_) => return Ok(()),
+                    Err(error) => match classify_reqwest(&error) {
+                        CommErrorKind::Transient => last_error = Some(error),
+                        _ => {
+                            return Err(error).context("control plane refused the recovery report");
+                        }
+                    },
+                },
+                Err(error) => match classify_reqwest(&error) {
+                    CommErrorKind::Transient => last_error = Some(error),
+                    _ => return Err(error).context("recovery report failed"),
+                },
+            }
+        }
+        Err(last_error
+            .context("recovery report retry set is empty")?
+            .into())
+    }
+
+    /// The terminal-or-live answer recovery needs to attribute a markerless
+    /// leftover dir on a shared work root. The control poll endpoint already
+    /// carries the lease's status; 404 means the lease is not ours (or never
+    /// existed), which leaves nothing live for a dir to belong to.
+    fn lease_liveness(&self, lease_id: &str) -> Result<runtime_launch::recovery::LeaseLiveness> {
+        use runtime_launch::recovery::LeaseLiveness;
         let response = self
-            .authorized(self.client.post(format!(
-                "{}/v1/runner-leases/{}/recovery",
-                self.base, report.lease_id
-            )))
-            .json(report)
+            .authorized(
+                self.client
+                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base)),
+            )
             .send()?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(());
+            return Ok(LeaseLiveness::Terminal);
         }
-        response
-            .error_for_status()
-            .context("control plane refused the recovery report")?;
-        Ok(())
+        let probe: LeaseStatusProbe = response.error_for_status()?.json()?;
+        match probe.status.as_deref() {
+            // Mirror of the control plane's LEASE_TERMINAL_STATUSES plus the
+            // owner-abort end state: no writer is bound to any of these.
+            Some("failed") | Some("stopped") | Some("expired") | Some("revoked")
+            | Some("cancelled") | Some("aborted") => Ok(LeaseLiveness::Terminal),
+            Some(_) => Ok(LeaseLiveness::Live),
+            // A lease answer without a status cannot be attributed either
+            // way — retry it next round rather than guess.
+            None => Err(anyhow::anyhow!("lease control response carried no status")),
+        }
     }
+}
+
+/// The one field recovery reads from the lease control poll.
+#[derive(Debug, Deserialize)]
+struct LeaseStatusProbe {
+    status: Option<String>,
 }
 
 fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
@@ -4680,6 +5080,38 @@ mod tests {
     use tungstenite::client::IntoClientRequest;
 
     #[test]
+    fn journal_entry_is_dropped_only_once_the_terminal_report_is_delivered() {
+        let reported = RuntimeLaunchOutcome {
+            result: Ok(()),
+            stop_confirmed: true,
+        };
+        assert_eq!(journal_phase_after_run(&reported), None);
+
+        // The host proved the stop but the API never heard it: keep the entry
+        // so recovery can deliver the `stopped` evidence and free the Run's
+        // state grants. Dropping it here strands the lease open forever.
+        let unreported = RuntimeLaunchOutcome {
+            result: Err(anyhow::anyhow!("report delivery failed")),
+            stop_confirmed: true,
+        };
+        assert_eq!(
+            journal_phase_after_run(&unreported),
+            Some(runtime_launch::recovery::RunPhase::StopConfirmedUnreported)
+        );
+
+        // The workload may still be running: keep the entry as unconfirmed so
+        // recovery proves the stop (or quarantines) before the slot frees.
+        let unconfirmed = RuntimeLaunchOutcome {
+            result: Err(anyhow::anyhow!("stop unconfirmed")),
+            stop_confirmed: false,
+        };
+        assert_eq!(
+            journal_phase_after_run(&unconfirmed),
+            Some(runtime_launch::recovery::RunPhase::StopUnconfirmed)
+        );
+    }
+
+    #[test]
     fn explicit_stop_wins_a_race_with_revoked_continuation_authority() {
         let refreshed = Cell::new(false);
 
@@ -4771,7 +5203,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_state_commit_preserves_the_working_copy_and_blocks_restart() {
+    fn failed_state_commit_preserves_the_working_copy_for_recovery() {
         let temporary = tempfile::tempdir().unwrap();
         let lease = temporary.path().join("leases/lease-failed");
         fs::create_dir_all(&lease).unwrap();
@@ -4779,7 +5211,11 @@ mod tests {
         let outcome = settle_lease_directory(&lease, Err(anyhow::anyhow!("state commit failed")));
         assert!(outcome.is_err());
         assert_eq!(fs::read(lease.join("state")).unwrap(), b"unsaved work");
-        assert!(slot_state::SlotGuard::acquire(temporary.path()).is_err());
+        // Restarting is not what unresolved state blocks: the worker must come
+        // up so recovery can report and settle the residue. New claims stay
+        // closed until recovery confirms the stop is acknowledged — covered by
+        // runtime_launch::recovery tests.
+        assert!(slot_state::SlotGuard::acquire(temporary.path(), "slot-1").is_ok());
     }
 
     #[test]

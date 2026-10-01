@@ -79,6 +79,8 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
             network: "denied".to_owned(),
             allow_managed: false,
             decision: None,
+            generation: None,
+            proposal: None,
         },
         SatisfyBudget::ceilings(4, "first_pass"),
         "search_test",
@@ -1349,6 +1351,8 @@ fn a_search_budget_above_a_ceiling_is_never_sent() {
             network: "denied".to_owned(),
             allow_managed: false,
             decision: None,
+            generation: None,
+            proposal: None,
         },
         SatisfyBudget {
             max_stored_bytes: MAX_SEARCH_STORED_BYTES + 1,
