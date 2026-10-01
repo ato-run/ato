@@ -940,6 +940,7 @@ pub fn build_multi_derivation_bundle(
     let static_draft = AuthoringDraft {
         contract: process_draft.contract.clone(),
         derivation: DerivationDraft {
+            variable_bindings: vec![],
             requirements: Default::default(),
             inputs: vec![input.clone()],
             runtimes: Vec::new(),
@@ -1177,6 +1178,7 @@ pub fn build_dynamic_routes_bundle(
         content_ref: tree_ref,
     };
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
+        variable_bindings: vec![],
         requirements: Default::default(),
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         inputs: vec![input.clone()],

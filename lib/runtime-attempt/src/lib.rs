@@ -39,3 +39,5 @@ pub mod static_lane;
 pub mod static_server;
 pub mod text;
 pub mod verification;
+
+pub mod variables;

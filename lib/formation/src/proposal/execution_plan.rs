@@ -230,6 +230,8 @@ pub struct RequirementBasis {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlanProposal {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub runtime: RuntimeSelection,
     pub entrypoint: SourceReference,
     /// Source-owned build output served by the existing browser adapter. The
@@ -289,6 +291,14 @@ impl ExecutionPlanProposal {
         authorization: &PlanAuthorization,
     ) -> Result<(CompiledGeneration, SearchCandidate), ProposalError> {
         authorization.validate()?;
+        crate::variables::validate(&self.variable_bindings).map_err(ProposalError)?;
+        if self
+            .variable_bindings
+            .iter()
+            .any(|r| self.environment.contains_key(&r.name))
+        {
+            return Err(ProposalError("variable_binding_environment_conflict"));
+        }
         let exploration = frozen
             .policy
             .exploration
@@ -371,6 +381,7 @@ impl ExecutionPlanProposal {
                 || self.module.is_some()
                 || !self.argv.is_empty()
                 || !self.environment.is_empty()
+                || !self.variable_bindings.is_empty()
                 || !self.state.is_empty()
             {
                 return Err(ProposalError("unsupported_static_output"));
@@ -606,12 +617,15 @@ impl ExecutionPlanProposal {
         );
             json!({"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port})
         };
-        let document = json!({"schema":"ato.capsule/1",
+        let mut document = json!({"schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
             "runtime":runtimes,"derive":{"step":steps},
             "port":[serving_port],
             "contract":{"require":contract_requirements(&frozen.base_contract)},"requirements":self.requirements,
             "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>()});
+        if !self.variable_bindings.is_empty() {
+            document["variable_bindings"] = json!(self.variable_bindings);
+        }
         let value = toml::Value::try_from(document)
             .map_err(|_| ProposalError("proposal_compilation_failed"))?;
         let capsule_toml =
@@ -658,6 +672,7 @@ impl ExecutionPlanProposal {
             || !self.argv.is_empty()
             || self.module.is_some()
             || !self.environment.is_empty()
+            || !self.variable_bindings.is_empty()
             || !self.dependencies.is_empty()
             || !self.build_scripts.is_empty()
         {

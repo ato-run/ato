@@ -926,6 +926,8 @@ fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
     let view = status(&sub);
     let request = sub.proposal_request_v2(&view).unwrap();
     let mut input = ReasoningInput {
+        available_variables: vec![],
+        max_retries: 3,
         catalog_sources_in_inventory: false,
         goal: None,
         schema: INPUT_SCHEMA.into(),
@@ -969,4 +971,109 @@ fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
     }
     assert_eq!(mock.count(), 2);
     assert_eq!(budget.snapshot().unwrap().cells.len(), 2);
+}
+
+fn recovery_input(sub: &Submission) -> super::super::reasoning::ReasoningInput {
+    super::super::reasoning::ReasoningInput {
+        schema: super::super::reasoning::INPUT_SCHEMA.into(),
+        catalog_sources_in_inventory: false,
+        goal: None,
+        available_variables: vec![],
+        max_retries: 3,
+        call_id: "recovery_r1_s1".into(),
+        frozen_contract_ref: sub.request.contract_ref.clone(),
+        source_identity: super::super::reasoning::SourceIdentity {
+            archive_digest: sub.request.source.archive_digest.clone(),
+            closure_ref: sub.request.source.closure_ref.clone(),
+        },
+        inventory: vec![],
+        request: sub.proposal_request_v2(&status(sub)).unwrap(),
+        projection: vec![],
+        rounds_remaining: 3,
+        calls_remaining: 6,
+        inspections_remaining: 4,
+        inspection_source_bytes_remaining: 32768,
+        inspection_feedback: vec![],
+    }
+}
+#[test]
+fn shared_transient_calls_are_separate_charged_reservations_and_restart_cannot_reset_retry_three() {
+    let (root, sub) = enabled();
+    let input = recovery_input(&sub);
+    let mock = Mock::new(|_, _| {
+        let mut reply = Reply::json(json!({"error":"temporary"}));
+        reply.status = 503;
+        reply
+    });
+    let mut config = config(&mock.endpoint);
+    config.prompt_version = PROMPT_VERSION_V6.into();
+    let mut plan = plan();
+    plan.max_calls = 6;
+    plan.input_token_cap = 24576;
+    let path = root.path().join("retry-budget.jsonl");
+    let budget = Arc::new(CallBudget::create(&path, plan.clone()).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(config.clone(), budget.clone()).unwrap();
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 30000;
+    assert_eq!(
+        adapter
+            .propose_reasoning_recover(&input, expires, 3)
+            .err()
+            .unwrap()
+            .class,
+        ErrorClass::ProviderUnavailable
+    );
+    assert_eq!(mock.count(), 4);
+    assert!(
+        budget
+            .snapshot()
+            .unwrap()
+            .cells
+            .values()
+            .all(|c| c.charged_unknown && c.transport.as_ref().unwrap().http_status == Some(503))
+    );
+    let reopened = Arc::new(CallBudget::reopen(&path, plan).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(config, reopened).unwrap();
+    assert!(
+        adapter
+            .propose_reasoning_recover(&input, expires, 3)
+            .is_err()
+    );
+    assert_eq!(mock.count(), 4);
+}
+#[test]
+fn shared_authentication_failure_is_infrastructure_and_is_not_retried() {
+    let (root, sub) = enabled();
+    let input = recovery_input(&sub);
+    let mock = Mock::new(|_, _| {
+        let mut reply = Reply::json(json!({"error":"authentication"}));
+        reply.status = 401;
+        reply
+    });
+    let mut config = config(&mock.endpoint);
+    config.prompt_version = PROMPT_VERSION_V6.into();
+    let mut plan = plan();
+    plan.max_calls = 6;
+    plan.input_token_cap = 24576;
+    let budget =
+        Arc::new(CallBudget::create(&root.path().join("auth-budget.jsonl"), plan).unwrap());
+    let adapter = DeepSeekCandidateProducer::new_mock(config, budget.clone()).unwrap();
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 30000;
+    assert_eq!(
+        adapter
+            .propose_reasoning_recover(&input, expires, 3)
+            .err()
+            .unwrap()
+            .class,
+        ErrorClass::ProviderAuthentication
+    );
+    assert_eq!(mock.count(), 1);
+    assert!(budget.snapshot().unwrap().stopped);
 }

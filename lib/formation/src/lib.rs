@@ -52,6 +52,7 @@ pub mod requirements;
 pub mod retained;
 #[cfg(feature = "planning")]
 pub mod source;
+pub mod variables;
 pub mod verify;
 #[cfg(feature = "planning")]
 pub mod workspace;
