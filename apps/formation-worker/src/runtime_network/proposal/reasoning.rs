@@ -153,6 +153,47 @@ fn scoped_inventory(
     for (id, text) in acquired {
         let origin = domain.files.get(id).context("scope source missing")?;
         let parent = origin.path.rsplit_once('/').map_or("", |(p, _)| p);
+        // An explicit root Python import names a module, not an invitation to
+        // crawl its package. Expose only the module file or package initializer.
+        if parent.is_empty() && origin.path.ends_with(".py") {
+            for line in text.text.lines() {
+                let line = line.trim();
+                let modules: Vec<_> = if let Some(rest) = line.strip_prefix("from ") {
+                    rest.split_once(" import ")
+                        .map(|(m, _)| vec![m])
+                        .unwrap_or_default()
+                } else if let Some(rest) = line.strip_prefix("import ") {
+                    rest.split(',')
+                        .filter_map(|m| m.split_whitespace().next())
+                        .collect()
+                } else {
+                    vec![]
+                };
+                for module in modules {
+                    if module.len() > 128
+                        || !module.split('.').all(|p| {
+                            !p.is_empty()
+                                && p.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                        })
+                    {
+                        continue;
+                    }
+                    let module = module.replace('.', "/");
+                    for path in [format!("{module}.py"), format!("{module}/__init__.py")] {
+                        for (target, _) in domain.files.iter().filter(|(_, f)| f.path == path) {
+                            let basis = allowed.entry(target.clone()).or_default();
+                            let reference = SourceReference {
+                                file_id: id.clone(),
+                                digest: origin.digest.clone(),
+                            };
+                            if !basis.contains(&reference) {
+                                basis.push(reference);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for token in text
             .text
             .split(|c: char| !c.is_ascii_alphanumeric() && !"._-@/*".contains(c))
@@ -198,6 +239,11 @@ fn scoped_inventory(
                 .collect();
             ensure!(matched.len() <= 32, "source_reference_expansion_limit");
             for (target, _) in matched {
+                // Root files were already in scope; do not duplicate their
+                // references as if another root file had widened the boundary.
+                if !domain.files[target].path.contains('/') {
+                    continue;
+                }
                 let basis = allowed.entry(target.clone()).or_default();
                 let reference = SourceReference {
                     file_id: id.clone(),
@@ -311,6 +357,87 @@ mod autonomous_tests {
                 .file_id,
             "package.json"
         );
+    }
+    #[test]
+    fn explicit_python_import_exposes_only_module_or_initializer() {
+        use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
+        let domain = PlanAuthorization {
+            source_oci: None,
+            toolchains: BTreeMap::new(),
+            files: [
+                "main.py",
+                "README.md",
+                "service/__init__.py",
+                "service/hidden.py",
+                "other/__init__.py",
+            ]
+            .into_iter()
+            .map(|path| {
+                (
+                    path.into(),
+                    VerifiedSourceFile {
+                        path: path.into(),
+                        digest: format!("sha256:{}", "a".repeat(64)),
+                    },
+                )
+            })
+            .collect(),
+        };
+        let entry = SourceContextEntry {
+            kind: SourceContextKind::VerifiedFile,
+            logical_id: "main.py".into(),
+            source_id: "main.py".into(),
+            encoding: ato_formation::proposal::SourceEncoding::Utf8,
+            content_sha256: "unused".into(),
+            truncated: false,
+            text: "from service import main\nimport os\n# other directory exists\n".into(),
+        };
+        let inventory =
+            scoped_inventory(&domain, &BTreeMap::from([("main.py".into(), entry)])).unwrap();
+        assert_eq!(inventory.len(), 3);
+        let module = inventory
+            .iter()
+            .find(|f| f.source_relative_path == "service/__init__.py")
+            .unwrap();
+        assert_eq!(module.discovered_from[0].file_id, "main.py");
+        assert_eq!(
+            module.discovered_from[0].digest,
+            domain.files["main.py"].digest
+        );
+        assert!(
+            inventory
+                .iter()
+                .filter(|f| !f.source_relative_path.contains('/'))
+                .all(|f| f.discovered_from.is_empty())
+        );
+    }
+    #[test]
+    fn exchange_call_bound_is_frozen_separately_from_rounds() -> Result<()> {
+        std::fs::create_dir_all(".tmp")?;
+        let dir = tempfile::tempdir_in(".tmp")?;
+        let plan = budget::BudgetPlan {
+            max_calls: 12,
+            input_token_cap: 49152,
+            output_token_cap: 2048,
+            input_price: 300000,
+            output_price: 1200000,
+            ceiling_usd_micros: 206448,
+        };
+        let path = dir.path().join("budget.jsonl");
+        let calls = budget::CallBudget::create(&path, plan.clone())?;
+        for call in 0..12 {
+            let cell = format!("call{call}");
+            calls.reserve(&cell)?;
+            calls.settle_retry(&cell, false)?;
+        }
+        assert!(calls.reserve("call12").is_err());
+        let resumed = budget::CallBudget::reopen(&path, plan.clone())?;
+        assert!(resumed.reserve("new-name").is_err());
+        let mut changed = plan;
+        changed.max_calls = 13;
+        changed.ceiling_usd_micros = 300000;
+        assert!(budget::CallBudget::reopen(&path, changed).is_err());
+        Ok(())
     }
     #[test]
     fn operation_retries_are_initial_plus_three_and_survive_restart() -> Result<()> {
