@@ -58,9 +58,9 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     requirements = source / 'requirements.txt'; requirements.write_text(sdist.as_uri() + '\n')
     plan = dict(schema='ato.python-build-plan/1', python_version=sys.version.split()[0], root=str(source / 'operation'), requirements=str(requirements),
                 requirements_sha256=sha(requirements), build_dependencies=[dict(name='ato-fixture-backend', version='1.0.0')],
-                toolchains=[], build_network='denied', lock_operation=(HELPERS / 'python-dependency-lock.py').read_text())
+                toolchains=[], build_network='denied', lock_operation=(HELPERS / 'python-lock-operation.py').read_text())
     environment = dict(os.environ, PIP_NO_INDEX='1', PIP_FIND_LINKS=str(source), TMPDIR=str(root / 'tmp'))
-    helper = (HELPERS / 'python-native-dependencies.py').read_text()
+    helper = (HELPERS / 'python-native-operation.py').read_text()
     for mode in ('check', 'build-dependencies', 'prepare', 'acquire', 'build', 'seal'):
         subprocess.run([sys.executable, '-c', helper, mode, json.dumps(plan)], env=environment, check=True, timeout=60)
     provenance = json.loads((source / 'operation/provenance.json').read_text())
