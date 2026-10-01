@@ -542,6 +542,7 @@ mod tests {
                 archive_digest: closure.clone(),
             });
             frozen.policy.proposal = Some(ProposalAuthorization {
+                execution_plan: None,
                 modifiable_derivation_refs: vec![],
                 source_domain: SourceDomain {
                     entrypoints: Default::default(),

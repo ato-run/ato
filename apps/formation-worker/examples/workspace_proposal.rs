@@ -76,6 +76,7 @@ fn main() -> Result<()> {
     )?;
     let contract_ref = k.contract_ref()?;
     let authorization = ProposalAuthorization {
+        execution_plan: None,
         modifiable_derivation_refs: vec![],
         source_domain: SourceDomain {
             entrypoints: BTreeMap::new(),

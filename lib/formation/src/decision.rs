@@ -247,6 +247,9 @@ pub struct DecisionRecord {
     /// what tells "the released action is still pending" from "the search
     /// moved on".
     pub attempt_seq: u64,
+    /// Durable generated-round counter when this decision opened.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub proposal_seq: u64,
     pub opened_at_ms: u64,
     pub default_id: String,
     pub choices: Vec<Choice>,
@@ -311,10 +314,10 @@ pub fn choice_id(seq: u64, action: &ChoiceAction) -> String {
 /// then the inspections still missing their evidence, then the stop. The
 /// default is always the first, the same issue the core would take alone.
 pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choice> {
-    let seq = s.decisions.len() as u64;
     let b = &s.budget;
     let l = &s.frozen.policy.budget;
     let transfer_left = available(l.max_transfer_bytes, b.transfer_used, b.transfer_reserved);
+    let seq = s.decisions.len() as u64;
     let mut out = Vec::new();
     for d in s.candidates().filter(|d| safe(&d.effects)) {
         for p in placements.iter().filter(|p| {
@@ -563,7 +566,10 @@ pub(crate) fn apply(
                         // Evidence recorded: consumed.
                     }
                     Some(ChoiceAction::EscalateToCandidateProducer {}) => {
-                        if s.proposal_round.is_none() {
+                        if (s.proposal_history.len() + usize::from(s.proposal_round.is_some()))
+                            as u64
+                            <= record.proposal_seq
+                        {
                             // The default has already rechecked all fences. It
                             // alone may authorize opening the proposal round.
                             return default;
@@ -587,7 +593,8 @@ pub(crate) fn apply(
                     record.released(),
                     Some(ChoiceAction::EscalateToCandidateProducer {})
                 ) {
-                    s.proposal_round.is_none()
+                    (s.proposal_history.len() + usize::from(s.proposal_round.is_some())) as u64
+                        <= record.proposal_seq
                 } else {
                     s.attempts.len() as u64 == record.attempt_seq
                 };
@@ -599,6 +606,19 @@ pub(crate) fn apply(
         }
     }
     let seq = s.decisions.len() as u64;
+    // Exploration has a prescribed evidence → producer/reduction step. A
+    // provider only chooses between genuinely available execution routes;
+    // the synthetic "stop" choice must not prevent the required inference.
+    if s.frozen.policy.exploration.is_some()
+        && (matches!(default, SearchAction::OpenProposalRound { .. })
+            || allowed_choices(s, placements)
+                .iter()
+                .filter(|c| matches!(c.action, ChoiceAction::Attempt { .. }))
+                .count()
+                < 2)
+    {
+        return default;
+    }
     let choices = if matches!(default, SearchAction::OpenProposalRound { .. }) {
         proposal_choices(s)
     } else {
@@ -728,6 +748,7 @@ impl SearchStateV1 {
         }
         let last = self.decisions.len().saturating_sub(1);
         let mut previous_attempt_seq = 0;
+        let mut previous_proposal_seq = 0;
         for (index, d) in self.decisions.iter().enumerate() {
             let consistent = match d.outcome {
                 Some(DecisionOutcome::Chosen) => d
@@ -740,6 +761,8 @@ impl SearchStateV1 {
             if d.seq != index as u64
                 || d.attempt_seq < previous_attempt_seq
                 || d.attempt_seq > self.attempts.len() as u64
+                || d.proposal_seq < previous_proposal_seq
+                || d.proposal_seq > (self.proposal_history.len() + usize::from(self.proposal_round.is_some())) as u64
                 || d.choices.len() < 2
                 || d.choices.len() > MAX_CHOICES
                 || d.choices.iter().any(|c| !ids.insert(&c.choice_id))
@@ -752,6 +775,7 @@ impl SearchStateV1 {
                 return Err(SearchError("decision_record"));
             }
             previous_attempt_seq = d.attempt_seq;
+            previous_proposal_seq = d.proposal_seq;
         }
         // Inspection evidence is append-only and owned by exactly one point:
         // its decision_seq names a point that chose that very inspection.
@@ -777,4 +801,8 @@ impl SearchStateV1 {
         }
         Ok(())
     }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }

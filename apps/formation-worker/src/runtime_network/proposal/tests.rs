@@ -5,6 +5,7 @@ use ato_formation::search::BudgetCounters;
 
 fn authorization() -> ProposalAuthorization {
     ProposalAuthorization {
+        execution_plan: None,
         modifiable_derivation_refs: vec![],
         source_domain: SourceDomain {
             entrypoints: BTreeMap::from([("entry".into(), "app.py".into())]),
@@ -47,6 +48,7 @@ fn prepared(edit: impl FnOnce(&Path)) -> (tempfile::TempDir, Submission) {
             decision: None,
             generation: None,
             proposal: None,
+            exploration: None,
         },
         SatisfyBudget::ceilings(4, "first_pass"),
         "proposal_test",
@@ -64,8 +66,8 @@ fn status(sub: &Submission) -> Value {
         schema:ato_formation::search::SEARCH_SCHEMA.into(),search_id:sub.request.search_id.clone(),owner_scope:"owner".into(),
         revision:1,frozen:frozen_request(&sub.request).unwrap(),deadline_ms:now+60_000,budget:BudgetCounters::default(),
         source_archive_bytes:sub.request.source.archive_bytes,attempts:vec![],owner_stopped:false,decisions:vec![],evidence:vec![],generation:None,
-        proposal_round:Some(ProposalRoundRecord {opened_at_ms:now,expires_at_ms:now+30_000,outcome:None,candidates:vec![]}),
-    },"proposal_point":{"round_seq":1,"revision":1,"claimed":false},"proposal_round":{"status":"open"}})
+        proposal_history:vec![],exploration_submission:None,proposal_round:Some(ProposalRoundRecord {opened_at_ms:now,expires_at_ms:now+30_000,outcome:None,candidates:vec![],derivations:vec![],diagnostics:vec![],inspection_requests:vec![]}),
+    },"proposal_point":{"round_seq":1,"revision":1,"claimed":false},"proposal_round":{"round_seq":1,"status":"open"}})
 }
 fn output() -> ProducerOutput {
     ProducerOutput::new(br#"{"schema":"ato.formation-proposal/1","proposals":[{"kind":"propose_derivation","operations":[{"operation":"python_http_process@1","entrypoint_id":"entry"}]}]}"#.to_vec(),ProducerProvenance {provider:"fixed".into(),model:None}).unwrap()
@@ -328,6 +330,277 @@ fn prompt_v1_bytes_stay_pinned_and_v2_names_the_workspace_operation() {
     assert_eq!(prompt_for(PROMPT_VERSION_V2), Some(PROMPT_V2));
     assert_eq!(
         prompt_for("ato.formation-candidate-producer-prompt/3"),
-        None
+        Some(PROMPT_V3)
     );
+}
+
+#[test]
+fn auto_plan_inventory_comes_from_verified_source_and_excludes_credentials() {
+    let (_root, mut sub) = prepared(|source| {
+        std::fs::write(source.join("package.json"), "{\"main\":\"app.py\"}").unwrap();
+        std::fs::write(source.join(".dev.vars"), "PROVIDER_KEY=must_not_project").unwrap();
+    });
+    let source = sub.frozen_source.root.clone();
+    let files = source_file_inventory(&source).unwrap();
+    assert!(files.contains("app.py"));
+    assert!(!ato_formation::proposal::source_file_allowed(".dev.vars"));
+    // The compiler refuses a private credential path even if a requester
+    // tries to supply it in a hand-written authorization.
+    let mut auth = authorization();
+    auth.execution_plan = Some(ato_formation::proposal::PlanAuthorization {
+        source_oci: None,
+        toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
+        files: BTreeMap::from([(
+            "private".into(),
+            ato_formation::proposal::VerifiedSourceFile {
+                path: ".dev.vars".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+        )]),
+    });
+    assert!(sub.enable_candidate_producer(auth).is_err());
+}
+
+#[test]
+fn auto_source_priority_subset_is_valid_canonical_provider_context() {
+    let (root, sub) = prepared(|source| {
+        std::fs::write(source.join("package.json"), "{\"main\":\"app.py\"}").unwrap();
+        std::fs::write(source.join("README.md"), "untrusted source documentation").unwrap();
+        std::fs::write(source.join("package-lock.json"), "{\"lockfileVersion\":3}").unwrap();
+        std::fs::write(source.join(".dev.vars"), "PROVIDER_KEY=excluded").unwrap();
+    });
+    let mut policy = sub.request.policy.clone();
+    policy.exploration = Some(
+        serde_json::from_value(json!({"ceiling":{},
+        "max_provider_calls":3,"max_inspections":4,"max_provider_cost_usd_micros":100000,
+        "max_provider_input_tokens":90000,"max_provider_output_tokens":6144}))
+        .unwrap(),
+    );
+    let fresh = prepare_exploration_submission_auto(
+        &sub.frozen_source.root,
+        &[],
+        sub.request.base_contract.clone(),
+        &root.path().join("auto"),
+        RuntimeConstraintWire::Any,
+        policy,
+        SatisfyBudget::ceilings(4, "first_pass"),
+        "auto_context_test",
+        None,
+        BTreeMap::from([("python".into(), "3.12.7".into())]),
+    )
+    .unwrap();
+    let request = fresh.proposal_request_v2(&status(&fresh)).unwrap();
+    let mut view = status(&fresh);
+    let mut old = view["search_state"]["proposal_round"].clone();
+    old["outcome"] = json!("completed");
+    let inspected = request
+        .source_context
+        .iter()
+        .find(|e| e.text.contains("untrusted source documentation"))
+        .unwrap();
+    let auth = fresh
+        .request
+        .policy
+        .proposal
+        .as_ref()
+        .unwrap()
+        .execution_plan
+        .as_ref()
+        .unwrap();
+    old["inspection_requests"] =
+        json!([{"file_id":inspected.logical_id,"digest":auth.files[&inspected.logical_id].digest}]);
+    old["diagnostics"] = json!(["source_inspection_requested"]);
+    view["search_state"]["proposal_history"] = json!([old]);
+    let after = fresh.proposal_request_v2(&view).unwrap();
+    assert!(
+        after.source_context.iter().any(|e| e.text.contains("main")),
+        "manifest lost after a one-file inspection"
+    );
+    assert!(
+        after
+            .source_context
+            .iter()
+            .any(|e| e.logical_id == inspected.logical_id)
+    );
+    assert_eq!(after.source_context.len(), 4);
+    assert_eq!(request.source_context.len(), 4);
+    assert!(
+        request
+            .source_context
+            .windows(2)
+            .all(|w| (w[0].kind, &w[0].logical_id) < (w[1].kind, &w[1].logical_id))
+    );
+    assert!(
+        !serde_json::to_string(&request)
+            .unwrap()
+            .contains("PROVIDER_KEY=excluded")
+    );
+}
+
+#[test]
+fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() {
+    use reasoning::{
+        ReasoningInput, ReasoningProducer, ReasoningProviderConfig, SESSION_RESPONSE_SCHEMA,
+        SessionConfig,
+    };
+    let (root, mut sub) = prepared(|path| {
+        std::fs::create_dir(path.join("src")).unwrap();
+        for (name, text) in [
+            (
+                "setup.py",
+                "# explicitly referenced config: src/requirements.txt\n",
+            ),
+            ("README.md", "# application\n"),
+            ("settings.py", "PORT=8000\n"),
+            ("src/requirements.txt", "# requirements\n"),
+        ] {
+            std::fs::write(path.join(name), text).unwrap();
+        }
+    });
+    sub.request.policy.exploration=Some(serde_json::from_value(json!({"ceiling":{},"max_provider_calls":6,"max_inspections":4,
+        "max_provider_cost_usd_micros":1000000,"max_provider_input_tokens":200000,"max_provider_output_tokens":100000,
+        "reasoning":{"round_timeout_ms":60000,"inspection_timeout_ms":50,"inspection_source_bytes":32768}})).unwrap());
+    let source = root.path().join("input");
+    let files = [
+        ("entry", "app.py"),
+        ("manifest", "setup.py"),
+        ("readme", "README.md"),
+        ("config", "settings.py"),
+        ("requirements", "src/requirements.txt"),
+    ]
+    .into_iter()
+    .map(|(id, path)| {
+        (
+            id.into(),
+            ato_formation::proposal::VerifiedSourceFile {
+                path: path.into(),
+                digest: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(std::fs::read(source.join(path)).unwrap())
+                ),
+            },
+        )
+    })
+    .collect();
+    let domain = ato_formation::proposal::PlanAuthorization {
+        files,
+        toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
+        source_oci: None,
+    };
+    let mut a = authorization();
+    a.execution_plan = Some(domain);
+    a.python_http_process = None;
+    a.source_domain.entrypoints.clear();
+    a.policy.allow_source_text = true;
+    a.policy.max_source_bytes = 16384;
+    a.policy.max_proposals = 1;
+    sub.enable_candidate_producer(a).unwrap();
+    let mut status = status(&sub);
+    let opened = status["search_state"]["proposal_round"]["opened_at_ms"]
+        .as_u64()
+        .unwrap();
+    status["search_state"]["proposal_round"]["expires_at_ms"] = json!(opened + 60000);
+    let request = sub.proposal_request_v2(&status).unwrap();
+    let config = ReasoningProviderConfig::Session(SessionConfig {
+        provider: "codex_session".into(),
+        model: "codex-session".into(),
+        prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+    });
+    let budget = budget::BudgetPlan {
+        max_calls: 6,
+        input_token_cap: 24576,
+        output_token_cap: 2048,
+        input_price: 300000,
+        output_price: 1200000,
+        ceiling_usd_micros: 100000,
+    };
+    let dir = root.path().join("reasoning");
+    let producer =
+        ReasoningProducer::new(config.clone(), budget.clone(), dir.clone(), None).unwrap();
+    let thread_dir = dir.clone();
+    let private_root = root.path().to_string_lossy().to_string();
+    let responder = std::thread::spawn(move || {
+        for step in 1..=3 {
+            let name = format!("r001_s{step:03}");
+            let input_path = thread_dir.join(format!("{name}.input.json"));
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            while !input_path.exists() {
+                assert!(std::time::Instant::now() < end);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let bytes = std::fs::read(&input_path).unwrap();
+            let input: ReasoningInput = serde_json::from_slice(&bytes).unwrap();
+            assert!(!std::str::from_utf8(&bytes).unwrap().contains(&private_root));
+            assert!(
+                input
+                    .request
+                    .source_context
+                    .iter()
+                    .any(|e| e.logical_id == "manifest")
+            );
+            assert!(
+                input
+                    .request
+                    .source_context
+                    .iter()
+                    .any(|e| e.logical_id == "entry")
+            );
+            let output = if step == 1 {
+                json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"unsupported","reason":"invalid-reason"}]})
+            } else if step == 2 {
+                assert!(!input.inspection_feedback.is_empty());
+                let source = input
+                    .inventory
+                    .iter()
+                    .find(|s| s.source_relative_path == "src/requirements.txt")
+                    .unwrap();
+                json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"inspect_source","sources":[source.reference]}]})
+            } else {
+                assert!(
+                    input
+                        .request
+                        .source_context
+                        .iter()
+                        .any(|e| e.logical_id == "requirements")
+                );
+                assert_eq!(input.request.round_seq, Some(1));
+                assert_eq!(input.rounds_remaining, 3);
+                assert_eq!(input.calls_remaining, 4);
+                let entry = input
+                    .inventory
+                    .iter()
+                    .find(|s| s.source_relative_path == "app.py")
+                    .unwrap();
+                json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"propose_derivation","operations":[{"operation":"execution_plan@1","plan":{
+                    "runtime":{"name":"python","version":"3.12.7"},"entrypoint":entry.reference,"argv":[],"cwd":".","guest_port":8000,
+                    "dependencies":[],"build_scripts":[],"requirements":{},"basis":[],"unknowns":[]}}]}]})
+            };
+            // Inference/wait time belongs to the round, not the separate inspection clock.
+            std::thread::sleep(Duration::from_millis(80));
+            let response = json!({"schema":SESSION_RESPONSE_SCHEMA,"input_sha256":format!("sha256:{:x}",Sha256::digest(&bytes)),"output":output});
+            reasoning::save(
+                &thread_dir.join(format!("{name}.response.json")),
+                &serde_jcs::to_vec(&response).unwrap(),
+            )
+            .unwrap();
+        }
+    });
+    let answer = producer
+        .run_round(&sub, &status, request.clone(), opened + 60000)
+        .unwrap();
+    responder.join().unwrap();
+    let outcomes = CandidateRegistry::new(&frozen_request(&sub.request).unwrap())
+        .unwrap()
+        .validate_batch(&BTreeMap::new(), &answer.output)
+        .unwrap();
+    assert!(matches!(&outcomes[0],ProposalOutcome::InspectionRequested(refs) if refs.len()==1));
+    assert!(matches!(&outcomes[1], ProposalOutcome::Admitted(_)));
+    assert_eq!(producer.accounting().unwrap()["call_count"], 3);
+    assert_eq!(producer.accounting().unwrap()["API_calls"], 0);
+    let restarted = ReasoningProducer::new(config, budget, dir, None).unwrap();
+    let cached = restarted
+        .run_round(&sub, &status, request, opened + 60000)
+        .unwrap();
+    assert_eq!(answer.output.raw(), cached.output.raw());
+    assert_eq!(restarted.accounting().unwrap()["call_count"], 3);
 }
