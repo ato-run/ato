@@ -159,6 +159,7 @@ pub(super) fn compile_operation(
                     steps,
                     vec![
                         executable.into(),
+                        "-I".into(),
                         "-c".into(),
                         include_str!("python-native-operation.py").into(),
                         mode.into(),
@@ -178,6 +179,7 @@ pub(super) fn compile_operation(
                 steps,
                 vec![
                     executable.into(),
+                    "-I".into(),
                     "-m".into(),
                     "pip".into(),
                     "install".into(),
@@ -200,6 +202,7 @@ pub(super) fn compile_operation(
                 steps,
                 vec![
                     executable.into(),
+                    "-I".into(),
                     "-c".into(),
                     include_str!("python-native-operation.py").into(),
                     "cleanup".into(),

@@ -32,6 +32,9 @@ def wheel(path, name, module, source, metadata=None):
 
 def python_case(root):
     source = root / 'python'; source.mkdir()
+    # Builtin hashing/install tooling must not import same-named source modules.
+    for module in ('hashlib', 'email', 'pip', 'base64'):
+        (source / (module + '.py')).write_text("raise RuntimeError('ambient_source_imported')\n")
     backend = source / 'ato_fixture_backend-1.0.0-py3-none-any.whl'
     # The fixture builds a real wheel through pip/PEP 517, using only stdlib.
     backend_code = '''import pathlib, zipfile
@@ -69,27 +72,29 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     environment = dict(os.environ, PIP_NO_INDEX='1', PIP_FIND_LINKS=str(source), TMPDIR=str(root / 'tmp'))
     helper = (HELPERS / 'python-native-operation.py').read_text()
     for mode in ('check', 'build-dependencies', 'prepare', 'acquire', 'build', 'seal'):
-        subprocess.run([sys.executable, '-c', helper, mode, json.dumps(plan)], env=environment, check=True, timeout=60)
+        subprocess.run([sys.executable, '-I', '-c', helper, mode, json.dumps(plan)],
+                       cwd=source, env=environment, check=True, timeout=60)
     provenance = json.loads((source / 'operation/provenance.json').read_text())
     assert provenance['acquired'][0]['sha256'] == sha(sdist).removeprefix('sha256:')
     assert provenance['wheels']['artifacts'][0]['version'] == '1.0.0'
     directory = source / 'operation/wheels'
     target = source / 'installed'
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-compile', '--require-hashes', '--only-binary=:all:',
+    subprocess.run([sys.executable, '-I', '-m', 'pip', 'install', '--no-index', '--no-compile', '--require-hashes', '--only-binary=:all:',
                     '--find-links', str(directory), '--target', str(target), '-r', str(directory / 'requirements.lock')],
-                   env=environment, check=True, timeout=60)
+                   cwd=source, env=environment, check=True, timeout=60)
     assert not list(target.glob('**/*.pyc'))
     subprocess.run([sys.executable, '-c', 'import ato_fixture_app; assert ato_fixture_app.VALUE == 42'],
                    env=dict(environment, PYTHONPATH=str(target), PYTHONDONTWRITEBYTECODE='1'), check=True, timeout=10)
     completed = directory / backend.name
     original_bytes = completed.read_bytes()
     completed.write_bytes(original_bytes + b'altered-after-seal')
-    refused = subprocess.run([sys.executable, '-c', helper, 'cleanup', json.dumps(plan)],
-                             env=environment, capture_output=True, text=True, timeout=10)
+    refused = subprocess.run([sys.executable, '-I', '-c', helper, 'cleanup', json.dumps(plan)],
+                             cwd=source, env=environment, capture_output=True, text=True, timeout=10)
     assert refused.returncode != 0 and 'dependency_artifact_changed' in refused.stderr
     assert (source / 'operation/acquired' / backend.name).exists()
     completed.write_bytes(original_bytes)
-    subprocess.run([sys.executable, '-c', helper, 'cleanup', json.dumps(plan)], env=environment, check=True, timeout=10)
+    subprocess.run([sys.executable, '-I', '-c', helper, 'cleanup', json.dumps(plan)],
+                   cwd=source, env=environment, check=True, timeout=10)
     assert not (source / 'operation/build-env').exists()
     assert not (source / 'operation/acquired' / backend.name).exists()
     assert (source / 'operation/acquired' / sdist.name).exists()
@@ -99,7 +104,8 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     return dict(sdist_to_wheel=True, offline_hash_install=True, provenance=True,
                 description_not_an_identity=True, identical_acquired_wheel_retained_once=True,
                 original_sdist_retained=True, bytecode_not_captured=True,
-                changed_completed_wheel_refused_before_deduplication=True)
+                changed_completed_wheel_refused_before_deduplication=True,
+                source_cannot_shadow_builtin_metadata_or_installer=True)
 
 
 def wheel_metadata_refusals(root):
