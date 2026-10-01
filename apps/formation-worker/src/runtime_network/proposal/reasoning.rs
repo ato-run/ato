@@ -142,10 +142,19 @@ impl ReasoningInput {
 
 /// Inference discovery is rooted in acquired configuration, never in the
 /// presence of a directory. COPY . . and broad globs confer no read authority.
+#[cfg(test)]
 fn scoped_inventory(
     domain: &ato_formation::proposal::PlanAuthorization,
     acquired: &BTreeMap<String, SourceContextEntry>,
 ) -> Result<Vec<PublicSource>> {
+    scoped_inventory_with_feedback(domain, acquired).map(|(inventory, _)| inventory)
+}
+
+fn scoped_inventory_with_feedback(
+    domain: &ato_formation::proposal::PlanAuthorization,
+    acquired: &BTreeMap<String, SourceContextEntry>,
+) -> Result<(Vec<PublicSource>, Vec<String>)> {
+    let mut feedback = Vec::new();
     let mut allowed = BTreeMap::<String, Vec<SourceReference>>::new();
     for (id, file) in &domain.files {
         if !file.path.contains('/') {
@@ -204,12 +213,15 @@ fn scoped_inventory(
                 .strip_prefix("./")
                 .unwrap_or(token)
                 .trim_end_matches('/');
-            if token.is_empty()
-                || token == "."
-                || token.contains("..")
-                || token.starts_with('/')
-                || token.contains("**")
-            {
+            if token.is_empty() || token == "." || token.contains("..") || token.starts_with('/') {
+                continue;
+            }
+            if token.contains("**") {
+                if token.contains('/') {
+                    feedback.push(format!(
+                        "unsupported_source_glob: {} references {token}; recursive expansion is unavailable in v0", origin.path
+                    ));
+                }
                 continue;
             }
             let path = if parent.is_empty() {
@@ -223,13 +235,20 @@ fn scoped_inventory(
                 .filter(|(_, f)| {
                     if let Some((prefix, suffix)) = path.split_once('*') {
                         // v0: one segment glob, explicit parent; never an unbounded crawl.
+                        let one_segment = |candidate: &str| {
+                            candidate
+                                .strip_prefix(prefix)
+                                .and_then(|s| s.strip_suffix(suffix))
+                                .is_some_and(|s| !s.is_empty() && !s.contains('/'))
+                        };
                         !prefix.is_empty()
                             && prefix.contains('/')
                             && !suffix.contains('*')
-                            && f.path
-                                .strip_prefix(prefix)
-                                .and_then(|s| s.strip_suffix(suffix))
-                                .is_some_and(|s| !s.contains('/'))
+                            && (one_segment(&f.path)
+                                || f.path.rsplit_once('/').is_some_and(|(directory, name)| {
+                                    ato_formation::proposal::source_inspection_priority(name).0 <= 5
+                                        && one_segment(directory)
+                                }))
                     } else {
                         f.path == path
                             || f.path.strip_prefix(&format!("{path}/")).is_some_and(|s| {
@@ -239,7 +258,12 @@ fn scoped_inventory(
                     }
                 })
                 .collect();
-            ensure!(matched.len() <= 32, "source_reference_expansion_limit");
+            if matched.len() > 32 {
+                feedback.push(format!(
+                    "source_reference_expansion_limit: {} references {token}; {} files exceed the32-file bound; no targets admitted", origin.path, matched.len()
+                ));
+                continue;
+            }
             for (target, _) in matched {
                 // Root files were already in scope; do not duplicate their
                 // references as if another root file had widened the boundary.
@@ -265,22 +289,31 @@ fn scoped_inventory(
             id.clone(),
         )
     });
-    ensure!(files.len() <= 128, "source_inventory_limit");
-    Ok(files
-        .into_iter()
-        .map(|(id, discovered_from)| {
-            let file = &domain.files[&id];
-            PublicSource {
-                reference: SourceReference {
-                    file_id: id,
-                    digest: file.digest.clone(),
-                },
-                source_relative_path: file.path.clone(),
-                purpose: "source".into(),
-                discovered_from,
-            }
-        })
-        .collect())
+    if files.len() > 128 {
+        feedback.push(format!("source_inventory_limit: {} scoped files exceed128; inventory projection omits {} files; do not guess omitted targets", files.len(), files.len()-128));
+        files.truncate(128);
+    }
+    feedback.sort();
+    feedback.dedup();
+    feedback.truncate(32);
+    Ok((
+        files
+            .into_iter()
+            .map(|(id, discovered_from)| {
+                let file = &domain.files[&id];
+                PublicSource {
+                    reference: SourceReference {
+                        file_id: id,
+                        digest: file.digest.clone(),
+                    },
+                    source_relative_path: file.path.clone(),
+                    purpose: "source".into(),
+                    discovered_from,
+                }
+            })
+            .collect(),
+        feedback,
+    ))
 }
 
 fn priority_context(mut entries: Vec<SourceContextEntry>, cap: usize) -> Vec<SourceContextEntry> {
@@ -358,6 +391,70 @@ mod autonomous_tests {
                 .discovered_from[0]
                 .file_id,
             "package.json"
+        );
+    }
+    #[test]
+    fn explicit_workspace_globs_are_bounded_and_recursive_refs_are_reported() {
+        use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
+        let paths = std::iter::once("package.json".to_owned())
+            .chain((0..33).map(|i| format!("packages/p{i}/package.json")))
+            .chain([
+                "packages/one/deep/hidden.js".to_owned(),
+                "unrelated/package.json".to_owned(),
+            ]);
+        let mut domain = PlanAuthorization {
+            source_oci: None,
+            toolchains: BTreeMap::new(),
+            files: paths
+                .map(|path| {
+                    (
+                        path.clone(),
+                        VerifiedSourceFile {
+                            path,
+                            digest: format!("sha256:{}", "a".repeat(64)),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let context = BTreeMap::from([(
+            "package.json".into(),
+            SourceContextEntry {
+                kind: SourceContextKind::VerifiedFile,
+                logical_id: "package.json".into(),
+                text: r#"{"workspaces":["packages/*"],"config":"packages/**/config.json"}"#.into(),
+                source_id: "package.json".into(),
+                encoding: ato_formation::proposal::SourceEncoding::Utf8,
+                content_sha256: "unused".into(),
+                truncated: false,
+            },
+        )]);
+        let (inventory, feedback) = scoped_inventory_with_feedback(&domain, &context).unwrap();
+        assert_eq!(
+            inventory.len(),
+            1,
+            "overflow must not silently choose a package"
+        );
+        assert!(feedback.iter().any(|s| s.contains("33 files exceed")));
+        assert!(
+            feedback
+                .iter()
+                .any(|s| s.contains("unsupported_source_glob"))
+        );
+        domain.files.remove("packages/p32/package.json");
+        let (inventory, _) = scoped_inventory_with_feedback(&domain, &context).unwrap();
+        assert_eq!(inventory.len(), 33);
+        assert!(
+            !inventory
+                .iter()
+                .any(|s| s.source_relative_path.contains("hidden")
+                    || s.source_relative_path.starts_with("unrelated"))
+        );
+        assert!(
+            inventory
+                .iter()
+                .filter(|s| s.source_relative_path.contains('/'))
+                .all(|s| s.discovered_from[0].file_id == "package.json")
         );
     }
     #[test]
@@ -1068,6 +1165,9 @@ impl ReasoningProducer {
                     auth.policy.max_source_bytes,
                 )
             };
+            let (inventory, scope_feedback) = scoped_inventory_with_feedback(domain, &acquired)?;
+            let mut effective_feedback = feedback.clone();
+            effective_feedback.extend(scope_feedback);
             let mut input = ReasoningInput {
                 catalog_sources_in_inventory: true,
                 goal: limits.goal.clone(),
@@ -1081,7 +1181,7 @@ impl ReasoningProducer {
                     archive_digest: submission.request.source.archive_digest.clone(),
                     closure_ref: submission.request.source.closure_ref.clone(),
                 },
-                inventory: scoped_inventory(domain, &acquired)?,
+                inventory,
                 request: request.clone(),
                 projection: vec![],
                 rounds_remaining: policy.formation.max_rounds.get().saturating_sub(round - 1),
@@ -1098,7 +1198,7 @@ impl ReasoningProducer {
                 inspection_source_bytes_remaining: limits
                     .inspection_source_bytes
                     .saturating_sub(inspection_bytes),
-                inspection_feedback: feedback.clone(),
+                inspection_feedback: effective_feedback,
             };
             // The exact same public source refs appear once, in inventory.
             // The original full catalog is reconstructed and validated locally.
