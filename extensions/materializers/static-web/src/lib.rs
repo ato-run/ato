@@ -13,6 +13,7 @@ mod receipt;
 pub use bundle::{
     MAX_DIRECTORY_COUNT, MAX_FILE_COUNT, MAX_FILE_SIZE, MAX_RECURSION_DEPTH, MAX_TOTAL_SIZE,
     ProducedStaticWebBundle, blob_is_clean, media_type_for, produce_static_web_bundle,
+    produce_static_web_bundle_guarded,
 };
 pub use manifest::{
     STATIC_WEB_FRAME_ANCESTORS_V1, STATIC_WEB_MANIFEST_V1_SCHEMA, StaticWebFileV1,
@@ -23,7 +24,8 @@ pub use manifest::{
 pub use output::{
     ExtractedStaticWebOutput, INSTANCE_STATE_BRIDGE_PATH, INSTANCE_STATE_ELEMENT_ID,
     StaticWebInstrumentation, StaticWebOutputPlan, extract_static_web_output,
-    extract_static_web_output_instrumented, extract_static_web_output_with_browser_runner,
+    extract_static_web_output_instrumented, extract_static_web_output_instrumented_guarded,
+    extract_static_web_output_with_browser_runner,
 };
 pub use receipt::{
     STATIC_WEB_BLOB_V1_SCHEMA, STATIC_WEB_BUNDLE_RECEIPT_V1_SCHEMA, StaticWebBlobMetadataV1,

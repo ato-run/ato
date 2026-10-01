@@ -451,7 +451,10 @@ impl ExecutionPlanProposal {
                 || self.launch_script.is_some()
                 || !self.argv.is_empty()
                 || !self.environment.is_empty()
-                || !self.variable_bindings.is_empty()
+                || self
+                    .variable_bindings
+                    .iter()
+                    .any(|r| r.phase == crate::requirements::ExecutionPhase::Runtime)
                 || !self.state.is_empty()
             {
                 return Err(ProposalError("unsupported_static_output"));
@@ -821,15 +824,21 @@ impl ExecutionPlanProposal {
         entrypoint: &str,
     ) -> Result<(CompiledGeneration, SearchCandidate), ProposalError> {
         if self.cwd != "."
+            || self.static_output.is_some()
             || !self.argv.is_empty()
             || self.module.is_some()
             || self.launch_script.is_some()
-            || !self.environment.is_empty()
-            || !self.variable_bindings.is_empty()
             || !self.dependencies.is_empty()
             || !self.build_scripts.is_empty()
         {
             return Err(ProposalError("unsupported_source_oci_selection"));
+        }
+        if self
+            .variable_bindings
+            .iter()
+            .any(|r| r.phase != crate::requirements::ExecutionPhase::Runtime)
+        {
+            return Err(ProposalError("unsupported_source_oci_variable_phase"));
         }
         let recipe = authorization
             .source_oci
@@ -855,11 +864,14 @@ impl ExecutionPlanProposal {
         validate_http_contract(&frozen.base_contract, source, port)?;
         let mut document = json!({"schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
-            "derive":{"step":[{"id":"app","use":crate::source_oci_plan::OCI_PROTOCOL,"op":"serve","source":"workspace"}]},
+            "derive":{"step":[{"id":"app","use":crate::source_oci_plan::OCI_PROTOCOL,"op":"serve","source":"workspace","env":self.environment}]},
             "port":[{"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port}],
             "source_oci":recipe,"requirements":self.requirements,
             "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
             "contract":{"require":contract_requirements(&frozen.base_contract)}});
+        if !self.variable_bindings.is_empty() {
+            document["variable_bindings"] = json!(self.variable_bindings);
+        }
         if let Some(image) = &self.oci_image {
             let approved = recipe.base_images.iter().any(|b| {
                 let pinned = if b.reference.contains('@') {

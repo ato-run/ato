@@ -469,6 +469,23 @@ fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
     assert!(c.compiled().derivation.steps[0].argv.is_empty());
     assert!(c.compiled().derivation.source_oci.is_some());
     assert_eq!(c.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let binding = json!({"name":"JWT_SECRET","kind":"signing_secret","purpose":"Sign local sessions","resource":"session.signing","operation":"execute","phase":"runtime","secret":true,"temporary":true});
+    let mut bound = p.clone();
+    bound["variable_bindings"] = json!([binding]);
+    let admitted = compile(&s, bound.clone());
+    let ProposalOutcome::Admitted(variable_d) = &admitted[0] else {
+        panic!("{admitted:?}")
+    };
+    assert_eq!(
+        variable_d.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_eq!(variable_d.compiled().derivation.variable_bindings.len(), 1);
+    bound["variable_bindings"][0]["phase"] = json!("build");
+    assert!(matches!(
+        &compile(&s, bound)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_source_oci_variable_phase"))
+    ));
     s.frozen
         .policy
         .proposal
@@ -601,6 +618,18 @@ fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
     assert!(d.steps.last().unwrap().argv.is_empty());
     assert_eq!(d.ports[0].guest_port, None);
     let expected_d = candidate.compiled().derivation_ref.clone();
+    let mut configured = p.clone();
+    configured["variable_bindings"] = json!([{"name":"CLIENT_ORIGIN","kind":"configuration","purpose":"Public client build configuration","resource":"client.configuration","operation":"read","phase":"build","secret":false,"artifact_embedding":true}]);
+    let binding = compile(&s, configured.clone());
+    let ProposalOutcome::Admitted(binding) = &binding[0] else {
+        panic!("{binding:?}")
+    };
+    assert_eq!(binding.compiled().base_contract_ref, s.frozen.contract_ref);
+    configured["variable_bindings"][0]["phase"] = json!("runtime");
+    assert!(matches!(
+        &compile(&s, configured)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
+    ));
     p.as_object_mut().unwrap().remove("guest_port");
     let without_port = compile(&s, p.clone());
     let ProposalOutcome::Admitted(no_port) = &without_port[0] else {

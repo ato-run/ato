@@ -43,6 +43,7 @@ impl ReasoningProviderConfig {
                                 | deepseek::PROMPT_VERSION_V8
                                 | deepseek::PROMPT_VERSION_V9
                                 | deepseek::PROMPT_VERSION_V10
+                                | deepseek::PROMPT_VERSION_V11
                         ),
                     "invalid session provider"
                 );
@@ -76,6 +77,7 @@ impl ReasoningProviderConfig {
             deepseek::PROMPT_VERSION_V8
                 | deepseek::PROMPT_VERSION_V9
                 | deepseek::PROMPT_VERSION_V10
+                | deepseek::PROMPT_VERSION_V11
         ) {
             lowering_capabilities_for(auth, runtimes, prompt_version)
         } else {
@@ -150,6 +152,12 @@ impl ReasoningInput {
                         auth,
                         &self.runtime_capabilities,
                         deepseek::PROMPT_VERSION_V9
+                    )
+                || self.lowering_capabilities
+                    == lowering_capabilities_for(
+                        auth,
+                        &self.runtime_capabilities,
+                        deepseek::PROMPT_VERSION_V10
                     ),
             "lowering capability mismatch"
         );
@@ -260,22 +268,22 @@ fn lowering_capabilities(
     let node_bound = bound_toolchains
         .iter()
         .any(|t| t["name"] == "node" && t["bound"] == true);
-    json!({"schema":"ato.formation-lowering-capabilities/2",
+    json!({"schema":"ato.formation-lowering-capabilities/3",
         "static_http":{
             "available":toolchains.is_some_and(|t| t.contains_key("node") && t.contains_key("npm")),
             "entrypoint":"source manifest package.json reference",
             "static_output":"source-declared relative output directory",
             "argv":[],"guest_port":0,
-            "omit_fields":["module","environment","state","variable_bindings"],
+            "omit_fields":["module","environment","state"],"variables":"dependency/build-phase private grants; runtime phase unavailable; public artifact bytes require owner embedding permission",
             "build_scripts":"source-owned npm script names; never commands or process argv"
         },
-        "oci_image":{"available":!images.is_empty(),"proposal_field":"oci_image","images":images,"platform":recipe.map(|r|&r.platform),"command":"image default","acquisition_network":"none; approved verified archive binding","runtime_network":"internal network; no egress"},
+        "oci_image":{"available":!images.is_empty(),"proposal_field":"oci_image","images":images,"platform":recipe.map(|r|&r.platform),"command":"image default","acquisition_network":"none; approved verified archive binding","runtime_network":"internal network; no egress","variables":"runtime-phase grants only; no values in D or image"},
         "source_oci":{"supported":true,"available":recipe.is_some() && oci_bound,"configured":configured,"builder_bound":oci_bound,
             "unavailable_reason":if !configured {"source_oci_builder_unavailable"} else if !oci_bound {"runtime_unavailable"} else {"none"},
             "selection":"root Dockerfile or literal reference from acquired root declarations",
             "recipe":recipe,"single_service":true,"source_rewrite":false,
             "build_network":"explicit HTTPS host/port allowance within frozen ceiling",
-            "runtime_network":"isolated internal network; no egress", "state":"explicit isolated writable VOLUME bindings", "variables":"not yet supported by source OCI lowering"},
+            "runtime_network":"isolated internal network; no egress", "state":"explicit isolated writable VOLUME bindings", "variables":"runtime-phase grants only; dependencies/build grants unavailable; no values in D or image"},
         "http_process":{"guest_port":"1..65535","entrypoint":"actual supported source script reference, or frozen package.json for launch_script","argv":"literal arguments after the interpreter/entrypoint or npm run script","launch_script":"source-owned npm script key; frozen manifest hash checked before launch"},
         "network":{"phases":["dependencies","build","runtime"],"inbound_HTTP_requires_egress":false,"within_frozen_ceiling":true},
         "HTTP_authority":{"protocol":"ato.http@1","operation":"bind","phase":"runtime","resource":"frozen K logical HTTP Port"},
@@ -292,6 +300,23 @@ fn lowering_capabilities_for(
     prompt_version: &str,
 ) -> Value {
     let mut capabilities = lowering_capabilities(auth, runtimes);
+    if matches!(
+        prompt_version,
+        deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9 | deepseek::PROMPT_VERSION_V10
+    ) {
+        capabilities["schema"] = json!("ato.formation-lowering-capabilities/2");
+        capabilities["static_http"]["omit_fields"] =
+            json!(["module", "environment", "state", "variable_bindings"]);
+        capabilities["static_http"]
+            .as_object_mut()
+            .expect("static capability object")
+            .remove("variables");
+        capabilities["source_oci"]["variables"] = json!("not yet supported by source OCI lowering");
+        capabilities["oci_image"]
+            .as_object_mut()
+            .expect("OCI capability object")
+            .remove("variables");
+    }
     if matches!(
         prompt_version,
         deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9
