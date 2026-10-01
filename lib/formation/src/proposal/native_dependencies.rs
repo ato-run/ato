@@ -183,6 +183,7 @@ pub(super) fn compile_operation(
                     "install".into(),
                     "--no-input".into(),
                     "--no-index".into(),
+                    "--no-compile".into(),
                     "--only-binary=:all:".into(),
                     "--require-hashes".into(),
                     "--find-links".into(),
