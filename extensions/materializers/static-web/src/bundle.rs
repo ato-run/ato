@@ -27,6 +27,18 @@ pub const MAX_TOTAL_SIZE: u64 = 1024 * 1024 * 1024;
 pub const MAX_DIRECTORY_COUNT: usize = 10_000;
 pub const MAX_RECURSION_DEPTH: usize = 32;
 
+/// A protected runtime value entered reusable output. Carries no value or path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactEmbeddingRefused;
+
+impl std::fmt::Display for ArtifactEmbeddingRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("secret_artifact_embedding_refused")
+    }
+}
+
+impl std::error::Error for ArtifactEmbeddingRefused {}
+
 pub fn blob_is_clean(blob: &[u8], secrets: &[&[u8]]) -> bool {
     !secrets
         .iter()
@@ -139,7 +151,7 @@ pub fn produce_static_web_bundle_guarded(
         }
         let bytes = read_regular_file(&source, guard)?;
         if !blob_is_clean(&bytes, runtime_secret_canaries) {
-            bail!("static web output failed the runtime secret canary scan: {relative}");
+            return Err(ArtifactEmbeddingRefused.into());
         }
         let hex_digest = format!("{:x}", Sha256::digest(&bytes));
         let digest = format!("sha256:{hex_digest}");
@@ -183,7 +195,7 @@ pub fn produce_static_web_bundle_guarded(
     };
     let manifest_bytes = manifest.canonical_bytes().map_err(anyhow::Error::from)?;
     if !blob_is_clean(&manifest_bytes, runtime_secret_canaries) {
-        bail!("static web manifest failed the runtime secret canary scan");
+        return Err(ArtifactEmbeddingRefused.into());
     }
     let manifest_hex = format!("{:x}", Sha256::digest(&manifest_bytes));
     let manifest_digest = format!("sha256:{manifest_hex}");
@@ -469,6 +481,41 @@ mod tests {
             produce_static_web_bundle(&plan(), &extracted, parent.path(), &[b"secret-value"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn embedding_refusal_is_typed_private_and_never_publishes_partial_output() {
+        let image = fixture_root();
+        fs::write(image.path().join("dist/index.html"), "private-build-value").unwrap();
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let error = produce_static_web_bundle(
+            &plan(),
+            &extracted,
+            parent.path(),
+            &[b"private-build-value"],
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<ArtifactEmbeddingRefused>().is_some());
+        assert_eq!(error.to_string(), "secret_artifact_embedding_refused");
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+
+        // A value permitted by the caller is absent from the protected set.
+        let allowed = produce_static_web_bundle(&plan(), &extracted, parent.path(), &[]).unwrap();
+        assert!(allowed.bundle_root.exists());
+    }
+
+    #[test]
+    fn manifest_embedding_refusal_has_the_same_type_and_no_partial_output() {
+        let image = fixture_root();
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        // The canary occurs only in metadata, not in any input file's bytes.
+        let error =
+            produce_static_web_bundle(&plan(), &extracted, parent.path(), &[b"mat_fixture"])
+                .unwrap_err();
+        assert!(error.downcast_ref::<ArtifactEmbeddingRefused>().is_some());
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
     /// Live-artifact compatibility, fixed as a regression test.

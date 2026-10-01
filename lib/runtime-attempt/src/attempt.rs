@@ -793,6 +793,13 @@ pub fn failure_of(error: &anyhow::Error) -> AttemptFailure {
             stage: failure.stage.as_str().to_owned(),
             message: failure.bounded_message(crate::text::FAILURE_REASON_LIMIT),
         },
+        None if error
+            .downcast_ref::<ato_materializer_static_web::ArtifactEmbeddingRefused>()
+            .is_some() => AttemptFailure {
+            code: "secret_artifact_embedding_refused".to_owned(),
+            stage: FailureStage::Build.as_str().to_owned(),
+            message: "a protected runtime value entered the artifact; explicit embedding permission is required for non-secret configuration".to_owned(),
+        },
         None => AttemptFailure {
             code: "formation_failed".to_owned(),
             stage: "build".to_owned(),
@@ -821,6 +828,31 @@ mod tests {
     use ato_formation::request::{OutcomeState, RealizationEvidence};
 
     use super::*;
+
+    #[test]
+    fn embedding_failure_keeps_its_code_through_private_context() {
+        let error = anyhow::Error::new(ato_materializer_static_web::ArtifactEmbeddingRefused)
+            .context("private-source-path/private-context-value");
+        let failure = failure_of(&error);
+        assert_eq!(failure.code, "secret_artifact_embedding_refused");
+        assert_eq!(failure.stage, "build");
+        assert!(!failure.message.contains("private-source-path"));
+        assert!(!failure.message.contains("private-context-value"));
+    }
+
+    #[test]
+    fn durable_failure_precedes_embedding_failure_in_the_same_chain() {
+        let error = anyhow::Error::new(ato_materializer_static_web::ArtifactEmbeddingRefused)
+            .context(FormationFailure::new(
+                "attempt_already_started",
+                FailureStage::Admission,
+                "a previous execution has an unfinished durable record",
+            ));
+        assert_eq!(failure_of(&error).code, "attempt_already_started");
+        let anonymous = failure_of(&anyhow::anyhow!("private-context-value"));
+        assert_eq!(anonymous.code, "formation_failed");
+        assert!(!anonymous.message.contains("private-context-value"));
+    }
 
     /// An attempt whose K was fully satisfied: one HTTP observation, its
     /// receipt, and a realization that has not been stopped yet.
