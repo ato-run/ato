@@ -926,6 +926,7 @@ fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
     let view = status(&sub);
     let request = sub.proposal_request_v2(&view).unwrap();
     let mut input = ReasoningInput {
+        catalog_sources_in_inventory: false,
         goal: None,
         schema: INPUT_SCHEMA.into(),
         call_id: "shared_r1_s1".into(),
