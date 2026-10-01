@@ -85,8 +85,14 @@ allow/deny remain required. No external service credential was used.
 An earlier fixture Search `search_00a0fc9dde14ec15bddbe44d1ebae1b1`
 was interrupted by a harness KeyError while waiting for input. Preserve it:
 no claim of application failure, safe replay, refunded reservation or PASS.
-Its outstanding Runtime expanded/stored reservations are distinct from the
-zero unsettled provider reservations below. The subsequent owned driver held
+Its Runtime expanded/stored reservations were outstanding at that observation.
+A later read-only Coordinator restart on the original isolated database at
+22:16:13.625Z preserved the claimed attempt as UNKNOWN / result_not_received,
+with no receipt/effects or resolution. It conservatively charged the 512 MiB
+expanded/stored reservations and 128 MiB network reservation; no byte reservation
+remains, no refund is asserted and no Runtime was restarted. These byte charges
+are distinct from provider money. This new fixture UNKNOWN and old WBO UNKNOWN
+are both preserved. The subsequent owned driver held
 the Coordinator/Runtime alive through the owner's pause without changing
 the original deadline.
 
