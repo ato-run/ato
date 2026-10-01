@@ -40,6 +40,7 @@ impl ReasoningProviderConfig {
                             deepseek::PROMPT_VERSION_V5
                                 | deepseek::PROMPT_VERSION_V6
                                 | deepseek::PROMPT_VERSION_V7
+                                | deepseek::PROMPT_VERSION_V8
                         ),
                     "invalid session provider"
                 );
@@ -447,6 +448,20 @@ mod autonomous_tests {
             "modifiable_derivation_refs":[],"source_domain":{"entrypoints":{},"modules":{}},
             "policy":{"max_proposal_rounds":3,"max_proposals":1,"timeout_ms":30000,"allow_source_text":true,"max_source_bytes":16384}
         })).unwrap();
+        ReasoningProviderConfig::Session(SessionConfig {
+            provider: "codex_session".into(),
+            model: "codex-session".into(),
+            prompt_version: deepseek::PROMPT_VERSION_V8.into(),
+        })
+        .configuration_ref(&budget::BudgetPlan {
+            max_calls: 6,
+            input_token_cap: 49152,
+            output_token_cap: 2048,
+            input_price: 300000,
+            output_price: 1200000,
+            ceiling_usd_micros: 103224,
+        })
+        .unwrap();
         let caps = lowering_capabilities(&auth);
         assert_eq!(caps["static_http"]["available"], true);
         assert_eq!(caps["static_http"]["guest_port"], 0);
