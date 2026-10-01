@@ -516,7 +516,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
     let thread_dir = dir.clone();
     let private_root = root.path().to_string_lossy().to_string();
     let responder = std::thread::spawn(move || {
-        for step in 1..=2 {
+        for step in 1..=3 {
             let name = format!("r001_s{step:03}");
             let input_path = thread_dir.join(format!("{name}.input.json"));
             let end = std::time::Instant::now() + Duration::from_secs(10);
@@ -542,6 +542,9 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
                     .any(|e| e.logical_id == "entry")
             );
             let output = if step == 1 {
+                json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"unsupported","reason":"invalid-reason"}]})
+            } else if step == 2 {
+                assert!(!input.inspection_feedback.is_empty());
                 let source = input
                     .inventory
                     .iter()
@@ -558,7 +561,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
                 );
                 assert_eq!(input.request.round_seq, Some(1));
                 assert_eq!(input.rounds_remaining, 3);
-                assert_eq!(input.calls_remaining, 5);
+                assert_eq!(input.calls_remaining, 4);
                 let entry = input
                     .inventory
                     .iter()
@@ -586,12 +589,12 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
         .unwrap();
     assert!(matches!(&outcomes[0],ProposalOutcome::InspectionRequested(refs) if refs.len()==1));
     assert!(matches!(&outcomes[1], ProposalOutcome::Admitted(_)));
-    assert_eq!(producer.accounting().unwrap()["call_count"], 2);
+    assert_eq!(producer.accounting().unwrap()["call_count"], 3);
     assert_eq!(producer.accounting().unwrap()["API_calls"], 0);
     let restarted = ReasoningProducer::new(config, budget, dir, None).unwrap();
     let cached = restarted
         .run_round(&sub, &status, request, opened + 60000)
         .unwrap();
     assert_eq!(answer.output.raw(), cached.output.raw());
-    assert_eq!(restarted.accounting().unwrap()["call_count"], 2);
+    assert_eq!(restarted.accounting().unwrap()["call_count"], 3);
 }
