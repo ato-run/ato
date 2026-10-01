@@ -100,12 +100,63 @@ impl Drop for IngressBridge {
 #[cfg(unix)]
 fn ingress_connect(socket: &std::path::Path) -> Result<std::os::unix::net::UnixStream> {
     use std::io::Read;
-    let mut unix = std::os::unix::net::UnixStream::connect(socket)?;
+    let mut unix = connect_owner_socket(socket)?;
     unix.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
     let mut accepted = [0];
     unix.read_exact(&mut accepted)?;
     ensure!(accepted == [1], "guest endpoint did not accept");
     Ok(unix)
+}
+
+/// Linux resolves this reference through a held directory descriptor. The
+/// private realization directory may be deeper than sockaddr_un.sun_path;
+/// shortening its address must not change the endpoint or the process cwd.
+#[cfg(target_os = "linux")]
+fn connect_owner_socket(socket: &std::path::Path) -> Result<std::os::unix::net::UnixStream> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+    let parent = socket.parent().context("ingress directory missing")?;
+    let name = socket.file_name().context("ingress socket name missing")?;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(parent)?;
+    let address =
+        std::path::PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name);
+    Ok(std::os::unix::net::UnixStream::connect(address)?)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn connect_owner_socket(socket: &std::path::Path) -> Result<std::os::unix::net::UnixStream> {
+    Ok(std::os::unix::net::UnixStream::connect(socket)?)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ingress_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::{fd::AsRawFd, unix::net::UnixListener};
+
+    #[test]
+    fn ingress_handshake_reaches_a_deep_private_socket_without_chdir() {
+        let root =
+            tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap_or_else(|| ".".into())).unwrap();
+        let parent = root.path().join("owner-realization-".repeat(12));
+        std::fs::create_dir(&parent).unwrap();
+        let directory = std::fs::File::open(&parent).unwrap();
+        let short = format!("/proc/self/fd/{}/8080.sock", directory.as_raw_fd());
+        let listener = UnixListener::bind(short).unwrap();
+        let socket = parent.join("8080.sock");
+        assert!(socket.as_os_str().len() > 108);
+        assert!(std::os::unix::net::UnixStream::connect(&socket).is_err());
+        let cwd = std::env::current_dir().unwrap();
+        let task = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.write_all(&[1]).unwrap();
+        });
+        ingress_connect(&socket).unwrap();
+        task.join().unwrap();
+        assert_eq!(std::env::current_dir().unwrap(), cwd);
+    }
 }
 
 #[cfg(unix)]
