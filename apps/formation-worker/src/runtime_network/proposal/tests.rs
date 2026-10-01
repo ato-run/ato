@@ -455,7 +455,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
     });
     sub.request.policy.exploration=Some(serde_json::from_value(json!({"ceiling":{},"max_provider_calls":6,"max_inspections":4,
         "max_provider_cost_usd_micros":1000000,"max_provider_input_tokens":200000,"max_provider_output_tokens":100000,
-        "reasoning":{"round_timeout_ms":60000,"inspection_timeout_ms":30000,"inspection_source_bytes":32768}})).unwrap());
+        "reasoning":{"round_timeout_ms":60000,"inspection_timeout_ms":50,"inspection_source_bytes":32768}})).unwrap());
     let source = root.path().join("input");
     let files = [
         ("entry", "app.py"),
@@ -571,6 +571,8 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
                     "runtime":{"name":"python","version":"3.12.7"},"entrypoint":entry.reference,"argv":[],"cwd":".","guest_port":8000,
                     "dependencies":[],"build_scripts":[],"requirements":{},"basis":[],"unknowns":[]}}]}]})
             };
+            // Inference/wait time belongs to the round, not the separate inspection clock.
+            std::thread::sleep(Duration::from_millis(80));
             let response = json!({"schema":SESSION_RESPONSE_SCHEMA,"input_sha256":format!("sha256:{:x}",Sha256::digest(&bytes)),"output":output});
             reasoning::save(
                 &thread_dir.join(format!("{name}.response.json")),

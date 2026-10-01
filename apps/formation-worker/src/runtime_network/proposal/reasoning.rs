@@ -205,6 +205,77 @@ fn scoped_inventory_with_feedback(
                 }
             }
         }
+        // Only literal relative JS imports extend inspection. Resolve exact files,
+        // never crawl a directory or infer dynamic require() expressions.
+        if origin.path.ends_with(".js")
+            || origin.path.ends_with(".mjs")
+            || origin.path.ends_with(".cjs")
+        {
+            for line in text.text.lines() {
+                let parts: Vec<_> = line.split(['\'', '"']).collect();
+                for pair in parts.windows(2).step_by(2) {
+                    let prefix = pair[0].trim_end();
+                    let reference = pair[1];
+                    if !(prefix.ends_with("require(")
+                        || prefix.ends_with("from")
+                        || prefix.ends_with("import"))
+                        || !(reference.starts_with("./") || reference.starts_with("../"))
+                        || reference.len() > 256
+                        || reference.contains(['*', '\\'])
+                    {
+                        continue;
+                    }
+                    let mut segments: Vec<_> =
+                        parent.split('/').filter(|s| !s.is_empty()).collect();
+                    let mut valid = true;
+                    for segment in reference.split('/') {
+                        match segment {
+                            "." | "" => {}
+                            ".." => {
+                                if segments.pop().is_none() {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                            s => segments.push(s),
+                        }
+                    }
+                    if !valid {
+                        feedback.push(format!("source_reference_outside_root: {}", origin.path));
+                        continue;
+                    }
+                    let path = segments.join("/");
+                    let candidates = [
+                        path.clone(),
+                        format!("{path}.js"),
+                        format!("{path}.json"),
+                        format!("{path}/index.js"),
+                    ];
+                    let matched: Vec<_> = domain
+                        .files
+                        .iter()
+                        .filter(|(_, f)| candidates.contains(&f.path))
+                        .collect();
+                    if matched.len() > 1 {
+                        feedback.push(format!(
+                            "source_reference_ambiguous: {} references {reference}",
+                            origin.path
+                        ));
+                        continue;
+                    }
+                    for (target, _) in matched {
+                        let basis = allowed.entry(target.clone()).or_default();
+                        let r = SourceReference {
+                            file_id: id.clone(),
+                            digest: origin.digest.clone(),
+                        };
+                        if !basis.contains(&r) {
+                            basis.push(r);
+                        }
+                    }
+                }
+            }
+        }
         for token in text
             .text
             .split(|c: char| !c.is_ascii_alphanumeric() && !"._-@/*".contains(c))
@@ -508,6 +579,73 @@ mod autonomous_tests {
                 .iter()
                 .filter(|f| !f.source_relative_path.contains('/'))
                 .all(|f| f.discovered_from.is_empty())
+        );
+    }
+    #[test]
+    fn relative_js_imports_use_exact_bounded_files_and_reject_ambiguity() {
+        use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
+        let mut domain = PlanAuthorization {
+            source_oci: None,
+            toolchains: BTreeMap::new(),
+            files: [
+                "package.json",
+                "server/main.js",
+                "server/config.js",
+                "server/private/hidden.js",
+                "shared/settings.json",
+            ]
+            .into_iter()
+            .map(|path| {
+                (
+                    path.into(),
+                    VerifiedSourceFile {
+                        path: path.into(),
+                        digest: format!("sha256:{}", "a".repeat(64)),
+                    },
+                )
+            })
+            .collect(),
+        };
+        let acquired=BTreeMap::from([("server/main.js".into(),SourceContextEntry {
+            kind:SourceContextKind::VerifiedFile, logical_id:"server/main.js".into(), source_id:"server/main.js".into(),
+            encoding:ato_formation::proposal::SourceEncoding::Utf8, content_sha256:"unused".into(),truncated:false,
+            text:"const cfg = require(\"./config\");\nimport settings from '../shared/settings.json';\nrequire('../../outside');\nrequire(name);".into()
+        })]);
+        let (inventory, feedback) = scoped_inventory_with_feedback(&domain, &acquired).unwrap();
+        for path in ["server/config.js", "shared/settings.json"] {
+            let file = inventory
+                .iter()
+                .find(|s| s.source_relative_path == path)
+                .unwrap();
+            assert_eq!(file.discovered_from[0].file_id, "server/main.js");
+        }
+        assert!(
+            feedback
+                .iter()
+                .any(|s| s.starts_with("source_reference_outside_root"))
+        );
+        assert!(
+            !inventory
+                .iter()
+                .any(|s| s.source_relative_path.contains("hidden"))
+        );
+        domain.files.insert(
+            "server/config/index.js".into(),
+            VerifiedSourceFile {
+                path: "server/config/index.js".into(),
+                digest: format!("sha256:{}", "b".repeat(64)),
+            },
+        );
+        let (inventory, feedback) = scoped_inventory_with_feedback(&domain, &acquired).unwrap();
+        assert!(
+            !inventory
+                .iter()
+                .any(|s| s.source_relative_path == "server/config.js")
+        );
+        assert!(
+            feedback
+                .iter()
+                .any(|s| s.starts_with("source_reference_ambiguous"))
         );
     }
     #[test]
@@ -1071,12 +1209,11 @@ impl ReasoningProducer {
                 );
             }
         }
-        let prior_inspection_ms: u64 = records
+        let mut inspection_ms_used: u64 = records
             .iter()
             .filter(|(_, _, r)| !r.inspected.is_empty() || r.inspection_error.is_some())
-            .map(|(_, _, r)| r.elapsed_ms)
+            .map(|(_, _, r)| r.inspection_ms)
             .sum();
-        let started = Instant::now();
         let prior_in_round = records
             .iter()
             .filter(|(_, i, _)| i.request.round_seq == Some(round))
@@ -1471,10 +1608,12 @@ impl ReasoningProducer {
                 inspection_exchanges += 1;
                 let result = (|| -> Result<_> {
                     ensure!(
-                        inspection_exchanges <= policy.max_inspections
-                            && u128::from(prior_inspection_ms) + started.elapsed().as_millis()
-                                <= u128::from(limits.inspection_timeout_ms),
-                        "inspection budget exhausted"
+                        inspection_exchanges <= policy.max_inspections,
+                        "inspection_exchange_budget_exhausted"
+                    );
+                    ensure!(
+                        inspection_ms_used < limits.inspection_timeout_ms,
+                        "inspection_time_budget_exhausted"
                     );
                     let remaining = policy
                         .max_inspections
@@ -1491,7 +1630,7 @@ impl ReasoningProducer {
                         refs.iter().all(|r| !inspected.contains_key(&r.file_id)
                             && (!acquired.contains_key(&r.file_id)
                                 || input.projection.iter().any(|e| e.logical_id == r.file_id))),
-                        "no new inspection"
+                        "inspection_no_new_information"
                     );
                     for reference in &refs {
                         let text = local.source_text(&reference.file_id)?;
@@ -1501,7 +1640,12 @@ impl ReasoningProducer {
                     }
                     ensure!(
                         inspection_bytes + retrieved_bytes <= limits.inspection_source_bytes,
-                        "inspection source byte budget exhausted"
+                        "inspection_source_byte_budget_exhausted"
+                    );
+                    ensure!(
+                        u128::from(inspection_ms_used) + inspection_started.elapsed().as_millis()
+                            <= u128::from(limits.inspection_timeout_ms),
+                        "inspection_time_budget_exhausted"
                     );
                     Ok(refs)
                 })();
@@ -1518,11 +1662,15 @@ impl ReasoningProducer {
                     }
                     Err(e) => {
                         retrieved_bytes = 0;
-                        error = Some(if e.to_string().starts_with("source_") {
-                            e.to_string()
-                        } else {
-                            "inspection_budget_or_progress".into()
-                        });
+                        error = Some(
+                            if e.to_string().starts_with("source_")
+                                || e.to_string().starts_with("inspection_")
+                            {
+                                e.to_string()
+                            } else {
+                                "inspection_budget_or_progress".into()
+                            },
+                        );
                         feedback = vec![error.clone().unwrap_or_default()];
                     }
                 }
@@ -1552,6 +1700,7 @@ impl ReasoningProducer {
                 inspected_bytes: retrieved_bytes,
             };
             save(&record_path, &serde_jcs::to_vec(&record)?)?;
+            inspection_ms_used = inspection_ms_used.saturating_add(record.inspection_ms);
             if let Some(call) = call {
                 round_calls.push(call);
             }
