@@ -86,6 +86,8 @@ pub struct ContextOmission {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningInput {
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub lowering_capabilities: Value,
     #[serde(default)]
     pub catalog_sources_in_inventory: bool,
     pub goal: Option<String>,
@@ -110,6 +112,11 @@ pub struct ReasoningInput {
 }
 impl ReasoningInput {
     fn validate(&self, auth: &ato_formation::proposal::ProposalAuthorization) -> Result<()> {
+        ensure!(
+            self.lowering_capabilities.is_null()
+                || self.lowering_capabilities == lowering_capabilities(auth),
+            "lowering capability mismatch"
+        );
         let mut request = self.request.clone();
         if self.catalog_sources_in_inventory {
             for operation in &mut request.operation_catalog.operations {
@@ -138,6 +145,25 @@ impl ReasoningInput {
         );
         Ok(())
     }
+}
+
+/// Public compiler constraints, independent of application source or known D.
+fn lowering_capabilities(auth: &ato_formation::proposal::ProposalAuthorization) -> Value {
+    let toolchains = auth.execution_plan.as_ref().map(|a| &a.toolchains);
+    json!({"schema":"ato.formation-lowering-capabilities/1",
+        "static_http":{
+            "available":toolchains.is_some_and(|t| t.contains_key("node") && t.contains_key("npm")),
+            "entrypoint":"source manifest package.json reference",
+            "static_output":"source-declared relative output directory",
+            "argv":[],"guest_port":0,
+            "omit_fields":["module","environment","state","variable_bindings"],
+            "build_scripts":"source-owned npm script names; never commands or process argv"
+        },
+        "http_process":{"guest_port":"1..65535","entrypoint":"actual supported source script reference","argv":"literal arguments after the interpreter and entrypoint"},
+        "network":{"phases":["dependencies","build","runtime"],"inbound_HTTP_requires_egress":false,"within_frozen_ceiling":true},
+        "HTTP_authority":{"protocol":"ato.http@1","operation":"bind","phase":"runtime","resource":"frozen K logical HTTP Port"},
+        "unsupported_dependency_operations":["direct npm lifecycle/rebuild dependency lowering","Python source distribution/native dependency lowering"]
+    })
 }
 
 /// Inference discovery is rooted in acquired configuration, never in the
@@ -413,6 +439,33 @@ fn priority_context(mut entries: Vec<SourceContextEntry>, cap: usize) -> Vec<Sou
 #[cfg(test)]
 mod autonomous_tests {
     use super::*;
+    #[test]
+    fn lowering_capabilities_are_source_independent_and_toolchain_scoped() {
+        use ato_formation::proposal::{PlanAuthorization, ProposalAuthorization};
+        let mut auth: ProposalAuthorization=serde_json::from_value(json!({
+            "execution_plan":{"files":{},"toolchains":{"node":"22.14.0","npm":"10.9.2"}},
+            "modifiable_derivation_refs":[],"source_domain":{"entrypoints":{},"modules":{}},
+            "policy":{"max_proposal_rounds":3,"max_proposals":1,"timeout_ms":30000,"allow_source_text":true,"max_source_bytes":16384}
+        })).unwrap();
+        let caps = lowering_capabilities(&auth);
+        assert_eq!(caps["static_http"]["available"], true);
+        assert_eq!(caps["static_http"]["guest_port"], 0);
+        assert_eq!(caps["network"]["inbound_HTTP_requires_egress"], false);
+        assert!(
+            !serde_json::to_string(&caps)
+                .unwrap()
+                .contains("derivation_ref")
+        );
+        auth.execution_plan = Some(PlanAuthorization {
+            files: BTreeMap::new(),
+            toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
+            source_oci: None,
+        });
+        assert_eq!(
+            lowering_capabilities(&auth)["static_http"]["available"],
+            false
+        );
+    }
     #[test]
     fn root_scope_requires_an_acquired_reference_and_preserves_its_digest() {
         use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
@@ -1309,6 +1362,13 @@ impl ReasoningProducer {
             let mut effective_feedback = feedback.clone();
             effective_feedback.extend(scope_feedback);
             let mut input = ReasoningInput {
+                lowering_capabilities: if matches!(&self.config, ReasoningProviderConfig::Session(c) if c.prompt_version == deepseek::PROMPT_VERSION_V8)
+                    || matches!(&self.config, ReasoningProviderConfig::Api(c) if c.prompt_version == deepseek::PROMPT_VERSION_V8)
+                {
+                    lowering_capabilities(auth)
+                } else {
+                    Value::Null
+                },
                 catalog_sources_in_inventory: true,
                 goal: limits.goal.clone(),
                 available_variables: local.available_variables.clone(),
@@ -1418,6 +1478,7 @@ impl ReasoningProducer {
                     saved.request.search_id == input.request.search_id
                         && saved.request.round_seq == input.request.round_seq
                         && saved.schema == INPUT_SCHEMA
+                        && saved.lowering_capabilities == input.lowering_capabilities
                         && saved.goal == input.goal
                         && saved.call_id == input.call_id
                         && saved.frozen_contract_ref == input.frozen_contract_ref

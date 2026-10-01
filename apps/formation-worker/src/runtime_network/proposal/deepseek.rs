@@ -33,8 +33,13 @@ pub const PROMPT_VERSION_V6: &str = "ato.formation-candidate-producer-prompt/6";
 pub const PROMPT_V6: &str = include_str!("prompt-v6.txt");
 pub const PROMPT_VERSION_V7: &str = "ato.formation-candidate-producer-prompt/7";
 pub const PROMPT_V7: &str = include_str!("prompt-v7.txt");
+pub const PROMPT_VERSION_V8: &str = "ato.formation-candidate-producer-prompt/8";
+pub const PROMPT_V8: &str = include_str!("prompt-v8.txt");
 pub fn is_autonomous_prompt(version: &str) -> bool {
-    matches!(version, PROMPT_VERSION_V6 | PROMPT_VERSION_V7)
+    matches!(
+        version,
+        PROMPT_VERSION_V6 | PROMPT_VERSION_V7 | PROMPT_VERSION_V8
+    )
 }
 pub fn prompt_sha256() -> String {
     format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))
@@ -48,6 +53,7 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
         PROMPT_VERSION_V5 => Some(PROMPT_V5),
         PROMPT_VERSION_V6 => Some(PROMPT_V6),
         PROMPT_VERSION_V7 => Some(PROMPT_V7),
+        PROMPT_VERSION_V8 => Some(PROMPT_V8),
         _ => None,
     }
 }
@@ -241,7 +247,7 @@ impl DeepSeekCandidateProducer {
         let result = (|| {
             if !matches!(
                 self.config.prompt_version.as_str(),
-                PROMPT_VERSION_V5 | PROMPT_VERSION_V6 | PROMPT_VERSION_V7
+                PROMPT_VERSION_V5 | PROMPT_VERSION_V6 | PROMPT_VERSION_V7 | PROMPT_VERSION_V8
             ) || input.schema != super::reasoning::INPUT_SCHEMA
             {
                 return Err(ErrorClass::MalformedResponse);
