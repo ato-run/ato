@@ -897,16 +897,8 @@ impl ExecutionPlanProposal {
             .derivation_ref()
             .map_err(|_| ProposalError("proposal_canonicalization"))?;
         let mut candidate = authorization.candidate(source, derivation_ref.clone());
-        candidate.requirements = vec![crate::search::Requirement {
-            fact: "runtime.oci".into(),
-            one_of: Some(vec!["true".into()]),
-        }];
-        if self.oci_image.is_none() {
-            candidate.requirements.push(crate::search::Requirement {
-                fact: "formation.source_oci.available".into(),
-                one_of: Some(vec!["true".into()]),
-            });
-        }
+        candidate.requirements = crate::source_oci_plan::runtime_requirements(&derivation)
+            .ok_or(ProposalError("unsupported_source_oci_selection"))?;
         candidate.provisions.clear();
         Ok((
             CompiledGeneration {

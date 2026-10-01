@@ -5,6 +5,35 @@ use serde::{Deserialize, Serialize};
 
 pub const OCI_PROTOCOL: &str = "ato.oci@1";
 
+/// Scheduler and Runtime derive admission facts from the same canonical OCI D.
+pub fn runtime_requirements(
+    d: &crate::authoring::BoundDerivation,
+) -> Option<Vec<crate::search::Requirement>> {
+    let image = d.runtimes.get("oci.image");
+    if d.source_oci.is_none() && image.is_none() {
+        return None;
+    }
+    let mut facts = vec!["runtime.oci".to_owned()];
+    if d.source_oci.is_some() {
+        facts.push("formation.source_oci.available".into());
+    }
+    if let Some((_, digest)) = image.and_then(|i| i.rsplit_once('@')) {
+        facts.push(format!(
+            "formation.oci.image.{}",
+            digest.trim_start_matches("sha256:")
+        ));
+    }
+    Some(
+        facts
+            .into_iter()
+            .map(|fact| crate::search::Requirement {
+                fact,
+                one_of: Some(vec!["true".into()]),
+            })
+            .collect(),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenBaseImage {

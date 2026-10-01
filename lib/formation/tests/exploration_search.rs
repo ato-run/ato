@@ -540,9 +540,12 @@ fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
             .candidate()
             .requirements
             .iter()
-            .map(|r| r.fact.as_str())
+            .map(|r| r.fact.clone())
             .collect::<Vec<_>>(),
-        vec!["runtime.oci"]
+        vec![
+            "runtime.oci".to_owned(),
+            format!("formation.oci.image.{}", "e".repeat(64))
+        ]
     );
     p["oci_image"] = json!("example/service:latest");
     assert!(matches!(

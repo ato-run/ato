@@ -604,6 +604,13 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             ),
         });
     }
+    if let Some(oci) = ato_formation::source_oci_plan::runtime_requirements(&planned.derivation) {
+        requirements.extend(oci.into_iter().map(|r| Requirement {
+            fact: r.fact,
+            one_of: r.one_of,
+        }));
+        return (requirements, vec![]);
+    }
     requirements.extend(
         ato_formation::search::execution_requirements(
             planned.plan.lane.is_process(),
