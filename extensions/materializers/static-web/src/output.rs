@@ -126,6 +126,17 @@ pub fn extract_static_web_output_instrumented(
     plan: &StaticWebOutputPlan,
     instrumentation: StaticWebInstrumentation,
 ) -> Result<ExtractedStaticWebOutput> {
+    extract_static_web_output_instrumented_guarded(image_root, plan, instrumentation, &|| Ok(()))
+}
+
+/// Owner deadline guard without a dependency on a Runtime implementation.
+pub fn extract_static_web_output_instrumented_guarded(
+    image_root: &Path,
+    plan: &StaticWebOutputPlan,
+    instrumentation: StaticWebInstrumentation,
+    guard: &dyn Fn() -> Result<()>,
+) -> Result<ExtractedStaticWebOutput> {
+    guard()?;
     plan.validate()?;
     let source = image_root.join(&plan.image_output_root);
     let source_meta = fs::symlink_metadata(&source)
@@ -139,7 +150,8 @@ pub fn extract_static_web_output_instrumented(
         .tempdir()
         .context("create static web extraction workspace")?;
     let output_root = workspace.path().join("output");
-    copy_tree_no_links(&source, &output_root)?;
+    copy_tree_no_links(&source, &output_root, guard)?;
+    guard()?;
     if instrumentation.browser_runner_bridge {
         inject_browser_runner_bridge(&output_root, &plan.entry_path)?;
     }
@@ -235,15 +247,25 @@ fn has_duplicates(values: &[String]) -> bool {
     values.iter().any(|value| !unique.insert(value))
 }
 
-fn copy_tree_no_links(source: &Path, destination: &Path) -> Result<()> {
+fn copy_tree_no_links(
+    source: &Path,
+    destination: &Path,
+    guard: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    guard()?;
     fs::create_dir_all(destination)
         .with_context(|| format!("create extracted output {}", destination.display()))?;
     let mut entries = fs::read_dir(source)
         .with_context(|| format!("read static output directory {}", source.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(|entry| {
+            guard()?;
+            Ok(entry?)
+        })
+        .collect::<Result<Vec<_>>>()
         .with_context(|| format!("enumerate static output directory {}", source.display()))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        guard()?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let file_type = entry
@@ -256,16 +278,22 @@ fn copy_tree_no_links(source: &Path, destination: &Path) -> Result<()> {
             );
         }
         if file_type.is_dir() {
-            copy_tree_no_links(&source_path, &destination_path)?;
+            copy_tree_no_links(&source_path, &destination_path, guard)?;
         } else if file_type.is_file() {
             reject_hard_link(&fs::metadata(&source_path)?, &source_path)?;
-            fs::copy(&source_path, &destination_path).with_context(|| {
-                format!(
-                    "copy static output {} to {}",
-                    source_path.display(),
-                    destination_path.display()
-                )
-            })?;
+            use std::io::{Read, Write};
+            let mut input = fs::File::open(&source_path)?;
+            let mut output = fs::File::create(&destination_path)?;
+            let mut buffer = [0u8; 65536];
+            loop {
+                guard()?;
+                let n = input.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                guard()?;
+                output.write_all(&buffer[..n])?;
+            }
         } else {
             bail!(
                 "static output contains a non-regular file: {}",
