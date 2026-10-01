@@ -35,7 +35,7 @@ impl BudgetPlan {
     }
     pub fn validate(&self) -> Result<u64> {
         ensure!(
-            (1..=6).contains(&self.max_calls)
+            (1..=64).contains(&self.max_calls)
                 && self.input_token_cap > 0
                 && (1..=if self.output_price == 0 { 65536 } else { 2048 })
                     .contains(&self.output_token_cap)
