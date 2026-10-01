@@ -152,6 +152,47 @@ enum Commands {
     PortableSandboxExec(PortableSandboxExecArgs),
     #[command(name = "__portable-instance-worker", hide = true)]
     PortableInstanceWorker(PortableInstanceWorkerArgs),
+    /// 6b-D2 experimental: build a frozen source's root Dockerfile with a
+    /// private builder into a verified OCI archive and an authored OCI route.
+    #[command(name = "__source-oci-build", hide = true)]
+    SourceOciBuild(SourceOciBuildArgs),
+    /// 6b-D2 experimental: freeze one docker.io base image for one platform
+    /// through an egress gate limited to the registry, auth and blob hosts.
+    #[command(name = "__source-oci-acquire-base", hide = true)]
+    SourceOciAcquireBase(SourceOciAcquireBaseArgs),
+}
+
+#[derive(Debug, Args)]
+struct SourceOciAcquireBaseArgs {
+    /// `docker.io/<namespace>/<name>:<tag>` or `<name>:<tag>`.
+    #[arg(long)]
+    reference: String,
+    #[arg(long)]
+    platform: String,
+    /// Content bound for the whole acquisition (at most 200 MiB).
+    #[arg(long)]
+    max_bytes: u64,
+    /// New archive path.
+    #[arg(long)]
+    out: PathBuf,
+    /// Where to write the acquisition provenance JSON.
+    #[arg(long)]
+    provenance: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct SourceOciBuildArgs {
+    /// `ato.source-oci-request/1` JSON.
+    #[arg(long)]
+    request: PathBuf,
+    /// New, short absolute directory for this job's private builder session
+    /// (daemon, cgroup, network namespace, bounded filesystem). No socket is
+    /// ever accepted from the caller.
+    #[arg(long)]
+    work_root: PathBuf,
+    /// New output directory.
+    #[arg(long)]
+    out: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -567,7 +608,92 @@ pub fn run() -> Result<()> {
         },
         Commands::PortableSandboxExec(args) => portable_sandbox_exec(args),
         Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
+        Commands::SourceOciBuild(args) => source_oci_build(args),
+        Commands::SourceOciAcquireBase(args) => source_oci_acquire_base(args),
     }
+}
+
+fn source_oci_build(args: SourceOciBuildArgs) -> Result<()> {
+    use ato_portable_application::source_oci::{PROVENANCE_FILE, SourceOciRequest, prepare};
+    let request: SourceOciRequest = serde_json::from_slice(
+        &fs::read(&args.request).with_context(|| format!("read {}", args.request.display()))?,
+    )
+    .context("source-oci request is malformed")?;
+    // Every input is verified before a builder session exists.
+    let prepared = prepare(&request)?;
+    let materialized = source_oci_session_build(&prepared, &args)?;
+    let provenance = serde_json::to_vec_pretty(&materialized.provenance)?;
+    fs::write(args.out.join(PROVENANCE_FILE), &provenance)?;
+    let authored = args.out.join("authored");
+    fs::create_dir(&authored)?;
+    fs::write(authored.join("capsule.toml"), &materialized.capsule_toml)?;
+    fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+    println!("image_reference={}", materialized.image_reference);
+    println!("archive={}", materialized.archive.display());
+    println!("authored={}", authored.display());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn source_oci_session_build(
+    prepared: &ato_portable_application::source_oci::Prepared,
+    args: &SourceOciBuildArgs,
+) -> Result<ato_portable_application::source_oci::Materialized> {
+    use ato_portable_application::source_oci::materialize;
+    use ato_portable_application::source_oci::session::{
+        DockerCliBuilder, PrivateDockerSession, SessionTools,
+    };
+    let egress = prepared.request().policy.egress.as_ref().map(|e| {
+        ato_portable_application::source_oci::session::SessionEgress {
+            hosts: e.hosts.clone(),
+            ports: e.ports.clone(),
+            max_transfer_bytes: e.max_transfer_bytes,
+        }
+    });
+    let session = PrivateDockerSession::start(
+        &args.work_root,
+        &prepared.request().policy.build,
+        SessionTools::default(),
+        egress,
+    )?;
+    Ok(materialize(
+        prepared,
+        &DockerCliBuilder::new(session),
+        &args.out,
+    )?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn source_oci_session_build(
+    _: &ato_portable_application::source_oci::Prepared,
+    _: &SourceOciBuildArgs,
+) -> Result<ato_portable_application::source_oci::Materialized> {
+    bail!("source_oci_session_refused: private builder sessions require Linux")
+}
+
+fn source_oci_acquire_base(args: SourceOciAcquireBaseArgs) -> Result<()> {
+    use ato_portable_application::source_oci::acquire::acquire_base;
+    if args.out.exists() || args.provenance.exists() {
+        bail!("source_oci_output_invalid: --out and --provenance must not exist");
+    }
+    let scratch = tempfile::tempdir().context("acquisition scratch")?;
+    let acquired = acquire_base(
+        &args.reference,
+        &args.platform,
+        args.max_bytes,
+        &args.out,
+        scratch.path(),
+    )?;
+    fs::write(&args.provenance, serde_json::to_vec_pretty(&acquired)?)?;
+    println!("root_digest={}", acquired.root_digest);
+    println!(
+        "platform_manifest_digest={}",
+        acquired.platform_manifest_digest
+    );
+    println!("config_digest={}", acquired.config_digest);
+    println!("archive_sha256={}", acquired.archive_sha256);
+    println!("transferred_bytes={}", acquired.egress.transferred_bytes);
+    Ok(())
 }
 
 fn pack(args: PackArgs) -> Result<()> {
@@ -751,6 +877,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             allow_managed: args.allow_managed,
             decision: decision_policy.clone(),
             generation: None,
+            proposal: None,
         },
         SatisfyBudget {
             max_attempts: u32::try_from(args.max_attempts)

@@ -41,7 +41,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::detect::DetectorEvidence;
+use crate::detect::{DetectorEvidence, NodeEvidence};
 
 /// The preset identifiers, as they appear in provenance and in authoring.
 pub const SINGLE_HTML_V1: &str = "single-html/v1";
@@ -490,4 +490,49 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
             preset: preset.id(),
         },
     }
+}
+
+pub(crate) mod node_static_v2;
+pub use node_static_v2::{NODE_STATIC_V2, synthesize_node_static_v2};
+
+/// Which Node frontend a source's own declarations select. Pure; no I/O.
+///
+/// An explicit author declaration outranks lockfile heuristics:
+/// A. any non-npm `packageManager` / `devEngines.packageManager` name (or a
+///    malformed devEngines declaration, or npm vs non-npm disagreement) → v2,
+///    which refuses ambiguity with a typed code instead of running a manager;
+/// B. only npm declarations → legacy v1;
+/// C. no declaration and an npm lock → legacy v1 (an extra pnpm/Yarn/Bun
+///    lock never takes the historical npm route away);
+/// D. no npm lock and pnpm/Yarn/Bun lock evidence → v2;
+/// E. otherwise → the existing v1 candidates.
+pub fn routes_to_node_static_v2(node: &NodeEvidence) -> bool {
+    if !node.has_package_json {
+        return false;
+    }
+    let mut declared = Vec::new();
+    if let Some(manager) = node.package_manager.as_deref() {
+        declared.push(manager.split('@').next().unwrap_or_default());
+    }
+    if let Some(value) = node.dev_engines_package_manager.as_ref() {
+        declared.push(value.get("name").and_then(|n| n.as_str()).unwrap_or(""));
+    }
+    if declared.iter().any(|name| *name != "npm") {
+        return true;
+    }
+    if !declared.is_empty() || node.has_package_lock || node.has_npm_shrinkwrap {
+        return false;
+    }
+    node.has_pnpm_lock || node.has_yarn_lock || node.has_bun_lock
+}
+
+/// Canonical known-D frontend. The v1 selector and its draft bytes remain fixed.
+/// Non-npm sources use a separate, source-qualified v2 authoring contract.
+pub fn candidate_authoring(
+    evidence: &DetectorEvidence,
+) -> Result<Vec<AuthoringDraft>, PresetMismatch> {
+    if evidence.node.as_ref().is_some_and(routes_to_node_static_v2) {
+        return synthesize_node_static_v2(evidence).map(|draft| vec![draft]);
+    }
+    candidates(evidence).map(|presets| presets.into_iter().map(synthesize_authoring).collect())
 }

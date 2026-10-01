@@ -21,7 +21,7 @@ use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::detect;
 use ato_formation::failure::FormationFailure;
 use ato_formation::intent::Lane;
-use ato_formation::preset::{select_preset, synthesize_authoring};
+use ato_formation::preset::{candidate_authoring, select_preset, synthesize_authoring};
 use ato_formation::request::{AttemptOutcomes, Outcome};
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
 use ato_formation::verify::{ContractVerification, ContractVerificationReceipt};
@@ -289,20 +289,32 @@ pub fn run_claimed_job_with_ledger(
             // matched" would name our dispatch instead of their problem — and
             // carrying the mismatch as a TYPE is what gets those words all the
             // way out, instead of them dying in a log nobody reads.
-            let preset = select_preset(&evidence).map_err(FormationFailure::from)?;
-            // A Preset that installs from a registry cannot run under a job
-            // whose policy denies the network. Saying so by name beats letting
-            // `npm ci` fail three steps later with a DNS error the person who
-            // uploaded a folder has no way to interpret.
-            if preset.resolves_dependencies()
-                && job["policy"]["network"].as_str() != Some("dependency_resolution")
+            let drafts = candidate_authoring(&evidence).map_err(FormationFailure::from)?;
+            if matches!(drafts.first().map(|d| &d.provenance),
+                Some(ato_formation::authoring::AuthoringProvenance::PresetSynthesized { preset })
+                    if *preset == ato_formation::preset::NODE_STATIC_V2)
             {
-                bail!(
-                    "{} needs to install its dependencies, which this lane does not allow",
-                    preset.label()
-                );
+                // The common plan admission enforces the declared network requirement.
+                drafts
+                    .into_iter()
+                    .next()
+                    .context("known-D frontend returned no draft")?
+            } else {
+                let preset = select_preset(&evidence).map_err(FormationFailure::from)?;
+                // A Preset that installs from a registry cannot run under a job
+                // whose policy denies the network. Saying so by name beats letting
+                // `npm ci` fail three steps later with a DNS error the person who
+                // uploaded a folder has no way to interpret.
+                if preset.resolves_dependencies()
+                    && job["policy"]["network"].as_str() != Some("dependency_resolution")
+                {
+                    bail!(
+                        "{} needs to install its dependencies, which this lane does not allow",
+                        preset.label()
+                    );
+                }
+                synthesize_authoring(preset)
             }
-            synthesize_authoring(preset)
         }
     };
 

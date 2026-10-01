@@ -1,0 +1,12 @@
+{
+  "schema": "ato.formation-public-price-snapshot/1",
+  "url": "https://api-docs.deepseek.com/quick_start/pricing/",
+  "retrieved_at": "2026-09-30T06:50:18.285891+00:00",
+  "source_html_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+  "source_html_bytes": 23982,
+  "currency": "USD",
+  "per_million_input": 0.3,
+  "per_million_output": 1.2,
+  "model": "deepseek-flash / DeepSeek-V4.1-Flash",
+  "basis": "peak/cache-miss conservative reservation"
+}

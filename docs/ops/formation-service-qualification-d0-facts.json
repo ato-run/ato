@@ -1,0 +1,1597 @@
+{
+ "10": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [
+    "[\"/usr/bin/entrypoint\"]",
+    "[\"/usr/bin/s6-svscan\", \"/etc/s6\"]",
+    "[\"/usr/bin/dumb-init\", \"--\", \"/usr/local/bin/docker-entrypoint.sh\"]",
+    "[]"
+   ],
+   "expose": [
+    "22 3000",
+    "2222 3000"
+   ],
+   "volume": [
+    "[\"/data\"]",
+    "[\"/var/lib/gitea\", \"/etc/gitea\"]"
+   ]
+  },
+  "dockerfiles": [
+   "Dockerfile",
+   "Dockerfile.rootless"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.27",
+   "main_root": true,
+   "toolchain": "go1.27.1"
+  },
+  "locks": [
+   "go.sum",
+   "pnpm-lock.yaml",
+   "uv.lock"
+  ],
+  "markers": [
+   "Makefile",
+   "go.mod",
+   "package.json",
+   "pyproject.toml"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": {
+    "node": ">= 22.18.0",
+    "pnpm": ">= 11.0.0"
+   },
+   "main": null,
+   "packageManager": "pnpm@12.6.0",
+   "start": null,
+   "workspaces": false
+  },
+  "pyproject": {
+   "build_backend": null,
+   "console_scripts": false,
+   "requires_python": ">=3.10"
+  },
+  "version_files": {}
+ },
+ "11": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [
+    "[ \"/app/vikunja/vikunja\" ]"
+   ],
+   "expose": [
+    "3456"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.27.0",
+   "main_root": true,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "go.mod"
+  ],
+  "version_files": {}
+ },
+ "12": {
+  "compose": {
+   "external_services": [
+    "postgres"
+   ],
+   "files": [
+    "docker/docker-compose.dev.yml",
+    "docker/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/app/run.sh\"]"
+   ],
+   "expose": [],
+   "volume": [
+    "[ \"$MEALIE_HOME/data/\" ]"
+   ]
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "docker/Dockerfile"
+  ],
+  "locks": [
+   "uv.lock"
+  ],
+  "markers": [
+   "pyproject.toml"
+  ],
+  "pyproject": {
+   "build_backend": "setuptools.build_meta",
+   "console_scripts": true,
+   "requires_python": ">=3.14,<3.15"
+  },
+  "version_files": {}
+ },
+ "13": {
+  "compose": {
+   "external_services": [
+    "mariadb",
+    "postgres"
+   ],
+   "files": [
+    "backend/docker-compose.auth.yml",
+    "backend/docker-compose.database.yml",
+    "docker/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"tini\", \"--\"]",
+    "[\"node\", \"dist/main.js\"]",
+    "[\"tini\", \"--\"]",
+    "[\"node\", \"server.js\"]"
+   ],
+   "expose": [
+    "3000/tcp",
+    "3001/tcp"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "backend/docker/Dockerfile",
+   "frontend/docker/Dockerfile"
+  ],
+  "locks": [
+   "pnpm-lock.yaml"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": "dotenv -c production -- turbo run start",
+   "workspaces": false
+  },
+  "version_files": {
+   ".nvmrc": "24.20.0"
+  }
+ },
+ "15": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [
+    "8888"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "docker/Dockerfile"
+  ],
+  "locks": [
+   "yarn.lock"
+  ],
+  "markers": [
+   "package.json",
+   "pyproject.toml"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": "yarn@3.5.0",
+   "start": null,
+   "workspaces": true
+  },
+  "pyproject": {
+   "build_backend": "hatchling.build",
+   "console_scripts": true,
+   "requires_python": ">=3.10"
+  },
+  "version_files": {}
+ },
+ "16": {
+  "compose": {
+   "external_services": [
+    "clickhouse",
+    "meilisearch",
+    "mongo",
+    "pgvector",
+    "postgres",
+    "redis"
+   ],
+   "files": [
+    ".devcontainer/docker-compose.yml",
+    "docker-compose.langfuse-fanout.yml",
+    "docker-compose.yml",
+    "search/compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"npm\", \"run\", \"backend\"]",
+    "[\"node\", \"server/index.js\"]",
+    "[\"/usr/local/bin/langfuse-fanout\"]"
+   ],
+   "expose": [
+    "3080",
+    "4318"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "Dockerfile",
+   "Dockerfile.multi",
+   "otel/langfuse-fanout/Dockerfile"
+  ],
+  "locks": [
+   "bun.lock",
+   "package-lock.json"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": "npm@11.13.0",
+   "start": null,
+   "workspaces": true
+  },
+  "version_files": {
+   ".nvmrc": "24.16.0"
+  }
+ },
+ "17": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "locks": [],
+  "markers": [
+   "pyproject.toml",
+   "requirements.txt"
+  ],
+  "pyproject": {
+   "build_backend": null,
+   "console_scripts": false,
+   "requires_python": ">=3.10"
+  },
+  "version_files": {}
+ },
+ "18": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [
+    "[\"./entrypoint.sh\"]"
+   ],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile"
+  ],
+  "locks": [
+   "package-lock.json",
+   "poetry.lock"
+  ],
+  "markers": [
+   "package.json",
+   "pyproject.toml"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": false
+  },
+  "pyproject": {
+   "build_backend": "poetry.core.masonry.api",
+   "console_scripts": false,
+   "requires_python": null
+  },
+  "version_files": {}
+ },
+ "19": {
+  "compose": {
+   "external_services": [],
+   "files": [
+    "docker-compose-examples/grist-local-testing/docker-compose.yml",
+    "docker-compose-examples/grist-traefik-auth-ssl/docker-compose.yml",
+    "docker-compose-examples/grist-traefik-basic-auth/docker-compose.yml",
+    "docker-compose-examples/grist-with-authelia-forwarded-headers/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"./sandbox/docker_entrypoint.sh\"]",
+    "[\"./sandbox/run.sh\"]"
+   ],
+   "expose": [
+    "8484"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile",
+   "sandbox/docker/Dockerfile"
+  ],
+  "locks": [
+   "yarn.lock"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
+   "start": "sandbox/watch.sh",
+   "workspaces": false
+  },
+  "version_files": {
+   ".nvmrc": "v22.12.0"
+  }
+ },
+ "2": {
+  "compose": {
+   "external_services": [],
+   "files": [
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/usr/local/bin/node\", \"server/server.mjs\"]"
+   ],
+   "expose": [
+    "80"
+   ],
+   "volume": [
+    "/opt/app/server-data"
+   ]
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "Dockerfile"
+  ],
+  "locks": [
+   "package-lock.json"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": {
+    "node": ">=22"
+   },
+   "main": "./server/server.mjs",
+   "packageManager": null,
+   "start": "node ./server/server.mjs",
+   "workspaces": false
+  },
+  "version_files": {}
+ },
+ "20": {
+  "compose": {
+   "external_services": [
+    "redis"
+   ],
+   "files": [
+    "compose.yaml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[ \"tini\", \"--\", \"/init.sh\" ]"
+   ],
+   "expose": [
+    "80"
+   ],
+   "volume": [
+    "/srv /config /database"
+   ]
+  },
+  "dockerfiles": [
+   "Dockerfile",
+   "Dockerfile.s6"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.25.0",
+   "main_root": true,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "go.mod"
+  ],
+  "version_files": {}
+ },
+ "27": {
+  "compose": {
+   "external_services": [
+    "postgres"
+   ],
+   "files": [
+    "dev/containers/docker-compose.yml",
+    "dev/examples/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"node\", \"server\"]",
+    "[\"node\", \"--no-deprecation\", \"server\"]",
+    "[\"tail\", \"-f\", \"/dev/null\"]"
+   ],
+   "expose": [
+    "3000",
+    "3443"
+   ],
+   "volume": [
+    "[\"/wiki/data/content\"]"
+   ]
+  },
+  "dockerfiles": [
+   "dev/build-arm/Dockerfile",
+   "dev/build/Dockerfile",
+   "dev/containers/Dockerfile",
+   "dev/openshift/Dockerfile"
+  ],
+  "locks": [
+   "yarn.lock"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": {
+    "node": ">=20"
+   },
+   "main": "wiki.js",
+   "packageManager": null,
+   "start": "node server",
+   "workspaces": false
+  },
+  "version_files": {
+   ".nvmrc": "v24.12.0"
+  }
+ },
+ "28": {
+  "compose": {
+   "external_services": [
+    "mariadb",
+    "mysql",
+    "postgres",
+    "redis"
+   ],
+   "files": [
+    "docker-compose.mariadb.yml",
+    "docker-compose.postgres.yml",
+    "docker-compose.sqlite-redis.yml",
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "npm run migrate && npm start"
+   ],
+   "expose": [
+    "3000"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile"
+  ],
+  "locks": [
+   "package-lock.json"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": "./server/server.js",
+   "packageManager": null,
+   "start": "node server/server.js --production",
+   "workspaces": false
+  },
+  "version_files": {}
+ },
+ "29": {
+  "compose": {
+   "external_services": [
+    "clickhouse",
+    "postgres"
+   ],
+   "files": [
+    "docker-compose.test.yml",
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"sh\", \"scripts/start-docker.sh\"]"
+   ],
+   "expose": [
+    "3000"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile"
+  ],
+  "locks": [
+   "pnpm-lock.yaml"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": {
+    "pnpm": "12.3.4"
+   },
+   "main": null,
+   "packageManager": null,
+   "start": "next start",
+   "workspaces": false
+  },
+  "version_files": {}
+ },
+ "30": {
+  "compose": {
+   "external_services": [
+    "clickhouse",
+    "mysql",
+    "redis"
+   ],
+   "files": [
+    ".devcontainer/compose.devcontainer.yaml",
+    "compose.dev.analytics.yaml",
+    "compose.dev.fake-mailgun.yaml",
+    "compose.dev.mailgun.yaml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"node\", \"index.js\"]",
+    "[\"/usr/local/bin/fake-mailgun\"]",
+    "[\"/home/ghost/entrypoint.sh\"]",
+    "[\"pnpm\", \"dev\"]"
+   ],
+   "expose": [
+    "2368",
+    "80 2368"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile.production",
+   "docker/dev-gateway/Dockerfile",
+   "docker/fake-mailgun/Dockerfile",
+   "docker/ghost-dev/Dockerfile",
+   "docker/tb-cli/Dockerfile",
+   "docker/tinybird-local-slim/Dockerfile"
+  ],
+  "locks": [
+   "pnpm-lock.yaml"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": {
+    "node": "^22.23.1 || ^24.20.0"
+   },
+   "main": null,
+   "packageManager": "pnpm@12.7.0+sha512.9c56477e360068d6e9dca6a92efb4e46b3dc5a52fcebf3d84d78b9736c0ded589a561621a52f68219a7a39facc63cdc079c3226ef9c9d5f02b79f74e69a807b6",
+   "start": null,
+   "workspaces": false
+  },
+  "version_files": {
+   ".node-version": "22.23.3",
+   ".nvmrc": "22.23.3"
+  }
+ },
+ "31": {
+  "compose": {
+   "external_services": [],
+   "files": [
+    "compose.yaml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[ \"/app/bin/python\", \"/app/bin/radicale\"]",
+    "[\"--hosts\", \"0.0.0.0:5232,[::]:5232\"]",
+    "[ \"/app/bin/python\", \"/app/bin/radicale\"]",
+    "[\"--hosts\", \"0.0.0.0:5232\"]"
+   ],
+   "expose": [
+    "5232"
+   ],
+   "volume": [
+    "/var/lib/radicale"
+   ]
+  },
+  "dockerfiles": [
+   "Dockerfile",
+   "Dockerfile.dev"
+  ],
+  "locks": [],
+  "markers": [
+   "pyproject.toml"
+  ],
+  "pyproject": {
+   "build_backend": "setuptools.build_meta",
+   "console_scripts": true,
+   "requires_python": ">=3.9.0"
+  },
+  "version_files": {}
+ },
+ "32": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "locks": [],
+  "markers": [
+   "pyproject.toml",
+   "requirements.txt"
+  ],
+  "pyproject": {
+   "build_backend": "setuptools.build_meta",
+   "console_scripts": true,
+   "requires_python": ">=3.6"
+  },
+  "version_files": {}
+ },
+ "33": {
+  "compose": {
+   "external_services": [
+    "postgres"
+   ],
+   "files": [
+    ".devcontainer/docker-compose.yml",
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[ \"./entrypoint.sh\" ]"
+   ],
+   "expose": [
+    "8080"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "Dockerfile"
+  ],
+  "locks": [
+   "package-lock.json",
+   "poetry.lock"
+  ],
+  "markers": [
+   "package.json",
+   "pyproject.toml"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": false
+  },
+  "pyproject": {
+   "build_backend": "poetry.core.masonry.api",
+   "console_scripts": false,
+   "requires_python": null
+  },
+  "version_files": {}
+ },
+ "34": {
+  "compose": {
+   "external_services": [],
+   "files": [
+    "docker/amd/docker-compose.yml",
+    "docker/cpu/docker-compose.yml",
+    "docker/intel/docker-compose.yml",
+    "docker/nvidia/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"python3\", \"server.py\", \"--api\", \"--listen\"]",
+    "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+    "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+    "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen"
+   ],
+   "expose": [
+    "7860 5000"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "docker/TensorRT-LLM/Dockerfile",
+   "docker/amd/Dockerfile",
+   "docker/cpu/Dockerfile",
+   "docker/intel/Dockerfile",
+   "docker/nvidia/Dockerfile"
+  ],
+  "locks": [],
+  "markers": [],
+  "version_files": {}
+ },
+ "35": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [
+    "[\"private-gpt\"]",
+    "[\"serve\"]"
+   ],
+   "expose": [
+    "8080"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile"
+  ],
+  "locks": [
+   "uv.lock"
+  ],
+  "markers": [
+   "Makefile",
+   "pyproject.toml"
+  ],
+  "pyproject": {
+   "build_backend": "hatchling.build",
+   "console_scripts": true,
+   "requires_python": ">=3.11,<3.12"
+  },
+  "version_files": {}
+ },
+ "36": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [
+    "[\"./gotify-app\"]",
+    "[\"serve\"]"
+   ],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [
+   "docker/Dockerfile"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.26.0",
+   "main_root": false,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "Makefile",
+   "go.mod"
+  ],
+  "version_files": {}
+ },
+ "37": {
+  "compose": {
+   "external_services": [],
+   "files": [
+    "contrib/docker-compose/docker-compose-caddy.yml",
+    "contrib/docker-compose/docker-compose-traefik.yml",
+    "contrib/docker-compose/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/app/navidrome\"]"
+   ],
+   "expose": [],
+   "volume": [
+    "[\"/data\", \"/music\"]"
+   ]
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "Dockerfile"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.27",
+   "main_root": true,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "Makefile",
+   "go.mod"
+  ],
+  "version_files": {
+   ".nvmrc": "v24"
+  }
+ },
+ "38": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.27",
+   "main_root": false,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "Makefile",
+   "go.mod"
+  ],
+  "version_files": {}
+ },
+ "39": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [
+    "[\"/app/glance\", \"--config\", \"/app/config/glance.yml\"]",
+    "[\"/app/glance\", \"--config\", \"/app/config/glance.yml\"]"
+   ],
+   "expose": [
+    "8080/tcp"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile",
+   "Dockerfile.goreleaser"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.27.1",
+   "main_root": true,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "go.mod"
+  ],
+  "version_files": {}
+ },
+ "4": {
+  "compose": {
+   "external_services": [
+    "postgres"
+   ],
+   "files": [
+    "Docker/freshrss/docker-compose-db.yml",
+    "Docker/freshrss/docker-compose-development.yml",
+    "Docker/freshrss/docker-compose-local.yml",
+    "Docker/freshrss/docker-compose-proxy.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"./Docker/entrypoint.sh\"]",
+    "([ -z \"$CRON_MIN\" ] || cron) && \\",
+    "[\"./Docker/entrypoint.sh\"]",
+    "([ -z \"$CRON_MIN\" ] || crond -d 6) && \\"
+   ],
+   "expose": [
+    "80",
+    "8080"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "Docker/Dockerfile",
+   "Docker/Dockerfile-Alpine",
+   "Docker/Dockerfile-Arch",
+   "Docker/Dockerfile-Newest",
+   "Docker/Dockerfile-Oldest"
+  ],
+  "locks": [
+   "composer.lock",
+   "package-lock.json"
+  ],
+  "markers": [
+   "Makefile",
+   "composer.json",
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": {
+    "node": ">=20"
+   },
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": false
+  },
+  "php": ">=8.1",
+  "version_files": {}
+ },
+ "40": {
+  "compose": {
+   "external_services": [
+    "mariadb",
+    "mysql",
+    "postgres"
+   ],
+   "files": [
+    "docker-compose.yaml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/usr/bin/shiori\"]",
+    "[\"server\"]",
+    "[\"/usr/bin/shiori\"]",
+    "[\"server\"]"
+   ],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile",
+   "Dockerfile.alpine",
+   "Dockerfile.compose",
+   "Dockerfile.e2e"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.25.1",
+   "main_root": true,
+   "toolchain": null
+  },
+  "locks": [
+   "bun.lockb",
+   "go.sum"
+  ],
+  "markers": [
+   "Makefile",
+   "Procfile",
+   "go.mod",
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": false
+  },
+  "procfile": [
+   "web: bin/shiori server -p $PORT"
+  ],
+  "version_files": {}
+ },
+ "41": {
+  "compose": {
+   "external_services": [
+    "mariadb",
+    "mysql",
+    "postgres"
+   ],
+   "files": [
+    "playwright/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/start.sh\"]",
+    "[\"/start.sh\"]",
+    "[\"/start.sh\"]"
+   ],
+   "expose": [
+    "80"
+   ],
+   "volume": [
+    "/data"
+   ]
+  },
+  "dockerfiles": [
+   "docker/Dockerfile.alpine",
+   "docker/Dockerfile.debian",
+   "docker/Dockerfile.j2"
+  ],
+  "locks": [
+   "Cargo.lock"
+  ],
+  "markers": [
+   "Cargo.toml"
+  ],
+  "rust": {
+   "rust_version": "1.96.1",
+   "src_main": true,
+   "workspace": true
+  },
+  "version_files": {
+   "rust-toolchain.toml": "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [ \"rustfmt\", \"clippy\" ]\nprofile = \"minimal\""
+  }
+ },
+ "42": {
+  "compose": {
+   "external_services": [
+    "postgres"
+   ],
+   "files": [
+    "docker/docker-compose.yml",
+    "docker/federation/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"lemmy_server\"]"
+   ],
+   "expose": [
+    "8536"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "docker/Dockerfile"
+  ],
+  "locks": [
+   "Cargo.lock"
+  ],
+  "markers": [
+   "Cargo.toml"
+  ],
+  "rust": {
+   "rust_version": "1.92",
+   "src_main": false,
+   "workspace": true
+  },
+  "version_files": {
+   "rust-toolchain.toml": "[toolchain]\nchannel = \"1.95\""
+  }
+ },
+ "43": {
+  "compose": {
+   "external_services": [
+    "mariadb",
+    "mysql",
+    "redis",
+    "valkey"
+   ],
+   "files": [
+    ".devcontainer/docker-compose.devcontainer.sqlite-tika.yml",
+    "docker/compose/docker-compose.ci-test.yml",
+    "docker/compose/docker-compose.mariadb-tika.yml",
+    "docker/compose/docker-compose.mariadb.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/init\"]"
+   ],
+   "expose": [
+    "8000"
+   ],
+   "volume": [
+    "[\"/usr/src/paperless/data\", \\",
+    "[\"/usr/src/paperless/paperless-ngx/data\", \\"
+   ]
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "Dockerfile"
+  ],
+  "locks": [
+   "uv.lock"
+  ],
+  "markers": [
+   "pyproject.toml"
+  ],
+  "pyproject": {
+   "build_backend": null,
+   "console_scripts": false,
+   "requires_python": ">=3.11"
+  },
+  "version_files": {}
+ },
+ "44": {
+  "compose": {
+   "external_services": [
+    "elasticsearch",
+    "postgres",
+    "redis"
+   ],
+   "files": [
+    ".devcontainer/compose.yaml",
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/usr/bin/tini\", \"--\"]",
+    "[ \"node\", \"./streaming/index.js\" ]"
+   ],
+   "expose": [
+    "3000",
+    "4000"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile",
+   "Dockerfile",
+   "streaming/Dockerfile"
+  ],
+  "locks": [
+   "Gemfile.lock",
+   "yarn.lock"
+  ],
+  "markers": [
+   "Gemfile",
+   "Procfile",
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": {
+    "node": ">=22"
+   },
+   "main": null,
+   "packageManager": "yarn@4.18.1",
+   "start": "node ./streaming/index.js",
+   "workspaces": true
+  },
+  "procfile": [
+   "web: bin/heroku-web",
+   "worker: bundle exec sidekiq",
+   "",
+   "# For the streaming API, you need a separate app that shares Postgres and Redis:",
+   "#",
+   "# heroku create"
+  ],
+  "ruby_version_in_gemfile": ">= 3.3.0",
+  "version_files": {
+   ".nvmrc": "24.21",
+   ".ruby-version": "4.0.7"
+  }
+ },
+ "45": {
+  "compose": {
+   "external_services": [
+    "meilisearch",
+    "postgres"
+   ],
+   "files": [
+    "docker-compose.dev.yml",
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[ \"/usr/bin/curl\", \"--silent\", \"--fail\", \"http://127.0.0.1:3000/\" ]",
+    "[\"sh\", \"-c\", \"export PATH=/data/node_modules/.bin:$PATH && prisma migrate deploy --schema=/data/packages/prisma/schema.p"
+   ],
+   "expose": [
+    "3000"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile"
+  ],
+  "locks": [
+   "yarn.lock"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": "yarn@4.12.0+sha512.f45ab632439a67f8bc759bf32ead036a1f413287b9042726b7cc4818b7b49e14e9423ba49b18f9e06ea4941c1ad062385b1d8760a8d5091a1a31e5f6219afca8",
+   "start": null,
+   "workspaces": true
+  },
+  "version_files": {}
+ },
+ "46": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "locks": [],
+  "markers": [
+   "pyproject.toml",
+   "requirements.txt"
+  ],
+  "pyproject": {
+   "build_backend": "hatchling.build",
+   "console_scripts": true,
+   "requires_python": ">=3.12"
+  },
+  "version_files": {}
+ },
+ "47": {
+  "compose": {
+   "external_services": [
+    "mysql"
+   ],
+   "files": [
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [
+   "dev/docker/Dockerfile"
+  ],
+  "locks": [
+   "composer.lock",
+   "package-lock.json"
+  ],
+  "markers": [
+   "artisan",
+   "composer.json",
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": false
+  },
+  "php": "^8.2.0",
+  "version_files": {}
+ },
+ "48": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "locks": [
+   "composer.lock",
+   "package-lock.json"
+  ],
+  "markers": [
+   "artisan",
+   "composer.json",
+   "package.json"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": true
+  },
+  "php": ">=8.5",
+  "version_files": {}
+ },
+ "49": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "locks": [],
+  "markers": [
+   "pom.xml"
+  ],
+  "version_files": {}
+ },
+ "5": {
+  "compose": {
+   "external_services": [],
+   "files": [
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "locks": [
+   "package-lock.json",
+   "uv.lock"
+  ],
+  "markers": [
+   "Makefile",
+   "manage.py",
+   "package.json",
+   "pyproject.toml"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": false
+  },
+  "pyproject": {
+   "build_backend": null,
+   "console_scripts": false,
+   "requires_python": ">=3.13"
+  },
+  "version_files": {}
+ },
+ "50": {
+  "compose": {
+   "external_services": [],
+   "files": []
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [],
+  "locks": [],
+  "markers": [
+   "Jellyfin.sln",
+   "global.json"
+  ],
+  "version_files": {
+   "global.json": "{\n    \"sdk\": {\n        \"version\": \"10.0.0\",\n        \"rollForward\": \"latestMinor\"\n    }\n}"
+  }
+ },
+ "6": {
+  "compose": {
+   "external_services": [
+    "valkey"
+   ],
+   "files": [
+    "container/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [
+   ".devcontainer/Dockerfile"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.24.5",
+   "main_root": false,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "Makefile",
+   "go.mod",
+   "package.json",
+   "requirements.txt",
+   "setup.py"
+  ],
+  "package_json": {
+   "bin": false,
+   "engines": null,
+   "main": null,
+   "packageManager": null,
+   "start": null,
+   "workspaces": false
+  },
+  "version_files": {
+   ".nvmrc": "25"
+  }
+ },
+ "7": {
+  "compose": {
+   "external_services": [
+    "ollama"
+   ],
+   "files": [
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/docker-entrypoint.sh\"]",
+    "[\"python\", \"./changedetection.py\", \"-d\", \"/datastore\"]"
+   ],
+   "expose": [
+    "5000"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   ".github/test/Dockerfile-alpine",
+   "Dockerfile"
+  ],
+  "locks": [],
+  "markers": [
+   "requirements.txt",
+   "setup.py"
+  ],
+  "version_files": {}
+ },
+ "8": {
+  "compose": {
+   "external_services": [
+    "mysql",
+    "postgres"
+   ],
+   "files": [
+    "docker-compose.dev.yml",
+    "docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "wget -qO- http://127.0.0.1:9001/health | grep -E \"pass|ok|up\" > /dev/null || exit 1",
+    "[\"sh\", \"-c\", \"cd src && exec node --require tsx/cjs node/server.ts\"]"
+   ],
+   "expose": [
+    "9001"
+   ],
+   "volume": []
+  },
+  "dockerfiles": [
+   "Dockerfile"
+  ],
+  "locks": [
+   "pnpm-lock.yaml"
+  ],
+  "markers": [
+   "package.json"
+  ],
+  "package_json": {
+   "bin": true,
+   "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=12.0.0"
+   },
+   "main": null,
+   "packageManager": "pnpm@12.4.2",
+   "start": null,
+   "workspaces": false
+  },
+  "version_files": {}
+ },
+ "9": {
+  "compose": {
+   "external_services": [
+    "postgres"
+   ],
+   "files": [
+    ".devcontainer/docker-compose.yml"
+   ]
+  },
+  "docker": {
+   "cmd": [
+    "[\"/src/packaging/debian/build.sh\"]"
+   ],
+   "expose": [],
+   "volume": []
+  },
+  "dockerfiles": [
+   "packaging/debian/Dockerfile",
+   "packaging/rpm/Dockerfile"
+  ],
+  "go": {
+   "cmd_mains": [],
+   "go": "1.26.0",
+   "main_root": true,
+   "toolchain": null
+  },
+  "locks": [
+   "go.sum"
+  ],
+  "markers": [
+   "Makefile",
+   "Procfile",
+   "go.mod"
+  ],
+  "procfile": [
+   "web: miniflux.app"
+  ],
+  "version_files": {}
+ }
+}
