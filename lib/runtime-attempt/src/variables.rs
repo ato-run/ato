@@ -91,6 +91,14 @@ pub fn scan_artifact_controlled(
         if let Some(c) = control {
             c.remaining(crate::control::AttemptPhase::Build)?;
         }
+        let relative = path.strip_prefix(root).unwrap_or(std::path::Path::new(""));
+        ensure!(
+            ato_materializer_static_web::blob_is_clean(
+                relative.as_os_str().as_encoded_bytes(),
+                secrets
+            ),
+            "secret_artifact_embedding_refused"
+        );
         let metadata = std::fs::symlink_metadata(&path)?;
         entries += 1;
         ensure!(
@@ -142,6 +150,16 @@ mod tests {
         assert!(
             scan_artifact_controlled(std::path::Path::new("unused"), &[], Some(&control)).is_err()
         );
+    }
+    #[test]
+    fn protected_values_in_artifact_names_are_refused() {
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        std::fs::write(
+            root.path().join("synthetic-private-filename"),
+            b"public bytes",
+        )
+        .unwrap();
+        assert!(scan_artifact(root.path(), &[b"synthetic-private-filename"]).is_err());
     }
     #[test]
     fn process_artifact_secret_is_refused_across_chunk_boundary() {
