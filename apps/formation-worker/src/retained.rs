@@ -19,7 +19,7 @@ pub fn prepare(
 ) -> Result<PreparedRetained> {
     let (bytes, materialization_ref, shape, validation_profile) = match executed {
         ExecutedCandidate::Process { workspace_root } => {
-            let bytes = crate::pack::pack_tree(workspace_root)?;
+            let bytes = crate::pack::pack_process_artifact(workspace_root)?;
             let reference = content_ref(&bytes);
             (
                 bytes,

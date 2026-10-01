@@ -43,7 +43,6 @@ use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
 use crate::executor::{AttemptExecutor, ExecutedCandidate, LocalAttemptExecutor};
 use crate::job::{copy_tree, digest, plan_candidate};
 use crate::journal::AttemptJournal;
-use crate::pack::pack_tree;
 use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
 use ato_runtime_attempt::admission::EffectAuthorization;
 use ato_runtime_attempt::formation_realizer::FormationRealizer;
@@ -427,7 +426,7 @@ pub(crate) enum PreparedArtifact<'a> {
 pub(crate) fn prepare_artifact(executed: &ExecutedCandidate) -> Result<PreparedArtifact<'_>> {
     Ok(match executed {
         ExecutedCandidate::Process { workspace_root } => PreparedArtifact::Process {
-            packed: pack_tree(workspace_root)?,
+            packed: crate::pack::pack_process_artifact(workspace_root)?,
         },
         ExecutedCandidate::StaticWeb { output } => PreparedArtifact::StaticWeb {
             output,
@@ -437,7 +436,7 @@ pub(crate) fn prepare_artifact(executed: &ExecutedCandidate) -> Result<PreparedA
 }
 
 impl PreparedArtifact<'_> {
-    /// The logical bytes keeping this artifact retains: the packed tar of a
+    /// The logical bytes keeping this artifact retains: the packed transport of a
     /// process workspace, the regular-file bytes of a static bundle. The same
     /// whether or not this Runtime already holds identical bytes.
     pub(crate) fn logical_bytes(&self) -> u64 {
