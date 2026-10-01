@@ -42,6 +42,7 @@ impl ReasoningProviderConfig {
                                 | deepseek::PROMPT_VERSION_V7
                                 | deepseek::PROMPT_VERSION_V8
                                 | deepseek::PROMPT_VERSION_V9
+                                | deepseek::PROMPT_VERSION_V10
                         ),
                     "invalid session provider"
                 );
@@ -60,6 +61,26 @@ impl ReasoningProviderConfig {
     }
     pub fn is_session(&self) -> bool {
         matches!(self, Self::Session(_))
+    }
+    fn capabilities(
+        &self,
+        auth: &ato_formation::proposal::ProposalAuthorization,
+        runtimes: &[Value],
+    ) -> Value {
+        let prompt_version = match self {
+            Self::Session(c) => &c.prompt_version,
+            Self::Api(c) => &c.prompt_version,
+        };
+        if matches!(
+            prompt_version.as_str(),
+            deepseek::PROMPT_VERSION_V8
+                | deepseek::PROMPT_VERSION_V9
+                | deepseek::PROMPT_VERSION_V10
+        ) {
+            lowering_capabilities_for(auth, runtimes, prompt_version)
+        } else {
+            Value::Null
+        }
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,7 +138,19 @@ impl ReasoningInput {
         ensure!(
             self.lowering_capabilities.is_null()
                 || self.lowering_capabilities
-                    == lowering_capabilities(auth, &self.runtime_capabilities),
+                    == lowering_capabilities(auth, &self.runtime_capabilities)
+                || self.lowering_capabilities
+                    == lowering_capabilities_for(
+                        auth,
+                        &self.runtime_capabilities,
+                        deepseek::PROMPT_VERSION_V8
+                    )
+                || self.lowering_capabilities
+                    == lowering_capabilities_for(
+                        auth,
+                        &self.runtime_capabilities,
+                        deepseek::PROMPT_VERSION_V9
+                    ),
             "lowering capability mismatch"
         );
         let mut request = self.request.clone();
@@ -203,7 +236,31 @@ fn lowering_capabilities(
         })
         .collect::<Vec<_>>();
     let toolchains = auth.execution_plan.as_ref().map(|a| &a.toolchains);
-    json!({"schema":"ato.formation-lowering-capabilities/1",
+    let bound_toolchains = toolchains
+        .into_iter()
+        .flatten()
+        .map(|(name, version)| {
+            let fact = format!("toolchain.{name}.{version}");
+            let available = runtimes
+                .iter()
+                .filter(|r| {
+                    r["availability"]["online"] == true && r["availability"]["health"] == "ok"
+                })
+                .any(|r| {
+                    r["environments"].as_array().into_iter().flatten().any(|e| {
+                        e["facts"][&fact] == "present" && e["facts"]["runtime.process"] == "true"
+                    })
+                });
+            json!({"name":name,"version":version,"bound":available})
+        })
+        .collect::<Vec<_>>();
+    let python_bound = bound_toolchains
+        .iter()
+        .any(|t| t["name"] == "python" && t["bound"] == true);
+    let node_bound = bound_toolchains
+        .iter()
+        .any(|t| t["name"] == "node" && t["bound"] == true);
+    json!({"schema":"ato.formation-lowering-capabilities/2",
         "static_http":{
             "available":toolchains.is_some_and(|t| t.contains_key("node") && t.contains_key("npm")),
             "entrypoint":"source manifest package.json reference",
@@ -219,11 +276,46 @@ fn lowering_capabilities(
             "recipe":recipe,"single_service":true,"source_rewrite":false,
             "build_network":"explicit HTTPS host/port allowance within frozen ceiling",
             "runtime_network":"isolated internal network; no egress", "state":"explicit isolated writable VOLUME bindings", "variables":"not yet supported by source OCI lowering"},
-        "http_process":{"guest_port":"1..65535","entrypoint":"actual supported source script reference","argv":"literal arguments after the interpreter and entrypoint"},
+        "http_process":{"guest_port":"1..65535","entrypoint":"actual supported source script reference, or frozen package.json for launch_script","argv":"literal arguments after the interpreter/entrypoint or npm run script","launch_script":"source-owned npm script key; frozen manifest hash checked before launch"},
         "network":{"phases":["dependencies","build","runtime"],"inbound_HTTP_requires_egress":false,"within_frozen_ceiling":true},
         "HTTP_authority":{"protocol":"ato.http@1","operation":"bind","phase":"runtime","resource":"frozen K logical HTTP Port"},
-        "unsupported_dependency_operations":["direct npm lifecycle/rebuild dependency lowering","Python source distribution/native dependency lowering"]
+        "native_dependencies":{"supported":true,"toolchains":bound_toolchains,
+            "python":{"available":python_bound,"operation":"python_build_requirements","build_dependencies":"exact name/version wheels; source requirements ref","sdist_build":"dedicated build environment in Runtime sandbox","metadata_network":"dependencies","build_network":["denied","scoped_build"],"install":"offline hashed completed wheels"},
+            "node":{"available":node_bound && toolchains.is_some_and(|t|t.contains_key("npm")),"operation":"npm_rebuild","after":"npm_ci","packages":"source/lock-owned explicit names","root_lifecycle":"explicit source-owned names","node_gyp_tools":["python","gcc","make"],"headers":"bound Node distribution include/node","ignore_scripts_is_runnable":false},
+            "limits":"same frozen Runtime execution deadline and contained build resource limits; no ambient toolchain fallback"}
     })
+}
+
+fn lowering_capabilities_for(
+    auth: &ato_formation::proposal::ProposalAuthorization,
+    runtimes: &[Value],
+    prompt_version: &str,
+) -> Value {
+    let mut capabilities = lowering_capabilities(auth, runtimes);
+    if matches!(
+        prompt_version,
+        deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9
+    ) {
+        let object = capabilities.as_object_mut().expect("capability object");
+        object.insert(
+            "schema".into(),
+            json!("ato.formation-lowering-capabilities/1"),
+        );
+        object.remove("native_dependencies");
+        object.insert("http_process".into(), json!({"guest_port":"1..65535","entrypoint":"actual supported source script reference","argv":"literal arguments after the interpreter and entrypoint"}));
+        object.insert(
+            "unsupported_dependency_operations".into(),
+            json!([
+                "direct npm lifecycle/rebuild dependency lowering",
+                "Python source distribution/native dependency lowering"
+            ]),
+        );
+        if prompt_version == deepseek::PROMPT_VERSION_V8 {
+            object.remove("source_oci");
+            object.remove("oci_image");
+        }
+    }
+    capabilities
 }
 
 /// Inference discovery is rooted in acquired configuration, never in the
@@ -568,6 +660,31 @@ mod autonomous_tests {
             caps["oci_image"]["images"][0],
             format!("example/app:1@sha256:{}", "e".repeat(64))
         );
+    }
+    #[test]
+    fn native_capabilities_require_bound_tools_and_preserve_legacy_prompt_views() {
+        let auth:ato_formation::proposal::ProposalAuthorization=serde_json::from_value(json!({
+            "execution_plan":{"files":{},"toolchains":{"python":"3.12.7","gcc":"13.3.0"}},"modifiable_derivation_refs":[],"source_domain":{"entrypoints":{},"modules":{}},
+            "policy":{"max_proposal_rounds":3,"max_proposals":1,"timeout_ms":30000,"allow_source_text":true,"max_source_bytes":16384}
+        })).unwrap();
+        let caps = lowering_capabilities(&auth, &[]);
+        assert_eq!(caps["native_dependencies"]["python"]["available"], false);
+        let runtime = json!({"availability":{"online":true,"health":"ok"},"environments":[{"facts":{"runtime.process":"true","toolchain.python.3.12.7":"present"}}]});
+        let caps = lowering_capabilities(&auth, &[runtime]);
+        assert_eq!(caps["native_dependencies"]["python"]["available"], true);
+        assert!(
+            caps["native_dependencies"]["toolchains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "gcc" && t["bound"] == false)
+        );
+        let legacy = lowering_capabilities_for(&auth, &[], deepseek::PROMPT_VERSION_V8);
+        assert_eq!(legacy["schema"], "ato.formation-lowering-capabilities/1");
+        assert!(legacy.get("native_dependencies").is_none() && legacy.get("oci_image").is_none());
+        assert!(legacy["unsupported_dependency_operations"].is_array());
+        let oci = lowering_capabilities_for(&auth, &[], deepseek::PROMPT_VERSION_V9);
+        assert!(oci.get("oci_image").is_some() && oci.get("native_dependencies").is_none());
     }
     #[test]
     fn root_scope_requires_an_acquired_reference_and_preserves_its_digest() {
@@ -1599,13 +1716,7 @@ impl ReasoningProducer {
             let mut effective_feedback = feedback.clone();
             effective_feedback.extend(scope_feedback);
             let mut input = ReasoningInput {
-                lowering_capabilities: if matches!(&self.config, ReasoningProviderConfig::Session(c) if matches!(c.prompt_version.as_str(),deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9))
-                    || matches!(&self.config, ReasoningProviderConfig::Api(c) if matches!(c.prompt_version.as_str(),deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9))
-                {
-                    lowering_capabilities(auth, &local.runtime_capabilities)
-                } else {
-                    Value::Null
-                },
+                lowering_capabilities: self.config.capabilities(auth, &local.runtime_capabilities),
                 catalog_sources_in_inventory: true,
                 goal: limits.goal.clone(),
                 available_variables: local.available_variables.clone(),
@@ -1715,11 +1826,12 @@ impl ReasoningProducer {
                     saved.request.search_id == input.request.search_id
                         && saved.request.round_seq == input.request.round_seq
                         && saved.schema == INPUT_SCHEMA
-                        && saved.lowering_capabilities == input.lowering_capabilities
+                        && saved.lowering_capabilities
+                            == self.config.capabilities(auth, &saved.runtime_capabilities)
                         && saved.goal == input.goal
                         && saved.call_id == input.call_id
                         && saved.frozen_contract_ref == input.frozen_contract_ref
-                        && saved.inventory == input.inventory
+                        && saved.max_retries == input.max_retries
                         && saved.source_identity.closure_ref == input.source_identity.closure_ref
                         && saved.source_identity.archive_digest
                             == input.source_identity.archive_digest,
@@ -1847,8 +1959,8 @@ impl ReasoningProducer {
                     operations.iter().all(|operation|if let ato_formation::proposal::OperationInvocation::ExecutionPlan{plan}=operation {
                         let mut references=vec![&plan.entrypoint];references.extend(plan.basis.iter().map(|b|&b.source));
                         for dependency in &plan.dependencies { match dependency {
-                            ato_formation::proposal::DependencyOperation::PythonRequirements{requirements}|ato_formation::proposal::DependencyOperation::PythonResolveRequirements{requirements}=>references.push(requirements),
-                            ato_formation::proposal::DependencyOperation::NpmCi{manifest,lockfile,..}=>references.extend([manifest,lockfile]),
+                            ato_formation::proposal::DependencyOperation::PythonRequirements{requirements}|ato_formation::proposal::DependencyOperation::PythonResolveRequirements{requirements}|ato_formation::proposal::DependencyOperation::PythonBuildRequirements{requirements,..}=>references.push(requirements),
+                            ato_formation::proposal::DependencyOperation::NpmCi{manifest,lockfile,..}|ato_formation::proposal::DependencyOperation::NpmRebuild{manifest,lockfile,..}=>references.extend([manifest,lockfile]),
                         }}
                         references.iter().all(|reference|input.inventory.iter().any(|s|&s.reference==*reference))
                     }else{true})
