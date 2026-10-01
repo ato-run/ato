@@ -127,12 +127,50 @@ def node_case(root):
                 stale_receipt_refused=True, packed_prepare_not_an_install_prerequisite=True)
 
 
+def runtime_scripts_case(root):
+    node, npm = shutil.which('node'), shutil.which('npm')
+    if not node or not npm:
+        return dict(status='unavailable', reason='local Node/npm test prerequisite')
+    source = root / 'runtime-scripts'; source.mkdir(); (source / 'state').mkdir()
+    manifest = source / 'package.json'
+    manifest.write_text(json.dumps(dict(name='source-runtime-fixture', version='1.0.0', scripts={
+        'initialize': 'node -e "require(\'fs\').writeFileSync(\'state/initialized\', process.env.FIXTURE_PRIVATE_INPUT ? \'bound\' : \'missing\')"',
+        'start': 'node -e "const f=require(\'fs\');if(f.readFileSync(\'state/initialized\',\'utf8\')!==\'bound\')process.exit(1);f.writeFileSync(\'state/launched\',\'ready\')"',
+        'fail-setup': 'node -e "process.exit(7)"'})))
+    plan = dict(manifest=str(manifest),manifest_sha256=sha(manifest),npm=npm,
+                setup_scripts=['initialize'],launch_script='start',argv=[])
+    helper = (HELPERS / 'node-runtime-scripts.cjs').read_text()
+    environment = dict(os.environ,TMPDIR=str(root / 'tmp'),FIXTURE_PRIVATE_INPUT='fixture-only-private-value',
+                       npm_config_cache=str(source / 'cache'))
+
+    def execute():
+        result = subprocess.run([node,'-e',helper,json.dumps(plan)],cwd=source,env=environment,
+                                capture_output=True,text=True,timeout=30)
+        assert environment['FIXTURE_PRIVATE_INPUT'] not in result.stdout + result.stderr
+        return result
+
+    success = execute(); assert success.returncode == 0, success.stderr
+    assert (source / 'state/launched').read_text() == 'ready'
+    (source / 'state/launched').unlink(); (source / 'state/initialized').unlink()
+    plan['setup_scripts'] = ['fail-setup']
+    failure = execute(); assert failure.returncode != 0 and 'source_runtime_setup_failed' in failure.stderr
+    assert not (source / 'state/launched').exists()
+    plan['setup_scripts'] = ['initialize']
+    manifest.write_text(manifest.read_text() + '\n')
+    altered = execute(); assert altered.returncode != 0 and 'source_runtime_manifest_changed' in altered.stderr
+    assert not (source / 'state/initialized').exists()
+    return dict(setup_before_launch=True,same_state_and_private_environment=True,
+                setup_failure_prevents_launch=True,manifest_checked_before_effects=True,
+                private_value_not_reported=True)
+
+
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument('--work-root', type=Path)
     args = parser.parse_args()
     root = (args.work_root or REPO / '.tmp' / ('native-operation-smoke-' + uuid.uuid4().hex)).resolve()
     root.mkdir(parents=True,exist_ok=False); (root / 'tmp').mkdir()
     result = dict(schema='ato.native-operation-smoke/1', python=python_case(root),node=node_case(root),
+                  runtime_scripts=runtime_scripts_case(root),
                   actual_Coordinator_Runtime=False, provider_calls=0)
     (root / 'result.json').write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result))

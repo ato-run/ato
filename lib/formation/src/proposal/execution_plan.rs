@@ -352,6 +352,10 @@ pub struct ExecutionPlanProposal {
     /// without inventing a source reference to a file that does not exist yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_script: Option<String>,
+    /// Source-owned preparation scripts executed after Runtime state and private
+    /// bindings are attached, inside the same contained launch as the service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup_scripts: Vec<String>,
     pub argv: Vec<String>,
     pub cwd: String,
     /// Static serving allocates its port through the browser adapter. Process
@@ -478,6 +482,27 @@ impl ExecutionPlanProposal {
             }
         }
         let entrypoint = authorization.resolve(&self.entrypoint)?;
+        if !self.setup_scripts.is_empty()
+            && (self.runtime.name != "node"
+                || self.launch_script.is_none()
+                || self.static_output.is_some()
+                || self.setup_scripts.len() > 4
+                || self.setup_scripts.iter().any(|s| {
+                    s.is_empty()
+                        || s.len() > 64
+                        || !s
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
+                })
+                || self
+                    .setup_scripts
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != self.setup_scripts.len())
+        {
+            return Err(ProposalError("unsupported_setup_scripts"));
+        }
         if self.runtime.name == "oci" {
             return self.compile_oci(frozen, authorization, entrypoint);
         }
@@ -756,7 +781,20 @@ impl ExecutionPlanProposal {
             );
             json!({"id":port,"use":"ato.http@1","from":"app"})
         } else {
-            let mut argv = if let Some(script) = &self.launch_script {
+            let mut argv = if !self.setup_scripts.is_empty() {
+                vec![
+                    executable.clone(),
+                    "-e".into(),
+                    include_str!("node-runtime-scripts.cjs").into(),
+                    json!({"manifest":format!("/app/{entrypoint}"),
+                        "manifest_sha256":self.entrypoint.digest,
+                        "npm":format!("/opt/ato/toolchains/node/{}/bin/npm", self.runtime.version),
+                        "setup_scripts":self.setup_scripts,
+                        "launch_script":self.launch_script,
+                        "argv":self.argv})
+                    .to_string(),
+                ]
+            } else if let Some(script) = &self.launch_script {
                 let guard = r#"const fs=require('node:fs'),crypto=require('node:crypto');const p=JSON.parse(process.argv[1]);let code='source_launch_manifest_changed';try{if(fs.statSync(p.file).size>8388608)throw Error();const b=fs.readFileSync(p.file);if('sha256:'+crypto.createHash('sha256').update(b).digest('hex')!==p.sha256)throw Error();const m=JSON.parse(b);code='source_launch_script_missing';if(typeof m.scripts?.[p.script]!=='string')throw Error();}catch{console.error('ATO_FORMATION_FAILURE '+JSON.stringify({code,message:'The source-owned launch script is unavailable in the frozen manifest'}));process.exit(1);}"#;
                 steps.push(json!({"id":"check-launch-script","use":"ato.process@1","op":"exec","argv":[executable,"-e",guard,json!({"file":format!("/app/{entrypoint}"),"sha256":self.entrypoint.digest,"script":script}).to_string()],"cwd":self.cwd,"network":"denied"}));
                 let mut argv = vec![
@@ -797,7 +835,9 @@ impl ExecutionPlanProposal {
                     }
                 }
             };
-            argv.extend(self.argv.iter().cloned());
+            if self.setup_scripts.is_empty() {
+                argv.extend(self.argv.iter().cloned());
+            }
             steps.push(
             json!({"id":"app","use":"ato.process@1","op":"serve","argv":argv,"cwd":self.cwd,"env":self.environment}),
         );
