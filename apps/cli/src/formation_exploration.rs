@@ -358,8 +358,15 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         )?;
         expires
     };
+    // Observing persisted results can continue after the execution deadline.
+    // Keep every submission, claim and inference on the original bounded client.
+    let reporting_client = client.clone();
     let client = client.with_deadline(expires);
-    let accepted = if let Some(producer) = &reasoning {
+    let accepted = if continuation
+        && SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() >= u128::from(expires)
+    {
+        reporting_client.resume_exploration(&submission)?
+    } else if let Some(producer) = &reasoning {
         producer.coordinator_operation(
             0,
             "start",
@@ -399,8 +406,11 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
                 .saturating_sub(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64),
         );
     loop {
-        let status = client.satisfy_status(&id)?;
-        if status["pause_reason"] == "needs_input" {
+        let status = reporting_client.satisfy_status(&id)?;
+        let settled = Settlement::of(&status)? != Settlement::Running;
+        let expired = Instant::now() >= deadline
+            || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() >= u128::from(expires);
+        if !settled && !expired && status["pause_reason"] == "needs_input" {
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -409,33 +419,43 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             );
             return Ok(());
         }
-        if let Some(decision) = &decision {
-            serve_decision(&client, &id, &status, decision, &mut answered);
+        if !settled && !expired {
+            if let Some(decision) = &decision {
+                serve_decision(&client, &id, &status, decision, &mut answered);
+            }
+            if let Some(producer) = &reasoning {
+                serve_reasoning_proposal(
+                    &client,
+                    &id,
+                    &status,
+                    &mut submission,
+                    &claimant_id,
+                    producer.clone(),
+                )?;
+            } else {
+                serve_general_proposal(
+                    &client,
+                    &id,
+                    &status,
+                    &mut submission,
+                    &claimant_id,
+                    api_producer
+                        .as_ref()
+                        .context("API producer missing")?
+                        .clone(),
+                )?;
+            }
         }
-        if let Some(producer) = &reasoning {
-            serve_reasoning_proposal(
-                &client,
-                &id,
-                &status,
-                &mut submission,
-                &claimant_id,
-                producer.clone(),
-            )?;
-        } else {
-            serve_general_proposal(
-                &client,
-                &id,
-                &status,
-                &mut submission,
-                &claimant_id,
-                api_producer
-                    .as_ref()
-                    .context("API producer missing")?
-                    .clone(),
-            )?;
-        }
-        if Settlement::of(&status)? != Settlement::Running {
+        if settled || expired {
             let mut result = submission.exploration_result(&status)?;
+            if expired && !settled {
+                // This is the requester's wait ending, not an invented durable
+                // settlement or evidence that an uncertain attempt had no effect.
+                result["requester_stop"] = serde_json::json!({
+                    "reason":"deadline_exceeded", "original_deadline_ms":expires,
+                    "durable_search_unchanged":true
+                });
+            }
             result["candidate_producer_accounting"] = match &budget {
                 Some(b) => serde_json::to_value(b.snapshot()?)?,
                 None => {
@@ -469,10 +489,6 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             }
             return Ok(());
         }
-        ensure!(
-            Instant::now() < deadline,
-            "requester wait expired; durable search budgets and UNKNOWN remain unchanged"
-        );
         std::thread::sleep(Duration::from_millis(200));
     }
 }
