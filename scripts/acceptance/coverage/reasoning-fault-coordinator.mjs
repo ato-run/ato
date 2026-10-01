@@ -2,7 +2,7 @@
 // before selected responses disappear; production Coordinator is unchanged.
 import http from 'node:http';
 import {spawn} from 'node:child_process';
-import {appendFileSync, existsSync} from 'node:fs';
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 
 const config = JSON.parse(process.env.ATO_FORMATION_COORDINATOR_FAULTS);
@@ -13,11 +13,16 @@ if (!Number.isInteger(frontPort) || !Number.isInteger(backPort) || backPort === 
 const journal = 'transport-faults.jsonl';
 const dropped = new Set();
 // A restarted proxy must not replay a fault already delivered.
-const {readFileSync} = await import('node:fs');
 if (existsSync(journal)) for (const line of readFileSync(journal, 'utf8').trim().split('\n')) {
   if (line) { const row = JSON.parse(line); if (row.dropped) dropped.add(row.rule); }
 }
-const backend = spawn(process.execPath, [config.backend_script], {
+// Resolve its ordinary npm dependencies beside the isolated receiver, just as
+// the baseline harness does. Retain the exact source bytes on every restart.
+const backendFile = 'backend-coordinator.mjs';
+const source = readFileSync(config.backend_script);
+if (existsSync(backendFile) && !readFileSync(backendFile).equals(source)) throw Error('backend source changed');
+if (!existsSync(backendFile)) writeFileSync(backendFile, source, {mode: 0o600, flag: 'wx'});
+const backend = spawn(process.execPath, [backendFile], {
   env: {...process.env, C2_PORT: String(backPort)}, stdio: 'inherit',
 });
 backend.on('exit', code => { server.close(); process.exit(code ?? 1); });
