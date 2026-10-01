@@ -65,6 +65,8 @@ class Pilot(wave.Wave):
             'exploration': config['exploration'], 'toolchains':config['toolchains'],
             'provider':self.plan['producer_config'], 'provider_budget':self.plan['producer_budget'],
             'provider_journal':str(cell/'producer.jsonl')}
+        if self.plan.get('proposal_authorization'):
+            live['authorization'] = self.plan['proposal_authorization']
         if self.plan['producer_config']['provider'] != 'codex_session':
             live['credential_environment'] = 'DEEPSEEK_API_KEY'
         if not continuation:
