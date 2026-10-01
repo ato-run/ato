@@ -1,7 +1,7 @@
 //! 6b-D2: bounded source Dockerfile -> OCI artifact materialization.
 //!
 //! Ato owns the inputs (digest-verified source closure, the docker-default
-//! root `Dockerfile`, platform, frozen base-image archives, build policy) and
+//! root or explicitly referenced `Dockerfile`, platform, frozen base-image archives, build policy) and
 //! the verification of the output. Dockerfile semantics belong to an existing
 //! builder (BuildKit through a *private* Docker daemon session, see
 //! [`session`]); nothing here parses a Dockerfile or rewrites it. The produced
@@ -19,7 +19,8 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ato_formation::source::{DownloadedArchive, SourceLimits, TreeVerifiedArchive};
+use ato_adapter_oci::command_control::CommandControl;
+use ato_formation::source::{FileVerifiedArchive, SourceLimits};
 use ato_objects::PortableOciArchive;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,47 @@ pub mod isolation;
 #[cfg(target_os = "linux")]
 pub mod session;
 
+/// Absolute paths of the host tools the session runs; nothing is resolved
+/// through the caller's `PATH`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionTools {
+    pub sh: PathBuf,
+    pub docker: PathBuf,
+    pub dockerd: PathBuf,
+    pub unshare: PathBuf,
+    pub mkfs_ext4: PathBuf,
+    pub mount: PathBuf,
+    pub umount: PathBuf,
+    pub kill: PathBuf,
+    /// Needed only for an egress session.
+    pub ip: PathBuf,
+    pub nsenter: PathBuf,
+    pub iptables: PathBuf,
+    pub sysctl: PathBuf,
+    pub buildx: Option<PathBuf>,
+}
+
+impl Default for SessionTools {
+    fn default() -> Self {
+        Self {
+            sh: "/bin/sh".into(),
+            docker: "/usr/bin/docker".into(),
+            dockerd: "/usr/bin/dockerd".into(),
+            unshare: "/usr/bin/unshare".into(),
+            mkfs_ext4: "/usr/sbin/mkfs.ext4".into(),
+            mount: "/usr/bin/mount".into(),
+            umount: "/usr/bin/umount".into(),
+            kill: "/usr/bin/kill".into(),
+            ip: "/usr/sbin/ip".into(),
+            nsenter: "/usr/bin/nsenter".into(),
+            iptables: "/usr/sbin/iptables".into(),
+            sysctl: "/usr/sbin/sysctl".into(),
+            buildx: None,
+        }
+    }
+}
+
 pub const SOURCE_OCI_REQUEST_SCHEMA: &str = "ato.source-oci-request/1";
 pub const SOURCE_OCI_PROVENANCE_SCHEMA: &str = "ato.source-oci-materialization/1";
 /// Same bound as portable OCI transport.
@@ -49,7 +91,7 @@ pub const MIN_BUILD_DISK_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_BUILD_DISK_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub const MIN_BUILD_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MIN_BUILD_PIDS: u64 = 64;
-/// Only the docker-default selection is authorized in v0.
+/// Default selection; other files require a root declaration reference.
 pub const SELECTED_DOCKERFILE: &str = "Dockerfile";
 
 /// A typed refusal. When releasing the builder also failed, that second
@@ -253,10 +295,10 @@ impl SourceOciRequest {
         if !is_digest(&self.source_archive_sha256) {
             return bad("source archive digest must be sha256:<hex>");
         }
-        if self.dockerfile != SELECTED_DOCKERFILE {
+        if !ato_formation::proposal::source_file_allowed(&self.dockerfile) {
             return Err(err(
                 "source_oci_dockerfile_unselected",
-                "v0 builds only the docker-default root `Dockerfile`",
+                "selected Dockerfile must be a normalized source-relative file",
             ));
         }
         if !matches!(self.platform.as_str(), "linux/amd64" | "linux/arm64") {
@@ -360,6 +402,23 @@ pub trait OciBuilder {
         tag: &str,
         timeout: Duration,
     ) -> Result<BuildOutcome>;
+    fn build_selected(
+        &self,
+        context: &Path,
+        dockerfile: &Path,
+        platform: &str,
+        named_contexts: &[(String, String)],
+        tag: &str,
+        timeout: Duration,
+    ) -> Result<BuildOutcome> {
+        if dockerfile != context.join(SELECTED_DOCKERFILE) {
+            return Err(err(
+                "source_oci_dockerfile_unselected",
+                "builder cannot select an explicit Dockerfile",
+            ));
+        }
+        self.build(context, platform, named_contexts, tag, timeout)
+    }
     fn image_id(&self, reference: &str) -> Result<String>;
     /// Uncompressed size the builder reports; checked before any save.
     fn image_size(&self, image_id: &str) -> Result<u64>;
@@ -396,14 +455,32 @@ pub(crate) fn tail(text: &str, bytes: usize) -> String {
     text[start..].to_owned()
 }
 
+struct DeadlineReader<'a, R> {
+    inner: R,
+    control: Option<&'a CommandControl>,
+}
+impl<R: Read> Read for DeadlineReader<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(c) = self.control {
+            c.remaining()?;
+        }
+        self.inner.read(bytes)
+    }
+}
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
+    sha256_file_controlled(path, None)
+}
+fn sha256_file_controlled(path: &Path, control: Option<&CommandControl>) -> Result<(String, u64)> {
     let file = File::open(path).map_err(|e| {
         err(
             "source_oci_input_unreadable",
             format!("{}: {e}", path.display()),
         )
     })?;
-    let mut reader = BufReader::new(file);
+    let mut reader = DeadlineReader {
+        inner: BufReader::new(file),
+        control,
+    };
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut size = 0_u64;
@@ -421,7 +498,12 @@ fn sha256_file(path: &Path) -> Result<(String, u64)> {
 }
 
 /// Copy `from` to `to` while hashing, refusing more than `max` bytes.
-fn copy_hashed(from: &Path, to: &Path, max: u64) -> Result<String> {
+fn copy_hashed(
+    from: &Path,
+    to: &Path,
+    max: u64,
+    control: Option<&CommandControl>,
+) -> Result<String> {
     let input = File::open(from).map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
     let mut reader = BufReader::new(input);
     let mut output =
@@ -430,6 +512,10 @@ fn copy_hashed(from: &Path, to: &Path, max: u64) -> Result<String> {
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut size = 0_u64;
     loop {
+        if let Some(c) = control {
+            c.remaining()
+                .map_err(|e| err("round_deadline_exceeded", e.to_string()))?;
+        }
         let n = reader
             .read(&mut buffer)
             .map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
@@ -457,8 +543,13 @@ fn copy_hashed(from: &Path, to: &Path, max: u64) -> Result<String> {
 /// The archive bytes must equal the frozen digest, and the pinned root must
 /// reach (through the selected platform manifest) exactly the config and
 /// layers the Docker load manifest names.
-fn check_base_archive(base: &BaseImageInput, path: &Path, platform: &str) -> Result<BaseGraph> {
-    let (digest, _) = sha256_file(path)?;
+fn check_base_archive(
+    base: &BaseImageInput,
+    path: &Path,
+    platform: &str,
+    control: Option<&CommandControl>,
+) -> Result<BaseGraph> {
+    let (digest, _) = sha256_file_controlled(path, control)?;
     if digest != base.archive_sha256 {
         return Err(err(
             "source_oci_base_digest_mismatch",
@@ -469,7 +560,15 @@ fn check_base_archive(base: &BaseImageInput, path: &Path, platform: &str) -> Res
         ));
     }
     let file = File::open(path).map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
-    verify_base_archive(BufReader::new(file), &base.pinned_digest, platform).map_err(|e| {
+    verify_base_archive(
+        DeadlineReader {
+            inner: BufReader::new(file),
+            control,
+        },
+        &base.pinned_digest,
+        platform,
+    )
+    .map_err(|e| {
         err(
             "source_oci_base_graph_invalid",
             format!("{}: {e:#}", base.reference),
@@ -481,9 +580,10 @@ fn check_base_archive(base: &BaseImageInput, path: &Path, platform: &str) -> Res
 /// archive digest and tree, and every base archive's pinned graph.
 pub struct Prepared {
     request: SourceOciRequest,
-    source: TreeVerifiedArchive,
+    source: std::cell::RefCell<FileVerifiedArchive>,
     closure: String,
     bases: Vec<BaseGraph>,
+    control: Option<CommandControl>,
 }
 
 impl Prepared {
@@ -496,14 +596,35 @@ impl Prepared {
 }
 
 pub fn prepare(request: &SourceOciRequest) -> Result<Prepared> {
+    prepare_controlled(request, None)
+}
+pub fn prepare_controlled(
+    request: &SourceOciRequest,
+    control: Option<CommandControl>,
+) -> Result<Prepared> {
     request.validate()?;
-    let bytes = std::fs::read(&request.source_archive)
+    let file = std::fs::File::open(&request.source_archive)
         .map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
+    let size = file
+        .metadata()
+        .map_err(|e| err("source_oci_input_unreadable", e.to_string()))?
+        .len();
+    if size > 512 * 1024 * 1024 {
+        return Err(err(
+            "source_oci_source_invalid",
+            "source archive exceeds 512 MiB",
+        ));
+    }
     let limits = SourceLimits::default();
-    let source = DownloadedArchive::new(bytes)
-        .verify_archive_digest(&request.source_archive_sha256)
-        .and_then(|a| a.verify_tree_digest(None, limits))
-        .map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
+    let can_continue = || control.as_ref().is_none_or(|c| c.remaining().is_ok());
+    let source = FileVerifiedArchive::verify_with_guard(
+        file,
+        &request.source_archive_sha256,
+        size,
+        limits,
+        &can_continue,
+    )
+    .map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
     let closure = source
         .closure_ref("")
         .map_err(|e| err("source_oci_source_invalid", e.to_string()))?
@@ -512,13 +633,30 @@ pub fn prepare(request: &SourceOciRequest) -> Result<Prepared> {
     let bases = request
         .base_images
         .iter()
-        .map(|base| check_base_archive(base, &base.archive, &request.platform))
+        .map(|base| {
+            if !can_continue() {
+                return Err(err(
+                    "round_deadline_exceeded",
+                    "base image verification deadline",
+                ));
+            }
+            let graph =
+                check_base_archive(base, &base.archive, &request.platform, control.as_ref())?;
+            if !can_continue() {
+                return Err(err(
+                    "round_deadline_exceeded",
+                    "base image verification deadline",
+                ));
+            }
+            Ok(graph)
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(Prepared {
         request: request.clone(),
-        source,
+        source: std::cell::RefCell::new(source),
         closure,
         bases,
+        control,
     })
 }
 
@@ -538,10 +676,17 @@ pub struct ImageFacts {
     pub user: String,
 }
 
-fn scan_saved(path: &Path, max_bytes: u64) -> Result<BTreeMap<String, crate::oci_archive::Member>> {
+fn scan_saved(
+    path: &Path,
+    max_bytes: u64,
+    control: Option<&CommandControl>,
+) -> Result<BTreeMap<String, crate::oci_archive::Member>> {
     let file = File::open(path).map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
     scan_members(
-        BufReader::new(file),
+        DeadlineReader {
+            inner: BufReader::new(file),
+            control,
+        },
         &ScanLimits {
             max_members: 1024,
             max_member_bytes: max_bytes,
@@ -589,10 +734,24 @@ fn saved_graph(
 }
 
 pub fn image_facts(archive: &Path) -> Result<ImageFacts> {
-    let members = scan_saved(archive, MAX_ARCHIVE_BYTES)?;
+    image_facts_controlled(archive, None)
+}
+pub fn image_facts_controlled(
+    archive: &Path,
+    control: Option<&CommandControl>,
+) -> Result<ImageFacts> {
+    let members = scan_saved(archive, MAX_ARCHIVE_BYTES, control)?;
     let (manifest_digest, _, config_digest, layer_digests) = saved_graph(&members)?;
+    image_facts_from_graph(&members, manifest_digest, config_digest, layer_digests)
+}
+fn image_facts_from_graph(
+    members: &BTreeMap<String, crate::oci_archive::Member>,
+    manifest_digest: String,
+    config_digest: String,
+    layer_digests: Vec<String>,
+) -> Result<ImageFacts> {
     let config = member_json(
-        &members,
+        members,
         &blob_path(&config_digest)
             .map_err(|e| err("source_oci_artifact_invalid", format!("{e:#}")))?,
         "OCI config",
@@ -629,6 +788,26 @@ pub fn image_facts(archive: &Path) -> Result<ImageFacts> {
         volumes: keys(&c["Volumes"]),
         user: c["User"].as_str().unwrap_or_default().to_owned(),
     })
+}
+
+/// Verify immutable acquisition bytes and selected graph before using the
+/// existing image Runtime. Multi-platform indexes retain their pinned root.
+pub fn verify_bound_image(base: &BaseImageInput, platform: &str) -> Result<ImageFacts> {
+    verify_bound_image_controlled(base, platform, None)
+}
+pub fn verify_bound_image_controlled(
+    base: &BaseImageInput,
+    platform: &str,
+    control: Option<&CommandControl>,
+) -> Result<ImageFacts> {
+    let graph = check_base_archive(base, &base.archive, platform, control)?;
+    let members = scan_saved(&base.archive, MAX_BASE_ARCHIVE_BYTES, control)?;
+    image_facts_from_graph(
+        &members,
+        graph.platform_manifest,
+        graph.config,
+        graph.layers,
+    )
 }
 
 /// Writer that refuses to grow past a bound.
@@ -672,10 +851,18 @@ impl<R: Read> Read for Hashing<R> {
 /// re-hashed while copied, so the manifest digest does not change. The output
 /// never grows past `max_bytes`. Returns how many members were dropped.
 pub fn repack_saved_archive(saved: &Path, output: &Path, max_bytes: u64) -> Result<usize> {
+    repack_saved_archive_controlled(saved, output, max_bytes, None)
+}
+fn repack_saved_archive_controlled(
+    saved: &Path,
+    output: &Path,
+    max_bytes: u64,
+    control: Option<&CommandControl>,
+) -> Result<usize> {
     let saved_len = std::fs::metadata(saved)
         .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?
         .len();
-    let members = scan_saved(saved, saved_len.max(1))?;
+    let members = scan_saved(saved, saved_len.max(1), control)?;
     let (manifest_digest, _, config, layers) = saved_graph(&members)?;
     let invalid = |d: String| err("source_oci_artifact_invalid", d);
     let mut keep: BTreeSet<String> = ["oci-layout", "index.json", "manifest.json"]
@@ -720,7 +907,10 @@ pub fn repack_saved_archive(saved: &Path, output: &Path, max_bytes: u64) -> Resu
     // Streamed in the saved archive's order; each kept member is re-hashed
     // while copied and must be the member the scan verified.
     let source = File::open(saved).map_err(|e| invalid(e.to_string()))?;
-    let mut archive = tar::Archive::new(BufReader::new(source));
+    let mut archive = tar::Archive::new(DeadlineReader {
+        inner: BufReader::new(source),
+        control,
+    });
     let mut written = BTreeSet::new();
     for entry in archive.entries().map_err(|e| invalid(e.to_string()))? {
         let entry = entry.map_err(|e| invalid(e.to_string()))?;
@@ -814,37 +1004,160 @@ pub fn materialize(
     outcome
 }
 
+fn safe_source_file(context: &Path, path: &str) -> Option<std::fs::Metadata> {
+    if !ato_formation::proposal::source_file_allowed(path) {
+        return None;
+    }
+    let mut absolute = context.to_owned();
+    let mut metadata = None;
+    for component in path.split('/') {
+        absolute.push(component);
+        let m = std::fs::symlink_metadata(&absolute).ok()?;
+        if m.file_type().is_symlink() {
+            return None;
+        }
+        metadata = Some(m);
+    }
+    metadata.filter(std::fs::Metadata::is_file)
+}
+
+/// Follow only literal source-relative file references from root declarations.
+/// This selects a file; it does not interpret or rewrite Dockerfile semantics.
+pub fn verify_dockerfile_selection(context: &Path, selected: &str) -> Result<Vec<Value>> {
+    if selected == SELECTED_DOCKERFILE {
+        return safe_source_file(context, selected)
+            .map(|_| vec![])
+            .ok_or_else(|| {
+                err(
+                    "source_oci_dockerfile_absent",
+                    "root Dockerfile must be a regular source file",
+                )
+            });
+    }
+    let mut queue = std::collections::VecDeque::new();
+    let mut seen = BTreeSet::new();
+    let mut roots = Vec::new();
+    for entry in
+        std::fs::read_dir(context).map_err(|e| err("source_oci_source_invalid", e.to_string()))?
+    {
+        let entry = entry.map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if ato_formation::proposal::is_discovery_root(&name) {
+            roots.push(name);
+        }
+    }
+    roots.sort();
+    for name in roots {
+        queue.push_back((name, Vec::<Value>::new()));
+    }
+    let mut read_bytes = 0usize;
+    while let Some((path, mut proof)) = queue.pop_front() {
+        if seen.len() >= 32 || !seen.insert(path.clone()) {
+            continue;
+        }
+        let absolute = context.join(&path);
+        let Some(meta) = safe_source_file(context, &path) else {
+            continue;
+        };
+        if !meta.is_file() || read_bytes >= 65536 {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        File::open(&absolute)
+            .and_then(|f| {
+                f.take((65536 - read_bytes).min(32768) as u64)
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
+        read_bytes += bytes.len();
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        proof.push(json!({"source":path,"captured_sha256":format!("sha256:{:x}", Sha256::digest(&bytes)),"truncated":meta.len()>bytes.len() as u64}));
+        let parent = Path::new(&path).parent().unwrap_or(Path::new(""));
+        for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || "._/@-".contains(c))) {
+            let token = token.strip_prefix("./").unwrap_or(token);
+            if !ato_formation::proposal::source_file_allowed(token) {
+                continue;
+            }
+            let reference = parent.join(token).to_string_lossy().into_owned();
+            if reference == selected {
+                return safe_source_file(context, selected)
+                    .map(|_| proof)
+                    .ok_or_else(|| {
+                        err(
+                            "source_oci_dockerfile_absent",
+                            "selected Dockerfile must be a regular source file",
+                        )
+                    });
+            }
+            if ato_formation::proposal::source_path(&reference)
+                && !seen.contains(&reference)
+                && queue.len() < 256
+            {
+                queue.push_back((reference, proof.clone()));
+            }
+        }
+    }
+    Err(err(
+        "source_oci_dockerfile_unselected",
+        "Dockerfile has no explicit reference from a root declaration",
+    ))
+}
+
 fn build_and_verify(
     prepared: &Prepared,
     builder: &dyn OciBuilder,
     out: &Path,
 ) -> Result<Materialized> {
     let request = &prepared.request;
+    let check_deadline = || -> Result<()> {
+        if let Some(c) = &prepared.control {
+            c.remaining()
+                .map_err(|e| err("round_deadline_exceeded", e.to_string()))?;
+        }
+        Ok(())
+    };
+    check_deadline()?;
     let scratch = builder.scratch().to_path_buf();
     // 1. Frozen source closure, materialized inside the bounded scratch.
     let limits = SourceLimits::default();
+    let context = scratch.join("context");
+    std::fs::create_dir(&context).map_err(|e| {
+        err(
+            "source_oci_source_invalid",
+            format!("builder context must be new: {e}"),
+        )
+    })?;
     let context = prepared
         .source
-        .materialize(&scratch.join("context"), "", limits)
+        .borrow_mut()
+        .materialize_with_guard(&scratch.join("context"), "", limits, &|| {
+            prepared
+                .control
+                .as_ref()
+                .is_none_or(|c| c.remaining().is_ok())
+        })
         .map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
-    let dockerfile = context.join(SELECTED_DOCKERFILE);
+    let dockerfile = context.join(&request.dockerfile);
+    let selection = verify_dockerfile_selection(&context, &request.dockerfile)?;
     let meta = std::fs::symlink_metadata(&dockerfile).map_err(|_| {
         err(
             "source_oci_dockerfile_absent",
-            "no root Dockerfile in the source",
+            "selected Dockerfile is absent from the source",
         )
     })?;
     if !meta.file_type().is_file() {
         return Err(err(
             "source_oci_dockerfile_absent",
-            "root Dockerfile is not a regular file",
+            "selected Dockerfile is not a regular file",
         ));
     }
     let dockerignore = context.join(".dockerignore");
     let dockerignore_sha256 = std::fs::symlink_metadata(&dockerignore)
         .ok()
         .filter(|m| m.file_type().is_file())
-        .map(|_| sha256_file(&dockerignore).map(|(d, _)| d))
+        .map(|_| sha256_file_controlled(&dockerignore, prepared.control.as_ref()).map(|(d, _)| d))
         .transpose()?;
     // 2. Private, empty builder only.
     if !builder.image_ids()?.is_empty() {
@@ -861,19 +1174,26 @@ fn build_and_verify(
     let mut bases = Vec::new();
     for (n, (base, graph)) in request.base_images.iter().zip(&prepared.bases).enumerate() {
         let copy = scratch.join(format!("base-{n}.tar"));
-        let copied = copy_hashed(&base.archive, &copy, MAX_BASE_ARCHIVE_BYTES)?;
+        let copied = copy_hashed(
+            &base.archive,
+            &copy,
+            MAX_BASE_ARCHIVE_BYTES,
+            prepared.control.as_ref(),
+        )?;
         if copied != base.archive_sha256 {
             return Err(err(
                 "source_oci_base_digest_mismatch",
                 format!("{} changed after it was verified", base.reference),
             ));
         }
-        if check_base_archive(base, &copy, &request.platform)? != *graph {
+        if check_base_archive(base, &copy, &request.platform, prepared.control.as_ref())? != *graph
+        {
             return Err(err(
                 "source_oci_base_graph_invalid",
                 format!("{} graph changed after it was verified", base.reference),
             ));
         }
+        check_deadline()?;
         builder.load(&copy)?;
         let tag = format!("ato-base/b{n}:frozen");
         builder.tag(&graph.config, &tag)?;
@@ -911,8 +1231,10 @@ fn build_and_verify(
     // 4. Build with the existing builder; semantics are BuildKit's.
     let tag = "ato-source/build:materialize";
     let started = Instant::now();
-    let outcome = builder.build(
+    check_deadline()?;
+    let outcome = builder.build_selected(
         &context,
+        &dockerfile,
         &request.platform,
         &named,
         tag,
@@ -958,10 +1280,11 @@ fn build_and_verify(
     let saved = scratch.join("image.saved.tar");
     builder.save(&image_id, &saved)?;
     let partial = out.join("image.tar.partial");
-    let dropped = repack_saved_archive(&saved, &partial, max)?;
+    let dropped =
+        repack_saved_archive_controlled(&saved, &partial, max, prepared.control.as_ref())?;
     std::fs::remove_file(&saved).map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
-    let (archive_sha256, size) = sha256_file(&partial)?;
-    let facts = image_facts(&partial)?;
+    let (archive_sha256, size) = sha256_file_controlled(&partial, prepared.control.as_ref())?;
+    let facts = image_facts_controlled(&partial, prepared.control.as_ref())?;
     if facts.config_digest != image_id {
         return Err(err(
             "source_oci_artifact_digest_mismatch",
@@ -977,6 +1300,7 @@ fn build_and_verify(
             format!("{}/{}", facts.os, facts.architecture),
         ));
     }
+    check_deadline()?;
     let portable = PortableOciArchive {
         image: image_reference.clone(),
         platform: request.platform.clone(),
@@ -993,6 +1317,7 @@ fn build_and_verify(
             "validator config reference differs",
         ));
     }
+    check_deadline()?;
     // 6. Explicit port binding against the artifact's own declaration.
     let expected = format!("{}/tcp", request.declared_transport_port);
     if facts.exposed_ports != [expected.clone()] {
@@ -1054,8 +1379,9 @@ fn build_and_verify(
         "inputs": {
             "source_archive_sha256": request.source_archive_sha256,
             "source_closure_ref": prepared.closure,
-            "dockerfile": SELECTED_DOCKERFILE,
-            "dockerfile_sha256": sha256_file(&dockerfile)?.0,
+            "dockerfile": request.dockerfile,
+            "dockerfile_selection":selection,
+            "dockerfile_sha256": sha256_file_controlled(&dockerfile,prepared.control.as_ref())?.0,
             "dockerignore_sha256": dockerignore_sha256,
             "build_context": ".",
             "target": "default (last stage)",

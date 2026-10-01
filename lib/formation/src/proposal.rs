@@ -7,8 +7,9 @@ mod python_http;
 mod source_context;
 pub use execution_plan::{
     CatalogSource, DependencyOperation, ExecutionPlanProposal, PlanAuthorization,
-    PlanStateRequirement, RuntimeSelection, SourceReference, VerifiedSourceFile, isolated_state_id,
-    isolated_state_mount, source_file_allowed, source_inspection_priority,
+    PlanStateRequirement, RuntimeSelection, SourceReference, VerifiedSourceFile, is_discovery_root,
+    isolated_state_id, isolated_state_mount, source_file_allowed, source_inspection_priority,
+    source_path,
 };
 pub use node_static_workspace::{
     MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,
@@ -463,6 +464,9 @@ impl<'a> CandidateRegistry<'a> {
                         "needs_input"
                     }
                     Some("source_broken") => "source_broken",
+                    Some("runtime_unavailable" | "infrastructure_failure") => {
+                        "infrastructure_error"
+                    }
                     Some("no_progress" | "insufficient_source" | "unknown") | None => "no_progress",
                     _ => "unsupported_capability",
                 }),
@@ -563,6 +567,8 @@ fn compile_proposal(
                         | "requires_external_service"
                         | "requires_binding"
                         | "source_oci_builder_unavailable"
+                        | "runtime_unavailable"
+                        | "infrastructure_failure"
                         | "insufficient_source"
                         | "unknown"
                 )
