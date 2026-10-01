@@ -27,7 +27,8 @@ use ato_formation::{authoring::BoundDerivation, execution::ExecutionPlan, intent
 use ato_materializer_static_web::INSTANCE_STATE_BRIDGE_PATH;
 use ato_materializer_static_web::{
     ProducedStaticWebBundle, StaticWebInstrumentation, StaticWebManifestV1, StaticWebOutputPlan,
-    extract_static_web_output_instrumented, media_type_for, produce_static_web_bundle,
+    extract_static_web_output_instrumented_guarded, media_type_for,
+    produce_static_web_bundle_guarded,
 };
 
 /// What the Static lane produced, in the terms a FormationResult needs.
@@ -56,6 +57,33 @@ pub fn materialize_static(
     materialization_id: &str,
     runtime_secret_canaries: &[&[u8]],
 ) -> Result<StaticFormationOutput> {
+    materialize_static_controlled(
+        derivation,
+        plan,
+        workspace_root,
+        destination_parent,
+        materialization_id,
+        runtime_secret_canaries,
+        None,
+    )
+}
+
+pub fn materialize_static_controlled(
+    derivation: &BoundDerivation,
+    plan: &ExecutionPlan,
+    workspace_root: &Path,
+    destination_parent: &Path,
+    materialization_id: &str,
+    runtime_secret_canaries: &[&[u8]],
+    control: Option<&crate::control::ExecutionControl>,
+) -> Result<StaticFormationOutput> {
+    let guard = || {
+        if let Some(c) = control {
+            c.remaining(crate::control::AttemptPhase::Build)?;
+        }
+        Ok(())
+    };
+    guard()?;
     if plan.lane != Lane::StaticWeb {
         bail!("materialize_static was handed a {:?} intent", plan.lane);
     }
@@ -106,7 +134,7 @@ pub fn materialize_static(
     let extract_name = output_root
         .file_name()
         .context("static output root has no directory name")?;
-    let extracted = extract_static_web_output_instrumented(
+    let extracted = extract_static_web_output_instrumented_guarded(
         extract_parent,
         &StaticWebOutputPlan {
             image_output_root: PathBuf::from(extract_name),
@@ -116,6 +144,7 @@ pub fn materialize_static(
             browser_runner_bridge: true,
             instance_state_bridge: true,
         },
+        &guard,
     )
     .context("static web extraction failed")?;
 
@@ -136,8 +165,8 @@ pub fn materialize_static(
     //
     // Selection is not a guess about WHERE the site is. An output root that
     // holds no entry file is still refused below, by the producer.
-    let dropped =
-        prune_unservable(extracted.output_root()).context("select servable static web files")?;
+    let dropped = prune_unservable(extracted.output_root(), &guard)
+        .context("select servable static web files")?;
     if !dropped.is_empty() {
         eprintln!(
             "[static] dropped {} file(s) with no servable media type: {}",
@@ -146,11 +175,12 @@ pub fn materialize_static(
         );
     }
 
-    let bundle = produce_static_web_bundle(
+    let bundle = produce_static_web_bundle_guarded(
         &output_plan,
         &extracted,
         destination_parent,
         runtime_secret_canaries,
+        &guard,
     )
     .map_err(|error| {
         // The producer refuses a file it cannot type, and that refusal is the
@@ -233,15 +263,22 @@ pub fn needs_build(plan: &ExecutionPlan) -> bool {
 /// `root`, for the attempt record.
 ///
 /// Operates on the extracted COPY only; the built workspace is never modified.
-fn prune_unservable(root: &Path) -> Result<Vec<String>> {
+fn prune_unservable(root: &Path, guard: &dyn Fn() -> Result<()>) -> Result<Vec<String>> {
     let mut dropped = Vec::new();
-    prune_dir(root, root, &mut dropped)?;
+    prune_dir(root, root, &mut dropped, guard)?;
     dropped.sort();
     Ok(dropped)
 }
 
-fn prune_dir(root: &Path, dir: &Path, dropped: &mut Vec<String>) -> Result<()> {
+fn prune_dir(
+    root: &Path,
+    dir: &Path,
+    dropped: &mut Vec<String>,
+    guard: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    guard()?;
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        guard()?;
         let entry = entry?;
         let path = entry.path();
         // `symlink_metadata`: a symlink is never followed here. The producer
@@ -249,7 +286,7 @@ fn prune_dir(root: &Path, dir: &Path, dropped: &mut Vec<String>) -> Result<()> {
         // tree decide what gets deleted.
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.is_dir() {
-            prune_dir(root, &path, dropped)?;
+            prune_dir(root, &path, dropped, guard)?;
             if std::fs::read_dir(&path)?.next().is_none() {
                 std::fs::remove_dir(&path)?;
             }

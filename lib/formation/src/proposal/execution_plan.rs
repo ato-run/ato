@@ -220,6 +220,52 @@ impl PlanAuthorization {
             materialization: source.materialization(),
         }
     }
+
+    /// Validate the bounded scheduler read model. Admission still recompiles
+    /// the source-owned proposal and compares its complete canonical D.
+    pub(super) fn candidate_scope(&self, source: &InitialSource, c: &SearchCandidate) -> bool {
+        let mut expected = self.candidate(source, c.derivation_ref.clone());
+        let provisions_valid = !c.provisions.is_empty()
+            && c.provisions.iter().all(|p| expected.provisions.contains(p))
+            && c.provisions.windows(2).all(|p| p[0] < p[1]);
+        let process_valid = provisions_valid
+            && [false, true].into_iter().any(|process| {
+                let base = execution_requirements(process, true);
+                let Some(extra) = c.requirements.strip_prefix(base.as_slice()) else {
+                    return false;
+                };
+                extra.windows(2).all(|p| p[0].fact < p[1].fact)
+                    && extra.iter().all(|r| {
+                        r.one_of.as_deref() == Some(&["present".to_owned()][..])
+                            && self.toolchains.iter().any(|(name, version)| {
+                                matches!(name.as_str(), "python" | "gcc" | "make" | "pkg-config")
+                                    && r.fact == format!("toolchain.{name}.{version}")
+                            })
+                    })
+            });
+        let oci_valid = c.provisions.is_empty()
+            && self.source_oci.as_ref().is_some_and(|recipe| {
+                let fact = |name: String| crate::search::Requirement {
+                    fact: name,
+                    one_of: Some(vec!["true".into()]),
+                };
+                let base = fact("runtime.oci".into());
+                c.requirements == vec![base.clone(), fact("formation.source_oci.available".into())]
+                    || recipe.base_images.iter().any(|image| {
+                        c.requirements
+                            == vec![
+                                base.clone(),
+                                fact(format!(
+                                    "formation.oci.image.{}",
+                                    image.pinned_digest.trim_start_matches("sha256:")
+                                )),
+                            ]
+                    })
+            });
+        expected.requirements = c.requirements.clone();
+        expected.provisions = c.provisions.clone();
+        (process_valid || oci_valid) && *c == expected
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +352,10 @@ pub struct ExecutionPlanProposal {
     /// without inventing a source reference to a file that does not exist yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_script: Option<String>,
+    /// Source-owned preparation scripts executed after Runtime state and private
+    /// bindings are attached, inside the same contained launch as the service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup_scripts: Vec<String>,
     pub argv: Vec<String>,
     pub cwd: String,
     /// Static serving allocates its port through the browser adapter. Process
@@ -432,6 +482,27 @@ impl ExecutionPlanProposal {
             }
         }
         let entrypoint = authorization.resolve(&self.entrypoint)?;
+        if !self.setup_scripts.is_empty()
+            && (self.runtime.name != "node"
+                || self.launch_script.is_none()
+                || self.static_output.is_some()
+                || self.setup_scripts.len() > 4
+                || self.setup_scripts.iter().any(|s| {
+                    s.is_empty()
+                        || s.len() > 64
+                        || !s
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
+                })
+                || self
+                    .setup_scripts
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != self.setup_scripts.len())
+        {
+            return Err(ProposalError("unsupported_setup_scripts"));
+        }
         if self.runtime.name == "oci" {
             return self.compile_oci(frozen, authorization, entrypoint);
         }
@@ -451,7 +522,10 @@ impl ExecutionPlanProposal {
                 || self.launch_script.is_some()
                 || !self.argv.is_empty()
                 || !self.environment.is_empty()
-                || !self.variable_bindings.is_empty()
+                || self
+                    .variable_bindings
+                    .iter()
+                    .any(|r| r.phase == crate::requirements::ExecutionPhase::Runtime)
                 || !self.state.is_empty()
             {
                 return Err(ProposalError("unsupported_static_output"));
@@ -707,7 +781,20 @@ impl ExecutionPlanProposal {
             );
             json!({"id":port,"use":"ato.http@1","from":"app"})
         } else {
-            let mut argv = if let Some(script) = &self.launch_script {
+            let mut argv = if !self.setup_scripts.is_empty() {
+                vec![
+                    executable.clone(),
+                    "-e".into(),
+                    include_str!("node-runtime-scripts.cjs").into(),
+                    json!({"manifest":format!("/app/{entrypoint}"),
+                        "manifest_sha256":self.entrypoint.digest,
+                        "npm":format!("/opt/ato/toolchains/node/{}/bin/npm", self.runtime.version),
+                        "setup_scripts":self.setup_scripts,
+                        "launch_script":self.launch_script,
+                        "argv":self.argv})
+                    .to_string(),
+                ]
+            } else if let Some(script) = &self.launch_script {
                 let guard = r#"const fs=require('node:fs'),crypto=require('node:crypto');const p=JSON.parse(process.argv[1]);let code='source_launch_manifest_changed';try{if(fs.statSync(p.file).size>8388608)throw Error();const b=fs.readFileSync(p.file);if('sha256:'+crypto.createHash('sha256').update(b).digest('hex')!==p.sha256)throw Error();const m=JSON.parse(b);code='source_launch_script_missing';if(typeof m.scripts?.[p.script]!=='string')throw Error();}catch{console.error('ATO_FORMATION_FAILURE '+JSON.stringify({code,message:'The source-owned launch script is unavailable in the frozen manifest'}));process.exit(1);}"#;
                 steps.push(json!({"id":"check-launch-script","use":"ato.process@1","op":"exec","argv":[executable,"-e",guard,json!({"file":format!("/app/{entrypoint}"),"sha256":self.entrypoint.digest,"script":script}).to_string()],"cwd":self.cwd,"network":"denied"}));
                 let mut argv = vec![
@@ -748,7 +835,9 @@ impl ExecutionPlanProposal {
                     }
                 }
             };
-            argv.extend(self.argv.iter().cloned());
+            if self.setup_scripts.is_empty() {
+                argv.extend(self.argv.iter().cloned());
+            }
             steps.push(
             json!({"id":"app","use":"ato.process@1","op":"serve","argv":argv,"cwd":self.cwd,"env":self.environment}),
         );
@@ -783,27 +872,17 @@ impl ExecutionPlanProposal {
             .derivation_ref()
             .map_err(|_| ProposalError("proposal_canonicalization"))?;
         let mut candidate = authorization.candidate(source, derivation_ref.clone());
+        candidate.requirements = execution_requirements(self.static_output.is_none(), true);
         candidate.provisions = derivation
             .runtimes
             .iter()
             .map(|(name, version)| format!("toolchain.{name}.{version}"))
             .collect();
-        for dependency in &self.dependencies {
-            let tools = match dependency {
-                DependencyOperation::PythonBuildRequirements { toolchains, .. }
-                | DependencyOperation::NpmRebuild { toolchains, .. } => toolchains,
-                _ => continue,
-            };
-            for tool in tools {
-                let requirement = crate::search::Requirement {
-                    fact: format!("toolchain.{}.{}", tool.name, tool.version),
-                    one_of: Some(vec!["present".into()]),
-                };
-                if !candidate.requirements.contains(&requirement) {
-                    candidate.requirements.push(requirement);
-                }
-            }
-        }
+        candidate
+            .requirements
+            .extend(super::native_dependencies::runtime_requirements(
+                &derivation,
+            ));
         Ok((
             CompiledGeneration {
                 capsule_toml,
@@ -821,15 +900,21 @@ impl ExecutionPlanProposal {
         entrypoint: &str,
     ) -> Result<(CompiledGeneration, SearchCandidate), ProposalError> {
         if self.cwd != "."
+            || self.static_output.is_some()
             || !self.argv.is_empty()
             || self.module.is_some()
             || self.launch_script.is_some()
-            || !self.environment.is_empty()
-            || !self.variable_bindings.is_empty()
             || !self.dependencies.is_empty()
             || !self.build_scripts.is_empty()
         {
             return Err(ProposalError("unsupported_source_oci_selection"));
+        }
+        if self
+            .variable_bindings
+            .iter()
+            .any(|r| r.phase != crate::requirements::ExecutionPhase::Runtime)
+        {
+            return Err(ProposalError("unsupported_source_oci_variable_phase"));
         }
         let recipe = authorization
             .source_oci
@@ -855,11 +940,14 @@ impl ExecutionPlanProposal {
         validate_http_contract(&frozen.base_contract, source, port)?;
         let mut document = json!({"schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
-            "derive":{"step":[{"id":"app","use":crate::source_oci_plan::OCI_PROTOCOL,"op":"serve","source":"workspace"}]},
+            "derive":{"step":[{"id":"app","use":crate::source_oci_plan::OCI_PROTOCOL,"op":"serve","source":"workspace","env":self.environment}]},
             "port":[{"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port}],
             "source_oci":recipe,"requirements":self.requirements,
             "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
             "contract":{"require":contract_requirements(&frozen.base_contract)}});
+        if !self.variable_bindings.is_empty() {
+            document["variable_bindings"] = json!(self.variable_bindings);
+        }
         if let Some(image) = &self.oci_image {
             let approved = recipe.base_images.iter().any(|b| {
                 let pinned = if b.reference.contains('@') {
@@ -895,16 +983,8 @@ impl ExecutionPlanProposal {
             .derivation_ref()
             .map_err(|_| ProposalError("proposal_canonicalization"))?;
         let mut candidate = authorization.candidate(source, derivation_ref.clone());
-        candidate.requirements = vec![crate::search::Requirement {
-            fact: "runtime.oci".into(),
-            one_of: Some(vec!["true".into()]),
-        }];
-        if self.oci_image.is_none() {
-            candidate.requirements.push(crate::search::Requirement {
-                fact: "formation.source_oci.available".into(),
-                one_of: Some(vec!["true".into()]),
-            });
-        }
+        candidate.requirements = crate::source_oci_plan::runtime_requirements(&derivation)
+            .ok_or(ProposalError("unsupported_source_oci_selection"))?;
         candidate.provisions.clear();
         Ok((
             CompiledGeneration {

@@ -63,6 +63,23 @@ pub fn produce_static_web_bundle(
     destination_parent: &Path,
     runtime_secret_canaries: &[&[u8]],
 ) -> Result<ProducedStaticWebBundle> {
+    produce_static_web_bundle_guarded(
+        plan,
+        built,
+        destination_parent,
+        runtime_secret_canaries,
+        &|| Ok(()),
+    )
+}
+
+pub fn produce_static_web_bundle_guarded(
+    plan: &StaticWebOutputPlan,
+    built: &ExtractedStaticWebOutput,
+    destination_parent: &Path,
+    runtime_secret_canaries: &[&[u8]],
+    guard: &dyn Fn() -> Result<()>,
+) -> Result<ProducedStaticWebBundle> {
+    guard()?;
     let built_output_root = built.output_root();
     plan.validate()?;
     let source_meta = fs::symlink_metadata(built_output_root)
@@ -82,7 +99,13 @@ pub fn produce_static_web_bundle(
 
     let mut input_files = Vec::new();
     let mut traversal = TraversalCounts::default();
-    collect_files(built_output_root, &mut input_files, &mut traversal, 0)?;
+    collect_files(
+        built_output_root,
+        &mut input_files,
+        &mut traversal,
+        0,
+        guard,
+    )?;
 
     let mut files = BTreeMap::new();
     let mut receipts = BTreeMap::new();
@@ -90,6 +113,7 @@ pub fn produce_static_web_bundle(
     let blobs_dir = staging.path().join("blobs/sha256");
     fs::create_dir_all(&blobs_dir).context("create static web blob directory")?;
     for source in input_files {
+        guard()?;
         let relative = source
             .strip_prefix(built_output_root)
             .expect("collected paths are descendants")
@@ -113,12 +137,13 @@ pub fn produce_static_web_bundle(
         if total_bytes > MAX_TOTAL_SIZE {
             bail!("static web output exceeds {MAX_TOTAL_SIZE} bytes");
         }
-        let bytes = read_regular_file(&source)?;
+        let bytes = read_regular_file(&source, guard)?;
         if !blob_is_clean(&bytes, runtime_secret_canaries) {
             bail!("static web output failed the runtime secret canary scan: {relative}");
         }
         let hex_digest = format!("{:x}", Sha256::digest(&bytes));
         let digest = format!("sha256:{hex_digest}");
+        guard()?;
         let blob_path = blobs_dir.join(&hex_digest);
         if !blob_path.exists() {
             fs::write(&blob_path, &bytes)
@@ -184,6 +209,7 @@ pub fn produce_static_web_bundle(
     fs::write(staging.path().join("receipt.json"), &receipt_bytes)
         .context("write static web receipt")?;
 
+    guard()?;
     let bundle_root = destination_parent.join("static-web-bundle-v1");
     fs::rename(staging.path(), &bundle_root).with_context(|| {
         format!(
@@ -211,7 +237,9 @@ fn collect_files(
     output: &mut Vec<PathBuf>,
     traversal: &mut TraversalCounts,
     depth: usize,
+    guard: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
+    guard()?;
     if depth > MAX_RECURSION_DEPTH {
         bail!("static web output exceeds recursion depth {MAX_RECURSION_DEPTH}");
     }
@@ -221,6 +249,7 @@ fn collect_files(
         .with_context(|| format!("enumerate static web directory {}", current.display()))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        guard()?;
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -233,7 +262,7 @@ fn collect_files(
             if traversal.directories > MAX_DIRECTORY_COUNT {
                 bail!("static web output exceeds {MAX_DIRECTORY_COUNT} directories");
             }
-            collect_files(&path, output, traversal, depth + 1)?;
+            collect_files(&path, output, traversal, depth + 1, guard)?;
         } else if file_type.is_file() {
             if output.len() == MAX_FILE_COUNT {
                 bail!("static web output exceeds {MAX_FILE_COUNT} files");
@@ -249,12 +278,25 @@ fn collect_files(
     Ok(())
 }
 
-fn read_regular_file(path: &Path) -> Result<Vec<u8>> {
+fn read_regular_file(path: &Path, guard: &dyn Fn() -> Result<()>) -> Result<Vec<u8>> {
+    guard()?;
     let mut file =
         fs::File::open(path).with_context(|| format!("open static web file {}", path.display()))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .with_context(|| format!("read static web file {}", path.display()))?;
+    let mut buffer = [0u8; 65536];
+    loop {
+        guard()?;
+        let n = file
+            .read(&mut buffer)
+            .with_context(|| format!("read static web file {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(n) > MAX_FILE_SIZE as usize {
+            bail!("static web file exceeds size bound while reading");
+        }
+        bytes.extend_from_slice(&buffer[..n]);
+    }
     Ok(bytes)
 }
 

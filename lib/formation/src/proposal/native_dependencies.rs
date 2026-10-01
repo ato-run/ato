@@ -6,6 +6,48 @@ use super::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+/// The same canonical registered operations supply scheduler claims and the
+/// Runtime attestation. Tools are prebound requirements, never provisions.
+pub fn runtime_requirements(
+    d: &crate::authoring::BoundDerivation,
+) -> Vec<crate::search::Requirement> {
+    let mut facts = BTreeSet::new();
+    for step in &d.steps {
+        if step.protocol != "ato.process@1" || step.op != "exec" || step.argv.len() != 5 {
+            continue;
+        }
+        let schema = if step.argv[2] == include_str!("python-native-operation.py")
+            || step.argv[2] == include_str!("python-native-dependencies.py")
+        {
+            "ato.python-build-plan/1"
+        } else if step.argv[2] == include_str!("node-native-dependencies.cjs") {
+            "ato.npm-native-plan/1"
+        } else {
+            continue;
+        };
+        let Ok(plan) = serde_json::from_str::<Value>(&step.argv[4]) else {
+            continue;
+        };
+        if plan["schema"] != schema {
+            continue;
+        }
+        let Ok(tools) = serde_json::from_value::<Vec<RuntimeSelection>>(plan["toolchains"].clone())
+        else {
+            continue;
+        };
+        for tool in tools {
+            facts.insert(format!("toolchain.{}.{}", tool.name, tool.version));
+        }
+    }
+    facts
+        .into_iter()
+        .map(|fact| crate::search::Requirement {
+            fact,
+            one_of: Some(vec!["present".into()]),
+        })
+        .collect()
+}
+
 fn step(steps: &mut Vec<Value>, argv: Vec<String>, cwd: &str, network: &str) {
     steps.push(
         json!({"id":format!("native-{}",steps.len()),"use":"ato.process@1",
@@ -104,7 +146,7 @@ pub(super) fn compile_operation(
             let plan = json!({"schema":"ato.python-build-plan/1","python_version":proposal.runtime.version,"requirements":format!("/app/{path}"),
                 "requirements_sha256":requirements.digest,"root":root,"build_dependencies":build_dependencies,
                 "toolchains":tools(toolchains,authorization)?,"build_network":build_network(*network),
-                "lock_operation":include_str!("python-dependency-lock.py")});
+                "lock_operation":include_str!("python-lock-operation.py")});
             for (mode, phase) in [
                 ("check", "denied"),
                 ("build-dependencies", "scoped-dependencies"),
@@ -118,7 +160,7 @@ pub(super) fn compile_operation(
                     vec![
                         executable.into(),
                         "-c".into(),
-                        include_str!("python-native-dependencies.py").into(),
+                        include_str!("python-native-operation.py").into(),
                         mode.into(),
                         plan.to_string(),
                     ],
@@ -158,7 +200,7 @@ pub(super) fn compile_operation(
                 vec![
                     executable.into(),
                     "-c".into(),
-                    include_str!("python-native-dependencies.py").into(),
+                    include_str!("python-native-operation.py").into(),
                     "cleanup".into(),
                     plan.to_string(),
                 ],

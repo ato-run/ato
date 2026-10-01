@@ -112,6 +112,7 @@ impl SourceOciSandbox {
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) struct SourceOciRealizer<'a> {
+    pub variables: &'a [ato_runtime_attempt::variables::ResolvedVariable],
     pub planned: &'a PlannedCandidate,
     pub archive: &'a std::fs::File,
     pub artifact_root: &'a Path,
@@ -137,6 +138,15 @@ impl CandidateRealizer for SourceOciRealizer<'_> {
         _: &ato_formation::request::RuntimeProfile,
     ) -> Option<ato_formation::request::AttemptFailure> {
         let d = &self.planned.derivation;
+        if d.variable_bindings
+            .iter()
+            .any(|r| r.phase != ExecutionPhase::Runtime)
+        {
+            return refusal(
+                "unsupported_source_oci_variable_phase",
+                "OCI accepts Runtime grants only; image acquisition/build bindings are unavailable",
+            );
+        }
         if let Err(e) = d.requirements.within(&self.ticket.ceiling) {
             return refusal(e.0, "outside frozen exploration ceiling");
         }
@@ -179,10 +189,10 @@ impl CandidateRealizer for SourceOciRealizer<'_> {
                     "bound OCI image platform is unavailable on this Runtime",
                 );
             }
-            if !d.requirements.network.is_empty() || !d.variable_bindings.is_empty() {
+            if !d.requirements.network.is_empty() {
                 return refusal(
                     "unsupported_capability",
-                    "this image Runtime does not yet enforce runtime egress or variable bindings",
+                    "this image Runtime does not yet enforce runtime egress",
                 );
             }
             return None;
@@ -636,7 +646,20 @@ impl SourceOciRealizer<'_> {
                     facts.working_dir
                 },
                 workspace_mount_path: source_oci::SOURCE_OCI_WORKSPACE_MOUNT.into(),
-                environment: BTreeMap::new(),
+                environment: self
+                    .planned
+                    .plan
+                    .serving(d)
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .chain(self.variables.iter().map(|v| {
+                        (
+                            v.value.name().to_owned(),
+                            v.value.expose_for_spawn().to_owned(),
+                        )
+                    }))
+                    .collect(),
                 endpoints: vec![OciEndpoint {
                     host_port,
                     guest_port: d.ports[0].guest_port.context("OCI guest port missing")?,
@@ -793,8 +816,41 @@ fn source_oci_failure(e: source_oci::SourceOciError) -> RealizeFailure {
             resources: vec!["source-oci-builder".into()],
         }
     } else {
-        RealizeFailure::Execution(anyhow::anyhow!(e))
+        let failure = ato_formation::failure::FormationFailure::new(
+            e.code,
+            ato_formation::failure::FailureStage::Build,
+            "The isolated OCI operation failed; the Runtime retained its operator evidence.",
+        );
+        RealizeFailure::Execution(anyhow::anyhow!(failure).context(e))
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn oci_failure_keeps_typed_code_without_exposing_operator_detail() {
+    let failure = source_oci_failure(source_oci::SourceOciError {
+        code: "source_oci_build_failed",
+        detail: "private-path and secret-canary".into(),
+        cleanup: None,
+    });
+    let RealizeFailure::Execution(error) = failure else {
+        panic!("expected finished failure")
+    };
+    let public = ato_runtime_attempt::attempt::failure_of(&error);
+    assert_eq!(public.code, "source_oci_build_failed");
+    assert_eq!(public.stage, "build");
+    assert!(!public.message.contains("private-path"));
+    assert!(!public.message.contains("secret-canary"));
+    let failure = source_oci_failure(source_oci::SourceOciError {
+        code: "source_oci_build_failed",
+        detail: "build failure".into(),
+        cleanup: Some(Box::new(source_oci::SourceOciError {
+            code: "source_oci_cleanup_unconfirmed",
+            detail: "unconfirmed stop".into(),
+            cleanup: None,
+        })),
+    });
+    assert!(matches!(failure, RealizeFailure::Abandoned { .. }));
 }
 
 #[cfg(target_os = "linux")]
