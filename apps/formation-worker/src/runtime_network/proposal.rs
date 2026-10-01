@@ -34,6 +34,7 @@ pub(super) struct RequesterProposal {
     inspection_context: BTreeMap<String, SourceContextEntry>,
     source_root: PathBuf,
     available_variables: Vec<Value>,
+    runtime_capabilities: Vec<Value>,
     provider_identity: Option<ProviderIdentity>,
     observed_calls: BTreeMap<u64, ProviderCall>,
 }
@@ -540,6 +541,7 @@ impl Submission {
             inspection_context,
             source_root: inventory.root.clone(),
             available_variables: vec![],
+            runtime_capabilities: vec![],
             provider_identity: None,
             observed_calls: Default::default(),
         });
@@ -1371,12 +1373,22 @@ fn serve_proposal_inner(
     match producer {
         Invocation::Reasoning(producer) => {
             // Only owner metadata enters reasoning; redeemed values are never fetched here.
-            let metadata = client.variable_metadata()?;
+            let metadata = client.variable_metadata(
+                &submission.request.source.closure_ref,
+                &submission.request.search_id,
+            )?;
+            let runtime_capabilities =
+                client.runtime_capabilities(&submission.request.runtime_constraint)?;
             submission
                 .proposal_state
                 .as_mut()
                 .context("producer missing")?
                 .available_variables = metadata;
+            submission
+                .proposal_state
+                .as_mut()
+                .context("producer missing")?
+                .runtime_capabilities = runtime_capabilities;
             let answer = producer.run_round(
                 submission,
                 status,
