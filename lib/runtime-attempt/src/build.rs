@@ -745,6 +745,7 @@ fn run_step_with_variables(
     _budget: Duration,
     _facts: Option<&Path>,
     _refusal: Option<&NetworkRefusalObserver<'_>>,
+    _variables: &[crate::variables::ResolvedVariable],
 ) -> Result<Vec<u8>> {
     bail!("Formation build execution requires Unix process-group isolation")
 }
