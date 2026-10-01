@@ -680,6 +680,7 @@ fn browse(
 pub fn network_name(network: NetworkPolicy) -> &'static str {
     match network {
         NetworkPolicy::Denied => "denied",
+        NetworkPolicy::Scoped => "phase-scoped-connect",
         NetworkPolicy::DependencyResolution => "dependency-resolution",
     }
 }

@@ -1,0 +1,227 @@
+{
+  "schema": "ato.formation-offline-proposal-review/1",
+  "status": "not submitted; original Search exhausted; new acceptance authorization pending",
+  "input_evidence": "cells/057/producer.reasoning/r003_s001.input.json",
+  "input_sha256": "1dbc5a6ba1b986be800a1613422498b428d3d71aa0c01b2c2be0f3a95b8b09e9",
+  "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+  "source_identity": {
+    "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+    "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c"
+  },
+  "proposal": {
+    "schema": "ato.formation-proposal/1",
+    "proposals": [
+      {
+        "kind": "propose_derivation",
+        "operations": [
+          {
+            "operation": "execution_plan@1",
+            "plan": {
+              "runtime": {
+                "name": "node",
+                "version": "22.14.0"
+              },
+              "entrypoint": {
+                "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              },
+              "static_output": "build",
+              "argv": [],
+              "cwd": ".",
+              "dependencies": [
+                {
+                  "kind": "npm_ci",
+                  "manifest": {
+                    "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                    "file_id": "f_7ae45ad102eab3b6d7e7896a"
+                  },
+                  "lockfile": {
+                    "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac",
+                    "file_id": "f_053150b640a7ce75eff69d1a"
+                  },
+                  "production_only": false
+                }
+              ],
+              "build_scripts": [
+                "build"
+              ],
+              "requirements": {
+                "network": [],
+                "authority": [
+                  {
+                    "phase": "runtime",
+                    "protocol": "ato.http@1",
+                    "resource": "app.http",
+                    "operation": "bind"
+                  }
+                ]
+              },
+              "basis": [
+                {
+                  "source": {
+                    "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                    "file_id": "f_7ae45ad102eab3b6d7e7896a"
+                  },
+                  "reason": "Recorded package.json declares source-owned build as gulp clean-build and start as sirv build; devDependencies provide the build toolchain."
+                },
+                {
+                  "source": {
+                    "digest": "sha256:ac5b4f38788164eab74cd7d527b2aeb8b4c5da80580204b953f6853572d6c664",
+                    "file_id": "f_25789e3ba4c2adf4a6899626"
+                  },
+                  "reason": "Recorded gulpfile.js writes HTML and assets to build. Serve that output with the existing static adapter; do not run a browser worker as a Node HTTP entrypoint."
+                }
+              ],
+              "unknowns": [
+                "The frozen acceptance goal requires a closed dependency-egress probe before deriving any dependency-phase network grants from actual refusal evidence.",
+                "No source process has been started manually. This proposal is offline review material; the original Search is exhausted and cannot execute it."
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "manual_source_startup": false,
+  "fresh_receipt": null,
+  "success": false,
+  "offline_compilation": {
+    "source_pin": "688eb4a6484bf8e0237c6265a64aa0d590b16488",
+    "output_sha256": "6171b02823f5e83358951cfdb9a12fae09708a8ad874db5acbdd8d9ad7bc14c6",
+    "result": {
+      "admitted_to_runtime": false,
+      "compiled": [
+        {
+          "candidate": {
+            "derivation_ref": "sha256:33e70161a9b0819520312531e78b1e379538ad21f81906b34707b732d7ee151d",
+            "effects": "pure",
+            "materialization": {
+              "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+              "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+              "kind": "source"
+            },
+            "provisions": [
+              "toolchain.node.22.14.0"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "canonical": {
+            "base_contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+            "capsule_toml": "schema = \"ato.capsule/1\"\nstate = []\n\n[[contract.require]]\nid = \"root\"\nmethod = \"GET\"\npath = \"/\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\ninput = \"workspace\"\nuse = \"ato.contract.workspace@1\"\n\n[contract.require.expect]\ndigest = \"sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c\"\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/node/22.14.0/bin/node\", \"--version\"]\ncwd = \".\"\nid = \"check-toolchain\"\nnetwork = \"scoped-dependencies\"\nop = \"exec\"\nuse = \"ato.process@1\"\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/node/22.14.0/bin/npm\", \"ci\", \"--ignore-scripts\", \"--no-audit\", \"--no-fund\"]\ncwd = \".\"\nid = \"dependencies-1\"\nnetwork = \"scoped-dependencies\"\nop = \"exec\"\nuse = \"ato.process@1\"\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/node/22.14.0/bin/npm\", \"run\", \"build\"]\ncwd = \".\"\nid = \"build-2\"\nnetwork = \"scoped-build\"\nop = \"exec\"\nuse = \"ato.process@1\"\n\n[[derive.step]]\ncwd = \".\"\nentry = \"index.html\"\nid = \"app\"\nop = \"serve\"\nroot = \"build\"\nsource = \"workspace\"\nspa_fallback = false\nuse = \"ato.browser@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[requirements.authority]]\noperation = \"bind\"\nphase = \"runtime\"\nprotocol = \"ato.http@1\"\nresource = \"app.http\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "requirements": {
+                "authority": [
+                  {
+                    "operation": "bind",
+                    "phase": "runtime",
+                    "protocol": "ato.http@1",
+                    "resource": "app.http"
+                  }
+                ]
+              },
+              "runtimes": {
+                "node": "22.14.0"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/node",
+                    "--version"
+                  ],
+                  "cwd": ".",
+                  "id": "check-toolchain",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "ci",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund"
+                  ],
+                  "cwd": ".",
+                  "id": "dependencies-1",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "run",
+                    "build"
+                  ],
+                  "cwd": ".",
+                  "id": "build-2",
+                  "network": "scoped-build",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "cwd": ".",
+                  "entry": "index.html",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.browser@1",
+                  "root": "build",
+                  "source": "workspace",
+                  "spa_fallback": false
+                }
+              ]
+            },
+            "derivation_ref": "sha256:33e70161a9b0819520312531e78b1e379538ad21f81906b34707b732d7ee151d"
+          }
+        }
+      ],
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "fresh_receipt": null,
+      "note": "Pure existing Ato validator/compiler. The exhausted Search was not reopened or changed.",
+      "outcomes": [
+        {
+          "proposal_id": "proposal-content:sha256:17dedc03ffc0850f56c67a4a8621c79d21a28d259301ee86e7792e4a076582b8",
+          "validation": "accepted"
+        }
+      ],
+      "schema": "ato.formation-offline-canonical-review/1",
+      "source_programs_executed": 0,
+      "submitted": false,
+      "typed_K_pass": false
+    }
+  }
+}
