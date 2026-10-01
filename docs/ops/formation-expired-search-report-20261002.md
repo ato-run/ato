@@ -18,7 +18,12 @@ never displays an expired input as resumable, and if only the requester wait
 expires, labels that separately without inventing a durable settlement or
 resolving UNKNOWN. No retry, round, budget or Search expiry is reset.
 
-CLI clippy with warnings denied and formatting pass. Real reporting regression
-on the preserved fault-test Search remains to be verified with the frozen new
-binary. This is independent from real application acceptance. No deployment,
-remote migration or ordinary Run permission.
+CLI clippy with warnings denied, formatting and Linux binary build pass. The
+frozen bbd36877 CLI on the same preserved Search now prints the authenticated
+deadline_exceeded result: one inference, one Runtime attempt, original deadline
+22:15:48.952Z on October 1 UTC, no new inference or execution after expiry.
+No byte reservations remain. Actual API/Runtime pins remain fe541c31/e02d4ca3
+for this existing Search; this is a reporting regression, not new application
+acceptance of the rebuilt authority. Result SHA-256:
+cb3550ca2ec9b97bb5609be02d5be6d4803d944d98a367b4f1d7f29df940cb14.
+No deployment, remote migration or ordinary Run permission.
