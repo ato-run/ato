@@ -1,4 +1,4 @@
-//! Acceptance-side dollar reservation journal, separate from Formation budgets.
+//! Durable provider dollar reservation journal, separate from execution budgets.
 //! A reservation is consumed before credentials are read. Never refunded on
 //! timeout/unknown usage. Incomplete writes fail closed; no implicit reset.
 use anyhow::{Result, ensure};
@@ -35,11 +35,11 @@ impl BudgetPlan {
     }
     pub fn validate(&self) -> Result<u64> {
         ensure!(
-            (1..=6).contains(&self.max_calls)
+            (1..=64).contains(&self.max_calls)
                 && self.input_token_cap > 0
-                && (1..=2048).contains(&self.output_token_cap)
+                && (1..=if self.output_price == 0 { 65536 } else { 2048 })
+                    .contains(&self.output_token_cap)
                 && self.input_price > 0
-                && self.output_price > 0
                 && self.ceiling_usd_micros <= AUTHORIZED_USD_MICROS,
             "invalid spend plan"
         );
@@ -101,7 +101,27 @@ impl CallBudget {
         self.transact(Some(JournalEvent::Response { response }))
             .map(|_| ())
     }
+    /// Final accounting of a provider call whose usage cannot be established.
+    /// Charge the full reservation, halt this search's provider channel and
+    /// never retry it. This does not resolve workload effect UNKNOWN.
+    pub fn charge_unknown(&self, cell: &str) -> Result<()> {
+        self.transact(Some(JournalEvent::ChargedUnknown {
+            charged_unknown: cell.into(),
+        }))
+        .map(|_| ())
+    }
     /// Controllers consume this validated view, never reinterpret journal JSON.
+    pub fn record_transport(&self, transport: TransportEvidence) -> Result<()> {
+        self.transact(Some(JournalEvent::Transport { transport }))
+            .map(|_| ())
+    }
+    pub fn settle_retry(&self, cell: &str, not_sent: bool) -> Result<()> {
+        self.transact(Some(JournalEvent::RetryCharge {
+            retry_charge: cell.into(),
+            not_sent,
+        }))
+        .map(|_| ())
+    }
     pub fn snapshot(&self) -> Result<BudgetSnapshot> {
         self.transact(None)
     }
@@ -116,7 +136,7 @@ impl CallBudget {
                 .request
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("historical reservation has no request evidence"))?,
-            response_resolved: saved.response.is_some(),
+            response_resolved: saved.is_settled(),
         })
     }
     fn transact(&self, event: Option<JournalEvent>) -> Result<BudgetSnapshot> {
@@ -156,7 +176,8 @@ impl CallBudget {
     }
 }
 
-/// Lengths only, never request/source bodies or credential/header material.
+/// Exact transmitted request digests plus optional safe projection metadata.
+/// Never persist source text, logs, environment values or credential headers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestEvidence {
@@ -167,16 +188,70 @@ pub struct RequestEvidence {
     pub timeout_ms: u64,
     pub proposal_request_bytes: u64,
     pub provider_body_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmitted_context: Option<TransmittedContextEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransmittedContextEvidence {
+    pub source_entries: Vec<TransmittedSourceEvidence>,
+    pub failure_codes: Vec<String>,
+    pub previous_derivation_refs: Vec<String>,
+    pub proposal_diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransmittedSourceEvidence {
+    pub logical_id: String,
+    pub content_sha256: String,
+    pub text_bytes: u64,
+    pub truncated: bool,
+}
+
+impl TransmittedContextEvidence {
+    pub(super) fn from_request(request: &ato_formation::proposal::ProposalRequestV2) -> Self {
+        let context = request.exploration_context.as_ref();
+        Self {
+            source_entries: request
+                .source_context
+                .iter()
+                .map(|e| TransmittedSourceEvidence {
+                    logical_id: e.logical_id.clone(),
+                    content_sha256: e.content_sha256.clone(),
+                    text_bytes: e.text.len() as u64,
+                    truncated: e.truncated,
+                })
+                .collect(),
+            failure_codes: context
+                .map(|c| c.failures.iter().map(|f| f.code.clone()).collect())
+                .unwrap_or_default(),
+            previous_derivation_refs: context
+                .map(|c| {
+                    c.previous_derivations
+                        .iter()
+                        .filter_map(|d| d.derivation_ref().ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            proposal_diagnostics: context
+                .map(|c| c.proposal_diagnostics.clone())
+                .unwrap_or_default(),
+        }
+    }
 }
 impl RequestEvidence {
     fn validate(&self) -> Result<()> {
-        for hash in [&self.proposal_request_sha256, &self.provider_body_sha256] {
-            ensure!(
-                hash.strip_prefix("sha256:").is_some_and(|s| s.len() == 64
+        let valid_digest = |hash: &str| {
+            hash.strip_prefix("sha256:").is_some_and(|s| {
+                s.len() == 64
                     && s.bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-                "invalid request digest"
-            );
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        };
+        for hash in [&self.proposal_request_sha256, &self.provider_body_sha256] {
+            ensure!(valid_digest(hash), "invalid request digest");
         }
         ensure!(
             (1..=30_000).contains(&self.timeout_ms)
@@ -184,6 +259,39 @@ impl RequestEvidence {
                 && self.provider_body_bytes > 0,
             "invalid request evidence"
         );
+        if let Some(context) = &self.transmitted_context {
+            let identifier = |s: &str| {
+                !s.is_empty()
+                    && s.len() <= 96
+                    && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            };
+            ensure!(
+                context.source_entries.len() <= 2048
+                    && context
+                        .source_entries
+                        .iter()
+                        .all(|e| identifier(&e.logical_id)
+                            && valid_digest(&e.content_sha256)
+                            && e.text_bytes
+                                <= ato_formation::proposal::MAX_SOURCE_ENTRY_BYTES as u64)
+                    && context
+                        .source_entries
+                        .iter()
+                        .map(|e| e.text_bytes)
+                        .sum::<u64>()
+                        <= ato_formation::proposal::MAX_SOURCE_BYTES as u64
+                    && context.failure_codes.len() <= 4
+                    && context.failure_codes.iter().all(|s| identifier(s))
+                    && context.previous_derivation_refs.len() <= 3
+                    && context
+                        .previous_derivation_refs
+                        .iter()
+                        .all(|s| valid_digest(s))
+                    && context.proposal_diagnostics.len() <= 4
+                    && context.proposal_diagnostics.iter().all(|s| identifier(s)),
+                "invalid transmitted context evidence"
+            );
+        }
         Ok(())
     }
 }
@@ -200,9 +308,18 @@ pub struct BudgetSnapshot {
 }
 #[derive(Debug, Serialize)]
 pub struct CallEvidence {
+    pub transport: Option<TransportEvidence>,
+    pub not_sent: bool,
     /// None only for a historical Cell reservation. Not acceptable for D3 v2.
     pub request: Option<RequestEvidence>,
     pub response: Option<ResponseEvidence>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub charged_unknown: bool,
+}
+impl CallEvidence {
+    pub fn is_settled(&self) -> bool {
+        self.response.is_some() || self.charged_unknown || self.not_sent
+    }
 }
 impl BudgetSnapshot {
     fn reserve(
@@ -213,7 +330,7 @@ impl BudgetSnapshot {
     ) -> Result<()> {
         ensure!(!self.stopped, "provider protocol violation: run stopped");
         ensure!(
-            self.cells.values().all(|c| c.response.is_some()),
+            self.cells.values().all(CallEvidence::is_settled),
             "prior call response unresolved"
         );
         ensure!(
@@ -233,6 +350,9 @@ impl BudgetSnapshot {
             CallEvidence {
                 request,
                 response: None,
+                charged_unknown: false,
+                transport: None,
+                not_sent: false,
             },
         );
         Ok(())
@@ -249,8 +369,41 @@ impl BudgetSnapshot {
                 request.validate()?;
                 self.reserve(request.cell.clone(), Some(request), plan)?;
             }
+            JournalEvent::Transport { transport } => {
+                let call = self
+                    .cells
+                    .get_mut(&transport.cell)
+                    .ok_or_else(|| anyhow::anyhow!("provider reservation missing"))?;
+                ensure!(call.transport.is_none(), "provider transport write once");
+                call.transport = Some(transport);
+            }
+            JournalEvent::RetryCharge {
+                retry_charge,
+                not_sent,
+            } => {
+                let call = self
+                    .cells
+                    .get_mut(&retry_charge)
+                    .ok_or_else(|| anyhow::anyhow!("provider reservation missing"))?;
+                ensure!(!call.is_settled(), "provider accounting already settled");
+                ensure!(
+                    !not_sent || call.transport.as_ref().is_some_and(|t| !t.possibly_sent),
+                    "unproved unsent call"
+                );
+                call.not_sent = not_sent;
+                call.charged_unknown = !not_sent;
+            }
             JournalEvent::Halt { halt } => {
                 ensure!(halt, "invalid halt");
+                self.stopped = true;
+            }
+            JournalEvent::ChargedUnknown { charged_unknown } => {
+                let call = self
+                    .cells
+                    .get_mut(&charged_unknown)
+                    .ok_or_else(|| anyhow::anyhow!("provider reservation missing"))?;
+                ensure!(!call.is_settled(), "provider accounting already settled");
+                call.charged_unknown = true;
                 self.stopped = true;
             }
             JournalEvent::Response { response } => {
@@ -264,7 +417,7 @@ impl BudgetSnapshot {
                     historical_read || call.request.is_some(),
                     "response without request evidence"
                 );
-                ensure!(call.response.is_none(), "duplicate provider response");
+                ensure!(!call.is_settled(), "duplicate provider response");
                 self.stopped |= !response.within(plan);
                 call.response = Some(response);
             }
@@ -302,8 +455,35 @@ impl ResponseEvidence {
 #[derive(Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 enum JournalEvent {
+    Transport {
+        transport: TransportEvidence,
+    },
+    RetryCharge {
+        retry_charge: String,
+        not_sent: bool,
+    },
     Cell(String),
-    Request { request: RequestEvidence },
-    Halt { halt: bool },
-    Response { response: ResponseEvidence },
+    Request {
+        request: RequestEvidence,
+    },
+    Halt {
+        halt: bool,
+    },
+    ChargedUnknown {
+        charged_unknown: String,
+    },
+    Response {
+        response: ResponseEvidence,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportEvidence {
+    pub cell: String,
+    pub possibly_sent: bool,
+    pub http_status: Option<u16>,
+    pub retry_after_ms: u64,
+    pub recorded_at_ms: u64,
+    pub error_class: super::provenance::ErrorClass,
 }

@@ -7,7 +7,7 @@
 //! not another slot's, not another Runner's, not a container Ato did not make.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -122,7 +122,7 @@ fn filters(runner_id: &str, slot_id: &str) -> Vec<String> {
 }
 
 fn list(
-    docker: &Path,
+    docker: &crate::DockerClient,
     mut arguments: Vec<String>,
     name_field: &str,
     runner_id: &str,
@@ -191,14 +191,14 @@ impl OwnedResourceScanner {
     pub fn scan(&self) -> Result<OwnedResources> {
         Ok(OwnedResources {
             containers: list(
-                &self.docker,
+                &crate::DockerClient::ambient(self.docker.clone()),
                 vec!["ps".to_owned(), "--all".to_owned(), "--no-trunc".to_owned()],
                 ".Names",
                 &self.runner_id,
                 &self.slot_id,
             )?,
             networks: list(
-                &self.docker,
+                &crate::DockerClient::ambient(self.docker.clone()),
                 vec![
                     "network".to_owned(),
                     "ls".to_owned(),
@@ -218,11 +218,18 @@ impl OwnedResourceScanner {
                 reason: "refusing to stop a container this slot does not own".to_owned(),
             };
         }
-        let outcome = stop_container(&self.docker, &container.id, budget);
+        let outcome = stop_container(
+            &crate::DockerClient::ambient(self.docker.clone()),
+            &container.id,
+            budget,
+        );
         if outcome.is_confirmed() {
             // A stopped container that could not be removed writes nothing;
             // it is left for the next scan rather than force-removed.
-            let _ = remove_stopped_container(&self.docker, &container.id);
+            let _ = remove_stopped_container(
+                &crate::DockerClient::ambient(self.docker.clone()),
+                &container.id,
+            );
         }
         outcome
     }
@@ -233,7 +240,10 @@ impl OwnedResourceScanner {
             owned_by(&network.labels, &self.runner_id, &self.slot_id),
             "refusing to remove a network this slot does not own"
         );
-        crate::remove_network(&self.docker, &network.id)
+        crate::remove_network(
+            &crate::DockerClient::ambient(self.docker.clone()),
+            &network.id,
+        )
     }
 }
 

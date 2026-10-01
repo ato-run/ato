@@ -47,6 +47,7 @@ fn main() -> Result<()> {
     let workspace_facts = inventory(&tree);
     let workspace = workspace_facts.as_ref().ok().and_then(|f| f.authorization());
     let auth = if entries.is_empty() && workspace.is_none() { None } else { Some(ProposalAuthorization {
+        execution_plan: None,
         modifiable_derivation_refs:vec![],
         source_domain:SourceDomain { entrypoints:entries, modules:BTreeMap::new() },
         python_http_process:(total > 0).then(|| PythonHttpProcess {

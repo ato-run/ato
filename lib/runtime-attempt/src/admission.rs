@@ -11,6 +11,7 @@
 
 use ato_formation::authoring::EffectClass;
 use ato_formation::request::AttemptFailure;
+use ato_formation::requirements::ExecutionRequirements;
 
 use crate::browser_verify::BrowserVerification;
 use crate::spec::{AttemptSpec, CandidateShape};
@@ -44,6 +45,12 @@ pub enum EffectAuthorization<'a> {
     /// confirmation of effects the D declares beyond the disposable ones,
     /// which still need a confirmation this request does not carry.
     UserInvoked { derivation_ref: &'a str },
+    /// Search-scoped grant issued from an external frozen ceiling. It is not
+    /// a user Run authorization and cannot be carried by a retained artifact.
+    Exploration {
+        derivation_ref: &'a str,
+        grant: &'a ExecutionRequirements,
+    },
 }
 
 impl EffectAuthorization<'_> {
@@ -52,6 +59,7 @@ impl EffectAuthorization<'_> {
         match self {
             Self::Unattended => "unattended",
             Self::UserInvoked { .. } => "user_invoked",
+            Self::Exploration { .. } => "exploration",
         }
     }
 }
@@ -70,6 +78,32 @@ pub fn admit(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
 ) -> Option<AttemptFailure> {
+    match authorization {
+        EffectAuthorization::Exploration {
+            derivation_ref,
+            grant,
+        } => {
+            if derivation_ref != spec.derivation_ref {
+                return refused(
+                    "authorization_mismatch",
+                    "exploration grant names another D",
+                );
+            }
+            if let Err(error) = spec.derivation.requirements.within(grant) {
+                return refused(
+                    error.0,
+                    "D requires conditions outside its search-scoped grant",
+                );
+            }
+        }
+        _ if !spec.derivation.requirements.is_empty() => {
+            return refused(
+                "execution_authority_required",
+                "requirements in D do not grant normal execution; risk assessment and authorization for this D digest are required",
+            );
+        }
+        _ => {}
+    }
     if let EffectAuthorization::UserInvoked { derivation_ref } = authorization
         && derivation_ref != spec.derivation_ref
     {

@@ -195,6 +195,7 @@ fn replay_case(kind: &str) {
     // Corruption is rejected before any launcher sees a candidate. Merely
     // holding the previous PASS receipt cannot replace current observation.
     let check = RetainedCandidateRealizer {
+        exploration: None,
         descriptor: &descriptor,
         archive: &path,
         expected_contract_ref: &descriptor.contract_ref,
@@ -234,6 +235,7 @@ fn replay_case(kind: &str) {
             interrupt: None,
         },
         &RetainedCandidateRealizer {
+            exploration: None,
             descriptor: &descriptor,
             archive: &path,
             expected_contract_ref: &descriptor.contract_ref,

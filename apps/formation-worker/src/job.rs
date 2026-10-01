@@ -712,6 +712,7 @@ fn compose_result(
             "network_policy": match network {
                 NetworkPolicy::Denied => "denied",
                 NetworkPolicy::DependencyResolution => "dependency_resolution",
+                NetworkPolicy::Scoped => "phase_scoped_connect",
             },
             // What was ACTUALLY in force, so a later reader can tell whether
             // this artifact was built under isolation.

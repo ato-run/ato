@@ -1,0 +1,453 @@
+{
+  "schema": "ato.formation-exploration-repair-pilot-plan/1",
+  "wave": "separate prior-live-D actual repair replay gate",
+  "frozen_at": "2026-09-30T18:00:14.173895+00:00",
+  "ato_pin": "fb6f6bb76d13d0bcef1d64346b623cde0f6b255c",
+  "ato_api_pin": "b20bba7ab9daf282f8d5b1e22affe549ad3492a3",
+  "authority_source_pin": "fb6f6bb76d13d0bcef1d64346b623cde0f6b255c",
+  "baseline": {
+    "ledger": "docs/ops/formation-coverage-100.json",
+    "sha256": "560302a51a04fc08d9868a8dfb84bc2ac58666e14a0ee3533f181e502c98d45c",
+    "typed_K_pass": 7,
+    "pin": "e494e9375cf1151fc2884d545047dfbdad52c2cc"
+  },
+  "entry_conditions": {
+    "K": "same source-bound StaticFiles K template; 81 explicit K supplied by prior user authorization",
+    "known_D": "same-K losslessly representable known authoring first; legacy retained regression checked separately",
+    "cohort_changed": false,
+    "conditions_changed": true,
+    "network": "legacy denied; phase-scoped explicit D requirements within frozen external sandbox ceiling",
+    "approval": "K reached awaiting assessment; no normal execution permission, publication or deployment",
+    "same_source_and_K_as_prior_arm": true,
+    "prior_D_replay_is_a_separate_seeded_repair_gate": true,
+    "automatic_zero_known_D_cases": [
+      2,
+      57,
+      69
+    ]
+  },
+  "preflight_config": {
+    "exploration": {
+      "formation": {
+        "max_rounds": 3
+      },
+      "ceiling": {
+        "network": [
+          {
+            "phase": "dependencies",
+            "host": "registry.npmjs.org",
+            "port": 443
+          },
+          {
+            "phase": "dependencies",
+            "host": "pypi.org",
+            "port": 443
+          },
+          {
+            "phase": "dependencies",
+            "host": "files.pythonhosted.org",
+            "port": 443
+          },
+          {
+            "phase": "dependencies",
+            "host": "nodejs.org",
+            "port": 443
+          },
+          {
+            "phase": "build",
+            "host": "registry.npmjs.org",
+            "port": 443
+          },
+          {
+            "phase": "build",
+            "host": "pypi.org",
+            "port": 443
+          },
+          {
+            "phase": "build",
+            "host": "files.pythonhosted.org",
+            "port": 443
+          },
+          {
+            "phase": "build",
+            "host": "nodejs.org",
+            "port": 443
+          }
+        ],
+        "authority": [
+          {
+            "phase": "runtime",
+            "protocol": "ato.http@1",
+            "resource": "app.http",
+            "operation": "bind"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.data",
+            "operation": "read"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.data",
+            "operation": "write"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.data",
+            "operation": "create"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.state",
+            "operation": "read"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.state",
+            "operation": "write"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.state",
+            "operation": "create"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.cache",
+            "operation": "read"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.cache",
+            "operation": "write"
+          },
+          {
+            "phase": "runtime",
+            "protocol": "ato.state.filesystem@1",
+            "resource": "app.cache",
+            "operation": "create"
+          }
+        ]
+      },
+      "max_provider_calls": 4,
+      "max_inspections": 4,
+      "max_provider_cost_usd_micros": 32246,
+      "max_provider_input_tokens": 139264,
+      "max_provider_output_tokens": 71680,
+      "max_network_transfer_bytes": 536870912,
+      "max_network_transfer_bytes_per_attempt": 134217728
+    },
+    "toolchains": {
+      "python": "3.12.7",
+      "node": "22.14.0",
+      "npm": "10.9.2",
+      "oci": "1.0.0"
+    },
+    "policy": {
+      "network": "denied",
+      "allow_managed": false,
+      "decision": {
+        "provider": "requester",
+        "max_decisions": 1,
+        "decision_timeout_ms": 32000
+      }
+    },
+    "budget": {
+      "max_attempts": 4,
+      "mode": "first_pass",
+      "deadline_seconds": 900,
+      "max_transfer_bytes": 1073741824,
+      "max_expanded_bytes": 2147483648,
+      "max_stored_bytes": 1073741824
+    }
+  },
+  "sandbox": {
+    "ceiling": {
+      "network": [
+        {
+          "phase": "dependencies",
+          "host": "registry.npmjs.org",
+          "port": 443
+        },
+        {
+          "phase": "dependencies",
+          "host": "pypi.org",
+          "port": 443
+        },
+        {
+          "phase": "dependencies",
+          "host": "files.pythonhosted.org",
+          "port": 443
+        },
+        {
+          "phase": "dependencies",
+          "host": "nodejs.org",
+          "port": 443
+        },
+        {
+          "phase": "build",
+          "host": "registry.npmjs.org",
+          "port": 443
+        },
+        {
+          "phase": "build",
+          "host": "pypi.org",
+          "port": 443
+        },
+        {
+          "phase": "build",
+          "host": "files.pythonhosted.org",
+          "port": 443
+        },
+        {
+          "phase": "build",
+          "host": "nodejs.org",
+          "port": 443
+        }
+      ],
+      "authority": [
+        {
+          "phase": "runtime",
+          "protocol": "ato.http@1",
+          "resource": "app.http",
+          "operation": "bind"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.data",
+          "operation": "read"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.data",
+          "operation": "write"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.data",
+          "operation": "create"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.state",
+          "operation": "read"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.state",
+          "operation": "write"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.state",
+          "operation": "create"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.cache",
+          "operation": "read"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.cache",
+          "operation": "write"
+        },
+        {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "app.cache",
+          "operation": "create"
+        }
+      ]
+    },
+    "max_network_transfer_bytes_per_attempt": 134217728
+  },
+  "producer_budget": {
+    "max_calls": 3,
+    "input_token_cap": 24576,
+    "output_token_cap": 2048,
+    "input_price": 300000,
+    "output_price": 1200000,
+    "ceiling_usd_micros": 29493
+  },
+  "producer_config": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "endpoint": "https://api.deepseek.com",
+    "prompt_version": "ato.formation-candidate-producer-prompt/4",
+    "max_output_tokens": 2048,
+    "timeout_ms": 30000,
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "decision_config": {
+    "model": "jev-1.13.0",
+    "timeout_ms": 30000,
+    "credential_environment": "ATO_DECISION_JEV_API_KEY",
+    "budget": {
+      "max_calls": 1,
+      "input_token_cap": 65536,
+      "output_token_cap": 65536,
+      "input_price": 42000,
+      "output_price": 0,
+      "ceiling_usd_micros": 2753
+    }
+  },
+  "prompt_sha256": "993454556653605059c759e2bcf273b2cf3fb4c6157f5001565c7b7d042ad5c5",
+  "pricing_snapshots": {
+    "deepseek": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "jev": "https://docs.typesafe.ai/models",
+    "cache_miss_peak_prices": true,
+    "verified_at": "2026-09-30"
+  },
+  "model_budget": {
+    "remaining_before_pilot_usd_micros": 722202,
+    "max_candidate_producer_calls": 12,
+    "max_decision_provider_calls": 4,
+    "per_CP_reservation": 9831,
+    "per_DP_reservation": 2753,
+    "max_requester_invocations": 4,
+    "maximum_cases": 4,
+    "maximum_unique_apps": 3
+  },
+  "maximum_reservation_usd_micros": 128984,
+  "small_gate": null,
+  "api": "http://127.0.0.1:28962",
+  "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-build/receiver",
+  "api_node_modules": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-api/node_modules",
+  "coordinator_script": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-measurement/scripts/acceptance/proposal/coordinator.mjs",
+  "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-code/scripts/acceptance/coverage/exploration-credential-exec.py",
+  "binaries": {
+    "ato": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-build/bin/ato",
+      "sha256": "35ed6b97725bbb1bcd13b482c1f8033cf46228c0468fab87c3fde8e01154154d"
+    },
+    "worker": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-build/bin/worker",
+      "sha256": "22ce5f77697e5903b923038b7a656e5c5fe23126ae3fa2751c7933722007d3b4"
+    },
+    "preflight": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-repair-build/bin/preflight",
+      "sha256": "5fc030c8a87e4a97970ed2dcecc15baf040d8433e43b1b48f957c0b620648986"
+    }
+  },
+  "receiver_hashes": {
+    "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
+    "schema.sql": "aba341217e9b5933bac894e20329f76823ed7dad4d9069fe96f2b5b641f338f0",
+    "receipt_authority.wasm": "7caa19f4f3987d345c3f8d713f4e3662b10c099cb801e1ad2d2dffb34216d7da",
+    "worker.js": "555df791a82e09c33d6200702d9603b0a2cc658c6e93a79a049a56510aed36bd",
+    "receiver-pin.json": "80939bbe813c5446699544692df2a1969bccb564e646167bdadfeb97ae59ee1c",
+    "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
+    "schema-baseline.sql": "a941408a62e7fb6cdc03c83a14240952ff5e0753778f756313c16367185ef6e8",
+    "authority-provenance.json": "8d3f5be90dbd26df9ec535771b730222c698889ddfaf927e1f5512a2fd211aeb",
+    "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+    "schema-baseline.json": "c78d3109d741d6e3fce9babd86e026fec07d7c973adc24488a8a6e6518d7f1b8"
+  },
+  "host": {
+    "OS": "Linux-6.17.0-1016-oracle-aarch64-with-glibc2.39",
+    "arch": "aarch64",
+    "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "disk_free_bytes": 88843427840,
+    "recorded_at": "2026-09-30T12:47:59.414847+00:00",
+    "runtime_profile": "bwrap+Landlock; isolated loopback bridge; phase HTTPS broker; exact provisioned Python3.12.7/Node22.14.0",
+    "toolchains_verified": {
+      "npm": "10.9.2 from Node22.14.0 distribution"
+    }
+  },
+  "classification": {
+    "zero_cases": "direct first-generation PASS vs generated failure/repair PASS vs specific failure",
+    "replay": "prior generated failed D is actually replayed; do not claim zero-known-D or automatic cohort for this case",
+    "functional": "not measured",
+    "progress": "transmitted per-entry digest,bytes,truncation and execution fields"
+  },
+  "constraints": {
+    "inherited": [
+      "no production credentials/resources",
+      "no shell/source patch/Dockerfile rewrite",
+      "no K changes",
+      "no permission ceiling expansion",
+      "no deploy or migration",
+      "1421 untouched",
+      "old ledgers preserved",
+      "no prompt changes after application results",
+      "no generic external-effect UNKNOWN retry"
+    ],
+    "rounds_unchanged": true,
+    "model_unchanged": true,
+    "ceiling_unchanged": true,
+    "source_rewrite": false
+  },
+  "applications": [
+    {
+      "index": 57,
+      "name": "SVGOMG",
+      "repo": "https://github.com/jakearchibald/svgomg",
+      "ref": "f925656d40a507c512bf95ee14ad16445a4ad3ed",
+      "archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+      "archive_bytes": 622928,
+      "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/057.tar.gz",
+      "license": "MIT",
+      "license_file": "LICENSE.md",
+      "license_sha256": "fc238e99233704853d397eb25d538edfd5f2ddb2ad86d903bb33af99753897bb",
+      "primary_language": "JavaScript",
+      "broad_source_shape": "frontend-spa",
+      "monorepo": false,
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "baseline_terminal": "network_denied",
+      "baseline_typed_K_pass": false,
+      "explicit_K_newly_supplied": false,
+      "gate_routes": [
+        "/home/ubuntu/formation-foundation/.tmp/exploration-repair-build/svgomg-prior-live-D.toml"
+      ],
+      "prior_failure_replay": {
+        "capsule_toml_sha256": "fd72d67ca17a862a232924c14ed4349ca05bfa72f077d49c73ad0df9360da6b5",
+        "canonical_D_ref": "sha256:257d10b9e0a8643f53ed5cafed8416b1ddb77fb65e832c2433f6c9a5e5b10a29",
+        "original_live_proposal": "docs/ops/formation-exploration-100.json app57 round1",
+        "previous_failure": "build exit127 gulp not found",
+        "original_status_sha256": "0953dd75df94e4b662f3ab5059a42e50e8934cd49bc14135b84ed870c36459de"
+      }
+    }
+  ],
+  "credential_binding": {
+    "source": "ato-api/.dev.vars; authorized provider keys only",
+    "requester_variables": {
+      "DEEPSEEK_API_KEY": "DEEPSEEK_API_KEY",
+      "JEV_API_KEY": "ATO_DECISION_JEV_API_KEY"
+    },
+    "credential_values_saved": false
+  },
+  "accounting_roots": [
+    "/home/ubuntu/formation-foundation/.tmp/exploration-repair-zero",
+    "/home/ubuntu/formation-foundation/.tmp/exploration-repair-replay"
+  ],
+  "live_wave": "not_started",
+  "source_preflight_timeout_seconds": 600,
+  "build_provenance": {
+    "wasm_sha256": "7caa19f4f3987d345c3f8d713f4e3662b10c099cb801e1ad2d2dffb34216d7da",
+    "API_JS_source_pin": "b20bba7ab9daf282f8d5b1e22affe549ad3492a3",
+    "authority_WASM_source_pin": "fb6f6bb76d13d0bcef1d64346b623cde0f6b255c",
+    "prior_authority_source_pin": "eb73dff36d15a829e8358d310dbb4106562b344d"
+  },
+  "host_resource_state": {
+    "disk": "Filesystem        1B-blocks         Used   Available Use% Mounted on\n/dev/sda1      310911414272 227369410560 83525226496  74% /\n",
+    "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "kernel": "Linux 6.17.0-1016-oracle aarch64"
+  }
+}

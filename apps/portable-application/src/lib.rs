@@ -940,6 +940,8 @@ pub fn build_multi_derivation_bundle(
     let static_draft = AuthoringDraft {
         contract: process_draft.contract.clone(),
         derivation: DerivationDraft {
+            variable_bindings: vec![],
+            requirements: Default::default(),
             inputs: vec![input.clone()],
             runtimes: Vec::new(),
             platforms: Vec::new(),
@@ -966,6 +968,7 @@ pub fn build_multi_derivation_bundle(
             state: Vec::new(),
             workspace_build: None,
             workspace_compiler: None,
+            source_oci: None,
             effects: EffectClass::Pure,
         },
         provenance: AuthoringProvenance::Authored,
@@ -1175,6 +1178,8 @@ pub fn build_dynamic_routes_bundle(
         content_ref: tree_ref,
     };
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
+        variable_bindings: vec![],
+        requirements: Default::default(),
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         inputs: vec![input.clone()],
         runtimes: route.execution.runtimes.clone(),
@@ -1264,6 +1269,7 @@ pub fn build_dynamic_routes_bundle(
             .collect(),
         workspace_build: None,
         workspace_compiler: None,
+        source_oci: None,
         effects: spec.effects,
     };
     let mut requirements = spec

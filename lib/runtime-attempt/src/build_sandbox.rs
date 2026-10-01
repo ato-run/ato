@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 pub use ato_formation::intent::ToolchainAccess;
 use ato_sandbox::{SandboxPolicy, filter_sensitive_paths, sensitive_paths};
 
@@ -84,6 +84,8 @@ pub enum NetworkPolicy {
     /// express "the package index and nothing else", so this is unrestricted
     /// egress and is confined to trusted sources by policy above, not here.
     DependencyResolution,
+    /// No external network interface; CONNECT goes through an owner socket.
+    Scoped,
 }
 
 impl NetworkPolicy {
@@ -92,6 +94,7 @@ impl NetworkPolicy {
     pub fn provenance(self) -> &'static str {
         match self {
             Self::Denied => "bubblewrap+landlock;network=denied",
+            Self::Scoped => "bubblewrap+landlock;network=phase-scoped-connect",
             Self::DependencyResolution => {
                 "bubblewrap+landlock;network=host-unrestricted;trusted-only"
             }
@@ -153,6 +156,7 @@ pub struct BuildSandbox<'a> {
     /// with a link would redirect the host's next write.
     pub policy_host_path: &'a Path,
     pub network: NetworkPolicy,
+    pub broker_socket: Option<&'a Path>,
     pub limits: BuildLimits,
     /// Read-only unless this step is the platform provisioning a toolchain.
     pub toolchain: ToolchainAccess,
@@ -191,6 +195,7 @@ pub fn sandboxed_build_step_command(
         shim,
         policy_host_path,
         network,
+        broker_socket,
         limits,
         toolchain,
     } = *sandbox;
@@ -246,6 +251,19 @@ pub fn sandboxed_build_step_command(
         BUILD_ASSET_ROOT.to_owned(),
     ]);
 
+    if network == NetworkPolicy::Scoped {
+        let socket = broker_socket.context("scoped step has no phase gate")?;
+        argv.extend([
+            "--ro-bind".into(),
+            path_str(socket, "phase gate")?,
+            crate::network_bridge::GUEST_SOCKET.into(),
+        ]);
+    } else {
+        ensure!(
+            broker_socket.is_none(),
+            "a non-scoped step cannot receive a gate socket"
+        );
+    }
     // Every credential directory becomes an empty tmpfs. `--unshare-all` plus
     // explicit binds already means they are absent; this makes a future
     // accidental bind harmless, and it is cheap.
@@ -306,6 +324,9 @@ pub fn sandboxed_build_step_command(
     for (name, value) in workload_env {
         argv.extend(["--env".to_owned(), format!("{name}={value}")]);
     }
+    if network == NetworkPolicy::Scoped {
+        argv.push("--scoped-network".into());
+    }
     argv.push("--".to_owned());
     argv.extend(workload_argv.iter().cloned());
 
@@ -340,7 +361,18 @@ fn build_environment(network: NetworkPolicy, toolchain_path: &[String]) -> Vec<(
     // `$HOME` here IS the workspace — which becomes the artifact. Every one of
     // them is pointed elsewhere: the cache mount when this step may fill it,
     // the step's own /tmp when it may not.
-    let cache = if network == NetworkPolicy::DependencyResolution {
+    if network == NetworkPolicy::Scoped {
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            env.push((
+                name.into(),
+                format!("http://127.0.0.1:{}", crate::network_bridge::PROXY_PORT),
+            ));
+        }
+        env.push(("NO_PROXY".into(), "".into()));
+        env.push(("no_proxy".into(), "".into()));
+        env.push(("PIP_NO_INPUT".into(), "1".into()));
+    }
+    let cache = if network != NetworkPolicy::Denied {
         GUEST_CACHE_ROOT.to_owned()
     } else {
         "/tmp/.ato-cache".to_owned()

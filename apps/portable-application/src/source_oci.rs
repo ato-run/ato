@@ -487,6 +487,9 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    pub fn source_closure_ref(&self) -> &str {
+        &self.closure
+    }
     pub fn request(&self) -> &SourceOciRequest {
         &self.request
     }
