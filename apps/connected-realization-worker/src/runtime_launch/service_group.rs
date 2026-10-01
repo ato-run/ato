@@ -127,6 +127,20 @@ mod tests {
 
         let web = spec_for("web");
         assert!(web.mounts.is_empty(), "the volume never reaches a sibling");
+        // Service groups do not model a working directory: only /app.
+        let mut moved = group
+            .services
+            .iter()
+            .find(|s| s.name == "web")
+            .unwrap()
+            .clone();
+        moved.working_dir = "/opt/app".to_owned();
+        assert!(
+            service_oci_spec(spec, &moved, &context, &owner, &BTreeMap::new())
+                .unwrap_err()
+                .to_string()
+                .contains("service groups run in /app")
+        );
         assert!(
             !web.environment
                 .keys()

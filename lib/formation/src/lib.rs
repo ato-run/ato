@@ -51,8 +51,12 @@ pub mod retained;
 #[cfg(feature = "planning")]
 pub mod source;
 pub mod verify;
+#[cfg(feature = "planning")]
+pub mod workspace;
 
 pub mod decision;
 pub mod generation;
 pub mod generation_context;
 pub mod search;
+
+pub mod proposal;

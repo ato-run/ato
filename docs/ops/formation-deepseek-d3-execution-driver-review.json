@@ -1,0 +1,159 @@
+{
+  "schema": "ato.formation-deepseek-d3-execution-driver-review/1",
+  "preregistration_merge": "c3f44c6e548cc4f73acaf37966621d21bad0097a",
+  "controller_base": "c3f44c6e548cc4f73acaf37966621d21bad0097a",
+  "controller_tested_head": "dcbf9ac5203cb39a632ad93d0c46aea045dd83c2",
+  "controller_hashes": {
+    "entrypoint_sha256": "2278ae6bc0ad39f44f377151c9f6c969e74edca6fd284335636240025f211d32",
+    "bundle_sha256": "43b1f6147a45ba3b95e19f2790f27db0bbf4fc48be4ea8a14128942f8a4a1c83",
+    "files": {
+      "scripts/acceptance/proposal/deepseek-execute.py": "2278ae6bc0ad39f44f377151c9f6c969e74edca6fd284335636240025f211d32",
+      "scripts/acceptance/proposal/execution/__init__.py": "7586c84a9d30920b56d713b0590263edd8a01d34acb57277ddf71a79a8abf743",
+      "scripts/acceptance/proposal/execution/budget.rs": "699d9bbcbcaeb82628f7e9d049ba04e4ea94d7902840af71c96012ffb1096274",
+      "scripts/acceptance/proposal/execution/build.py": "4e31eb993c9e21f43237cd24f55543d2a4d421f401355480885136097500fb51",
+      "scripts/acceptance/proposal/execution/gates.py": "9a7af9493a2fdd117d1e626da441a4867d81e7c47370270f0c7888ef1902e8ed",
+      "scripts/acceptance/proposal/execution/preflight.py": "3c33199534c43eda01440190512f36d283748183ceeb637efd93689619279017",
+      "scripts/acceptance/proposal/execution/project.rs": "dfe9d5c73a86b4678ae76385ae6f2e79b16edc34b61ecab989eede35bd71c663",
+      "scripts/acceptance/proposal/execution/proxy.py": "904c570f5000fff5542ee24d3228b2e1a076d2f77bdcd17c95ad2be29938f96e",
+      "scripts/acceptance/proposal/execution/runner.py": "bd7f1f8b551ba821fab4df292b8dec73f266a1d8a8443fc110af9ecc2d4b620a"
+    }
+  },
+  "plan_sha256": "b67607c6cff1de5339f79822bd3e5d6610d1663dcce6e3f0d6b418ef8a2a1585",
+  "execution_sha": "10ad1cd8338e8261cc5bd5e944c38867f22bfe8b",
+  "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+  "wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+  "preflight": {
+    "trace": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H",
+      "I",
+      "J",
+      "K",
+      "L",
+      "M"
+    ],
+    "plan_sha256": "b67607c6cff1de5339f79822bd3e5d6610d1663dcce6e3f0d6b418ef8a2a1585",
+    "execution_sha": "10ad1cd8338e8261cc5bd5e944c38867f22bfe8b",
+    "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+    "wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+    "pricing": {
+      "fetch_timestamp_utc": "2026-09-28T14:16:46.586846+00:00",
+      "final_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "response_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "model_version": "DeepSeek-V4.1-Flash",
+      "checked_at": "2026-09-28T14:16:46.586846+00:00",
+      "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "document_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "input_basis": "peak_cache_miss",
+      "input_usd_per_million": "0.3",
+      "output_usd_per_million": "1.2",
+      "input_price_usd_micros_per_million": 300000,
+      "output_price_usd_micros_per_million": 1200000
+    },
+    "reservation": {
+      "per_call_usd_micros": 81102,
+      "total_usd_micros": 486612
+    },
+    "live_calls": 0,
+    "key_read": false,
+    "execution_ready": false,
+    "blocker": "execution pin has no post-claim provider-request capture hook; preclaim reconstruction is not an exact provider request SHA"
+  },
+  "binaries_sha256": {
+    "requester": "b3660b324210943535b35790f0f53e0c1142a776e2231132492cae22b0865daf",
+    "runtime": "bd7c1d1d097cf7e1fb4181e1807847b1ff593819015b49fdb457b67e2659b84f",
+    "worker": "a921614fa571f0742b6e86b5b9e6950e1bbac82355e67f2f14e3c6090fd1a3d8",
+    "budget": "1fa4640fff1d257e58564f261a31be2dec18174515bb84ed8dc6567d6bedbf15",
+    "project": "246478c7d65927507cf61280a20b873ba0cd72036002cd2b288025f341b9948e"
+  },
+  "control_helpers": {
+    "budget.rs": "699d9bbcbcaeb82628f7e9d049ba04e4ea94d7902840af71c96012ffb1096274",
+    "project.rs": "dfe9d5c73a86b4678ae76385ae6f2e79b16edc34b61ecab989eede35bd71c663"
+  },
+  "budget_helper_test": {
+    "check": {
+      "exit": 0,
+      "output": {
+        "per_call_usd_micros": 81102,
+        "total_usd_micros": 486612
+      }
+    },
+    "create": {
+      "exit": 0,
+      "output": {
+        "per_call_usd_micros": 81102,
+        "total_usd_micros": 486612
+      }
+    },
+    "reopen": {
+      "exit": 0,
+      "output": {
+        "per_call_usd_micros": 81102,
+        "total_usd_micros": 486612
+      }
+    },
+    "duplicate_create": {
+      "exit": 1,
+      "output": "closed error"
+    },
+    "corrupt_reopen": {
+      "exit": 1,
+      "output": "closed error"
+    }
+  },
+  "E0_E14": {
+    "E0": "PASS (offline)",
+    "E1": "PASS (offline)",
+    "E2": "PASS (offline)",
+    "E3": "PASS (offline)",
+    "E4": "PASS (offline)",
+    "E5": "PASS (offline)",
+    "E6": "PASS (offline)",
+    "E7": "PASS (offline)",
+    "E8": "PASS (offline)",
+    "E9": "PASS (offline)",
+    "E10": "PASS (offline)",
+    "E11": "PASS (offline)",
+    "E12": "PASS (offline)",
+    "E13": "PASS (offline)",
+    "E14": "PASS (offline)"
+  },
+  "python_tests": {
+    "driver": 17,
+    "unchanged_preregistration": 8,
+    "passed": 25,
+    "failed": 0
+  },
+  "helper_clippy": "PASS",
+  "helper_rustfmt": "PASS",
+  "diff_check": "PASS",
+  "live_G0_G5": "NOT_RUN",
+  "runtime_verifier_integration_for_this_driver": "NOT_RUN",
+  "blockers": [
+    {
+      "id": "exact_provider_request_capture",
+      "source": "10ad1cd:apps/formation-worker/src/runtime_network/proposal.rs:744-746",
+      "detail": "Requester overwrites timeout_ms after claim using the current clock. No pre-send raw request capture hook. External preclaim projection cannot truthfully provide the exact model-visible request SHA.",
+      "behavior": "execute refuses before journal initialization and G0; no approximate hash is passed off as exact",
+      "next_decision": "authorize a separately versioned implementation/plan preregistration, or retain current pin and blocker"
+    }
+  ],
+  "live_calls": 0,
+  "spend_usd_micros": 0,
+  "DEEPSEEK_API_KEY_read": false,
+  "key_existence_checked": false,
+  "live_journal_created": false,
+  "plan_changed": false,
+  "core_or_receiver_semantics_changed": false,
+  "merged": false,
+  "deployed": false,
+  "remote_migration": false
+}

@@ -1,0 +1,13 @@
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6587746Z ---- tests::local_static_server_rejects_browser_state_without_the_run_token stdout ----
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6588019Z 
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6588405Z thread 'tests::local_static_server_rejects_browser_state_without_the_run_token' (13110) panicked at apps/portable-application/src/lib.rs:3566:43:
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6589071Z called `Result::unwrap()` on an `Err` value: Os { code: 104, kind: ConnectionReset, message: "Connection reset by peer" }
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6589450Z stack backtrace:
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6589638Z    0: __rustc::rust_begin_unwind
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6589979Z              at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6590336Z    1: core::panicking::panic_fmt
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6590680Z              at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6591059Z    2: core::result::unwrap_failed
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6591390Z              at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/result.rs:1867:5
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6591738Z    3: core::result::Result<T,E>::unwrap
+workspace (ubuntu-latest)	Test workspace	2026-09-30T01:18:11.6592076Z              at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/result.rs:1233:23

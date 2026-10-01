@@ -1,0 +1,91 @@
+{
+  "schema": "ato.formation-node-static-workspace-remeasurement/1",
+  "execution_sha": "c9500b37c91f6844f68b07cf1633d21144674dde",
+  "base": {
+    "pr": 1440,
+    "merge": "a6033ecfb768f8aa00f08fd6cf489a25e0d04483",
+    "reviewed_head": "476393f3bb37957b656dec80bc3410927d01f2ad"
+  },
+  "source_plan": {
+    "path": "docs/ops/formation-node-build-8-plan.json",
+    "sha256": "c788cdb08ac4c64599e4a1cc019415176f4cc8d7ce162bfdb1bf5448ad22803d"
+  },
+  "network": "denied",
+  "decision_provider": "off",
+  "model_calls": 0,
+  "app_specific_D": false,
+  "retry": 0,
+  "K_scope": "unchanged node-static K template (GET / = 200 on app.http + source identity); no K on pre-authoring refusal",
+  "measurements": {
+    "A": {
+      "candidate_producer": "off",
+      "path": "coverage_baseline (known-D, unchanged 6b-A harness)",
+      "purpose": "confirm known-D terminals do not gain an automatic workspace route"
+    },
+    "B": {
+      "candidate_producer": "fixed",
+      "path": "workspace_proposal (inventory -> authorization -> fixed producer -> CandidateRegistry -> local Formation)",
+      "selection_rule": "Preregistered before execution: when the inventory authorizes no ID, the operation is not published and the producer is not invoked. When it authorizes IDs, each authorized ID is proposed in a separate single-proposal run (w_0, w_1, ... in inventory order); no ID is chosen by name or path.",
+      "network": "denied (unchanged); an admitted D that requires dependency resolution is expected to stop at network_denied"
+    }
+  },
+  "applications": [
+    {
+      "index": 1,
+      "name": "Excalidraw",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "ref": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "archive_sha256": "94603a7879307fd68bd993b4758a1ccdcf1ff068222bf98a9f5b6c5bdaca56a3",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "repo": "https://github.com/ether/etherpad",
+      "ref": "c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "archive_sha256": "268168f1f5e6644f86e6c514d1f90068d01d56a1a290e5762f4ffcd1e0097ec0",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "repo": "https://github.com/go-gitea/gitea",
+      "ref": "fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "archive_sha256": "8e2f5281daf1ec18427319ae7d61ccbc12038310bd44fb72ecc66d43b1c061f8",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "repo": "https://github.com/hedgedoc/hedgedoc",
+      "ref": "5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "archive_sha256": "6b99ac59a4ce6990f9a9e20d4b44b405c255900943c5bfaa868fc8a526e7720d",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 14,
+      "name": "Actual Budget",
+      "repo": "https://github.com/actualbudget/actual",
+      "ref": "eb28966d6ca549236dd08b163ffc8570c710e712",
+      "archive_sha256": "23659e0cc54128ac20e459ddb7a7524c96148f906dcb74dfe66342ce84ddb8a5",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "repo": "https://github.com/jupyterlab/jupyterlab",
+      "ref": "bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "archive_sha256": "af39846f2016b0d0a4220123ba13b69180ab11b64c8ec893572018157b2c56c5",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    }
+  ],
+  "counts": [
+    "workspace candidates discovered",
+    "operation published (authorized IDs)",
+    "proposal-authoring reach (D admitted)",
+    "known-D reach",
+    "execution started",
+    "same-K verified",
+    "functional success (not inferred)"
+  ]
+}

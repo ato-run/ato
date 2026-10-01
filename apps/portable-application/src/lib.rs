@@ -41,6 +41,7 @@ pub mod local_instance;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
+pub mod source_oci;
 pub mod validator_agent;
 
 use instance_snapshot::{
@@ -67,6 +68,11 @@ pub const OCI_ENTRYPOINT_RUNTIME: &str = "oci.entrypoint";
 /// Optional read-only mount target for the materialized workspace. Omitting
 /// this key preserves the original `/app` target and existing DerivationRefs.
 pub const OCI_WORKSPACE_MOUNT_RUNTIME: &str = "oci.workspace_mount";
+/// Optional container working directory for the single-container route, taken
+/// from the verified image when it is not `/app`. Omitting this key preserves
+/// the original `/app` working directory and existing DerivationRefs. It is
+/// independent of the workspace mount target.
+pub const OCI_WORKING_DIR_RUNTIME: &str = "oci.working_dir";
 
 #[derive(Debug, Error)]
 pub enum PortableApplicationError {
@@ -1537,6 +1543,9 @@ fn validate_initial_route(
             if let Some(target) = derivation.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME) {
                 validate_oci_workspace_mount(target)?;
             }
+            if let Some(directory) = derivation.runtimes.get(OCI_WORKING_DIR_RUNTIME) {
+                validate_oci_working_dir(directory)?;
+            }
             if derivation.runtimes.len()
                 != 5 + usize::from(derivation.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                     + usize::from(
@@ -1544,6 +1553,7 @@ fn validate_initial_route(
                             .runtimes
                             .contains_key(OCI_WORKSPACE_MOUNT_RUNTIME),
                     )
+                    + usize::from(derivation.runtimes.contains_key(OCI_WORKING_DIR_RUNTIME))
                 || step.op != "serve"
                 || step.argv.is_empty()
                 || step.argv.iter().any(|value| value.contains('\0'))
@@ -1687,6 +1697,15 @@ fn validate_oci_workspace_mount(target: &str) -> Result<(), PortableApplicationE
     if !valid_guest_mount(target) || target.contains(',') {
         return Err(profile(
             "OCI workspace mount must be an absolute traversal-free guest path",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_oci_working_dir(directory: &str) -> Result<(), PortableApplicationError> {
+    if !valid_guest_mount(directory) || directory.contains(',') {
+        return Err(profile(
+            "OCI working directory must be an absolute traversal-free guest path",
         ));
     }
     Ok(())
@@ -3961,6 +3980,39 @@ default = "pure"
             "/ato/../workspace".to_owned(),
         );
         assert!(build_dynamic_process_oci_bundle(&datasette_fixture_root(), &moved).is_err());
+    }
+
+    #[test]
+    fn oci_working_dir_is_optional_part_of_d_and_leaves_existing_refs_unchanged() {
+        // Omitted: the pre-existing D bytes (and /app working directory).
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let original_oci_ref = route_ref(&original, PortableRealizationKind::OciContainer);
+        let mut declared = datasette_spec();
+        declared
+            .oci
+            .runtimes
+            .insert(OCI_WORKING_DIR_RUNTIME.to_owned(), "/opt/app".to_owned());
+        let (_, declared_bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &declared).unwrap();
+        let declared_ref = route_ref(&declared_bundle, PortableRealizationKind::OciContainer);
+        assert_eq!(
+            original.index.root_contract_ref,
+            declared_bundle.index.root_contract_ref
+        );
+        assert_ne!(original_oci_ref, declared_ref);
+        validate_bundle_for_derivation(&declared_bundle, &declared_ref).unwrap();
+
+        for invalid in ["opt/app", "/opt/../etc", "/opt//app", "/"] {
+            declared
+                .oci
+                .runtimes
+                .insert(OCI_WORKING_DIR_RUNTIME.to_owned(), invalid.to_owned());
+            assert!(
+                build_dynamic_process_oci_bundle(&datasette_fixture_root(), &declared).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

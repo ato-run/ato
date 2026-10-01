@@ -1,0 +1,146 @@
+{
+  "candidate_producer": "off",
+  "decision_provider": "off",
+  "model_calls": 0,
+  "result": {
+    "result": {
+      "attempts": [
+        {
+          "attempt_id": "local-2234825-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+          "derivation_ref": "sha256:5173440aff1098a28b887614ecd5b36ec529c4fc637deec39e6f6604c616e25a",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        },
+        {
+          "attempt_id": "local-2234825-4",
+          "candidate": "static-files/v1",
+          "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+          "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+          "outcomes": {
+            "cleanup": {
+              "state": "succeeded"
+            },
+            "publication": {
+              "state": "succeeded"
+            },
+            "runtime_verification": {
+              "state": "succeeded"
+            },
+            "seal": {
+              "state": "succeeded"
+            }
+          },
+          "realization": {
+            "build_network": "n/a",
+            "candidate_network": "loopback only",
+            "containment": "none; serves the produced bundle's files, runs nothing",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "loopback static server"
+            },
+            "executor": "runtime-static-loopback",
+            "workspace": "the produced static web bundle, read-only"
+          },
+          "receipt": {
+            "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+            "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+            "execution": {
+              "attempt_id": "local-2234825-4",
+              "endpoint": "http://127.0.0.1:37545/",
+              "platform": "linux/aarch64",
+              "realization": "static_web",
+              "request_id": "local-2234825-2-1790732965159777696"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:909168ace5a3c3fbda2e4f1c4909b3becd40916f1394f03f9d93b94f3cd0c451",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "runtime_id": "local",
+          "status": "verified",
+          "verification": {
+            "verdicts": [
+              {
+                "id": "root",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              },
+              {
+                "id": "source-identity",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+      "status": "formed",
+      "verified_routes": [
+        {
+          "attempt_id": "local-2234825-4",
+          "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+          "materialization_ref": "sha256:b897468d2497186ac0e0d32992b9364ef87eecef36772e5feaf1f0dcdf6ca92f",
+          "runtime_id": "local"
+        }
+      ]
+    },
+    "status": "formation_result"
+  },
+  "runtime_facts": {
+    "formation.containment": "bwrap+landlock",
+    "formation.toolchain_root": "/opt/ato/toolchains",
+    "platform.arch": "aarch64",
+    "platform.os": "linux"
+  },
+  "runtime_id": "local",
+  "schema": "ato.formation-coverage-observation/1"
+}
