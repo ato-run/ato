@@ -43,8 +43,40 @@ unfinished durable execution records. Untyped errors remain anonymous.
 Local macOS validation: all 30 static materializer and 77 Runtime attempt unit
 tests PASS. New cases cover blob and manifest rejection without partial output,
 explicitly allowed output, preservation through private context, durable-error
-precedence, and typed process rejection across a read boundary. Linux final-code
-and real Coordinator/Runtime cause propagation remain pending.
+precedence, and typed process rejection across a read boundary. At execution pin
+`7d0822a1c7e6508c97a204f18bb26a3442c50139`, Linux passed 30 materializer
+and 78 Runtime attempt tests, with one existing ignored test.
+
+## Actual final-code input observations
+
+* Search `search_f071722028c022691490161d1c1a746b`, attempt
+  `01M3WXR3SHYJNC8YBQK4S7DZV1`: source build succeeded; the canonical guard
+  refused output. The next common reasoning input contained
+  `secret_artifact_embedding_refused`, without a value or internal path, and
+  the producer returned `needs_input`. One execution, two rounds, no retained
+  submission, zero outstanding byte reservations at terminal reporting.
+* Search `search_b41c7cc4a1218d94021a1da359824f38`: two independently registered
+  reusable values in the same source/resource scope produced `ambiguous_scope`
+  and two metadata-only candidates before source execution. Owner selection
+  used only the credential ID, preserving creation time, Search deadline and
+  attempts used. The original candidate then ran once, was refused by the
+  same embedding guard, and stopped as `needs_input`; no duplicate execution.
+* Search `search_62e0287ddecfecb20645f696f32c3cda`: a reusable value with a
+  separately scoped resource expired after its 15-second TTL. The common input
+  view returned `expired` and zero selectable values; no source execution was
+  permitted. Its original Search/round deadline was not extended. This is a
+  paused input case, not an application PASS or a terminal Search yet.
+
+Owned reusable metadata from these tests was revoked through the normal API.
+The final observed encrypted store contained 10 metadata rows, nine assignments,
+zero live metadata rows and zero value rows. A scan of 203 public input/journal/
+report files found zero occurrences of the private configuration. The
+explicitly permitted embedded artifact is excluded from that scan; permission
+does not authorize disclosure in model input or traces.
+
+One attempted resume used an unsupported CLI argument and exited before any
+network action. Its diagnostic is retained and excluded. Correct resumption
+repeated the original command/configuration/journal, without changing counters.
 
 The prior actual fixtures prove enforcement and the positive UI path, not
 correct final-code negative classification. They are not counted as OSS app
