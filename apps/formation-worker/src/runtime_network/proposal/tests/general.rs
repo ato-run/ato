@@ -927,6 +927,7 @@ fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
     let request = sub.proposal_request_v2(&view).unwrap();
     let mut input = ReasoningInput {
         available_variables: vec![],
+        runtime_capabilities: vec![],
         max_retries: 3,
         catalog_sources_in_inventory: false,
         goal: None,
@@ -979,6 +980,7 @@ fn recovery_input(sub: &Submission) -> super::super::reasoning::ReasoningInput {
         catalog_sources_in_inventory: false,
         goal: None,
         available_variables: vec![],
+        runtime_capabilities: vec![],
         max_retries: 3,
         call_id: "recovery_r1_s1".into(),
         frozen_contract_ref: sub.request.contract_ref.clone(),
