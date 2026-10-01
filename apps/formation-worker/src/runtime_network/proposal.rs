@@ -1512,9 +1512,14 @@ fn serve_proposal_inner(
     // A lost completion response is recovered by the caller's next GET. Never
     // re-enter the producer or synthesize a new batch to repair that transport.
     if let Some(p) = durable_producer {
-        p.coordinator_operation(seq, "complete", &bytes, retries, expires, || {
-            client.complete_proposal(id, &bytes)
-        })?;
+        let reported = p.coordinator_operation(seq, "complete", &bytes, retries, expires, || {
+            client.for_reporting().complete_proposal(id, &bytes)
+        });
+        if let Err(error) = reported
+            && SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() < u128::from(expires)
+        {
+            return Err(error);
+        }
     } else {
         let _ = client.complete_proposal(id, &bytes);
     }

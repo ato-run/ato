@@ -352,6 +352,7 @@ pub struct CandidateRegistry<'a> {
     frozen: &'a FrozenSearchV1,
     generated: Vec<ValidatedCandidate>,
     inspection_remaining: u32,
+    decline_reasons: Vec<String>,
 }
 impl<'a> CandidateRegistry<'a> {
     pub fn new(frozen: &'a FrozenSearchV1) -> Result<Self, ProposalError> {
@@ -361,6 +362,7 @@ impl<'a> CandidateRegistry<'a> {
         Ok(Self {
             frozen,
             generated: Vec::new(),
+            decline_reasons: Vec::new(),
             inspection_remaining: frozen
                 .policy
                 .exploration
@@ -383,6 +385,12 @@ impl<'a> CandidateRegistry<'a> {
     }
     pub fn generated(&self) -> &[ValidatedCandidate] {
         &self.generated
+    }
+
+    /// Metadata derived from validated producer bytes. Kept outside outcome
+    /// rows so historical byte-identical validator caches remain valid.
+    pub fn decline_reasons(&self) -> &[String] {
+        &self.decline_reasons
     }
 
     /// Only Ato parses producer bytes. `base_recipes` is a private lookup keyed
@@ -449,10 +457,26 @@ impl<'a> CandidateRegistry<'a> {
                 });
                 continue;
             }
+            let decline_reason = match &parsed {
+                Ok(Proposal::Unsupported { reason, .. }) => Some(match reason.as_deref() {
+                    Some("needs_input" | "requires_binding" | "requires_external_service") => {
+                        "needs_input"
+                    }
+                    Some("source_broken") => "source_broken",
+                    Some("no_progress" | "insufficient_source" | "unknown") | None => "no_progress",
+                    _ => "unsupported_capability",
+                }),
+                _ => None,
+            };
             let result =
                 parsed.and_then(|proposal| compile_proposal(self.frozen, base_recipes, &proposal));
             let outcome = match result {
-                Ok(None) => ProposalOutcome::Unsupported,
+                Ok(None) => {
+                    if let Some(reason) = decline_reason {
+                        self.decline_reasons.push(reason.to_owned());
+                    }
+                    ProposalOutcome::Unsupported
+                }
                 Err(error) => ProposalOutcome::Rejected(error),
                 Ok(Some((proposal_id, compiled, candidate))) => {
                     if self

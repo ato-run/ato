@@ -365,9 +365,16 @@ pub struct AttemptTicket {
 pub struct ExplorationTicket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
+    /// Frozen Search transport budget. Historical tickets retain initial + 3.
+    #[serde(default = "default_transport_retries")]
+    pub max_retries: u32,
     pub search_id: String,
     pub ceiling: ato_formation::requirements::ExecutionRequirements,
     pub network_transfer_bytes: u64,
+}
+
+fn default_transport_retries() -> u32 {
+    3
 }
 
 /// Operator configuration, read once at worker start and never projected as
@@ -1359,6 +1366,7 @@ pub struct Client {
     token: String,
     http: reqwest::blocking::Client,
     deadline_ms: Option<u64>,
+    deadline_clock: Option<(std::time::Instant, Duration)>,
 }
 
 impl Client {
@@ -1367,6 +1375,7 @@ impl Client {
             api: api.trim_end_matches('/').to_owned(),
             token: token.trim().to_owned(),
             deadline_ms: None,
+            deadline_clock: None,
             http: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()?,
@@ -1385,7 +1394,22 @@ impl Client {
             self.deadline_ms
                 .map_or(deadline_ms, |old| old.min(deadline_ms)),
         );
+        let now = ato_runtime_attempt::control::now_ms();
+        let remaining = Duration::from_millis(bounded.deadline_ms.unwrap().saturating_sub(now));
+        let monotonic = self.deadline_clock.map_or(remaining, |(start, initial)| {
+            initial.saturating_sub(start.elapsed()).min(remaining)
+        });
+        bounded.deadline_clock = Some((std::time::Instant::now(), monotonic));
         bounded
+    }
+
+    /// Report already-produced evidence without granting another execution.
+    /// The receiver's frozen completion fence still rejects expired proposals.
+    fn for_reporting(&self) -> Self {
+        let mut reporting = self.clone();
+        reporting.deadline_ms = None;
+        reporting.deadline_clock = None;
+        reporting
     }
 
     fn prepare(
@@ -1399,7 +1423,16 @@ impl Client {
                 now < deadline,
                 "coordinator request deadline elapsed; operation preserved"
             );
-            let remaining = Duration::from_millis(deadline - now);
+            let remaining = Duration::from_millis(deadline - now).min(
+                self.deadline_clock
+                    .map_or(Duration::MAX, |(start, initial)| {
+                        initial.saturating_sub(start.elapsed())
+                    }),
+            );
+            ensure!(
+                !remaining.is_zero(),
+                "coordinator request monotonic deadline elapsed"
+            );
             let configured = request
                 .timeout()
                 .copied()
@@ -1832,18 +1865,7 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 execute_ticket_with_publication(
                     config,
                     &ticket,
-                    || {
-                        attempt_client.download_input(
-                            &ticket.attempt_id,
-                            ticket.resource_budget.transfer_bytes,
-                            ticket.fence,
-                            &config.work_root,
-                            match ticket.input {
-                                AttemptInput::Source { .. } => "source",
-                                AttemptInput::Retained { .. } => "retained-content",
-                            },
-                        )
-                    },
+                    || delivery.input(&attempt_client, &ticket, &config.work_root),
                     Some(&attempt_client),
                 )
             };
@@ -1959,6 +1981,27 @@ fn execute_ticket_with_publication(
     source: impl FnOnce() -> Result<File>,
     publisher: Option<&Client>,
 ) -> AttemptResultReport {
+    let control = ticket
+        .exploration
+        .as_ref()
+        .and_then(|e| e.deadline_ms)
+        .map(ato_runtime_attempt::control::ExecutionControl::new);
+    let mut report = execute_ticket_inner(config, ticket, source, publisher, control.as_ref());
+    if let Some(control) = control {
+        report.verifier_receipts.push(serde_json::json!({
+            "kind":"exploration_phase_timings", "phases":control.timings(),
+        }));
+    }
+    report
+}
+
+fn execute_ticket_inner(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<File>,
+    publisher: Option<&Client>,
+    control: Option<&ato_runtime_attempt::control::ExecutionControl>,
+) -> AttemptResultReport {
     let mut attested = attestation();
     let permit = match AttemptJournal::new(config.out_dir.join("attempt-records"))
         .acquire(&ticket.satisfy_id, &ticket.attempt_id)
@@ -1970,17 +2013,39 @@ fn execute_ticket_with_publication(
             return refused(ticket, attested, refusal.code(), &refusal.message());
         }
     };
+    let source_timing = match control
+        .map(|c| c.phase(ato_runtime_attempt::control::AttemptPhase::Source))
+        .transpose()
+    {
+        Ok(timing) => timing,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested,
+                "round_deadline_exceeded",
+                &error.to_string(),
+            );
+        }
+    };
     let archive = match source() {
         Ok(archive) => archive,
         Err(error) => {
             return refused(
                 ticket,
                 attested,
-                "source_unavailable",
+                if control.is_some_and(|c| {
+                    c.remaining(ato_runtime_attempt::control::AttemptPhase::Source)
+                        .is_err()
+                }) {
+                    "round_deadline_exceeded"
+                } else {
+                    "source_unavailable"
+                },
                 &format!("{error:#}"),
             );
         }
     };
+    drop(source_timing);
     // The ticket's transfer cap is the source's own size; a longer source is
     // not the one the search paid for.
     if archive.metadata().map(|m| m.len()).unwrap_or(u64::MAX)
@@ -2023,10 +2088,16 @@ fn execute_ticket_with_publication(
         &attempt_root,
         &mut attested,
         permit,
-        publisher,
+        &TicketExecution { publisher, control },
     );
+    let _cleanup = control.map(|c| c.cleanup());
     let _ = std::fs::remove_dir_all(&attempt_root);
     report
+}
+
+struct TicketExecution<'a> {
+    publisher: Option<&'a Client>,
+    control: Option<&'a ato_runtime_attempt::control::ExecutionControl>,
 }
 
 fn execute_planned_ticket(
@@ -2036,14 +2107,23 @@ fn execute_planned_ticket(
     attempt_root: &Path,
     attested: &mut RuntimeAttestation,
     permit: Box<dyn AttemptPermit>,
-    publisher: Option<&Client>,
+    context: &TicketExecution<'_>,
 ) -> AttemptResultReport {
+    let TicketExecution { publisher, control } = *context;
     let AttemptInput::Source {
         capsule_toml,
         archive_digest,
     } = &ticket.input
     else {
-        return execute_retained_ticket(config, ticket, archive, attempt_root, attested, permit);
+        return execute_retained_ticket(
+            config,
+            ticket,
+            archive,
+            attempt_root,
+            attested,
+            permit,
+            context,
+        );
     };
     // The ticket's expanded cap, under this Runtime's own source ceiling. The
     // tree is measured against it before anything is written, and expansion
@@ -2066,11 +2146,32 @@ fn execute_planned_ticket(
             );
         }
     };
-    let verified = match FileVerifiedArchive::verify(
+    let source_timing = match control
+        .map(|c| c.phase(ato_runtime_attempt::control::AttemptPhase::Source))
+        .transpose()
+    {
+        Ok(timing) => timing,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "round_deadline_exceeded",
+                &error.to_string(),
+            );
+        }
+    };
+    let can_continue = || {
+        control.is_none_or(|c| {
+            c.remaining(ato_runtime_attempt::control::AttemptPhase::Source)
+                .is_ok()
+        })
+    };
+    let verified = match FileVerifiedArchive::verify_with_guard(
         archive,
         archive_digest,
         ticket.resource_budget.transfer_bytes,
         limits,
+        &can_continue,
     )
     .map_err(anyhow::Error::new)
     {
@@ -2088,7 +2189,9 @@ fn execute_planned_ticket(
             return refused(
                 ticket,
                 attested.clone(),
-                if over_cap {
+                if !can_continue() {
+                    "round_deadline_exceeded"
+                } else if over_cap {
                     "search_expanded_budget_exceeded"
                 } else {
                     "ticket_unplannable"
@@ -2110,8 +2213,12 @@ fn execute_planned_ticket(
         };
     let planned = (|| -> Result<_> {
         std::fs::create_dir_all(attempt_root)?;
-        let frozen =
-            local::freeze_verified_file(verified, &std::path::absolute(attempt_root)?, limits)?;
+        let frozen = local::freeze_verified_file_with_guard(
+            verified,
+            &std::path::absolute(attempt_root)?,
+            limits,
+            &can_continue,
+        )?;
         let evidence = detect(&frozen.root).context("detection failed")?;
         let draft: AuthoringDraft = parse_capsule_toml(capsule_toml)
             .map_err(ato_formation::failure::FormationFailure::from)?;
@@ -2132,11 +2239,16 @@ fn execute_planned_ticket(
         Err(error) => {
             return refused_after_expansion(
                 attested.clone(),
-                "ticket_unplannable",
+                if can_continue() {
+                    "ticket_unplannable"
+                } else {
+                    "round_deadline_exceeded"
+                },
                 &format!("{error:#}"),
             );
         }
     };
+    drop(source_timing);
     let (requirements, provisions) = derivation_requirements(&planned);
     attested.derivation_ref = Some(planned.derivation_ref.clone());
     attested.contract_ref = Some(contract_ref.clone());
@@ -2364,6 +2476,7 @@ fn execute_planned_ticket(
                 continuation: Continuation::Stop,
                 receipt: ReceiptContext::formation(),
                 interrupt: deadline.map(|_| &expired),
+                control,
             },
             realizer,
             Ok(permit),
@@ -2509,7 +2622,9 @@ fn execute_retained_ticket(
     attempt_root: &Path,
     attested: &mut RuntimeAttestation,
     permit: Box<dyn AttemptPermit>,
+    context: &TicketExecution<'_>,
 ) -> AttemptResultReport {
+    let control = context.control;
     use ato_formation::{execution::lower_retained, retained::RetainedCandidateV1};
     use ato_runtime_attempt::{
         plan::{BoundCandidate, PlannedCandidate},
@@ -2635,6 +2750,7 @@ fn execute_retained_ticket(
             continuation: Continuation::Stop,
             receipt: ReceiptContext::formation(),
             interrupt: None,
+            control,
         },
         &RetainedCandidateRealizer {
             descriptor: &descriptor,
