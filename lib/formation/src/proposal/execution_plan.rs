@@ -207,6 +207,11 @@ pub enum DependencyOperation {
     PythonRequirements {
         requirements: SourceReference,
     },
+    /// Source-owned ranges resolved to wheel artifacts, hashed, then installed
+    /// offline. Acquisition and execution are separate registered execs.
+    PythonResolveRequirements {
+        requirements: SourceReference,
+    },
     NpmCi {
         manifest: SourceReference,
         lockfile: SourceReference,
@@ -411,6 +416,73 @@ impl ExecutionPlanProposal {
         ];
         let runtimes = vec![json!({"name":self.runtime.name,"version":self.runtime.version})];
         for dependency in &self.dependencies {
+            if let DependencyOperation::PythonResolveRequirements { requirements } = dependency {
+                if self.runtime.name != "python" {
+                    return Err(ProposalError("unsupported_dependency_operation"));
+                }
+                let path = authorization.resolve(requirements)?;
+                if !path.ends_with(".txt") {
+                    return Err(ProposalError("unsupported_dependency_manifest"));
+                }
+                let directory = format!("/app/.ato-dependencies/python-{}", steps.len());
+                let minor = self
+                    .runtime
+                    .version
+                    .rsplit_once('.')
+                    .ok_or(ProposalError("unsupported_toolchain"))?
+                    .0;
+                for (phase, argv) in [
+                    (
+                        "scoped-dependencies",
+                        vec![
+                            executable.clone(),
+                            "-m".into(),
+                            "pip".into(),
+                            "download".into(),
+                            "--no-input".into(),
+                            "--only-binary=:all:".into(),
+                            "--dest".into(),
+                            directory.clone(),
+                            "-r".into(),
+                            format!("/app/{path}"),
+                        ],
+                    ),
+                    (
+                        "denied",
+                        vec![
+                            executable.clone(),
+                            "-c".into(),
+                            include_str!("python-dependency-lock.py").into(),
+                            directory.clone(),
+                        ],
+                    ),
+                    (
+                        "denied",
+                        vec![
+                            executable.clone(),
+                            "-m".into(),
+                            "pip".into(),
+                            "install".into(),
+                            "--no-input".into(),
+                            "--no-index".into(),
+                            "--only-binary=:all:".into(),
+                            "--require-hashes".into(),
+                            "--find-links".into(),
+                            directory.clone(),
+                            "--target".into(),
+                            format!("/app/.venv/lib/python{minor}/site-packages"),
+                            "-r".into(),
+                            format!("{directory}/requirements.lock"),
+                        ],
+                    ),
+                ] {
+                    steps.push(
+                        json!({"id":format!("dependencies-{}",steps.len()),"use":"ato.process@1",
+                        "op":"exec","argv":argv,"cwd":self.cwd,"network":phase}),
+                    );
+                }
+                continue;
+            }
             let argv = match dependency {
                 DependencyOperation::PythonRequirements { requirements }
                     if self.runtime.name == "python" =>

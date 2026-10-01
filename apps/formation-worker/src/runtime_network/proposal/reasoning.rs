@@ -35,13 +35,21 @@ impl ReasoningProviderConfig {
                 ensure!(
                     c.provider == "codex_session"
                         && c.model == "codex-session"
-                        && c.prompt_version == deepseek::PROMPT_VERSION_V5,
+                        && matches!(
+                            c.prompt_version.as_str(),
+                            deepseek::PROMPT_VERSION_V5 | deepseek::PROMPT_VERSION_V6
+                        ),
                     "invalid session provider"
                 );
                 budget.validate()?;
                 Ok(format!(
                     "sha256:{:x}",
-                    Sha256::digest(serde_jcs::to_vec(&(c, budget, deepseek::PROMPT_V5))?)
+                    Sha256::digest(serde_jcs::to_vec(&(
+                        c,
+                        budget,
+                        deepseek::prompt_for(&c.prompt_version)
+                            .context("session prompt missing")?
+                    ))?)
                 ))
             }
         }
@@ -56,6 +64,8 @@ pub struct PublicSource {
     pub reference: SourceReference,
     pub source_relative_path: String,
     pub purpose: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovered_from: Vec<SourceReference>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,18 +109,234 @@ impl ReasoningInput {
                     operation
                 {
                     ensure!(sources.is_empty(), "duplicate common source catalog");
-                    *sources = self
-                        .inventory
-                        .iter()
-                        .map(|s| ato_formation::proposal::CatalogSource {
-                            reference: s.reference.clone(),
-                            purpose: s.purpose.clone(),
-                        })
-                        .collect();
+                    *sources = auth
+                        .execution_plan
+                        .as_ref()
+                        .context("source catalog missing")?
+                        .catalog_sources();
                 }
             }
         }
         request.validate(auth)?;
+        ensure!(
+            self.inventory.iter().all(|s| auth
+                .execution_plan
+                .as_ref()
+                .and_then(|p| p.files.get(&s.reference.file_id))
+                .is_some_and(
+                    |f| f.digest == s.reference.digest && f.path == s.source_relative_path
+                )),
+            "reasoning inventory source mismatch"
+        );
+        Ok(())
+    }
+}
+
+/// Inference discovery is rooted in acquired configuration, never in the
+/// presence of a directory. COPY . . and broad globs confer no read authority.
+fn scoped_inventory(
+    domain: &ato_formation::proposal::PlanAuthorization,
+    acquired: &BTreeMap<String, SourceContextEntry>,
+) -> Result<Vec<PublicSource>> {
+    let mut allowed = BTreeMap::<String, Vec<SourceReference>>::new();
+    for (id, file) in &domain.files {
+        if !file.path.contains('/') {
+            allowed.insert(id.clone(), vec![]);
+        }
+    }
+    for (id, text) in acquired {
+        let origin = domain.files.get(id).context("scope source missing")?;
+        let parent = origin.path.rsplit_once('/').map_or("", |(p, _)| p);
+        for token in text
+            .text
+            .split(|c: char| !c.is_ascii_alphanumeric() && !"._-@/*".contains(c))
+        {
+            let token = token
+                .strip_prefix("./")
+                .unwrap_or(token)
+                .trim_end_matches('/');
+            if token.is_empty()
+                || token == "."
+                || token.contains("..")
+                || token.starts_with('/')
+                || token.contains("**")
+            {
+                continue;
+            }
+            let path = if parent.is_empty() {
+                token.to_owned()
+            } else {
+                format!("{parent}/{token}")
+            };
+            let matched: Vec<_> = domain
+                .files
+                .iter()
+                .filter(|(_, f)| {
+                    if let Some((prefix, suffix)) = path.split_once('*') {
+                        // v0: one segment glob, explicit parent; never an unbounded crawl.
+                        !prefix.is_empty()
+                            && prefix.contains('/')
+                            && !suffix.contains('*')
+                            && f.path
+                                .strip_prefix(prefix)
+                                .and_then(|s| s.strip_suffix(suffix))
+                                .is_some_and(|s| !s.contains('/'))
+                    } else {
+                        f.path == path
+                            || f.path.strip_prefix(&format!("{path}/")).is_some_and(|s| {
+                                !s.contains('/')
+                                    && ato_formation::proposal::source_inspection_priority(s).0 != 6
+                            })
+                    }
+                })
+                .collect();
+            ensure!(matched.len() <= 32, "source_reference_expansion_limit");
+            for (target, _) in matched {
+                let basis = allowed.entry(target.clone()).or_default();
+                let reference = SourceReference {
+                    file_id: id.clone(),
+                    digest: origin.digest.clone(),
+                };
+                if !basis.contains(&reference) {
+                    basis.push(reference);
+                }
+            }
+        }
+    }
+    let mut files: Vec<_> = allowed.into_iter().collect();
+    files.sort_by_key(|(id, _)| {
+        (
+            domain.files[id].path.contains('/'),
+            ato_formation::proposal::source_inspection_priority(&domain.files[id].path),
+            id.clone(),
+        )
+    });
+    ensure!(files.len() <= 128, "source_inventory_limit");
+    Ok(files
+        .into_iter()
+        .map(|(id, discovered_from)| {
+            let file = &domain.files[&id];
+            PublicSource {
+                reference: SourceReference {
+                    file_id: id,
+                    digest: file.digest.clone(),
+                },
+                source_relative_path: file.path.clone(),
+                purpose: "source".into(),
+                discovered_from,
+            }
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod autonomous_tests {
+    use super::*;
+    #[test]
+    fn root_scope_requires_an_acquired_reference_and_preserves_its_digest() {
+        use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
+        let domain = PlanAuthorization {
+            source_oci: None,
+            toolchains: BTreeMap::new(),
+            files: [
+                "package.json",
+                "README.md",
+                "src/server.js",
+                "unrelated/main.py",
+            ]
+            .into_iter()
+            .map(|p| {
+                (
+                    p.into(),
+                    VerifiedSourceFile {
+                        path: p.into(),
+                        digest: format!("sha256:{}", "a".repeat(64)),
+                    },
+                )
+            })
+            .collect(),
+        };
+        let root = scoped_inventory(&domain, &BTreeMap::new()).unwrap();
+        assert_eq!(root.len(), 2);
+        let entry = SourceContextEntry {
+            kind: SourceContextKind::VerifiedFile,
+            logical_id: "package.json".into(),
+            text: "{\"main\":\"src/server.js\"} COPY . .".into(),
+            source_id: "package.json".into(),
+            encoding: ato_formation::proposal::SourceEncoding::Utf8,
+            content_sha256: "unused".into(),
+            truncated: false,
+        };
+        let scoped =
+            scoped_inventory(&domain, &BTreeMap::from([("package.json".into(), entry)])).unwrap();
+        assert_eq!(scoped.len(), 3);
+        assert!(
+            !scoped
+                .iter()
+                .any(|s| s.source_relative_path.starts_with("unrelated/"))
+        );
+        assert_eq!(
+            scoped
+                .iter()
+                .find(|s| s.source_relative_path == "src/server.js")
+                .unwrap()
+                .discovered_from[0]
+                .file_id,
+            "package.json"
+        );
+    }
+    #[test]
+    fn operation_retries_are_initial_plus_three_and_survive_restart() -> Result<()> {
+        std::fs::create_dir_all(".tmp")?;
+        let root = tempfile::tempdir_in(".tmp")?;
+        let config = ReasoningProviderConfig::Session(SessionConfig {
+            provider: "codex_session".into(),
+            model: "codex-session".into(),
+            prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+        });
+        let budget = budget::BudgetPlan {
+            max_calls: 6,
+            input_token_cap: 1024,
+            output_token_cap: 1024,
+            input_price: 1,
+            output_price: 1,
+            ceiling_usd_micros: 12,
+        };
+        let p = ReasoningProducer::new(config.clone(), budget.clone(), root.path().into(), None)?;
+        let expires = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64 + 10_000;
+        let mut count = 0;
+        assert!(
+            p.coordinator_operation(1, "claim", b"same", 3, expires, || {
+                count += 1;
+                anyhow::bail!("coordinator answered 503")
+            })
+            .is_err()
+        );
+        assert_eq!(count, 4);
+        let p = ReasoningProducer::new(config, budget, root.path().into(), None)?;
+        assert!(
+            p.coordinator_operation(1, "claim", b"same", 3, expires, || {
+                count += 1;
+                Ok(json!({"fence":"never"}))
+            })
+            .is_err()
+        );
+        assert_eq!(count, 4);
+        let result = p.coordinator_operation(2, "complete", b"fixed", 3, expires, || {
+            Ok(json!({"revision":2}))
+        })?;
+        assert_eq!(
+            result,
+            p.coordinator_operation(2, "complete", b"fixed", 3, expires, || panic!(
+                "completed operation redispatched"
+            ))?
+        );
+        assert!(
+            p.coordinator_operation(2, "complete", b"changed", 3, expires, || panic!(
+                "operation renamed"
+            ))
+            .is_err()
+        );
         Ok(())
     }
 }
@@ -129,6 +355,8 @@ struct StepRecord {
     elapsed_ms: u64,
     inspected: Vec<SourceReference>,
     inspection_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    validation_error: Option<String>,
     inspected_bytes: u64,
 }
 #[derive(Deserialize)]
@@ -173,6 +401,9 @@ pub(super) fn save(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::File::open(path.parent().context("evidence parent")?)?.sync_all()?;
     Ok(())
 }
+pub fn save_owner_checkpoint(path: &Path, bytes: &[u8]) -> Result<()> {
+    save(path, bytes)
+}
 fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -182,6 +413,93 @@ fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl ReasoningProducer {
+    /// Exactly one retry ledger per semantic operation, independent of worker
+    /// restarts and transport names. Dispatch reservation is durable first.
+    pub(super) fn coordinator_operation(
+        &self,
+        seq: u64,
+        kind: &str,
+        request: &[u8],
+        max_retries: u32,
+        expires: u64,
+        mut dispatch: impl FnMut() -> Result<Value>,
+    ) -> Result<Value> {
+        use fs2::FileExt;
+        ensure!(
+            matches!(kind, "claim" | "complete"),
+            "unknown coordinator operation"
+        );
+        let name = format!("r{seq:03}.{kind}");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.directory.join(format!("{name}.lock")))?;
+        lock.lock_exclusive()?;
+        let result_path = self.directory.join(format!("{name}.result.json"));
+        let request_hash = digest(request);
+        if result_path.exists() {
+            let result: Value = serde_json::from_slice(&bounded_read(&result_path, 4096)?)?;
+            ensure!(
+                result["request_sha256"] == request_hash,
+                "operation identity changed"
+            );
+            return Ok(result["response"].clone());
+        }
+        for attempt in 0..=max_retries {
+            let path = self
+                .directory
+                .join(format!("{name}.dispatch{attempt:03}.json"));
+            if path.exists() {
+                let old: Value = serde_json::from_slice(&bounded_read(&path, 4096)?)?;
+                ensure!(
+                    old["request_sha256"] == request_hash,
+                    "operation identity changed"
+                );
+                continue;
+            }
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            ensure!(now < expires, "coordinator operation deadline");
+            save(
+                &path,
+                &serde_jcs::to_vec(&json!({"request_sha256":request_hash,
+                "attempt":attempt,"started_at_ms":now}))?,
+            )?;
+            let started = Instant::now();
+            match dispatch() {
+                Ok(response) => {
+                    save(
+                        &result_path,
+                        &serde_jcs::to_vec(&json!({"request_sha256":request_hash,
+                        "response":response,"elapsed_ms":started.elapsed().as_millis()}))?,
+                    )?;
+                    return Ok(response);
+                }
+                Err(error) => {
+                    let retryable = error.downcast_ref::<reqwest::Error>().is_some()
+                        || error.to_string().starts_with("coordinator answered 5")
+                        || error.to_string().starts_with("coordinator answered 429");
+                    save(
+                        &self
+                            .directory
+                            .join(format!("{name}.error{attempt:03}.json")),
+                        &serde_jcs::to_vec(&json!({"retryable":retryable,
+                            "elapsed_ms":started.elapsed().as_millis()}))?,
+                    )?;
+                    if !retryable || attempt == max_retries {
+                        return Err(error);
+                    }
+                    let delay = 100_u64.saturating_mul(1 << attempt.min(6));
+                    ensure!(
+                        now.saturating_add(delay) < expires,
+                        "retry backoff exceeds deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(delay));
+                }
+            }
+        }
+        anyhow::bail!("coordinator retry budget exhausted; same operation preserved")
+    }
     pub fn new(
         config: ReasoningProviderConfig,
         budget: budget::BudgetPlan,
@@ -384,15 +702,6 @@ impl ReasoningProducer {
             .execution_plan
             .as_ref()
             .context("execution plan domain missing")?;
-        let inventory: Vec<_> = domain
-            .catalog_sources()
-            .into_iter()
-            .map(|s| PublicSource {
-                source_relative_path: domain.files[&s.reference.file_id].path.clone(),
-                reference: s.reference,
-                purpose: s.purpose,
-            })
-            .collect();
         let records = self.records()?;
         ensure!(
             records
@@ -408,10 +717,7 @@ impl ReasoningProducer {
         for (_, input, _) in &records {
             input.validate(auth)?;
             for entry in &input.request.source_context {
-                let verified = local
-                    .inspection_context
-                    .get(&entry.logical_id)
-                    .context("recorded source text absent")?;
+                let verified = local.source_text(&entry.logical_id)?;
                 ensure!(
                     verified.text.starts_with(&entry.text),
                     "recorded source text changed"
@@ -452,14 +758,7 @@ impl ReasoningProducer {
                     policy.max_inspections,
                     1,
                 )?;
-                acquired.insert(
-                    source.file_id.clone(),
-                    local
-                        .inspection_context
-                        .get(&source.file_id)
-                        .context("verified source text missing")?
-                        .clone(),
-                );
+                acquired.insert(source.file_id.clone(), local.source_text(&source.file_id)?);
                 inspected.insert(source.file_id.clone(), source.clone());
                 if input.request.round_seq == Some(round) {
                     round_inspections.push(source.clone());
@@ -491,7 +790,10 @@ impl ReasoningProducer {
                     provenance: call.provenance.clone(),
                 })));
             }
-            if last.inspected.is_empty() && last.inspection_error.is_none() {
+            if last.inspected.is_empty()
+                && last.inspection_error.is_none()
+                && last.validation_error.is_none()
+            {
                 return self.finish_round(
                     BASE64.decode(&last.raw_output_base64)?,
                     round_inspections,
@@ -510,6 +812,17 @@ impl ReasoningProducer {
             .filter(|(_, i, _)| i.request.round_seq == Some(round))
             .count();
         let mut step = prior_in_round as u32 + 1;
+        let mut repairs = records
+            .iter()
+            .filter(|(_, i, r)| i.request.round_seq == Some(round) && r.validation_error.is_some())
+            .count() as u32;
+        for (_, i, r) in &records {
+            if i.request.round_seq == Some(round)
+                && let Some(error) = &r.validation_error
+            {
+                feedback.push(error.clone());
+            }
+        }
         loop {
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
             ensure!(now < expires, "reasoning round deadline");
@@ -562,7 +875,7 @@ impl ReasoningProducer {
                     archive_digest: submission.request.source.archive_digest.clone(),
                     closure_ref: submission.request.source.closure_ref.clone(),
                 },
-                inventory: inventory.clone(),
+                inventory: scoped_inventory(domain, &acquired)?,
                 request: request.clone(),
                 projection: vec![],
                 rounds_remaining: policy.formation.max_rounds.get().saturating_sub(round - 1),
@@ -648,10 +961,7 @@ impl ReasoningProducer {
                 );
                 saved.validate(auth)?;
                 for entry in &saved.request.source_context {
-                    let verified = local
-                        .inspection_context
-                        .get(&entry.logical_id)
-                        .context("pending source text absent")?;
+                    let verified = local.source_text(&entry.logical_id)?;
                     ensure!(
                         verified.text.starts_with(&entry.text),
                         "pending source text changed"
@@ -689,6 +999,7 @@ impl ReasoningProducer {
                                 as u64,
                             inspected: vec![],
                             inspection_error: None,
+                            validation_error: None,
                             inspected_bytes: 0,
                         };
                         save(&record_path, &serde_jcs::to_vec(&record)?)?;
@@ -745,6 +1056,36 @@ impl ReasoningProducer {
             let mut retrieved = Vec::new();
             let mut error = None;
             let mut retrieved_bytes = 0_u64;
+            let mut validation_error = None;
+            if inspection.is_none() {
+                let output = ProducerOutput::new(
+                    raw.clone(),
+                    ProducerProvenance {
+                        provider: "fixed".into(),
+                        model: None,
+                    },
+                )?;
+                let result =
+                    CandidateRegistry::new(&local.frozen)?.validate_batch(&local.bases, &output);
+                let code = match result {
+                    Err(e) => Some(e.0),
+                    Ok(outcomes) => outcomes.into_iter().find_map(|o| match o {
+                        ProposalOutcome::Rejected(e) => Some(e.0),
+                        _ => None,
+                    }),
+                };
+                if let Some(code) = code.filter(|c| {
+                    !matches!(*c, "exploration_authority_exceeded")
+                        && !c.starts_with("unsupported_")
+                        && *c != "requires_binding"
+                }) && repairs < policy.formation.max_retries
+                    && !feedback.iter().any(|f| f == code)
+                {
+                    validation_error = Some(code.to_owned());
+                    feedback.push(code.to_owned());
+                    repairs += 1;
+                }
+            }
             if let Some(sources) = inspection {
                 inspection_exchanges += 1;
                 let result = (|| -> Result<_> {
@@ -761,16 +1102,18 @@ impl ReasoningProducer {
                         auth, &sources, remaining, 4,
                     )?;
                     ensure!(
+                        refs.iter()
+                            .all(|r| input.inventory.iter().any(|s| &s.reference == r)),
+                        "source_explicit_reference_required"
+                    );
+                    ensure!(
                         refs.iter().all(|r| !inspected.contains_key(&r.file_id)
                             && (!acquired.contains_key(&r.file_id)
                                 || input.projection.iter().any(|e| e.logical_id == r.file_id))),
                         "no new inspection"
                     );
                     for reference in &refs {
-                        let text = local
-                            .inspection_context
-                            .get(&reference.file_id)
-                            .context("verified source is not readable bounded text")?;
+                        let text = local.source_text(&reference.file_id)?;
                         retrieved_bytes = retrieved_bytes
                             .checked_add(text.text.len() as u64)
                             .context("inspection byte overflow")?;
@@ -785,10 +1128,7 @@ impl ReasoningProducer {
                     Ok(refs) => {
                         inspection_bytes += retrieved_bytes;
                         for r in &refs {
-                            acquired.insert(
-                                r.file_id.clone(),
-                                local.inspection_context[&r.file_id].clone(),
-                            );
+                            acquired.insert(r.file_id.clone(), local.source_text(&r.file_id)?);
                             inspected.insert(r.file_id.clone(), r.clone());
                         }
                         round_inspections.extend(refs.clone());
@@ -816,13 +1156,14 @@ impl ReasoningProducer {
                 elapsed_ms: call_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                 inspected: retrieved.clone(),
                 inspection_error: error.clone(),
+                validation_error: validation_error.clone(),
                 inspected_bytes: retrieved_bytes,
             };
             save(&record_path, &serde_jcs::to_vec(&record)?)?;
             if let Some(call) = call {
                 round_calls.push(call);
             }
-            if !retrieved.is_empty() || error.is_some() {
+            if !retrieved.is_empty() || error.is_some() || validation_error.is_some() {
                 step += 1;
                 continue;
             }

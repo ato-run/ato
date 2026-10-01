@@ -8,17 +8,33 @@ use std::num::NonZeroU32;
 fn default_rounds() -> NonZeroU32 {
     NonZeroU32::MIN.saturating_add(2)
 }
+fn default_retries() -> u32 {
+    3
+}
+fn default_round_timeout() -> u64 {
+    600_000
+}
+fn default_retry_count(value: &u32) -> bool {
+    *value == default_retries()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FormationConfig {
     #[serde(default = "default_rounds")]
     pub max_rounds: NonZeroU32,
+    /// Initial dispatch plus this many retries, cumulatively per operation.
+    #[serde(
+        default = "default_retries",
+        skip_serializing_if = "default_retry_count"
+    )]
+    pub max_retries: u32,
 }
 impl Default for FormationConfig {
     fn default() -> Self {
         Self {
             max_rounds: default_rounds(),
+            max_retries: default_retries(),
         }
     }
 }
@@ -59,6 +75,7 @@ pub struct ReasoningLimits {
     /// Owner-authored acceptance protocol, frozen before search; grants no rights.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    #[serde(default = "default_round_timeout")]
     pub round_timeout_ms: u64,
     pub inspection_timeout_ms: u64,
     pub inspection_source_bytes: u64,
@@ -70,6 +87,9 @@ fn is_zero(value: &u64) -> bool {
 
 impl ExplorationPolicy {
     pub fn validate(&self) -> Result<(), SearchError> {
+        if self.formation.max_retries > 16 {
+            return Err(SearchError("formation_retry_limit_invalid"));
+        }
         self.ceiling.validate().map_err(|e| SearchError(e.0))?;
         if self.reasoning.as_ref().is_some_and(|r| {
             !(1..=900_000).contains(&r.round_timeout_ms)
