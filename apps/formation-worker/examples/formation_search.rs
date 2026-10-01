@@ -1,8 +1,9 @@
-//! Actual known-D search acceptance driver. Frozen source and routes are planned
+//! Actual Formation search acceptance driver. Frozen source and routes are planned
 //! once, then every accepted route is checked by the shared Rust authority.
 use anyhow::{Context, Result, bail};
 use ato_formation_worker::decision_provider::{
-    DecisionPoint, DecisionProvider, ProviderAnswer, serve_decision,
+    DEFAULT_DECISION_MODEL, DecisionPoint, DecisionProvider, JevDecisionProvider, ProviderAnswer,
+    decision_request, serve_decision,
 };
 use ato_formation_worker::runtime_network::{
     Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, accept_verified_routes,
@@ -17,9 +18,43 @@ use std::path::Path;
 struct AcceptanceProvider {
     mode: String,
     log: Option<std::path::PathBuf>,
+    jev: Option<JevDecisionProvider>,
 }
 impl DecisionProvider for AcceptanceProvider {
     fn decide(&self, point: &DecisionPoint) -> ProviderAnswer {
+        if let Some(jev) = &self.jev {
+            let started = std::time::Instant::now();
+            let answer = jev.decide(point);
+            // Acceptance telemetry only: no key, source, raw response or receipt.
+            // Use the production provider and its unchanged bounded projection.
+            let model = std::env::var("ATO_DECISION_JEV_MODEL")
+                .unwrap_or_else(|_| DEFAULT_DECISION_MODEL.to_owned());
+            let request_bytes = serde_json::to_vec(&decision_request(&model, point))
+                .expect("serializable provider request")
+                .len();
+            if let Some(log) = &self.log {
+                use std::io::Write as _;
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log)
+                    .expect("open live acceptance ledger");
+                writeln!(
+                    file,
+                    "{}",
+                    serde_json::json!({
+                        "seq": point.seq,
+                        "mode": "jev",
+                        "elapsed_ms": started.elapsed().as_millis(),
+                        "request_bytes": request_bytes,
+                        "offered": point.choices.iter().map(|c| &c.choice_id).collect::<Vec<_>>(),
+                        "answer": answer.submission(point.seq),
+                    })
+                )
+                .expect("write live acceptance ledger");
+            }
+            return answer;
+        }
         if let Some(log) = &self.log {
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -74,11 +109,7 @@ impl DecisionProvider for AcceptanceProvider {
                 // inspect, stop): exercises the exploration actions without
                 // naming an index.
                 let want = &kind[5..];
-                match point
-                    .choices
-                    .iter()
-                    .find(|c| action_kind(c) == want)
-                {
+                match point.choices.iter().find(|c| action_kind(c) == want) {
                     Some(c) => ProviderAnswer::Choice {
                         choice_id: c.choice_id.clone(),
                         evidence: serde_json::json!({"provider": "acceptance", "mode": kind}),
@@ -125,6 +156,169 @@ fn action_kind(choice: &ato_formation_worker::decision_provider::OfferedChoice) 
         OfferedAction::Attempt { .. } => "attempt",
         OfferedAction::Inspect { .. } => "inspect",
         OfferedAction::Stop { .. } => "stop",
+        OfferedAction::EscalateToCandidateProducer {} => "escalate_to_candidate_producer",
+    }
+}
+
+/// Fault injection / deterministic draft producer for actual acceptance only.
+struct AcceptanceGenerationProvider {
+    mode: String,
+}
+impl ato_formation_worker::generation_provider::GenerationProvider
+    for AcceptanceGenerationProvider
+{
+    fn generate(
+        &self,
+        point: &ato_formation_worker::generation_provider::GenerationPoint,
+    ) -> ato_formation_worker::generation_provider::GenerationAnswer {
+        use ato_formation_worker::generation_provider::GenerationAnswer;
+        if self.mode == "deterministic_v1" {
+            use ato_formation_worker::generation_provider::generation_request_v2;
+            if generation_request_v2(
+                ato_formation_worker::generation_provider::DEFAULT_GENERATION_MODEL,
+                point,
+            )
+            .is_err()
+            {
+                return GenerationAnswer::Fallback { reason: "invalid" };
+            }
+            let provenance = serde_json::json!({
+                "provider": "acceptance", "model": "deterministic-selector-v1",
+                "prompt_version": "efficacy-selector/1",
+                "usage": {"input_tokens":0,"output_tokens":0},
+            });
+            let selected = point
+                .context
+                .as_ref()
+                .and_then(|context| efficacy_entrypoint(&context.entrypoints));
+            return match selected {
+                Some(id) => GenerationAnswer::Draft {
+                    draft: serde_json::json!({"schema":"ato.formation-derivation-draft/1",
+                        "operation":"python_script", "entrypoint_id":id}),
+                    provenance,
+                },
+                None => GenerationAnswer::Declined { provenance },
+            };
+        }
+        if self.mode == "error" {
+            return GenerationAnswer::Fallback {
+                reason: "provider_error",
+            };
+        }
+        if self.mode == "silent" {
+            std::thread::sleep(std::time::Duration::from_secs(31));
+            return GenerationAnswer::Fallback { reason: "timeout" };
+        }
+        if self.mode == "decline" {
+            return GenerationAnswer::Declined {
+                provenance: serde_json::json!({
+                    "provider": "acceptance", "model": "fixed-decline",
+                    "prompt_version": "acceptance/1",
+                    "usage": {"input_tokens":0,"output_tokens":0},
+                }),
+            };
+        }
+        let id = self.mode.strip_prefix("fixed:").unwrap_or(
+            point
+                .entrypoint_ids
+                .first()
+                .map(String::as_str)
+                .unwrap_or("none"),
+        );
+        GenerationAnswer::Draft {
+            draft: serde_json::json!({
+                "schema": "ato.formation-derivation-draft/1",
+                "operation": "python_script",
+                "entrypoint_id": id,
+            }),
+            provenance: serde_json::json!({
+                "provider": "acceptance", "model": "fixed",
+                "prompt_version": "acceptance/1",
+                "usage": {"input_tokens":0,"output_tokens":0},
+            }),
+        }
+    }
+}
+
+/// Evaluation-only fixed rule. No source, paths, labels or outcome feedback.
+/// Complete scans only; positive score, then ascending opaque ID for ties.
+fn efficacy_entrypoint(
+    entries: &[ato_formation::generation_context::EntryPointSummary],
+) -> Option<&str> {
+    use ato_formation::generation_context::{ImportMarker, SourceScan};
+    entries
+        .iter()
+        .filter(|entry| entry.source_scan == SourceScan::Complete)
+        .map(|entry| {
+            let http = entry.imports.iter().any(|marker| {
+                matches!(
+                    marker,
+                    ImportMarker::HttpServer
+                        | ImportMarker::Flask
+                        | ImportMarker::Fastapi
+                        | ImportMarker::Uvicorn
+                        | ImportMarker::Aiohttp
+                        | ImportMarker::Tornado
+                        | ImportMarker::Wsgiref
+                        | ImportMarker::Django
+                )
+            });
+            let score = 4 * u8::from(entry.custom_http_handler)
+                + 2 * u8::from(entry.server_listen)
+                + u8::from(http)
+                + u8::from(entry.main_guard);
+            (entry.id.as_str(), score)
+        })
+        .filter(|(_, score)| *score > 0)
+        .min_by(|(id_a, score_a), (id_b, score_b)| score_b.cmp(score_a).then(id_a.cmp(id_b)))
+        .map(|(id, _)| id)
+}
+
+/// Reject mode combinations that would record a different prompt from the
+/// one sent by the real provider. Fixed providers can exercise either format.
+fn validate_generation_capture(mode: Option<&str>, context_v2: bool) -> Result<()> {
+    anyhow::ensure!(
+        !matches!(
+            (mode, context_v2),
+            (Some("jev"), true) | (Some("jev_v2"), false)
+        ),
+        "generation provider and context versions must match"
+    );
+    Ok(())
+}
+
+/// Record exactly the privacy-projected provider payload, never GenerationPoint.
+struct RecordedGenerationProvider {
+    inner: Box<dyn ato_formation_worker::generation_provider::GenerationProvider>,
+    path: std::path::PathBuf,
+    v2: bool,
+}
+impl ato_formation_worker::generation_provider::GenerationProvider for RecordedGenerationProvider {
+    fn generate(
+        &self,
+        point: &ato_formation_worker::generation_provider::GenerationPoint,
+    ) -> ato_formation_worker::generation_provider::GenerationAnswer {
+        use ato_formation_worker::generation_provider::{self as generation, GenerationAnswer};
+        let model = std::env::var("ATO_GENERATION_JEV_MODEL")
+            .unwrap_or_else(|_| generation::DEFAULT_GENERATION_MODEL.into());
+        let payload = if self.v2 {
+            generation::generation_request_v2(&model, point)
+        } else {
+            generation::generation_request(&model, point)
+        };
+        let Ok(payload) = payload else {
+            return GenerationAnswer::Fallback { reason: "invalid" };
+        };
+        if serde_json::to_vec_pretty(&payload)
+            .ok()
+            .and_then(|bytes| std::fs::write(&self.path, bytes).ok())
+            .is_none()
+        {
+            return GenerationAnswer::Fallback {
+                reason: "provider_error",
+            };
+        }
+        self.inner.generate(point)
     }
 }
 
@@ -141,10 +335,17 @@ fn main() -> Result<()> {
         &a[8..].iter().map(Into::into).collect::<Vec<_>>(),
         None,
         Path::new(&a[4]),
-        RuntimeConstraintWire::Any,
+        std::env::var("ATO_ACCEPTANCE_EXACT_RUNTIME")
+            .map(|runtime_id| RuntimeConstraintWire::Exact {
+                runtime_id,
+                environment_id: None,
+            })
+            .unwrap_or(RuntimeConstraintWire::Any),
         SatisfyPolicy {
             network: "dependency-resolution".into(),
             allow_managed: false,
+            generation: None,
+            proposal: None,
             // ATO_ACCEPTANCE_DECISION_POLICY="MAX_DECISIONS,TIMEOUT_MS"
             decision: std::env::var("ATO_ACCEPTANCE_DECISION_POLICY")
                 .ok()
@@ -161,6 +362,44 @@ fn main() -> Result<()> {
         SatisfyBudget::ceilings(a[6].parse()?, "first_pass"),
         &a[5],
     )?;
+    if let Ok(entries) = std::env::var("ATO_ACCEPTANCE_GENERATION_ENTRYPOINTS") {
+        submission.authorize_generation(serde_json::from_str(&entries)?, 30_000)?;
+    }
+    let context_v2 = std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2");
+    validate_generation_capture(
+        std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER")
+            .ok()
+            .as_deref(),
+        context_v2,
+    )?;
+    if context_v2 {
+        submission.enable_generation_context()?;
+    }
+    let generation_provider = std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER").ok()
+        .map(|mode| -> Result<Box<dyn ato_formation_worker::generation_provider::GenerationProvider>> {
+            if mode == "jev_v2" {
+                Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env_v2(
+                    std::time::Duration::from_secs(20),
+                )?))
+            } else if mode == "jev" {
+                Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env(
+                    std::time::Duration::from_secs(20),
+                )?))
+            } else {
+                Ok(Box::new(AcceptanceGenerationProvider { mode }))
+            }
+        }).transpose()?;
+    let generation_provider = generation_provider.map(|inner| {
+        if let Some(path) = std::env::var_os("ATO_ACCEPTANCE_GENERATION_INPUT") {
+            Box::new(RecordedGenerationProvider {
+                inner,
+                path: path.into(),
+                v2: std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2"),
+            }) as Box<dyn ato_formation_worker::generation_provider::GenerationProvider>
+        } else {
+            inner
+        }
+    });
     // Fault injection for the effect-uncertainty acceptance only: a requester
     // whose effect hint is wrong. The Runtime re-plans D and attests the real
     // class; nothing here changes K or D.
@@ -180,6 +419,10 @@ fn main() -> Result<()> {
     let provider = std::env::var("ATO_ACCEPTANCE_DECISION_PROVIDER")
         .ok()
         .map(|mode| AcceptanceProvider {
+            jev: (mode == "jev")
+                .then(|| JevDecisionProvider::from_env(std::time::Duration::from_secs(20)))
+                .transpose()
+                .expect("live Jev acceptance configuration"),
             mode,
             log: std::env::var_os("ATO_ACCEPTANCE_DECISION_LOG").map(Into::into),
         });
@@ -187,6 +430,24 @@ fn main() -> Result<()> {
     loop {
         // Coordinator may be restarting; a transport failure is not D failure.
         if let Ok(status) = client.satisfy_status(id) {
+            submission.accept_generated_candidate(&status)?;
+            if let Some(provider) = &generation_provider
+                && let Some(call) = ato_formation_worker::runtime_network::serve_generation(
+                    &mut submission,
+                    &client,
+                    id,
+                    &status,
+                    provider.as_ref(),
+                )?
+                && let Some(path) = std::env::var_os("ATO_ACCEPTANCE_GENERATION_LOG")
+            {
+                use std::io::Write as _;
+                let mut log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
+                writeln!(log, "{call}")?;
+            }
             if let Some(provider) = &provider {
                 // A silent provider must not stall this poll loop.
                 if provider.mode == "silent" {
@@ -230,5 +491,75 @@ fn main() -> Result<()> {
             "search did not settle"
         );
         std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::validate_generation_capture;
+
+    #[test]
+    fn live_provider_version_must_match_captured_context() {
+        assert!(validate_generation_capture(Some("jev"), false).is_ok());
+        assert!(validate_generation_capture(Some("jev_v2"), true).is_ok());
+        assert!(validate_generation_capture(Some("jev"), true).is_err());
+        assert!(validate_generation_capture(Some("jev_v2"), false).is_err());
+        for context in [false, true] {
+            assert!(validate_generation_capture(Some("fixed:e01"), context).is_ok());
+            assert!(validate_generation_capture(None, context).is_ok());
+        }
+    }
+}
+
+#[cfg(test)]
+mod efficacy_tests {
+    use super::efficacy_entrypoint;
+    use ato_formation::generation_context::project_python;
+    #[test]
+    fn fixed_rule_uses_markers_not_input_order_and_breaks_ties_by_id() {
+        let source = b"from http.server import HTTPServer\nHTTPServer().serve_forever()";
+        let a = project_python("q7", source, source.len() as u64).unwrap();
+        let b = project_python("m2", source, source.len() as u64).unwrap();
+        assert_eq!(efficacy_entrypoint(&[a.clone(), b.clone()]), Some("m2"));
+        assert_eq!(efficacy_entrypoint(&[b, a]), Some("m2"));
+    }
+    #[test]
+    fn fixed_rule_declines_empty_zero_and_unavailable_contexts() {
+        assert_eq!(efficacy_entrypoint(&[]), None);
+        let zero = project_python("q7", b"print('hi')", 11).unwrap();
+        let large = project_python("m2", b"", 65537).unwrap();
+        let unavailable = project_python("z3", &[255], 1).unwrap();
+        assert_eq!(efficacy_entrypoint(&[zero, large, unavailable]), None);
+    }
+}
+
+#[cfg(test)]
+mod efficacy_provider_tests {
+    use super::AcceptanceGenerationProvider;
+    use ato_formation_worker::generation_provider::{
+        GenerationAnswer, GenerationPoint, GenerationProvider,
+    };
+    #[test]
+    fn comparator_reaches_draft_through_production_context_validation() {
+        let source = b"from http.server import HTTPServer\nHTTPServer().serve_forever()";
+        let summary =
+            ato_formation::generation_context::project_python("m2", source, source.len() as u64)
+                .unwrap();
+        let point: GenerationPoint = serde_json::from_value(serde_json::json!({
+            "schema":"ato.formation-generation-point/2","revision":1,"expires_at":"2026-09-27T00:00:00Z",
+            "entrypoint_ids":["m2"],"failures":[],"context":{
+                "schema":"ato.formation-generation-context/1","entrypoints":[summary],
+                "project_summary":{"python":true,"node":false,"manifest":true,"lockfile":false,
+                    "readme":false,"static_html":false,"regular_files":"one","python_files":"one"},
+                "failures":[],"inspections":[]
+            }
+        })).unwrap();
+        let provider = AcceptanceGenerationProvider {
+            mode: "deterministic_v1".into(),
+        };
+        match provider.generate(&point) {
+            GenerationAnswer::Draft { draft, .. } => assert_eq!(draft["entrypoint_id"], "m2"),
+            answer => panic!("expected comparator draft, got {answer:?}"),
+        }
     }
 }

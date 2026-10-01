@@ -56,6 +56,30 @@ impl std::fmt::Display for SpawnCleanupUnconfirmed {
 
 impl std::error::Error for SpawnCleanupUnconfirmed {}
 
+/// Stable code of [`OciVolumeUnauthorized`].
+pub const OCI_VOLUME_UNAUTHORIZED: &str = "oci_volume_unauthorized";
+
+/// The image declares VOLUMEs that no declared mount targets exactly. Docker
+/// would create an anonymous writable volume for each; the launch is refused
+/// before any container is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciVolumeUnauthorized {
+    pub volumes: Vec<String>,
+}
+
+impl std::fmt::Display for OciVolumeUnauthorized {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{OCI_VOLUME_UNAUTHORIZED}: OCI image declares VOLUME {:?} with no declared state, \
+             workspace or tmpfs mount at exactly that path; anonymous volumes are not created",
+            self.volumes
+        )
+    }
+}
+
+impl std::error::Error for OciVolumeUnauthorized {}
+
 /// Remove a container a failed launch may have left, and confirm it is gone.
 fn discard_failed_launch(docker: &Path, container: &str) -> std::result::Result<(), String> {
     let removed = stop::docker_output(
@@ -109,6 +133,19 @@ fn failed_launch(docker: &Path, container: &str, error: anyhow::Error) -> anyhow
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Staging-only escape hatch for a dedicated Runner that hosts trusted Apps.
+/// When set to `1`, the Run bridge has ordinary Docker egress instead of being
+/// `--internal`. The broker bridge remains internal, and all container sandbox
+/// controls remain unchanged.
+///
+/// Never set this on a Runner serving public Try, Guest or Discover Runs. This
+/// exists only until declared, policy-bound HTTP egress replaces it.
+pub const DIRECT_EGRESS_ENV: &str = "ATO_OCI_DIRECT_EGRESS";
+
+fn direct_egress_enabled() -> bool {
+    std::env::var(DIRECT_EGRESS_ENV).is_ok_and(|value| value == "1")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciEndpoint {
@@ -250,8 +287,13 @@ impl DockerOciAdapter {
     /// Launch in a new `--internal` network owned by the returned handle. The
     /// single-container route: nothing else ever joins that network.
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
-        let network =
-            OciNetwork::create_with(&self.docker, &self.spec.id, &self.spec.labels, "ator")?;
+        let network = OciNetwork::create_with(
+            &self.docker,
+            &self.spec.id,
+            &self.spec.labels,
+            "ator",
+            !direct_egress_enabled(),
+        )?;
         match self.spawn_in_network(workspace, runtime_root, &network, None) {
             Ok(mut handle) => {
                 handle.network = Some(network);
@@ -307,6 +349,16 @@ impl DockerOciAdapter {
             )?;
         }
         let (_, image_for_run) = self.admit_image()?;
+        // Docker silently creates an anonymous, writable volume for every
+        // image VOLUME no mount covers. That would be state outside the
+        // read-only root that no Capsule declared, so it is refused.
+        let volumes = image_volumes(&self.docker, &image_for_run)?;
+        let uncovered = uncovered_volumes(&volumes, &self.spec);
+        if !uncovered.is_empty() {
+            return Err(anyhow::Error::new(OciVolumeUnauthorized {
+                volumes: uncovered,
+            }));
+        }
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         // A service's alias is kept whole in its container name so an operator
@@ -561,7 +613,25 @@ fn validate_loaded_image(
     Ok(())
 }
 
-/// One `--internal` bridge for one Run. Removed on [`OciNetwork::remove`] or,
+fn network_create_arguments(bridge_name: &str, internal: bool) -> Vec<String> {
+    let mut arguments = vec![
+        "network".to_owned(),
+        "create".to_owned(),
+        "--driver".to_owned(),
+        "bridge".to_owned(),
+    ];
+    if internal {
+        arguments.push("--internal".to_owned());
+    }
+    arguments.extend([
+        "--opt".to_owned(),
+        format!("com.docker.network.bridge.name={bridge_name}"),
+    ]);
+    arguments
+}
+
+/// One Run bridge. It is `--internal` unless the dedicated staging escape
+/// hatch is enabled. Removed on [`OciNetwork::remove`] or,
 /// best effort, on drop — so a failed launch never leaks a network.
 pub struct OciNetwork {
     docker: PathBuf,
@@ -576,7 +646,7 @@ impl OciNetwork {
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
-        Self::create_with(&docker, label, labels, "ator")
+        Self::create_with(&docker, label, labels, "ator", !direct_egress_enabled())
     }
 
     /// Create the dedicated bridge used only to reach the Runner-owned TCP
@@ -586,7 +656,7 @@ impl OciNetwork {
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
-        Self::create_with(&docker, label, labels, "atoe")
+        Self::create_with(&docker, label, labels, "atoe", true)
     }
 
     fn create_with(
@@ -594,6 +664,7 @@ impl OciNetwork {
         label: &str,
         labels: &BTreeMap<String, String>,
         bridge_prefix: &str,
+        internal: bool,
     ) -> Result<Self> {
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!(
@@ -602,15 +673,7 @@ impl OciNetwork {
             std::process::id()
         );
         let bridge_name = bridge_name(bridge_prefix, suffix);
-        let mut arguments = vec![
-            "network".to_owned(),
-            "create".to_owned(),
-            "--driver".to_owned(),
-            "bridge".to_owned(),
-            "--internal".to_owned(),
-            "--opt".to_owned(),
-            format!("com.docker.network.bridge.name={bridge_name}"),
-        ];
+        let mut arguments = network_create_arguments(&bridge_name, internal);
         for (key, value) in labels {
             ensure!(
                 key.starts_with("run.ato.dev/") && is_label_value(value),
@@ -1050,16 +1113,38 @@ fn inspect_container_address(docker: &Path, container_id: &str) -> Result<IpAddr
         ],
         "inspect OCI container network address",
     )?;
-    value
-        .trim()
-        .parse()
-        .context("Docker returned an invalid container network address")
+    if let Ok(address) = value.trim().parse() {
+        return Ok(address);
+    }
+    // No address usually means the process already exited (e.g. exec was
+    // refused). Report the container's own state; its output is not copied
+    // into the error because it may hold runtime secrets.
+    let state = run_checked(
+        docker,
+        [
+            "inspect",
+            "--format",
+            "status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{json .State.Error}}",
+            container_id,
+        ],
+        "inspect OCI container state",
+    )
+    .unwrap_or_default();
+    bail!(
+        "OCI container has no network address ({}); an exit code of 126 means the command could not be executed",
+        state.trim()
+    )
 }
 
 impl Drop for OciHandle {
     fn drop(&mut self) {
         let _ = self.shutdown(StopBudget::DEFAULT);
     }
+}
+
+/// The host-independent checks [`DockerOciAdapter::new`] applies to a spec.
+pub fn validate_oci_spec(spec: &OciSpec) -> Result<()> {
+    validate_spec(spec)
 }
 
 fn validate_spec(spec: &OciSpec) -> Result<()> {
@@ -1096,8 +1181,8 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
         "OCI entrypoint is invalid"
     );
     ensure!(
-        spec.working_dir == "/app",
-        "OCI working directory must be /app"
+        valid_guest_path(&spec.working_dir),
+        "OCI working directory must be an absolute traversal-free guest path"
     );
     ensure!(
         valid_guest_path(&spec.workspace_mount_path),
@@ -1150,6 +1235,49 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn image_volumes(docker: &Path, image: &str) -> Result<Vec<String>> {
+    let output = Command::new(docker)
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{json .Config.Volumes}}",
+            image,
+        ])
+        .output()
+        .context("inspect OCI image volumes")?;
+    ensure!(
+        output.status.success(),
+        "OCI image volumes are not inspectable: {}",
+        bounded_stderr(&output)
+    );
+    let volumes: Option<BTreeMap<String, serde_json::Value>> =
+        serde_json::from_slice(&output.stdout).context("invalid Docker image volume output")?;
+    Ok(volumes.unwrap_or_default().into_keys().collect())
+}
+
+/// Image VOLUMEs without a mount at exactly their path. Docker skips the
+/// anonymous volume only when a mount (or tmpfs) has that exact destination;
+/// a mount above or below the VOLUME path does not prevent it. A VOLUME path
+/// that is not an absolute traversal-free guest path is never covered.
+fn uncovered_volumes(volumes: &[String], spec: &OciSpec) -> Vec<String> {
+    let targets = std::iter::once(spec.workspace_mount_path.as_str())
+        .chain(spec.mounts.iter().map(|mount| mount.guest_path.as_str()))
+        .chain(std::iter::once("/tmp"))
+        .collect::<Vec<_>>();
+    volumes
+        .iter()
+        .filter(|volume| {
+            let path = volume
+                .strip_suffix('/')
+                .filter(|path| !path.is_empty())
+                .unwrap_or(volume);
+            !(valid_guest_path(path) && targets.contains(&path))
+        })
+        .cloned()
+        .collect()
 }
 
 fn valid_guest_path(target: &str) -> bool {
@@ -1385,12 +1513,69 @@ mod tests {
     }
 
     #[test]
+    fn working_dir_is_any_absolute_traversal_free_guest_path() {
+        let mut declared = spec();
+        declared.working_dir = "/opt/app".to_owned();
+        assert!(validate_spec(&declared).is_ok());
+        for invalid in ["opt/app", "/", "/opt/../etc", "/opt//app", "/a,b", "/a\\b"] {
+            declared.working_dir = invalid.to_owned();
+            assert!(validate_spec(&declared).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn image_volumes_need_a_declared_mount_at_exactly_their_path() {
+        let state = tempfile::tempdir().unwrap();
+        let mut declared = spec();
+        declared.workspace_mount_path = "/.ato-workspace".to_owned();
+        declared.mounts.push(OciMount {
+            host_path: state.path().to_path_buf(),
+            guest_path: "/opt/app/server-data".to_owned(),
+            writable: true,
+        });
+        declared.mounts.push(OciMount {
+            host_path: state.path().to_path_buf(),
+            guest_path: "/data".to_owned(),
+            writable: true,
+        });
+        let covered = |volume: &str| uncovered_volumes(&[volume.to_owned()], &declared).is_empty();
+        // Exact destinations: state, workspace, the /tmp tmpfs.
+        assert!(covered("/opt/app/server-data"));
+        assert!(covered("/opt/app/server-data/"));
+        assert!(covered("/.ato-workspace"));
+        assert!(covered("/tmp"));
+        // A parent mount does not stop Docker creating the volume.
+        assert!(!covered("/data/sub"));
+        assert!(!covered("/tmp/cache"));
+        assert!(!covered("/.ato-workspace/x"));
+        // Nor does a child mount, a sibling prefix, or an unnormalized path.
+        assert!(!covered("/opt/app"));
+        assert!(!covered("/opt/app/server"));
+        assert!(!covered("/opt/app/server-data/../server-data"));
+        assert!(!covered("/data//"));
+        assert!(!covered("data"));
+        let error = OciVolumeUnauthorized {
+            volumes: vec!["/data/sub".to_owned()],
+        };
+        assert!(error.to_string().starts_with("oci_volume_unauthorized: "));
+    }
+
+    #[test]
     fn egress_bridge_names_fit_linux_and_keep_the_firewall_prefix() {
         let first = bridge_name("atoe", 1);
         let second = bridge_name("atoe", 2);
         assert!(first.starts_with("atoe"));
         assert!(first.len() <= 15);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn run_networks_are_internal_unless_direct_egress_is_requested() {
+        let internal = network_create_arguments("ator7", true);
+        assert!(internal.iter().any(|argument| argument == "--internal"));
+        let direct = network_create_arguments("ator7", false);
+        assert!(!direct.iter().any(|argument| argument == "--internal"));
+        assert!(direct.contains(&"com.docker.network.bridge.name=ator7".to_owned()));
     }
 
     #[test]

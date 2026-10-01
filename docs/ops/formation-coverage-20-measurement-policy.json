@@ -1,0 +1,22 @@
+{
+  "schema": "ato.formation-coverage-measurement-policy/1",
+  "cohort_plan_sha256": "09dd673a79b73e561dc872e75268008c4703615097a1019495ed652e51e7f556",
+  "semantic_implementation_pin": "857cb1ed4d71c99fde95a0302e0acf6952cdc7e8",
+  "entrypoint": "ato_formation_worker::local::run",
+  "runtime": "isolated Linux aarch64 local Runtime",
+  "contract_source": "Infer via existing authored capsule.toml or existing presets only",
+  "missing_contract": "null with actual typed authoring/source failure; no synthetic K",
+  "candidate_producer": "off",
+  "decision_provider": "off",
+  "browser_model_verifier": "off",
+  "network": "denied",
+  "max_attempts_per_app": 4,
+  "source_limits": {"max_files":50000,"max_total_bytes":536870912,"max_path_depth":64,"max_path_bytes":1024},
+  "build_limits": "existing BuildLimits::default at implementation pin",
+  "hard_process_timeout_seconds": 360,
+  "timeout_classification": "unclassified infrastructure stop; not counted as measured terminal",
+  "success": "actual fully_satisfied same-K receipt required",
+  "no_app_specific_overrides": true,
+  "no_live_model_calls": true,
+  "note": "Single currently available isolated Runtime profile baseline, not a claim of all Runtime Network environment coverage. Source acquisition is separate from workload network permission. Source failures do not fabricate K/D or Runtime attempts."
+}

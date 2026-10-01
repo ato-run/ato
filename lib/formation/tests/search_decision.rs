@@ -42,12 +42,7 @@ fn attempt_action(c: &Choice) -> Option<(&str, &str, &str, &str)> {
             derivation_ref,
             runtime_id,
             environment_id,
-        } => Some((
-            candidate_id,
-            derivation_ref,
-            runtime_id,
-            environment_id,
-        )),
+        } => Some((candidate_id, derivation_ref, runtime_id, environment_id)),
         _ => None,
     }
 }
@@ -154,10 +149,7 @@ fn choices_are_finite_deterministic_and_default_first() {
     assert_eq!(a, b);
     // Two attempts, one refusal-inspection per D, then the stop.
     assert_eq!(a.len(), 5);
-    assert_eq!(
-        attempt_action(&a[0]).unwrap().0,
-        "candidate-0"
-    );
+    assert_eq!(attempt_action(&a[0]).unwrap().0, "candidate-0");
     assert!(attempt_action(&a[1]).is_some());
     assert!(matches!(
         a[2].action,
@@ -223,7 +215,10 @@ fn choices_are_finite_deterministic_and_default_first() {
     let bounded = allowed_choices(&s, &many);
     assert_eq!(bounded.len(), MAX_CHOICES);
     // The stop is offered even when the set is full.
-    assert!(matches!(bounded.last().unwrap().action, ChoiceAction::Stop { .. }));
+    assert!(matches!(
+        bounded.last().unwrap().action,
+        ChoiceAction::Stop { .. }
+    ));
 }
 
 #[test]
@@ -329,10 +324,13 @@ fn a_fallback_releases_the_default_once_then_the_frontier_moves_on() {
     );
     // Once that attempt landed the point is consumed and a NEW point opens —
     // without issuing anything else, the decision sequence advanced.
-    { let d = s.frozen.candidates[0].derivation_ref.clone(); issue_attempt(&mut s, &d); }
+    {
+        let d = s.frozen.candidates[0].derivation_ref.clone();
+        issue_attempt(&mut s, &d);
+    }
     let action = decide_next(&s, &placements(&s), 12).unwrap();
     assert!(
-        matches!(&action, SearchAction::OpenDecision{seq:1,..}),
+        matches!(&action, SearchAction::OpenDecision { seq: 1, .. }),
         "{action:?}"
     );
     let _ = default_id;
@@ -374,7 +372,11 @@ fn an_inspection_choice_runs_once_records_evidence_and_opens_a_new_point() {
         })
         .unwrap()
         .clone();
-    let v = submit(&s, serde_json::json!({"seq":0,"choice_id":inspect.choice_id})).unwrap();
+    let v = submit(
+        &s,
+        serde_json::json!({"seq":0,"choice_id":inspect.choice_id}),
+    )
+    .unwrap();
     record(&mut s, &v);
     // No attempt was issued: the action is a Coordinator-side inspection.
     let action = decide_next(&s, &placements(&s), 11).unwrap();
@@ -395,23 +397,22 @@ fn an_inspection_choice_runs_once_records_evidence_and_opens_a_new_point() {
         kind: *inspection,
         target_ref: target_ref.clone(),
         decision_seq: 0,
-        result: InspectionResult::CandidateRefusals {
-            refusals: vec![],
-        },
+        result: InspectionResult::CandidateRefusals { refusals: vec![] },
         recorded_at_ms: 11,
     });
     assert_eq!(s.attempts.len(), 0);
     let restarted: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
     let action = decide_next(&restarted, &placements(&restarted), 12).unwrap();
     assert!(
-        matches!(&action, SearchAction::OpenDecision{seq:1,..}),
+        matches!(&action, SearchAction::OpenDecision { seq: 1, .. }),
         "{action:?}"
     );
-    assert!(events(&restarted, &action)
-        .contains(&SearchEvent::InspectionRecorded {
+    assert!(
+        events(&restarted, &action).contains(&SearchEvent::InspectionRecorded {
             inspection: InspectionKind::CandidateRefusals,
             target_ref: target_ref.clone()
-        }));
+        })
+    );
     // The collected evidence is no longer offered again.
     let next = allowed_choices(&s, &placements(&s));
     assert!(
@@ -459,13 +460,15 @@ fn a_stop_choice_finishes_without_a_ticket_and_is_not_a_failure() {
 fn attempt_failures_is_offered_only_when_a_failure_exists() {
     let s = with_policy(fixture("newly-created"));
     assert!(
-        !allowed_choices(&s, &placements(&s)).iter().any(|c| matches!(
-            c.action,
-            ChoiceAction::Inspect {
-                inspection: InspectionKind::AttemptFailures,
-                ..
-            }
-        ))
+        !allowed_choices(&s, &placements(&s))
+            .iter()
+            .any(|c| matches!(
+                c.action,
+                ChoiceAction::Inspect {
+                    inspection: InspectionKind::AttemptFailures,
+                    ..
+                }
+            ))
     );
     let failed = with_policy(fixture("d1-failed"));
     let target = failed.frozen.candidates[0].derivation_ref.clone();
@@ -490,7 +493,11 @@ fn decision_seq_is_independent_of_the_attempt_count() {
         .find(|c| matches!(c.action, ChoiceAction::Inspect { .. }))
         .unwrap()
         .clone();
-    let v = submit(&s, serde_json::json!({"seq":0,"choice_id":inspect.choice_id})).unwrap();
+    let v = submit(
+        &s,
+        serde_json::json!({"seq":0,"choice_id":inspect.choice_id}),
+    )
+    .unwrap();
     record(&mut s, &v);
     let run = decide_next(&s, &placements(&s), 11).unwrap();
     let (inspection, target) = match &run {
@@ -505,14 +512,12 @@ fn decision_seq_is_independent_of_the_attempt_count() {
         kind: inspection,
         target_ref: target,
         decision_seq: 0,
-        result: InspectionResult::CandidateRefusals {
-            refusals: vec![],
-        },
+        result: InspectionResult::CandidateRefusals { refusals: vec![] },
         recorded_at_ms: 11,
     });
     let action = decide_next(&s, &placements(&s), 12).unwrap();
     assert!(
-        matches!(&action, SearchAction::OpenDecision{seq:1,..}),
+        matches!(&action, SearchAction::OpenDecision { seq: 1, .. }),
         "{action:?}"
     );
     assert_eq!(s.attempts.len(), 0);
@@ -621,7 +626,10 @@ fn durable_decision_records_are_checked() {
     let mut bad_attempt = s.clone();
     bad_attempt.budget.decisions_used = 1;
     bad_attempt.decisions[0].attempt_seq = 1;
-    assert!(bad_attempt.validate().is_err(), "attempt_seq beyond attempts");
+    assert!(
+        bad_attempt.validate().is_err(),
+        "attempt_seq beyond attempts"
+    );
     // Only the last point may still be open.
     let mut two = s.clone();
     two.decisions.push(two.decisions[0].clone());
@@ -643,7 +651,11 @@ fn durable_evidence_records_are_checked() {
         .find(|c| matches!(c.action, ChoiceAction::Inspect { .. }))
         .unwrap()
         .clone();
-    let v = submit(&s, serde_json::json!({"seq":0,"choice_id":inspect.choice_id})).unwrap();
+    let v = submit(
+        &s,
+        serde_json::json!({"seq":0,"choice_id":inspect.choice_id}),
+    )
+    .unwrap();
     record(&mut s, &v);
     let Some(ChoiceAction::Inspect {
         inspection,
@@ -671,7 +683,10 @@ fn durable_evidence_records_are_checked() {
     // Evidence must come from the point that chose it.
     let mut bad = s.clone();
     bad.evidence[0].result = InspectionResult::AttemptFailures { failures: vec![] };
-    assert!(bad.validate().is_err(), "result kind must match the record kind");
+    assert!(
+        bad.validate().is_err(),
+        "result kind must match the record kind"
+    );
     let mut bad = s.clone();
     bad.evidence[0].target_ref = "other".into();
     assert!(bad.validate().is_err(), "the point chose another target");
@@ -683,7 +698,10 @@ fn durable_evidence_records_are_checked() {
     assert!(bad.validate().is_err(), "schema");
     let mut bad = s.clone();
     bad.evidence.push(bad.evidence[0].clone());
-    assert!(bad.validate().is_err(), "evidence is write-once per (kind,target)");
+    assert!(
+        bad.validate().is_err(),
+        "evidence is write-once per (kind,target)"
+    );
     let mut bad = s.clone();
     bad.evidence[0] = InspectionEvidence {
         schema: INSPECTION_SCHEMA.into(),

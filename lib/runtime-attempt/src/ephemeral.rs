@@ -247,6 +247,10 @@ impl TemporaryRealization {
         }
         realization.endpoints = endpoints;
 
+        // Authoring uses `.` for the root; the launch wire uses an empty
+        // relative path. Reuse the same checked projection as build steps.
+        let cwd_relative = ato_formation::projection::workspace_relative_cwd(&serve.cwd)
+            .map_err(anyhow::Error::msg)?;
         let argv = serve.argv.clone();
         let public_env = request.plan.process_environment(request.derivation);
 
@@ -260,7 +264,7 @@ impl TemporaryRealization {
             },
             workspace: LaunchWorkspaceV1 {
                 materialization_ref: format!("formation-attempt:{}", request.attempt_id),
-                cwd_relative: serve.cwd.clone(),
+                cwd_relative: cwd_relative.clone(),
             },
             realization: LaunchRealizationV1::Process(ProcessRealizationV1 {
                 argv,
@@ -283,7 +287,7 @@ impl TemporaryRealization {
         };
         let context = ResolvedRuntimeLaunchContext::new(
             workspace_root,
-            &serve.cwd,
+            &cwd_relative,
             public_env,
             Vec::new(),
             Vec::new(),

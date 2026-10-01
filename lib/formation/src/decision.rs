@@ -72,7 +72,6 @@ impl Eq for RefusalEntry {}
 impl Eq for InspectionResult {}
 impl Eq for InspectionEvidence {}
 
-
 /// The bounded, pre-defined read-only inspections a provider may ask for.
 /// Each maps to one Coordinator-side typed evidence producer; there are no
 /// provider-supplied arguments and nothing here can reach a shell, the
@@ -98,6 +97,8 @@ pub enum StopReasonClass {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChoiceAction {
+    /// Release the existing bounded proposal round; never carries producer input.
+    EscalateToCandidateProducer {},
     /// Issue the next attempt: a frozen D on an admissible, untried placement.
     Attempt {
         candidate_id: String,
@@ -204,8 +205,7 @@ impl InspectionEvidence {
                     }
                     for reason in &entry.reasons {
                         // Reasons are typed {code, ...} objects only.
-                        let bytes =
-                            serde_json::to_vec(reason).map_or(usize::MAX, |b| b.len());
+                        let bytes = serde_json::to_vec(reason).map_or(usize::MAX, |b| b.len());
                         if !reason.is_object()
                             || !reason["code"].is_string()
                             || bytes > MAX_REASON_BYTES
@@ -316,10 +316,11 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
     let l = &s.frozen.policy.budget;
     let transfer_left = available(l.max_transfer_bytes, b.transfer_used, b.transfer_reserved);
     let mut out = Vec::new();
-    for d in s.frozen.candidates.iter().filter(|d| safe(&d.effects)) {
+    for d in s.candidates().filter(|d| safe(&d.effects)) {
         for p in placements.iter().filter(|p| {
             p.derivation_ref == d.derivation_ref
                 && p.admissible
+                && s.generation_placement_allowed(p)
                 && p.transfer_bytes <= transfer_left
         }) {
             let tried = s.attempts.iter().any(|a| {
@@ -361,10 +362,28 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
             break;
         }
     }
+    append_inspections_and_stop(s, &mut out);
+    out
+}
+
+/// Called only after the deterministic core has admitted OpenProposalRound.
+/// Authorization, source cost and safety fences remain owned by default_next.
+fn proposal_choices(s: &SearchStateV1) -> Vec<Choice> {
+    let action = ChoiceAction::EscalateToCandidateProducer {};
+    let mut out = vec![Choice {
+        choice_id: choice_id(s.decisions.len() as u64, &action),
+        action,
+    }];
+    append_inspections_and_stop(s, &mut out);
+    out
+}
+
+fn append_inspections_and_stop(s: &SearchStateV1, out: &mut Vec<Choice>) {
+    let seq = s.decisions.len() as u64;
     // Inspections whose evidence is not recorded yet, in frozen D order.
     // attempt_failures exists only for a D with a finished non-pass attempt.
     if out.len() < MAX_CHOICES - 1 {
-        'ds: for d in &s.frozen.candidates {
+        'ds: for d in s.candidates() {
             for inspection in [
                 InspectionKind::CandidateRefusals,
                 InspectionKind::AttemptFailures,
@@ -412,7 +431,6 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
         choice_id: choice_id(seq, &stop),
         action: stop,
     });
-    out
 }
 
 fn issue(s: &SearchStateV1, c: &ChoiceAction) -> SearchAction {
@@ -426,11 +444,9 @@ fn issue(s: &SearchStateV1, c: &ChoiceAction) -> SearchAction {
         unreachable!("issue takes an attempt action")
     };
     let d = s
-        .frozen
-        .candidates
-        .iter()
+        .candidates()
         .find(|d| &d.derivation_ref == derivation_ref)
-        .expect("choices come from the frozen list");
+        .expect("choices come from the authorized candidate list");
     match &d.materialization {
         CandidateInput::Source { .. } => SearchAction::IssueAttempt {
             candidate_id: candidate_id.clone(),
@@ -463,7 +479,9 @@ pub(crate) fn apply(
     };
     if !matches!(
         default,
-        SearchAction::IssueAttempt { .. } | SearchAction::ReplayRetained { .. }
+        SearchAction::IssueAttempt { .. }
+            | SearchAction::ReplayRetained { .. }
+            | SearchAction::OpenProposalRound { .. }
     ) {
         return default;
     }
@@ -485,36 +503,39 @@ pub(crate) fn apply(
             }
             Some(DecisionOutcome::Chosen) => {
                 match record.released() {
-                    Some(attempt @ ChoiceAction::Attempt {
-                        derivation_ref,
-                        runtime_id,
-                        environment_id,
-                        ..
-                    }) => {
+                    Some(
+                        attempt @ ChoiceAction::Attempt {
+                            derivation_ref,
+                            runtime_id,
+                            environment_id,
+                            ..
+                        },
+                    ) => {
                         let issued = s.attempts.iter().any(|a| {
                             a.derivation_ref == *derivation_ref
                                 && a.runtime_id == *runtime_id
                                 && a.environment_id == *environment_id
                         });
                         if !issued && s.attempts.len() as u64 == record.attempt_seq {
-                            let offered = allowed_choices(s, placements)
-                                .into_iter()
-                                .find(|c| match (&c.action, attempt) {
-                                    (
-                                        ChoiceAction::Attempt {
-                                            derivation_ref: d1,
-                                            runtime_id: r1,
-                                            environment_id: e1,
-                                            ..
-                                        },
-                                        ChoiceAction::Attempt {
-                                            derivation_ref: d2,
-                                            runtime_id: r2,
-                                            environment_id: e2,
-                                            ..
-                                        },
-                                    ) => d1 == d2 && r1 == r2 && e1 == e2,
-                                    _ => false,
+                            let offered =
+                                allowed_choices(s, placements).into_iter().find(|c| {
+                                    match (&c.action, attempt) {
+                                        (
+                                            ChoiceAction::Attempt {
+                                                derivation_ref: d1,
+                                                runtime_id: r1,
+                                                environment_id: e1,
+                                                ..
+                                            },
+                                            ChoiceAction::Attempt {
+                                                derivation_ref: d2,
+                                                runtime_id: r2,
+                                                environment_id: e2,
+                                                ..
+                                            },
+                                        ) => d1 == d2 && r1 == r2 && e1 == e2,
+                                        _ => false,
+                                    }
                                 });
                             return match offered {
                                 Some(choice) => issue(s, &choice.action),
@@ -529,15 +550,25 @@ pub(crate) fn apply(
                         inspection,
                         target_ref,
                     }) => {
-                        if !s.evidence.iter().any(|e| {
-                            e.kind == *inspection && e.target_ref == *target_ref
-                        }) {
+                        if !s
+                            .evidence
+                            .iter()
+                            .any(|e| e.kind == *inspection && e.target_ref == *target_ref)
+                        {
                             return SearchAction::RunInspection {
                                 inspection: *inspection,
                                 target_ref: target_ref.clone(),
                             };
                         }
                         // Evidence recorded: consumed.
+                    }
+                    Some(ChoiceAction::EscalateToCandidateProducer {}) => {
+                        if s.proposal_round.is_none() {
+                            // The default has already rechecked all fences. It
+                            // alone may authorize opening the proposal round.
+                            return default;
+                        }
+                        // Durable round exists: consumed, including after restart.
                     }
                     Some(ChoiceAction::Stop { .. }) => {
                         return SearchAction::Finish {
@@ -552,15 +583,27 @@ pub(crate) fn apply(
             Some(_) => {
                 // A fallback releases the deterministic default exactly once:
                 // pending while no attempt was issued past the point.
-                if s.attempts.len() as u64 == record.attempt_seq {
+                let pending = if matches!(
+                    record.released(),
+                    Some(ChoiceAction::EscalateToCandidateProducer {})
+                ) {
+                    s.proposal_round.is_none()
+                } else {
+                    s.attempts.len() as u64 == record.attempt_seq
+                };
+                if pending {
                     return default;
                 }
-                // Issued: consumed.
+                // Attempt issued or proposal round persisted: consumed.
             }
         }
     }
     let seq = s.decisions.len() as u64;
-    let choices = allowed_choices(s, placements);
+    let choices = if matches!(default, SearchAction::OpenProposalRound { .. }) {
+        proposal_choices(s)
+    } else {
+        allowed_choices(s, placements)
+    };
     if choices.len() < 2 || s.budget.decisions_used >= u64::from(policy.max_decisions) {
         default
     } else {
@@ -646,9 +689,7 @@ pub fn validate_decision(
     };
     let offered = |id: &String| record.choices.iter().any(|c| &c.choice_id == id);
     match (&submission.choice_id, submission.fallback) {
-        (Some(id), None) if offered(id) => {
-            Ok(verdict(DecisionOutcome::Chosen, Some(id.clone())))
-        }
+        (Some(id), None) if offered(id) => Ok(verdict(DecisionOutcome::Chosen, Some(id.clone()))),
         (Some(_), None) => Ok(verdict(DecisionOutcome::OutOfSet, None)),
         (
             None,

@@ -1,0 +1,33 @@
+{
+  "export_paths": [
+    ".cargo",
+    "AGENTS.md",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "apps",
+    "extensions",
+    "lib",
+    "services",
+    "tools",
+    "samples"
+  ],
+  "historical_docs_and_root_scripts_excluded": true,
+  "exported_git_tree_entries_identical": true,
+  "records": {
+    "head": {
+      "pin": "06330897500092555c64cf143b241fbf93770a8d",
+      "git_tree_sha1": "3d89f49d4db5dd8de2a8f9553ba38629aa8845c2",
+      "export_tree_sha256": "8dd7ee2c60fd210728bed03a5a77ae02eb0c290a61b635fab29ac803c87d7ac1",
+      "uncompressed_archive_sha256": "1579b0154c79b143736a9eb97afde01230ccae066f3c2a84fe6d37801e80dbe5",
+      "compressed_archive_sha256": "98b7081d3a5d1f3aa911950a9edf65884677529c2d3e987037c2ccac27739b12"
+    },
+    "base": {
+      "pin": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+      "git_tree_sha1": "7f9d9625362b9dbf66e1eb5d2bee26dd688890ec",
+      "export_tree_sha256": "8dd7ee2c60fd210728bed03a5a77ae02eb0c290a61b635fab29ac803c87d7ac1",
+      "uncompressed_archive_sha256": "5f5dce71330f5eae87cebdee41f41de2eca9c3748fd63d0cf8c295570dfd8788",
+      "compressed_archive_sha256": "7246e2bd03abf16f55d46692b3c368313b9447107093b138f841ab13f72c911a"
+    }
+  }
+}

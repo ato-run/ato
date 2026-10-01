@@ -4,6 +4,8 @@ const PROCESS_FIXTURE: &str =
     include_str!("../../tests/fixtures/runtime-launch-spec-v1/fastapi-process.json");
 const OCI_FIXTURE: &str =
     include_str!("../../tests/fixtures/runtime-launch-spec-v1/fastapi-oci.json");
+const PORTABLE_OCI_WORKING_DIR_FIXTURE: &str =
+    include_str!("../../tests/fixtures/runtime-launch-spec-v1/portable-oci-working-dir.json");
 
 fn process_spec() -> RuntimeLaunchSpecV1 {
     RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("process fixture is valid")
@@ -56,7 +58,11 @@ fn canonical_bytes_are_the_fixture_bytes() {
     // `skip_serializing_if` on the Rust side omitted it while TypeScript
     // emitted `null` — the same spec canonicalizing to different bytes in the
     // two languages these fixtures exist to keep aligned.
-    for fixture in [PROCESS_FIXTURE, OCI_FIXTURE] {
+    for fixture in [
+        PROCESS_FIXTURE,
+        OCI_FIXTURE,
+        PORTABLE_OCI_WORKING_DIR_FIXTURE,
+    ] {
         let spec = RuntimeLaunchSpecV1::parse(fixture).expect("fixture is valid");
         assert_eq!(
             String::from_utf8(spec.canonical_bytes().unwrap()).unwrap(),

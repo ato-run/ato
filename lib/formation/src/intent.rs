@@ -489,7 +489,7 @@ pub const DEFAULT_NODE: &str = "20.20.2";
 ///
 /// A dependency set containing one of these is a server, and a server is not a
 /// Static Compute however plainly its build script reads.
-const SERVER_FRAMEWORKS: &[&str] = &[
+pub(crate) const SERVER_FRAMEWORKS: &[&str] = &[
     "express",
     "fastify",
     "koa",
@@ -637,7 +637,7 @@ fn resolve_package_manager(node: &NodeEvidence) -> Result<PackageManager, Intent
 /// property of the source, not of whichever machine claimed the job — the same
 /// lesson the Python lane learned when a host's 3.14 silently changed what
 /// `pydantic-core` did.
-fn resolve_node_version(node: &NodeEvidence) -> Result<String, IntentError> {
+pub(crate) fn resolve_node_version(node: &NodeEvidence) -> Result<String, IntentError> {
     let exact = |raw: &str| -> Result<String, IntentError> {
         let trimmed = raw.trim().trim_start_matches('v');
         let version = semver::Version::parse(trimmed).map_err(|error| IntentError::Malformed {

@@ -53,8 +53,12 @@ after the first issued attempt, and its offers included
 `attempt_failures` for the failed D — the second inspection kind
 gated on real failures as designed.
 
-## Not verified
+## Follow-up (2026-09-26)
 
-A real Jev call: no `ATO_DECISION_JEV_API_KEY` exists on the
-acceptance host. Probe: deferred (no safe existing primitive). Deploy,
-remote migration 0302, staging/production: not performed.
+The PR pair merged: API #695 `1853f280` → ato #1410 `c883087e`.
+At the original B0–B8 run no `ATO_DECISION_JEV_API_KEY` existed on the
+acceptance host. The later [live Jev paired acceptance](formation-live-jev-2026-09-26.md)
+used a process-only key from the user-designated ato-api vars and passed,
+closing the remaining 5a live/comparison gate. Probe remains deferred (no
+safe existing primitive). Deploy, remote migration 0302, staging/production:
+not performed.

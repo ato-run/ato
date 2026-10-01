@@ -1,0 +1,303 @@
+{
+  "schema": "ato.formation-ci-static-recheck/1",
+  "test": "tests::local_static_server_rejects_browser_state_without_the_run_token",
+  "host": {
+    "machine": "x86_64",
+    "kernel": "7.0.0-27-generic",
+    "os_release": "PRETTY_NAME=\"Ubuntu 26.04 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"26.04\"\nVERSION=\"26.04 LTS (Resolute Raccoon)\"\nVERSION_CODENAME=resolute\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=resolute\nLOGO=ubuntu-logo\n",
+    "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+    "cargo": "cargo 1.96.1 (356927216 2026-06-26)"
+  },
+  "fresh_env_root_per_invocation": true,
+  "dependency_network": "offline",
+  "source_changes": false,
+  "records": [
+    {
+      "label": "head",
+      "pin": "06330897500092555c64cf143b241fbf93770a8d",
+      "run": 1,
+      "command": [
+        "/home/ekohsuke/.cargo/bin/cargo",
+        "+stable",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "ato-portable-application",
+        "--lib",
+        "tests::local_static_server_rejects_browser_state_without_the_run_token",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "test_executed": true,
+      "pass": false,
+      "elapsed_seconds": 112.548,
+      "log": "head-1.log",
+      "log_sha256": "9b83f68cd6eea57066e090949bfecc2cb993802929699c8f539d1f4ec786de53",
+      "evidence": "evidence/formation-ci-static-recheck-20260930/head-1.log"
+    },
+    {
+      "label": "head",
+      "pin": "06330897500092555c64cf143b241fbf93770a8d",
+      "run": 2,
+      "command": [
+        "/home/ekohsuke/.cargo/bin/cargo",
+        "+stable",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "ato-portable-application",
+        "--lib",
+        "tests::local_static_server_rejects_browser_state_without_the_run_token",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "test_executed": true,
+      "pass": true,
+      "elapsed_seconds": 0.215,
+      "log": "head-2.log",
+      "log_sha256": "589f981336812c90655e2d03ae044c3d1057ff5be8c3d5ee2e48cd879e5630ed",
+      "evidence": "evidence/formation-ci-static-recheck-20260930/head-2.log"
+    },
+    {
+      "label": "head",
+      "pin": "06330897500092555c64cf143b241fbf93770a8d",
+      "run": 3,
+      "command": [
+        "/home/ekohsuke/.cargo/bin/cargo",
+        "+stable",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "ato-portable-application",
+        "--lib",
+        "tests::local_static_server_rejects_browser_state_without_the_run_token",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "test_executed": true,
+      "pass": true,
+      "elapsed_seconds": 0.215,
+      "log": "head-3.log",
+      "log_sha256": "af0fefbfb07206a4514715b1c12ee4561c701a887452c3515202efeffe848890",
+      "evidence": "evidence/formation-ci-static-recheck-20260930/head-3.log"
+    },
+    {
+      "label": "base",
+      "pin": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+      "run": 1,
+      "command": [
+        "/home/ekohsuke/.cargo/bin/cargo",
+        "+stable",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "ato-portable-application",
+        "--lib",
+        "tests::local_static_server_rejects_browser_state_without_the_run_token",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "test_executed": true,
+      "pass": true,
+      "elapsed_seconds": 0.214,
+      "log": "base-1.log",
+      "log_sha256": "864f8498b1a4553dc0ce2b1d2c7ce9162cc5004c0712cb5eb8f30ef09db42876",
+      "evidence": "evidence/formation-ci-static-recheck-20260930/base-1.log"
+    },
+    {
+      "label": "base",
+      "pin": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+      "run": 2,
+      "command": [
+        "/home/ekohsuke/.cargo/bin/cargo",
+        "+stable",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "ato-portable-application",
+        "--lib",
+        "tests::local_static_server_rejects_browser_state_without_the_run_token",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "test_executed": true,
+      "pass": false,
+      "elapsed_seconds": 6.427,
+      "log": "base-2.log",
+      "log_sha256": "f6f38b41be593eefbd496544bf77965591f539b0f8668c25e826df34928857f2",
+      "package_cache_cleared_before_run": true,
+      "evidence": "evidence/formation-ci-static-recheck-20260930/base-2.log"
+    }
+  ],
+  "build_cache_note": "base run 1 reused the identical-code executable; base run 2 independently compiled ato-portable-application from base after package-only clean in this dedicated target",
+  "date": "2026-09-30",
+  "pull_request": "https://github.com/ato-run/ato/pull/1449",
+  "reviewed_head": "06330897500092555c64cf143b241fbf93770a8d",
+  "exact_base": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+  "classification": "base-reproduced intermittent failure",
+  "timing_root_cause_established": false,
+  "stable_head_only_failure_observed": false,
+  "full_ci_green": false,
+  "base_independent_compilation_run": 2,
+  "export_provenance": {
+    "export_paths": [
+      ".cargo",
+      "AGENTS.md",
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "apps",
+      "extensions",
+      "lib",
+      "services",
+      "tools",
+      "samples"
+    ],
+    "historical_docs_and_root_scripts_excluded": true,
+    "exported_git_tree_entries_identical": true,
+    "records": {
+      "head": {
+        "pin": "06330897500092555c64cf143b241fbf93770a8d",
+        "git_tree_sha1": "3d89f49d4db5dd8de2a8f9553ba38629aa8845c2",
+        "export_tree_sha256": "8dd7ee2c60fd210728bed03a5a77ae02eb0c290a61b635fab29ac803c87d7ac1",
+        "uncompressed_archive_sha256": "1579b0154c79b143736a9eb97afde01230ccae066f3c2a84fe6d37801e80dbe5",
+        "compressed_archive_sha256": "98b7081d3a5d1f3aa911950a9edf65884677529c2d3e987037c2ccac27739b12"
+      },
+      "base": {
+        "pin": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+        "git_tree_sha1": "7f9d9625362b9dbf66e1eb5d2bee26dd688890ec",
+        "export_tree_sha256": "8dd7ee2c60fd210728bed03a5a77ae02eb0c290a61b635fab29ac803c87d7ac1",
+        "uncompressed_archive_sha256": "5f5dce71330f5eae87cebdee41f41de2eca9c3748fd63d0cf8c295570dfd8788",
+        "compressed_archive_sha256": "7246e2bd03abf16f55d46692b3c368313b9447107093b138f841ab13f72c911a"
+      }
+    }
+  },
+  "pretest_setup_failure": {
+    "kind": "archive transfer/extraction interrupted before any test invocation",
+    "test_executed": false,
+    "counted_as_test_result": false
+  },
+  "other_failures": "Known Windows Unix API, macOS process/hosted-validator and Ubuntu hosted Python/Node failures remain red; earlier unconfirmed failures retain their original distinctions.",
+  "constraints": {
+    "model_calls": 0,
+    "credential_reread": false,
+    "deploy": false,
+    "remote_migration": false,
+    "pr_1421_changed": false,
+    "branch_protection_settings_changed": false,
+    "test_or_workflow_modified": false
+  },
+  "next_100_app_wave_started": false,
+  "full_ci": {
+    "head": {
+      "run_url": "https://github.com/ato-run/ato/actions/runs/36658258823",
+      "pin": "06330897500092555c64cf143b241fbf93770a8d",
+      "conclusion": "failure",
+      "static_test_failure_location": "apps/portable-application/src/lib.rs:3566:43",
+      "static_test_failure": "ConnectionReset / OS error 104",
+      "metadata_evidence": "evidence/formation-ci-static-recheck-20260930/ci-head-run.json",
+      "excerpt_evidence": "evidence/formation-ci-static-recheck-20260930/ci-head-static-test-excerpt.log"
+    },
+    "base": {
+      "run_url": "https://github.com/ato-run/ato/actions/runs/36654141449",
+      "pin": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+      "conclusion": "failure",
+      "static_test_failure_location": "apps/portable-application/src/lib.rs:3566:43",
+      "static_test_failure": "ConnectionReset / OS error 104",
+      "metadata_evidence": "evidence/formation-ci-static-recheck-20260930/ci-base-run.json",
+      "excerpt_evidence": "evidence/formation-ci-static-recheck-20260930/ci-base-static-test-excerpt.log"
+    }
+  },
+  "evidence_files": [
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/results.json",
+      "sha256": "d56c6d537b0e00856d2ec3f554d03fc5d2f2e47e557eefa3787ae6eb7e1c414d",
+      "bytes": 4668
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/recheck.py",
+      "sha256": "05d751d8b8e42924df0a43c6adc704a6bcfb1e1f9cb55a6d66331b0406e4486a",
+      "bytes": 3496
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/base-independent.py",
+      "sha256": "71632e9c80614042f8feff21d0f1f3786082e773b4fc4caebe009949d2ba02d5",
+      "bytes": 2331
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/export-provenance.json",
+      "sha256": "7e244cf5c803d1d3e656c283b9dbc506d5439eabb77c40d404fedd19962fcf1a",
+      "bytes": 1221
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/head-1.log",
+      "sha256": "9b83f68cd6eea57066e090949bfecc2cb993802929699c8f539d1f4ec786de53",
+      "bytes": 10149
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/head-2.log",
+      "sha256": "589f981336812c90655e2d03ae044c3d1057ff5be8c3d5ee2e48cd879e5630ed",
+      "bytes": 409
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/head-3.log",
+      "sha256": "af0fefbfb07206a4514715b1c12ee4561c701a887452c3515202efeffe848890",
+      "bytes": 409
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/base-1.log",
+      "sha256": "864f8498b1a4553dc0ce2b1d2c7ce9162cc5004c0712cb5eb8f30ef09db42876",
+      "bytes": 409
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/base-2.log",
+      "sha256": "f6f38b41be593eefbd496544bf77965591f539b0f8668c25e826df34928857f2",
+      "bytes": 2272
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/base-package-clean.log",
+      "sha256": "3be8ebdb78b7bae62891b3ee48dc6f32c5fb34f08c8a8b65526653e41a9287c6",
+      "bytes": 39
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/ci-head-run.json",
+      "sha256": "3abbfe9dd05c9d3cf4f4c6814bba3abdc45336b2b1fa5fcf824f5a81ada1d1d6",
+      "bytes": 12751
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/ci-base-run.json",
+      "sha256": "c5db299c59743af5afee843760edd0bf464eaa15d6e2487b0f6088e5119aa6cc",
+      "bytes": 12751
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/ci-head-static-test-excerpt.log",
+      "sha256": "c50bf663268a926ad407392a3fcfa7fa2ba5315167a33cb1829b6752430a0e45",
+      "bytes": 1820
+    },
+    {
+      "path": "evidence/formation-ci-static-recheck-20260930/ci-base-static-test-excerpt.log",
+      "sha256": "54595c80851f8b4aed9029f35f4d7dad23b0d11761a8a6ab8f784da494f94fa6",
+      "bytes": 1820
+    }
+  ]
+}
