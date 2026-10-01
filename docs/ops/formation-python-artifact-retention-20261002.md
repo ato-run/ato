@@ -24,11 +24,20 @@ version/hash metadata and build/toolchain/network evidence. Add retained_inputs
 to provenance so the acquired identity points to its remaining exact bytes.
 No storage cap, source requirements, K, or permission is expanded.
 
+Run the builtin Python metadata, hash and installer operations with isolated
+mode (-I), including their child pip/venv commands. They execute in the source
+working directory but must use the pinned interpreter's modules, not same-named
+source modules or ambient PYTHONPATH. Explicit PEP 517 source backends remain
+part of the contained build operation; application launch keeps its declared
+source import behavior.
+
 Validation: real offline pip/PEP 517 integration confirms original sdist and
 completed wheels remain, identical acquired wheel is stored once, no bytecode
 is captured, and mutation of a completed wheel prevents deduplication before
 the original input is deleted. Hash install, metadata refusal, Node rebuild
 and private Runtime setup fixtures pass. All 119 Formation library tests and
-generated-source/format checks pass. Final-code actual application publication
+generated-source/format checks pass. The real pip fixture runs from a source
+directory containing failing hashlib, email, pip and base64 modules and confirms
+none can shadow builtin tooling. Final-code actual application publication
 and matching rebuilt authority remain required. No deployment, remote migration,
 ordinary Run or 100-case measurement.
