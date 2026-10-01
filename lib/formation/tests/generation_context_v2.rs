@@ -1,6 +1,7 @@
 #![cfg(feature = "planning")]
 use ato_formation::generation_context::{self as v1, v2, *};
 use serde_json::json;
+use std::path::Path;
 
 fn scan(bytes: &[u8]) -> v2::EntryPointSummary {
     v2::project_python(
@@ -331,5 +332,116 @@ fn ordinary_coding_comments_do_not_override_default_or_mask_actual_cookies() {
         b"# coding discussion; coding=unknown\nlisten()\n",
     ] {
         assert_eq!(scan(source).source_scan, v2::SourceScan::Unavailable);
+    }
+}
+
+// E2 prospective holdout: committed fixture bytes are hashed against the
+// preregistration, then only the closed projection is asserted. Labels and
+// selector outcomes are never inputs.
+fn e2_scan(bytes: &[u8]) -> v2::EntryPointSummary {
+    v2::project_python(
+        "k4",
+        &bytes[..bytes.len().min(MAX_SOURCE_BYTES)],
+        bytes.len() as u64,
+    )
+    .unwrap()
+}
+fn e2_files(case: &str) -> [Vec<u8>; 2] {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = base
+        .join("apps/formation-worker/fixtures/runtime-network/e2-holdout")
+        .join(case);
+    let files = [
+        std::fs::read(root.join("candidate_0.py")).unwrap(),
+        std::fs::read(root.join("candidate_1.py")).unwrap(),
+    ];
+    // Runtime read: the preregistration is a separate committed artifact.
+    let plan: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(base.join("docs/ops/formation-efficacy-e2-plan.json")).unwrap(),
+    )
+    .unwrap();
+    use sha2::{Digest, Sha256};
+    for (i, bytes) in files.iter().enumerate() {
+        assert_eq!(
+            format!("{:x}", Sha256::digest(bytes)),
+            plan["fixtures"][case]["files"][format!("candidate_{i}.py")]
+        );
+    }
+    files
+}
+#[test]
+fn e2_holdout_projections_match_preregistered_families() {
+    for case in [
+        "C01", "C02", "C03", "C04", "D01", "D02", "D03", "L01", "L02", "P01", "P02", "P03",
+    ] {
+        let [positive, negative] = e2_files(case);
+        let pos = e2_scan(&positive);
+        let neg = e2_scan(&negative);
+        match &case[..1] {
+            "D" => {
+                assert_eq!(pos.delegation, v2::Delegation::PythonMain, "{case}");
+                assert!(!pos.server_listen && !pos.custom_http_handler, "{case}");
+                assert_eq!(neg.delegation, v2::Delegation::None, "{case}");
+                assert_ne!(without_id(pos), without_id(neg), "{case}");
+            }
+            "P" => {
+                assert_eq!(pos.source_scan, v2::SourceScan::BoundedPrefix, "{case}");
+                assert_eq!(pos.size_bucket, SizeBucket::Over64Kib, "{case}");
+                assert!(pos.custom_http_handler && pos.server_listen, "{case}");
+            }
+            "L" => {
+                assert_eq!(pos.encoding, v2::Encoding::Latin1, "{case}");
+                assert_eq!(pos.source_scan, v2::SourceScan::Complete, "{case}");
+                assert!(pos.custom_http_handler && pos.server_listen, "{case}");
+            }
+            "C" => match case {
+                "C01" => {
+                    assert!(pos.custom_http_handler && pos.server_listen, "{case}");
+                    assert!(!neg.custom_http_handler && !neg.server_listen, "{case}");
+                }
+                "C02" => {
+                    assert!(pos.custom_http_handler && neg.custom_http_handler, "{case}");
+                    assert_ne!(without_id(pos), without_id(neg), "{case}");
+                }
+                "C03" => {
+                    assert!(!pos.server_listen && !neg.server_listen, "{case}");
+                    assert!(
+                        !pos.custom_http_handler && !neg.custom_http_handler,
+                        "{case}"
+                    );
+                }
+                "C04" => {
+                    // Deliberately indistinguishable closed summaries.
+                    assert_eq!(without_id(pos), without_id(neg), "{case}");
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
+}
+#[test]
+fn e2_context_v1_lacks_the_recovered_evidence() {
+    // The comparator arm B sees only the unchanged context/1 projection: the
+    // delegation marker, bounded prefix and Latin-1 scan are absent there.
+    for case in ["D01", "D02", "D03"] {
+        let [positive, _] = e2_files(case);
+        let entry = v1::project_python("k4", &positive, positive.len() as u64).unwrap();
+        assert!(
+            !entry.server_listen && !entry.custom_http_handler && entry.imports.is_empty(),
+            "{case}"
+        );
+    }
+    for case in ["P01", "P02", "P03"] {
+        let [positive, _] = e2_files(case);
+        let entry = v1::project_python("k4", &positive, positive.len() as u64).unwrap();
+        assert_eq!(entry.source_scan, v1::SourceScan::TooLarge, "{case}");
+        assert!(!entry.server_listen && !entry.custom_http_handler, "{case}");
+    }
+    for case in ["L01", "L02"] {
+        let [positive, _] = e2_files(case);
+        let entry = v1::project_python("k4", &positive, positive.len() as u64).unwrap();
+        assert_eq!(entry.source_scan, v1::SourceScan::Unavailable, "{case}");
+        assert!(!entry.server_listen && !entry.custom_http_handler, "{case}");
     }
 }
