@@ -74,6 +74,7 @@ pub struct ContextOmission {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningInput {
+    pub goal: Option<String>,
     pub schema: String,
     pub call_id: String,
     pub frozen_contract_ref: String,
@@ -370,6 +371,7 @@ impl ReasoningProducer {
             records
                 .iter()
                 .all(|(_, i, _)| i.request.search_id == request.search_id
+                    && i.goal == limits.goal
                     && i.frozen_contract_ref == state.frozen.base_contract_ref
                     && i.source_identity.closure_ref == submission.request.source.closure_ref
                     && i.source_identity.archive_digest
@@ -524,6 +526,7 @@ impl ReasoningProducer {
                 auth.policy.max_source_bytes,
             );
             let mut input = ReasoningInput {
+                goal: limits.goal.clone(),
                 schema: INPUT_SCHEMA.into(),
                 call_id,
                 frozen_contract_ref: state.frozen.base_contract_ref.clone(),
@@ -597,6 +600,7 @@ impl ReasoningProducer {
                     saved.request.search_id == input.request.search_id
                         && saved.request.round_seq == input.request.round_seq
                         && saved.schema == INPUT_SCHEMA
+                        && saved.goal == input.goal
                         && saved.call_id == input.call_id
                         && saved.frozen_contract_ref == input.frozen_contract_ref
                         && saved.inventory == input.inventory

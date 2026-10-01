@@ -63,3 +63,8 @@ it never starts an app. Exact inputs and response records are hash checked on
 restart, including source/K identity and verified source text prefixes. API
 protocol/transport failures halt sends and preserve the journal's settlement;
 the recorded failure is replayed as evidence, never resent to the model.
+
+An optional bounded owner-authored `reasoning.goal` freezes an acceptance protocol
+(e.g. a least-privilege egress probe) and appears verbatim in the common input.
+It grants no execution rights and cannot change K or the ceiling. Both providers
+receive it; deliberate probes are reported separately from accidental failures.

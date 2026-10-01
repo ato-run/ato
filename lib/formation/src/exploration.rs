@@ -56,6 +56,9 @@ pub struct ExplorationPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningLimits {
+    /// Owner-authored acceptance protocol, frozen before search; grants no rights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
     pub round_timeout_ms: u64,
     pub inspection_timeout_ms: u64,
     pub inspection_source_bytes: u64,
@@ -72,6 +75,9 @@ impl ExplorationPolicy {
             !(1..=900_000).contains(&r.round_timeout_ms)
                 || !(1..=r.round_timeout_ms).contains(&r.inspection_timeout_ms)
                 || !(1..=64 * 1024).contains(&r.inspection_source_bytes)
+                || r.goal.as_ref().is_some_and(|g| {
+                    g.is_empty() || g.len() > 512 || g.chars().any(char::is_control)
+                })
         }) {
             return Err(SearchError("reasoning_budget_invalid"));
         }
