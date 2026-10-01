@@ -74,6 +74,8 @@ pub struct ContextOmission {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningInput {
+    #[serde(default)]
+    pub catalog_sources_in_inventory: bool,
     pub goal: Option<String>,
     pub schema: String,
     pub call_id: String,
@@ -88,6 +90,31 @@ pub struct ReasoningInput {
     pub inspection_source_bytes_remaining: u64,
     pub inspection_feedback: Vec<String>,
 }
+impl ReasoningInput {
+    fn validate(&self, auth: &ato_formation::proposal::ProposalAuthorization) -> Result<()> {
+        let mut request = self.request.clone();
+        if self.catalog_sources_in_inventory {
+            for operation in &mut request.operation_catalog.operations {
+                if let ato_formation::proposal::OperationDomain::ExecutionPlan { sources, .. } =
+                    operation
+                {
+                    ensure!(sources.is_empty(), "duplicate common source catalog");
+                    *sources = self
+                        .inventory
+                        .iter()
+                        .map(|s| ato_formation::proposal::CatalogSource {
+                            reference: s.reference.clone(),
+                            purpose: s.purpose.clone(),
+                        })
+                        .collect();
+                }
+            }
+        }
+        request.validate(auth)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StepRecord {
@@ -379,7 +406,7 @@ impl ReasoningProducer {
             "reasoning search changed"
         );
         for (_, input, _) in &records {
-            input.request.validate(auth)?;
+            input.validate(auth)?;
             for entry in &input.request.source_context {
                 let verified = local
                     .inspection_context
@@ -526,6 +553,7 @@ impl ReasoningProducer {
                 auth.policy.max_source_bytes,
             );
             let mut input = ReasoningInput {
+                catalog_sources_in_inventory: true,
                 goal: limits.goal.clone(),
                 schema: INPUT_SCHEMA.into(),
                 call_id,
@@ -547,6 +575,15 @@ impl ReasoningProducer {
                     .saturating_sub(inspection_bytes),
                 inspection_feedback: feedback.clone(),
             };
+            // The exact same public source refs appear once, in inventory.
+            // The original full catalog is reconstructed and validated locally.
+            for operation in &mut input.request.operation_catalog.operations {
+                if let ato_formation::proposal::OperationDomain::ExecutionPlan { sources, .. } =
+                    operation
+                {
+                    sources.clear();
+                }
+            }
             loop {
                 input.projection = acquired
                     .values()
@@ -591,7 +628,7 @@ impl ReasoningProducer {
                 entry.content_sha256 = digest(entry.text.as_bytes());
                 input.request.source_context.retain(|e| !e.text.is_empty());
             }
-            input.request.validate(auth)?;
+            input.validate(auth)?;
             let mut bytes = serde_jcs::to_vec(&input)?;
             if input_path.exists() {
                 bytes = bounded_read(&input_path, 64 * 1024)?;
@@ -609,7 +646,7 @@ impl ReasoningProducer {
                             == input.source_identity.archive_digest,
                     "pending reasoning input mismatch"
                 );
-                saved.request.validate(auth)?;
+                saved.validate(auth)?;
                 for entry in &saved.request.source_context {
                     let verified = local
                         .inspection_context
@@ -724,7 +761,9 @@ impl ReasoningProducer {
                         auth, &sources, remaining, 4,
                     )?;
                     ensure!(
-                        refs.iter().all(|r| !acquired.contains_key(&r.file_id)),
+                        refs.iter().all(|r| !inspected.contains_key(&r.file_id)
+                            && (!acquired.contains_key(&r.file_id)
+                                || input.projection.iter().any(|e| e.logical_id == r.file_id))),
                         "no new inspection"
                     );
                     for reference in &refs {
