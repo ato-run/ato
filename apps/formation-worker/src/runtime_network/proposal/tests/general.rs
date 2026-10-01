@@ -926,6 +926,7 @@ fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
     let view = status(&sub);
     let request = sub.proposal_request_v2(&view).unwrap();
     let mut input = ReasoningInput {
+        lowering_capabilities: Value::Null,
         available_variables: vec![],
         runtime_capabilities: vec![],
         max_retries: 3,
@@ -976,6 +977,7 @@ fn shared_api_uses_exact_input_and_distinct_inspection_call_keys() {
 
 fn recovery_input(sub: &Submission) -> super::super::reasoning::ReasoningInput {
     super::super::reasoning::ReasoningInput {
+        lowering_capabilities: Value::Null,
         schema: super::super::reasoning::INPUT_SCHEMA.into(),
         catalog_sources_in_inventory: false,
         goal: None,
