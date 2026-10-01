@@ -110,6 +110,9 @@ impl Delivery {
                 control.remaining(AttemptPhase::Source)?;
             }
             self.save(&dispatched,&json!({"operation":kind,"retry":retry,"at_ms":SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()}))?;
+            if let Some(control) = control {
+                control.remaining(AttemptPhase::Source)?;
+            }
             match send() {
                 Ok(reply) => {
                     self.save(&result, &reply)?;
@@ -318,7 +321,10 @@ mod tests {
                 })
                 .is_err()
         );
-        assert_eq!(calls, 1);
+        assert!(
+            calls <= 1,
+            "expiry during durable reservation may also prevent the initial dispatch"
+        );
         assert!(!dir.join("short.dispatch1.json").exists());
         assert!(
             delivery

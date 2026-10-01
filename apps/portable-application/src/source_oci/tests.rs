@@ -202,7 +202,7 @@ impl OciBuilder for Fake {
     }
     fn load(&self, archive: &Path) -> Result<()> {
         // Docker loads what manifest.json names.
-        let members = scan_saved(archive, MAX_BASE_ARCHIVE_BYTES).unwrap();
+        let members = scan_saved(archive, MAX_BASE_ARCHIVE_BYTES, None).unwrap();
         let legacy = member_json(&members, "manifest.json", "m").unwrap();
         let config = legacy[0]["Config"]
             .as_str()
@@ -444,7 +444,11 @@ fn request_bounds_and_selection() {
     let mut r = request(dir.path());
     r.dockerfile = "docker/Dockerfile".into();
     assert_eq!(
-        code(run(&r, &b, &dir.path().join("o2"))),
+        code(run(
+            &r,
+            &fake(ok_config(), BuildOutcome::Built),
+            &dir.path().join("o2")
+        )),
         "source_oci_dockerfile_unselected"
     );
     let mut r = request(dir.path());
@@ -992,4 +996,90 @@ fn egress_allowlists_are_exact_and_bounded() {
         code(run(&r, &b, &dir.path().join("s"))),
         "source_oci_request_invalid"
     );
+}
+
+#[test]
+fn dockerfile_selection_requires_an_explicit_root_reference_and_keeps_source_bytes() {
+    std::fs::create_dir_all(".tmp").unwrap();
+    let dir = tempfile::tempdir_in(".tmp").unwrap();
+    std::fs::create_dir_all(dir.path().join("container")).unwrap();
+    let dockerfile = b"FROM scratch\nCMD [\"/app\"]\n";
+    std::fs::write(dir.path().join("container/Dockerfile"), dockerfile).unwrap();
+    assert_eq!(
+        verify_dockerfile_selection(dir.path(), "container/Dockerfile")
+            .unwrap_err()
+            .code,
+        "source_oci_dockerfile_unselected"
+    );
+    std::fs::write(
+        dir.path().join("README.md"),
+        b"Build with docker build -f container/Dockerfile .",
+    )
+    .unwrap();
+    let proof = verify_dockerfile_selection(dir.path(), "container/Dockerfile").unwrap();
+    assert_eq!(proof.len(), 1);
+    assert_eq!(proof[0]["source"], "README.md");
+    assert_eq!(
+        std::fs::read(dir.path().join("container/Dockerfile")).unwrap(),
+        dockerfile
+    );
+    assert!(verify_dockerfile_selection(dir.path(), "unrelated/Dockerfile").is_err());
+}
+#[test]
+fn explicit_dockerfile_references_can_chain_through_root_configuration() {
+    std::fs::create_dir_all(".tmp").unwrap();
+    let dir = tempfile::tempdir_in(".tmp").unwrap();
+    std::fs::create_dir_all(dir.path().join("deploy")).unwrap();
+    std::fs::write(dir.path().join("README.md"), b"See deploy/config.json").unwrap();
+    std::fs::write(
+        dir.path().join("deploy/config.json"),
+        br#"{"dockerfile":"Dockerfile"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("deploy/Dockerfile"), b"FROM scratch").unwrap();
+    let proof = verify_dockerfile_selection(dir.path(), "deploy/Dockerfile").unwrap();
+    assert_eq!(
+        proof
+            .iter()
+            .map(|v| v["source"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["README.md", "deploy/config.json"]
+    );
+}
+
+#[test]
+fn existing_image_uses_the_verified_platform_graph_of_a_pinned_index() {
+    std::fs::create_dir_all(".tmp").unwrap();
+    let dir = tempfile::tempdir_in(".tmp").unwrap();
+    let (bytes, root, config) = base_archive(BaseShape::default());
+    let path = dir.path().join("image.tar");
+    std::fs::write(&path, &bytes).unwrap();
+    let binding = BaseImageInput {
+        reference: "example/service:1".into(),
+        pinned_digest: root,
+        archive: path,
+        archive_sha256: digest(&bytes),
+    };
+    let facts = verify_bound_image(&binding, "linux/amd64").unwrap();
+    assert_eq!(facts.config_digest, config);
+    assert_eq!(facts.architecture, "amd64");
+    assert!(verify_bound_image(&binding, "linux/arm64").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn dockerfile_discovery_does_not_follow_secret_or_symlink_references() {
+    std::fs::create_dir_all(".tmp").unwrap();
+    let dir = tempfile::tempdir_in(".tmp").unwrap();
+    std::fs::create_dir(dir.path().join("private")).unwrap();
+    std::fs::write(dir.path().join("private/Dockerfile"), b"FROM scratch").unwrap();
+    std::os::unix::fs::symlink("private", dir.path().join("container")).unwrap();
+    std::fs::write(dir.path().join("README.md"), b"container/Dockerfile .env").unwrap();
+    assert_eq!(
+        verify_dockerfile_selection(dir.path(), "container/Dockerfile")
+            .unwrap_err()
+            .code,
+        "source_oci_dockerfile_absent"
+    );
+    assert!(verify_dockerfile_selection(dir.path(), ".env").is_err());
 }
