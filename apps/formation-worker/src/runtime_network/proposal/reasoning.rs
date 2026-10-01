@@ -87,6 +87,10 @@ pub struct ReasoningInput {
     #[serde(default)]
     pub catalog_sources_in_inventory: bool,
     pub goal: Option<String>,
+    #[serde(default)]
+    pub available_variables: Vec<Value>,
+    #[serde(default)]
+    pub max_retries: u32,
     pub schema: String,
     pub call_id: String,
     pub frozen_contract_ref: String,
@@ -353,6 +357,12 @@ struct StepRecord {
     #[serde(default)]
     failure: Option<ErrorClass>,
     elapsed_ms: u64,
+    #[serde(default)]
+    reasoning_ms: u64,
+    #[serde(default)]
+    inspection_ms: u64,
+    #[serde(default)]
+    validation_ms: u64,
     inspected: Vec<SourceReference>,
     inspection_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -415,7 +425,7 @@ fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>> {
 impl ReasoningProducer {
     /// Exactly one retry ledger per semantic operation, independent of worker
     /// restarts and transport names. Dispatch reservation is durable first.
-    pub(super) fn coordinator_operation(
+    pub fn coordinator_operation(
         &self,
         seq: u64,
         kind: &str,
@@ -426,7 +436,7 @@ impl ReasoningProducer {
     ) -> Result<Value> {
         use fs2::FileExt;
         ensure!(
-            matches!(kind, "claim" | "complete"),
+            matches!(kind, "start" | "claim" | "complete"),
             "unknown coordinator operation"
         );
         let name = format!("r{seq:03}.{kind}");
@@ -439,7 +449,7 @@ impl ReasoningProducer {
         let result_path = self.directory.join(format!("{name}.result.json"));
         let request_hash = digest(request);
         if result_path.exists() {
-            let result: Value = serde_json::from_slice(&bounded_read(&result_path, 4096)?)?;
+            let result: Value = serde_json::from_slice(&bounded_read(&result_path, 64 * 1024)?)?;
             ensure!(
                 result["request_sha256"] == request_hash,
                 "operation identity changed"
@@ -660,11 +670,16 @@ impl ReasoningProducer {
     pub fn accounting(&self) -> Result<Value> {
         let records = self.records()?;
         let calls: Vec<_> = records.iter().map(|(name,input,r)| json!({"call_id":input.call_id,
-            "input_sha256":r.input_sha256,"output_sha256":r.output_sha256,"latency_ms":r.elapsed_ms,
+            "input_sha256":r.input_sha256,"output_sha256":r.output_sha256,"latency_ms":r.elapsed_ms,"reasoning_ms":r.reasoning_ms,"inspection_ms":r.inspection_ms,"validation_ms":r.validation_ms,
             "provider_call":r.provider_call,"inspection_refs":r.inspected,"inspection_error":r.inspection_error,
             "input_file":format!("{name}.input.json"),"output_file":format!("{name}.record.json")})).collect();
+        let transport = self
+            .api
+            .as_ref()
+            .map(|api| api.accounting_snapshot())
+            .transpose()?;
         Ok(
-            json!({"schema":"ato.formation-reasoning-accounting/1", "provider":if self.config.is_session(){"codex_session"}else{"deepseek"},
+            json!({"provider_transport":transport,"schema":"ato.formation-reasoning-accounting/1", "provider":if self.config.is_session(){"codex_session"}else{"deepseek"},
             "calls":calls,"call_count":calls.len(),"API_calls":records.iter().filter(|(_,_,r)|r.provider_call.is_some()).count(),
             "session_token_usage":"not_exposed; no fabricated usage", "session_cost":"not_exposed", "configuration_ref":self.configuration_ref}),
         )
@@ -844,23 +859,41 @@ impl ReasoningProducer {
                 .min(expires - now)
                 .min(30_000);
             let mut entries: Vec<_> = acquired.values().cloned().collect();
-            entries.sort_by_key(|e| {
-                let file = &domain.files[&e.logical_id];
-                let priority = ato_formation::proposal::source_inspection_priority(&file.path).0;
-                (
-                    if priority == 0 {
-                        0
-                    } else if priority == 2 {
-                        1
-                    } else if inspected.contains_key(&e.logical_id) {
-                        2
-                    } else {
-                        3
-                    },
-                    priority,
-                    e.logical_id.clone(),
-                )
-            });
+            if matches!(&self.config, ReasoningProviderConfig::Session(c) if c.prompt_version != deepseek::PROMPT_VERSION_V6)
+                || matches!(&self.config, ReasoningProviderConfig::Api(c) if c.prompt_version != deepseek::PROMPT_VERSION_V6)
+            {
+                entries.sort_by_key(|e| {
+                    (
+                        !inspected.contains_key(&e.logical_id),
+                        e.kind,
+                        e.logical_id.clone(),
+                    )
+                });
+            } else {
+                entries.sort_by_key(|e| {
+                    let file = &domain.files[&e.logical_id];
+                    let priority =
+                        ato_formation::proposal::source_inspection_priority(&file.path).0;
+                    (
+                        if priority == 0 {
+                            0
+                        } else if inspected.contains_key(&e.logical_id) {
+                            1
+                        } else if matches!(
+                            e.kind,
+                            ato_formation::proposal::SourceContextKind::Entrypoint
+                        ) {
+                            2
+                        } else if matches!(priority, 3..=5) {
+                            3
+                        } else {
+                            4
+                        },
+                        priority,
+                        e.logical_id.clone(),
+                    )
+                });
+            }
             request.source_context = bounded_inspection_context(
                 entries.into_iter().take(4).collect(),
                 auth.policy.max_source_bytes,
@@ -868,6 +901,8 @@ impl ReasoningProducer {
             let mut input = ReasoningInput {
                 catalog_sources_in_inventory: true,
                 goal: limits.goal.clone(),
+                available_variables: local.available_variables.clone(),
+                max_retries: policy.formation.max_retries,
                 schema: INPUT_SCHEMA.into(),
                 call_id,
                 frozen_contract_ref: state.frozen.base_contract_ref.clone(),
@@ -879,7 +914,13 @@ impl ReasoningProducer {
                 request: request.clone(),
                 projection: vec![],
                 rounds_remaining: policy.formation.max_rounds.get().saturating_sub(round - 1),
-                calls_remaining: self.budget.max_calls.saturating_sub(input_count as u32),
+                calls_remaining: self.budget.max_calls.saturating_sub(
+                    self.api
+                        .as_ref()
+                        .map(|a| a.accounting_snapshot())
+                        .transpose()?
+                        .map_or(input_count as u32, |s| s.cells.len() as u32),
+                ),
                 inspections_remaining: policy
                     .max_inspections
                     .saturating_sub(inspection_exchanges.max(inspected.len() as u32)),
@@ -981,7 +1022,11 @@ impl ReasoningProducer {
             let input_sha256 = digest(&bytes);
             let call_started = Instant::now();
             let (raw, call) = if let Some(api) = &self.api {
-                let answer = match api.propose_reasoning(&input) {
+                let answer = match api.propose_reasoning_recover(
+                    &input,
+                    expires,
+                    policy.formation.max_retries,
+                ) {
                     Ok(answer) => answer,
                     Err(failure) => {
                         let failure = *failure;
@@ -1004,6 +1049,10 @@ impl ReasoningProducer {
                             failure: Some(failure.class),
                             elapsed_ms: call_started.elapsed().as_millis().min(u64::MAX as u128)
                                 as u64,
+                            reasoning_ms: call_started.elapsed().as_millis().min(u64::MAX as u128)
+                                as u64,
+                            inspection_ms: 0,
+                            validation_ms: 0,
                             inspected: vec![],
                             inspection_error: None,
                             validation_error: None,
@@ -1048,6 +1097,8 @@ impl ReasoningProducer {
                 raw.len() <= ato_formation::proposal::MAX_BATCH_BYTES,
                 "reasoning output bounds"
             );
+            let reasoning_ms = call_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let validation_started = Instant::now();
             let parsed = serde_json::from_slice::<ProposalBatch>(&raw);
             let inspection = parsed.as_ref().ok().and_then(|b| {
                 if b.schema == ato_formation::proposal::PROPOSAL_SCHEMA && b.proposals.len() == 1 {
@@ -1064,6 +1115,7 @@ impl ReasoningProducer {
             let mut error = None;
             let mut retrieved_bytes = 0_u64;
             let mut validation_error = None;
+            let mut details = parsed.as_ref().err().map(|e| format!("JSON/schema: {e}"));
             if inspection.is_none() {
                 let output = ProducerOutput::new(
                     raw.clone(),
@@ -1072,8 +1124,25 @@ impl ReasoningProducer {
                         model: None,
                     },
                 )?;
-                let result =
-                    CandidateRegistry::new(&local.frozen)?.validate_batch(&local.bases, &output);
+                let scope_ok = parsed.as_ref().is_ok_and(|batch|batch.proposals.iter().all(|proposal| {
+                    let operations=match proposal {Proposal::ProposeDerivation{operations}|Proposal::ModifyDerivation{operations,..}=>operations,_=>return true};
+                    operations.iter().all(|operation|if let ato_formation::proposal::OperationInvocation::ExecutionPlan{plan}=operation {
+                        let mut references=vec![&plan.entrypoint];references.extend(plan.basis.iter().map(|b|&b.source));
+                        for dependency in &plan.dependencies { match dependency {
+                            ato_formation::proposal::DependencyOperation::PythonRequirements{requirements}|ato_formation::proposal::DependencyOperation::PythonResolveRequirements{requirements}=>references.push(requirements),
+                            ato_formation::proposal::DependencyOperation::NpmCi{manifest,lockfile,..}=>references.extend([manifest,lockfile]),
+                        }}
+                        references.iter().all(|reference|input.inventory.iter().any(|s|&s.reference==*reference))
+                    }else{true})
+                }));
+                let result = if scope_ok || parsed.is_err() {
+                    CandidateRegistry::new(&local.frozen)?.validate_batch(&local.bases, &output)
+                } else {
+                    details=Some("Use only inventory source references; obtain explicitly referenced configuration with inspection.".into());
+                    Err(ato_formation::proposal::ProposalError(
+                        "source_explicit_reference_required",
+                    ))
+                };
                 let code = match result {
                     Err(e) => Some(e.0),
                     Ok(outcomes) => outcomes.into_iter().find_map(|o| match o {
@@ -1090,9 +1159,17 @@ impl ReasoningProducer {
                 {
                     validation_error = Some(code.to_owned());
                     feedback.push(code.to_owned());
+                    if let Some(detail) = details.take() {
+                        feedback.push(detail.chars().take(512).collect());
+                    }
                     repairs += 1;
                 }
             }
+            let validation_ms = validation_started
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            let inspection_started = Instant::now();
             if let Some(sources) = inspection {
                 inspection_exchanges += 1;
                 let result = (|| -> Result<_> {
@@ -1161,6 +1238,16 @@ impl ReasoningProducer {
                 provider_call: call.clone(),
                 failure: None,
                 elapsed_ms: call_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                reasoning_ms,
+                validation_ms,
+                inspection_ms: if !retrieved.is_empty() || error.is_some() {
+                    inspection_started
+                        .elapsed()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64
+                } else {
+                    0
+                },
                 inspected: retrieved.clone(),
                 inspection_error: error.clone(),
                 validation_error: validation_error.clone(),

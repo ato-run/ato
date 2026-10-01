@@ -46,6 +46,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
         let planned = self.planned;
         if planned.derivation.source_oci.is_some()
             || !planned.derivation.requirements.is_empty()
+            || !planned.derivation.variable_bindings.is_empty()
             || planned.derivation.steps.iter().any(|s| {
                 matches!(
                     s.network,
@@ -128,7 +129,7 @@ impl CandidateLauncher<'_> {
         attempt_id: &str,
         attempt_root: &Path,
     ) -> Result<Realized, RealizeFailure> {
-        self.realize_inner(executed, attempt_id, attempt_root, None)
+        self.realize_inner(executed, attempt_id, attempt_root, None, &[])
     }
 
     pub(crate) fn realize_scoped(
@@ -138,20 +139,36 @@ impl CandidateLauncher<'_> {
         attempt_root: &Path,
         gate: &Path,
     ) -> Result<Realized, RealizeFailure> {
-        self.realize_inner(executed, attempt_id, attempt_root, Some(gate))
+        self.realize_inner(executed, attempt_id, attempt_root, Some(gate), &[])
     }
 
+    pub(crate) fn realize_scoped_with_variables(
+        &self,
+        executed: ExecutedCandidate,
+        attempt_id: &str,
+        attempt_root: &Path,
+        gate: &Path,
+        variables: &[crate::variables::ResolvedVariable],
+    ) -> Result<Realized, RealizeFailure> {
+        self.realize_inner(executed, attempt_id, attempt_root, Some(gate), variables)
+    }
     fn realize_inner(
         &self,
         executed: ExecutedCandidate,
         attempt_id: &str,
         attempt_root: &Path,
         gate: Option<&Path>,
+        variables: &[crate::variables::ResolvedVariable],
     ) -> Result<Realized, RealizeFailure> {
         let (candidate, evidence, realization) = match &executed {
             ExecutedCandidate::Process { workspace_root } => {
-                let (candidate, evidence) =
-                    self.realize_process(workspace_root, attempt_id, attempt_root, gate)?;
+                let (candidate, evidence) = self.realize_process(
+                    workspace_root,
+                    attempt_id,
+                    attempt_root,
+                    gate,
+                    variables,
+                )?;
                 (candidate, evidence, "process")
             }
             ExecutedCandidate::StaticWeb { output } => {
@@ -188,6 +205,7 @@ impl CandidateLauncher<'_> {
         attempt_id: &str,
         attempt_root: &Path,
         runtime_gate: Option<&Path>,
+        variables: &[crate::variables::ResolvedVariable],
     ) -> Result<(Box<dyn RunningCandidate>, RealizationEvidence), RealizeFailure> {
         let planned = self.planned;
         let mut ports: Vec<RequiredPort> = Vec::new();
@@ -236,7 +254,9 @@ impl CandidateLauncher<'_> {
             attempt_id,
         };
         let launched = match runtime_gate {
-            Some(gate) => TemporaryRealization::launch_scoped(&request, gate),
+            Some(gate) => {
+                TemporaryRealization::launch_scoped_with_variables(&request, gate, variables)
+            }
             None => TemporaryRealization::launch(&request),
         };
         let realization = match launched {

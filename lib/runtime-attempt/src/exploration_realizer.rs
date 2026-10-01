@@ -18,6 +18,7 @@ use std::{
 };
 
 pub struct ExplorationRealizer<'a> {
+    pub variables: &'a [crate::variables::ResolvedVariable],
     pub planned: &'a PlannedCandidate,
     pub source_root: &'a Path,
     pub builder: &'a LocalAttemptExecutor,
@@ -101,7 +102,7 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
     fn realize(&self, attempt_id: &str, root: &Path) -> Result<Realized, RealizeFailure> {
         let executed = self
             .builder
-            .execute_with_observed_network(
+            .execute_with_variables(
                 &AttemptExecution {
                     attempt_id,
                     candidate: self.planned,
@@ -115,6 +116,7 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
                 },
                 self.gates,
                 self.network_refusal,
+                self.variables,
             )
             .map_err(
                 |error| match error.downcast_ref::<crate::build::BuildStopUnconfirmed>() {
@@ -131,7 +133,7 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
             shim: self.shim,
             network: NetworkPolicy::Scoped,
         }
-        .realize_scoped(
+        .realize_scoped_with_variables(
             executed,
             attempt_id,
             root,
@@ -141,6 +143,7 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
                     error: anyhow::anyhow!("runtime phase gate missing"),
                     evidence: None,
                 })?,
+            self.variables,
         )
     }
 }

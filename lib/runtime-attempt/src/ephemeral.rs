@@ -43,7 +43,7 @@ use ato_formation::{authoring::BoundDerivation, execution::ExecutionPlan};
 use ato_ipc::runtime_launch::{
     EndpointAllocationV1, EndpointV1, LaunchContextV1, LaunchRealizationV1, LaunchWorkspaceV1,
     LifecycleV1, ProcessRealizationV1, PublicEnvV1, RUNTIME_LAUNCH_SPEC_V1_PROTOCOL, ReadinessV1,
-    RuntimeLaunchSpecV1, StateAccessV1, StateAttachmentV1,
+    RuntimeLaunchSpecV1, SecretGrantV1, StateAccessV1, StateAttachmentV1,
 };
 
 use crate::plan::copy_tree;
@@ -158,6 +158,7 @@ pub struct TemporaryRealization {
     endpoints: Vec<RealizedEndpoint>,
     scratch: PathBuf,
     output: PathBuf,
+    variables: Vec<crate::variables::ResolvedVariable>,
     #[cfg(unix)]
     ingress: Vec<crate::network_bridge::IngressBridge>,
 }
@@ -166,19 +167,27 @@ impl TemporaryRealization {
     /// Launch the candidate through the Runtime's process executor and wait
     /// until every required port accepts connections.
     pub fn launch(request: &TemporaryRealizationRequest<'_>) -> Result<Self> {
-        Self::launch_inner(request, None)
+        Self::launch_inner(request, None, &[])
     }
 
     pub fn launch_scoped(
         request: &TemporaryRealizationRequest<'_>,
         runtime_gate: &Path,
     ) -> Result<Self> {
-        Self::launch_inner(request, Some(runtime_gate))
+        Self::launch_inner(request, Some(runtime_gate), &[])
     }
 
+    pub fn launch_scoped_with_variables(
+        request: &TemporaryRealizationRequest<'_>,
+        runtime_gate: &Path,
+        variables: &[crate::variables::ResolvedVariable],
+    ) -> Result<Self> {
+        Self::launch_inner(request, Some(runtime_gate), variables)
+    }
     fn launch_inner(
         request: &TemporaryRealizationRequest<'_>,
         runtime_gate: Option<&Path>,
+        variables: &[crate::variables::ResolvedVariable],
     ) -> Result<Self> {
         #[cfg(not(unix))]
         if runtime_gate.is_some() {
@@ -195,6 +204,17 @@ impl TemporaryRealization {
         let scratch = std::path::absolute(request.scratch)
             .context("cannot resolve the realization scratch")?;
         let mut realization = Self {
+            variables: variables
+                .iter()
+                .map(|v| crate::variables::ResolvedVariable {
+                    phase: v.phase,
+                    grant_ref: v.grant_ref.clone(),
+                    value: crate::launch::resolved::ResolvedSecret::new(
+                        v.value.name(),
+                        v.value.expose_for_spawn(),
+                    ),
+                })
+                .collect(),
             launched: None,
             endpoints: Vec::new(),
             scratch: scratch.to_path_buf(),
@@ -336,7 +356,14 @@ impl TemporaryRealization {
                     value: value.clone(),
                 })
                 .collect(),
-            secret_grants: Vec::new(),
+            secret_grants: variables
+                .iter()
+                .filter(|v| v.phase == ato_formation::requirements::ExecutionPhase::Runtime)
+                .map(|v| SecretGrantV1 {
+                    name: v.value.name().to_owned(),
+                    grant_ref: v.grant_ref.clone(),
+                })
+                .collect(),
             state_attachments,
             endpoints: declared,
             readiness: ReadinessV1::Process {
@@ -348,7 +375,16 @@ impl TemporaryRealization {
             workspace_root,
             &cwd_relative,
             public_env,
-            Vec::new(),
+            variables
+                .iter()
+                .filter(|v| v.phase == ato_formation::requirements::ExecutionPhase::Runtime)
+                .map(|v| {
+                    crate::launch::resolved::ResolvedSecret::new(
+                        v.value.name(),
+                        v.value.expose_for_spawn(),
+                    )
+                })
+                .collect(),
             resolved_state,
             resolved,
         )
@@ -526,7 +562,7 @@ impl TemporaryRealization {
         if tail.is_empty() {
             "(none)".to_owned()
         } else {
-            tail.to_owned()
+            crate::variables::redact(tail, &self.variables)
         }
     }
 }
