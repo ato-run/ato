@@ -786,27 +786,17 @@ impl ExecutionPlanProposal {
             .derivation_ref()
             .map_err(|_| ProposalError("proposal_canonicalization"))?;
         let mut candidate = authorization.candidate(source, derivation_ref.clone());
+        candidate.requirements = execution_requirements(self.static_output.is_none(), true);
         candidate.provisions = derivation
             .runtimes
             .iter()
             .map(|(name, version)| format!("toolchain.{name}.{version}"))
             .collect();
-        for dependency in &self.dependencies {
-            let tools = match dependency {
-                DependencyOperation::PythonBuildRequirements { toolchains, .. }
-                | DependencyOperation::NpmRebuild { toolchains, .. } => toolchains,
-                _ => continue,
-            };
-            for tool in tools {
-                let requirement = crate::search::Requirement {
-                    fact: format!("toolchain.{}.{}", tool.name, tool.version),
-                    one_of: Some(vec!["present".into()]),
-                };
-                if !candidate.requirements.contains(&requirement) {
-                    candidate.requirements.push(requirement);
-                }
-            }
-        }
+        candidate
+            .requirements
+            .extend(super::native_dependencies::runtime_requirements(
+                &derivation,
+            ));
         Ok((
             CompiledGeneration {
                 capsule_toml,

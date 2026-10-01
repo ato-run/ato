@@ -617,6 +617,10 @@ fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
     assert_eq!(d.steps.last().unwrap().root.as_deref(), Some("build"));
     assert!(d.steps.last().unwrap().argv.is_empty());
     assert_eq!(d.ports[0].guest_port, None);
+    assert_eq!(
+        candidate.candidate().requirements,
+        execution_requirements(false, true)
+    );
     let expected_d = candidate.compiled().derivation_ref.clone();
     let mut configured = p.clone();
     configured["variable_bindings"] = json!([{"name":"CLIENT_ORIGIN","kind":"configuration","purpose":"Public client build configuration","resource":"client.configuration","operation":"read","phase":"build","secret":false,"artifact_embedding":true}]);
@@ -1148,13 +1152,15 @@ fn npm_acquisition_is_audited_and_rebuild_requires_a_preceding_frozen_lock() {
     }
     auth.toolchains.insert("node".into(), "22.14.0".into());
     auth.toolchains.insert("npm".into(), "10.9.2".into());
+    auth.toolchains.insert("gcc".into(), "13.3.0".into());
+    auth.toolchains.insert("make".into(), "4.3.0".into());
     let reference = |id| json!({"file_id":id,"digest":format!("sha256:{}","c".repeat(64))});
     let mut p = plan();
     p["runtime"] = json!({"name":"node","version":"22.14.0"});
     let ci =
         json!({"kind":"npm_ci","manifest":reference("manifest"),"lockfile":reference("lockfile")});
     let rebuild = json!({"kind":"npm_rebuild","manifest":reference("manifest"),"lockfile":reference("lockfile"),
-        "packages":["native-dependency"],"root_lifecycle":[],"toolchains":[],"network":"denied"});
+        "packages":["native-dependency"],"root_lifecycle":[],"toolchains":[{"name":"gcc","version":"13.3.0"},{"name":"make","version":"4.3.0"}],"network":"denied"});
     p["dependencies"] = json!([ci.clone()]);
     let result = compile(&s, p.clone());
     let ProposalOutcome::Admitted(d) = &result[0] else {
@@ -1180,6 +1186,14 @@ fn npm_acquisition_is_audited_and_rebuild_requires_a_preceding_frozen_lock() {
         panic!("{result:?}")
     };
     assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let tools = native_runtime_requirements(&d.compiled().derivation);
+    assert_eq!(
+        tools.iter().map(|r| r.fact.as_str()).collect::<Vec<_>>(),
+        ["toolchain.gcc.13.3.0", "toolchain.make.4.3.0"]
+    );
+    let mut expected = execution_requirements(true, true);
+    expected.extend(tools);
+    assert_eq!(d.candidate().requirements, expected);
     p["dependencies"] = json!([rebuild, ci]);
     assert!(matches!(
         &compile(&s, p)[0],
