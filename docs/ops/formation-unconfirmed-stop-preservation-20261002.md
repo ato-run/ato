@@ -33,12 +33,21 @@ contention failure from overlapping fixtures are preserved. The successful
 normal control runs serially with identical Source/K/D. Only this task's unused
 incremental compiler cache was removed; frozen binary hashes are unchanged.
 
-A new owned actual disconnect case has stopped Coordinator communication during
-setup and exhausted its original report retry while preserving the saved result.
-It is waiting for the real unchanged 30-minute claimed-attempt timeout before
-UNKNOWN observation. No Runtime/requester restart or inferred resolution is
-performed; old WBO UNKNOWN is untouched. Physical-stop uncertainty remains a
-separate injected component boundary, not completed physical fault acceptance.
+The new owned actual Coordinator disconnect during setup completed after the
+original real claimed-attempt timeout (1804.144 seconds). The same Search
+`search_108ca6b4d1bee703d37d472018241316` remains UNKNOWN with
+`result_not_received`. Its saved Runtime result reports confirmed local cleanup,
+but is not a Coordinator-delivered finding and cannot resolve UNKNOWN.
+Original retry=1 exhausted dispatches 0 and 1, no ACK. Runtime/requester were
+not restarted; a read-only observer restarted the same Coordinator only after
+the original 30-minute timeout. One attempt, no extra execution/inference,
+original deadline/caps/round and producer journal hashes unchanged.
+Reservations are zero; UNKNOWN conservatively consumed the originally reserved
+expanded/stored caps (536870912 bytes each), without automatic refund.
+Public [disconnect metadata](evidence/formation-actual-disconnect-20261002.json)
+SHA-256 `e5cf3e3bb336008a61ba3eaf06711b8fef078362e3fe7b86053bddd6bebc6641`. This new UNKNOWN and old WBO UNKNOWN are preserved.
+Actual network disconnection is distinct from injected physical-stop uncertainty;
+the latter still requires a separately recorded physical fault acceptance.
 
 The small-pilot harness also waits up to 60 seconds for durable result settlement
 after requester timeout, keeping the original provisional status and writing a
