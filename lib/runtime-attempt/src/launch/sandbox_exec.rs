@@ -33,6 +33,54 @@ pub fn run(policy_path: &Path, argv: &[String]) -> Result<()> {
     run_with(policy_path, argv, &[], None)
 }
 
+/// The host-boundary shim: become the workload user, then restrict and exec.
+///
+/// There is no bwrap in front of this call, so nothing has changed user and
+/// nothing isolates the workload but what happens here. Every step is
+/// therefore required: a failure to change user, to set `no_new_privs`, or to
+/// apply Landlock fully is a refusal, never a degraded launch. (The namespace
+/// shim tolerates a missing Landlock because bwrap already contains the
+/// workload; here it is the containment.)
+pub fn run_host_boundary(
+    policy_path: &Path,
+    argv: &[String],
+    uid: u32,
+    gid: u32,
+    workload_cwd: &Path,
+) -> Result<()> {
+    let (program, arguments) = argv
+        .split_first()
+        .ok_or_else(|| anyhow!("sandbox-exec: no workload to execute"))?;
+    // Read the policy while still able to: it lives in the Runner's files.
+    let policy = read_policy(policy_path)?;
+    ato_sandbox::drop_to_user(uid, gid)
+        .context("sandbox-exec: could not become the workload user")?;
+    ato_sandbox::set_no_new_privs()
+        .context("sandbox-exec: PR_SET_NO_NEW_PRIVS is required in host-boundary mode")?;
+    let applied = apply_sandbox(&policy)
+        .context("sandbox-exec: Landlock is required in host-boundary mode")?;
+    if !applied.fully_enforced {
+        return Err(anyhow!(
+            "sandbox-exec: Landlock is not fully enforced: {}",
+            applied.message
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = std::process::Command::new(program)
+            .args(arguments)
+            .current_dir(workload_cwd)
+            .exec();
+        Err(anyhow!("sandbox-exec: failed to exec {program}: {error}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (program, arguments, workload_cwd);
+        Err(anyhow!("sandbox-exec is only available on Unix"))
+    }
+}
+
 /// [`run`], with environment and a working directory for the WORKLOAD only.
 ///
 /// Both are applied by the `exec` itself, after the policy is in force: this
