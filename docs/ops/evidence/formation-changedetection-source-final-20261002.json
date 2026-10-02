@@ -1,0 +1,468 @@
+{
+  "schema": "ato.formation-final-source-regression-proof/1",
+  "application": "changedetection.io",
+  "code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "receipt_authority_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+  "Source": {
+    "archive_digest": "sha256:402d92ae10a54bb659bc214b3eb4a57978ff76cdb7a3811ae59433b9d09d0a13",
+    "closure_ref": "sha256:5dcc9e34548a7c53e369ef5f0911f46ce3414a93aa1404d32e5e04955de11431"
+  },
+  "search_id": "search_6eb04bad8d5678c5d01b4990e3faa338",
+  "satisfy_id": "01M3XW49QMDRZNDEKV7TR5D0G6",
+  "K": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+  "D": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-02T08:36:40.241Z",
+    "deadline_at": "2026-10-02T09:06:40.241Z",
+    "attempts": {
+      "max": 4,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 3
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 17844224,
+      "reserved": 0,
+      "remaining": 1055897600
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 16887438,
+      "reserved": 0,
+      "remaining": 2130596210
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 306003211,
+      "reserved": 0,
+      "remaining": 767738613
+    }
+  },
+  "summary": {
+    "index": 7,
+    "name": "changedetection.io",
+    "provider": "codex_session",
+    "known_D": false,
+    "typed_K_pass": true,
+    "rounds_consumed": 2,
+    "reasoning_accounting": {
+      "API_calls": 0,
+      "actual_provider_calls": null,
+      "call_count": 4,
+      "calls": [
+        {
+          "call_id": "search_6eb04bad8d5678c5d01b4990e3faa338_r1_s1",
+          "input_file": "r001_s001.input.json",
+          "input_sha256": "sha256:383f27bd07a7eb1b981518884567e6e11cb12d9995beba609ff8ffb496e361d9",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [
+            {
+              "digest": "sha256:44fa7457c130e448a6e409ddf1dea056b9af940228cb351ca68866d555c298b6",
+              "file_id": "f_e5972d38da55694585ff779b"
+            }
+          ],
+          "latency_ms": 26926,
+          "output_file": "r001_s001.record.json",
+          "output_sha256": "sha256:d76879180d1b427675f236cb7439060b9a2b53b4f754c6227568cfef0ab64489",
+          "provider_call": null,
+          "reasoning_ms": 26926,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_6eb04bad8d5678c5d01b4990e3faa338_r1_s2",
+          "input_file": "r001_s002.input.json",
+          "input_sha256": "sha256:adf1cfa730de4d43c491bd018bdf7747140abf9ba706e49ba710c9fd34170092",
+          "inspection_error": null,
+          "inspection_ms": 32,
+          "inspection_refs": [
+            {
+              "digest": "sha256:8fd2bdd0455032ef4ebd4f9e201f5bd239e305e8b2ca8c0ca72b3acd23092041",
+              "file_id": "f_fff535675c4953d2d9411ee8"
+            }
+          ],
+          "latency_ms": 48480,
+          "output_file": "r001_s002.record.json",
+          "output_sha256": "sha256:cb4ac7d6d9a31e5578ee67ccbf4ec708ed326684b79000de762df3d4b0ea15ac",
+          "provider_call": null,
+          "reasoning_ms": 48448,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_6eb04bad8d5678c5d01b4990e3faa338_r1_s3",
+          "input_file": "r001_s003.input.json",
+          "input_sha256": "sha256:bb6b18cc5daf81955bcfddb22d643863d698f23b54c9ff8487571d5d5d6eac25",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 33608,
+          "output_file": "r001_s003.record.json",
+          "output_sha256": "sha256:3179912aac35e6247f747138a4a9acd119a7973276e59c2ffc771a096e3b020e",
+          "provider_call": null,
+          "reasoning_ms": 33532,
+          "validation_ms": 76
+        },
+        {
+          "call_id": "search_6eb04bad8d5678c5d01b4990e3faa338_r2_s1",
+          "input_file": "r002_s001.input.json",
+          "input_sha256": "sha256:19376d7837227a2fc6e27ba5d1138794f98b05339d1d123da05cf86ae49a23e8",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 44380,
+          "output_file": "r002_s001.record.json",
+          "output_sha256": "sha256:af7a43fb20503d0c4e6c0371646c4adbf7d36877212b99bcd6a443f8302b17ec",
+          "provider_call": null,
+          "reasoning_ms": 44343,
+          "validation_ms": 36
+        }
+      ],
+      "configuration_ref": "sha256:aefd26e024548e6cf63f9cf5f60045729fd0e4e2d4eac54f50fef4ca4d77f822",
+      "provider": "codex_session",
+      "provider_transport": null,
+      "schema": "ato.formation-reasoning-accounting/1",
+      "session_cost": "not_exposed",
+      "session_token_usage": "not_exposed; no fabricated usage"
+    },
+    "terminal_origin": "requester_verified",
+    "coordinator_status": "satisfied",
+    "automatic_retry": false,
+    "input_requirements": [],
+    "search_budget": null,
+    "result": "cells/007/requester.stdout.log",
+    "result_sha256": "099bb1fb1c10689ff41dae40184621dc217715ffac1f9aa0e27b52f6c8065e95",
+    "exit_code": 0,
+    "elapsed_seconds": 592.08,
+    "functional_acceptance": "not_measured",
+    "deployed": false
+  },
+  "attempt": {
+    "attempt_id": "01M3XW7S3MNS097X6F7WR7ENGK",
+    "status": "pass",
+    "failure": null,
+    "formation_attempt": {
+      "attempt_id": "01M3XW7S3MNS097X6F7WR7ENGK",
+      "candidate": "authored",
+      "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+      "derivation_ref": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+      "outcomes": {
+        "cleanup": {
+          "state": "succeeded"
+        },
+        "publication": {
+          "state": "succeeded"
+        },
+        "runtime_verification": {
+          "state": "succeeded"
+        },
+        "seal": {
+          "state": "succeeded"
+        }
+      },
+      "realization": {
+        "build_network": "phase-scoped-connect",
+        "candidate_network": "isolated namespace; declared ingress; phase-scoped HTTPS egress broker",
+        "containment": "bwrap+landlock",
+        "destroyed": true,
+        "endpoints": {
+          "app.http": "guest 3000 -> host 3000"
+        },
+        "executor": "runtime-process",
+        "workspace": "disposable-copy, read-only at /app; /tmp is tmpfs"
+      },
+      "receipt": {
+        "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+        "derivation_ref": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+        "execution": {
+          "attempt_id": "01M3XW7S3MNS097X6F7WR7ENGK",
+          "endpoint": "http://127.0.0.1:3000/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M3XW49QMDRZNDEKV7TR5D0G6"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:d8b3d91bb4f30aecca1e0d2aec5f04e88ee99372bab29bea609e04e10fb9217f",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:5dcc9e34548a7c53e369ef5f0911f46ce3414a93aa1404d32e5e04955de11431",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "runtime_id": "local",
+      "status": "verified",
+      "verification": {
+        "verdicts": [
+          {
+            "id": "root",
+            "outcome": {
+              "result": "satisfied"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": {
+              "result": "satisfied"
+            }
+          }
+        ]
+      }
+    },
+    "exploration_evidence": [
+      {
+        "kind": "exploration_network_evidence",
+        "reports": [
+          {
+            "phase": "dependencies",
+            "report": {
+              "allowance": {
+                "hosts": [
+                  "files.pythonhosted.org",
+                  "pypi.org"
+                ],
+                "max_transfer_bytes": 402653184,
+                "ports": [
+                  443
+                ]
+              },
+              "allowed": [
+                {
+                  "count": 2,
+                  "port": 443,
+                  "stage": "connect",
+                  "target": "files.pythonhosted.org"
+                },
+                {
+                  "count": 2,
+                  "port": 443,
+                  "stage": "connect",
+                  "target": "pypi.org"
+                }
+              ],
+              "budget_exhausted": false,
+              "refused": [],
+              "transferred_bytes": 157246721
+            }
+          },
+          {
+            "phase": "build",
+            "report": {
+              "allowance": {
+                "hosts": [
+                  "files.pythonhosted.org",
+                  "pypi.org"
+                ],
+                "max_transfer_bytes": 402653184,
+                "ports": [
+                  443
+                ]
+              },
+              "allowed": [],
+              "budget_exhausted": false,
+              "refused": [],
+              "transferred_bytes": 157246721
+            }
+          },
+          {
+            "phase": "runtime",
+            "report": {
+              "allowance": {
+                "hosts": [
+                  "exploration-denied.invalid"
+                ],
+                "max_transfer_bytes": 402653184,
+                "ports": [
+                  443
+                ]
+              },
+              "allowed": [],
+              "budget_exhausted": false,
+              "refused": [
+                {
+                  "count": 3,
+                  "port": 443,
+                  "stage": "hostname",
+                  "target": "changedetection.io"
+                },
+                {
+                  "count": 2,
+                  "port": 443,
+                  "stage": "hostname",
+                  "target": "news.ycombinator.com"
+                }
+              ],
+              "transferred_bytes": 157246721
+            }
+          }
+        ]
+      },
+      {
+        "facts": [
+          {
+            "exit_code": 0,
+            "log_tail": "py3-none-any.whl \nSaved ./.ato-dependencies/python-build-1/wheels/werkzeug-3.1.6-py3-none-any.whl \nSaved ./.ato-dependencies/python-build-1/wheels/wsproto-1.3.2-py3-none-any.whl \nSaved ./.ato-dependencies/python-build-1/wheels/wtforms-3.2.2-py3-none-any.whl \nSaved ./.ato-dependencies/python-build-1/wheels/yarl-1.25.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl \nSaved ./.ato-dependencies/python-build-1/wheels/zipp-4.1.0-py3-none-any.whl \nSaved ./.ato-dependencies/python-build-1/wheels/zope_event-6.2-py3-none-any.whl \nSaved ./.ato-dependencies/python-build-1/wheels/zope_interface-8.6-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl \nBuilding wheels for collected packages: feedgen, jstyleson, websockets \nBuilding wheel for feedgen (setup.py): started \nBuilding wheel for feedgen (setup.py): finished with status 'done' \nCreated wheel for feedgen: filename=feedgen-1.0.0-py2.py3-none-any.whl size=45396 sha256=338325f65c3fbe4bb43b5cbcc1c86522288f8c723dbddc2a2fba920514f2a6ec \nStored in directory: /app/.ato-dependencies/python-build-1/cache/wheels/33/ee/e9/c1106ec93a39cf640d3c94b71717f446bc0f0cc3e7ae4d8391 \nBuilding wheel for jstyleson (setup.py): started \nBuilding wheel for jstyleson (setup.py): finished with status 'done' \nCreated wheel for jstyleson: filename=jstyleson-0.0.2-py3-none-any.whl size=2420 sha256=915e00a4b403e802358a9df50fa9c69e7f26202d6f3751549f33bab761b6fab9 \nStored in directory: /app/.ato-dependencies/python-build-1/cache/wheels/86/b3/6e/74941385374e34880750c5bd1a9dfc6bebf40b19c11aa249d6 \nBuilding wheel for websockets (setup.py): started \nBuilding wheel for websockets (setup.py): finished with status 'done' \nCreated wheel for websockets: filename=websockets-10.4-cp312-cp312-linux_aarch64.whl size=107400 sha256=f77b82adae56a8c7c8660e1cfe00b36d5c2c817bcbc3a280cd92effae465a4ed \nStored in directory: /app/.ato-dependencies/python-build-1/cache/wheels/06/41/10/a718c6f83c2b6739441a03ad5095cfcf51a12fde82ee990828 \nSuccessfully built feedgen jstyleson websockets \n",
+            "signal": null,
+            "stage": "build",
+            "step": "native-5"
+          },
+          {
+            "exit_code": 0,
+            "log_tail": "[native-6] {\"schema\": \"ato.python-dependency-artifacts/1\", \"count\": 168, \"bytes\": 137055105} \n{\"schema\": \"ato.python-wheel-build/1\", \"wheel_count\": 168} \n",
+            "signal": null,
+            "stage": "build",
+            "step": "native-6"
+          },
+          {
+            "exit_code": 0,
+            "log_tail": "2 itsdangerous-2.2.0 jiter-0.17.0 jmespath-1.1.0 jq-1.12.0 jsonpath-ng-1.8.0 jsonschema-4.26.0 jsonschema-path-0.4.6 jsonschema-specifications-2025.9.1 jstyleson-0.0.2 lazy-object-proxy-1.12.0 linkify-it-py-2.2.0 litellm-1.103.2 loguru-0.7.3 lxml-6.1.3 lxml_html_clean-0.4.5 mf2py-2.0.2 more-itertools-11.1.0 multidict-6.9.1 mypy_extensions-1.1.0 numpy-2.5.3 oauthlib-4.0.0 openai-2.54.0 openapi-core-0.23.1 openapi-schema-validator-0.8.1 openapi-spec-validator-0.8.5 openpyxl-3.1.5 ordered-set-4.1.0 orjson-3.12.0 outcome-1.3.0.post0 packaging-26.3 paho-mqtt-2.1.0 panzi-json-logic-1.0.1 pathable-0.5.0 pillow-12.3.0 pluggy-1.6.0 price-parser-0.5.1 propcache-0.5.4 psutil-7.2.2 puremagic-1.30 pycparser-3.0 pydantic-2.13.5 pydantic-settings-2.15.0 pydantic_core-2.46.5 pyee-14.0.0 pyparsing-3.3.3 pyppeteer-ng-2.0.0rc16 pyppeteerstealth-0.0.5 pyrdfa3-3.6.5 pytest-9.1.1 pytest-flask-1.3.0 pytest-mock-3.16.0 pytest-xdist-3.8.0 python-dateutil-2.9.0.post0 python-dotenv-1.2.4 python-engineio-4.14.0 python-socketio-5.17.0 pytz-2026.4 rank-bm25-0.2.2 rdflib-7.6.0 referencing-0.37.0 regex-2026.9.29 requests-2.34.2 requests-file-3.0.1 requests-oauthlib-2.0.0 rfc3339-validator-0.1.4 rpds-py-2026.6.3 s3transfer-0.19.2 segno-1.6.6 selenium-4.49.0 simple-websocket-1.1.0 six-1.17.0 sniffio-1.3.1 sortedcontainers-2.4.0 soupsieve-2.10 tiktoken-0.14.0 timeago-1.0.16 tokenizers-0.23.2 tqdm-4.70.1 trio-0.34.0 trio-websocket-0.12.2 typing-inspect-0.5.0 typing-inspection-0.4.4 typing_extensions-4.16.0 tzdata-2026.4 urllib3-2.8.0 validators-0.35.0 w3lib-2.5.0 webencodings-0.6.1 websocket-client-1.9.2 websockets-10.4 wsproto-1.3.2 yarl-1.25.1 zipp-4.1.0 zope.event-6.2 zope.interface-8.6 \nWARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable.It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning. \n",
+            "signal": null,
+            "stage": "build",
+            "step": "native-7"
+          },
+          {
+            "exit_code": 0,
+            "log_tail": "[native-8] \n",
+            "signal": null,
+            "stage": "build",
+            "step": "native-8"
+          }
+        ],
+        "kind": "exploration_execution_facts"
+      },
+      {
+        "kind": "exploration_phase_timings",
+        "phases": [
+          {
+            "phase": "source",
+            "started_at_ms": 1790930315201,
+            "elapsed_ms": 268
+          },
+          {
+            "phase": "source",
+            "started_at_ms": 1790930315470,
+            "elapsed_ms": 3649
+          },
+          {
+            "phase": "source",
+            "started_at_ms": 1790930319127,
+            "elapsed_ms": 69
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930319197,
+            "elapsed_ms": 43
+          },
+          {
+            "phase": "dependencies",
+            "started_at_ms": 1790930319240,
+            "elapsed_ms": 17
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930319257,
+            "elapsed_ms": 108
+          },
+          {
+            "phase": "dependencies",
+            "started_at_ms": 1790930319366,
+            "elapsed_ms": 1803
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930321170,
+            "elapsed_ms": 4481
+          },
+          {
+            "phase": "dependencies",
+            "started_at_ms": 1790930325651,
+            "elapsed_ms": 37550
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930363201,
+            "elapsed_ms": 4747
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930367949,
+            "elapsed_ms": 569
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930368518,
+            "elapsed_ms": 17533
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930386052,
+            "elapsed_ms": 559
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790930386611,
+            "elapsed_ms": 0
+          },
+          {
+            "phase": "launch",
+            "started_at_ms": 1790930386611,
+            "elapsed_ms": 4246
+          },
+          {
+            "phase": "verification",
+            "started_at_ms": 1790930390858,
+            "elapsed_ms": 285
+          },
+          {
+            "phase": "cleanup",
+            "started_at_ms": 1790930391144,
+            "elapsed_ms": 367
+          }
+        ]
+      }
+    ],
+    "metadata_mismatch": [],
+    "resource_charged": {
+      "transfer_bytes": 17844224,
+      "expanded_bytes": 16887438,
+      "stored_bytes": 306003211
+    },
+    "claimed_at": "2026-10-02T08:38:35.162Z",
+    "finished_at": "2026-10-02T08:45:26.785Z"
+  },
+  "ACKed_attempt_ids": [
+    "01M3XW7S3MNS097X6F7WR7ENGK"
+  ],
+  "plan_sha256": "5899f42f17a7f4794cac041170ae72e4dfd607684dedc9fb08cbd050bc0b26f2",
+  "short_Runtime_root": "/opt/ato/.tmp/fc3/r2",
+  "preserved_infrastructure_failure_sha256": "f7d00a2a7bc863b0f41f6d73d5abada2b4b5d19cd7e18721cbe57517755920f4",
+  "original_failed_Search_resumed_or_reset": false,
+  "same_initial_information_without_known_D": true,
+  "first_execution_PASS_after_infrastructure_correction": true,
+  "fresh_OSS_unique_successes_added": 0,
+  "functional_and_state_acceptance": "separate pending measurement",
+  "paid_API_calls": 0,
+  "actual_Codex_provider_calls": null,
+  "deployment_remote_migration_ordinary_Run_permission": false,
+  "old_WBO_UNKNOWN_reexecuted": false
+}
