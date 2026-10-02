@@ -62,6 +62,13 @@ pub enum RealizeFailure {
         error: anyhow::Error,
         evidence: Option<Box<RealizationEvidence>>,
     },
+    /// A candidate was running; a declared interaction failed and its explicit
+    /// stop finding is known. Scratch retention must not erase that finding.
+    Stopped {
+        error: anyhow::Error,
+        evidence: Box<RealizationEvidence>,
+        stop: StopClass,
+    },
     /// Part of the candidate started, the start then failed, and what had
     /// started could not be confirmed stopped. It and its runtime scratch are
     /// kept for recovery: this is not "no candidate was realized".

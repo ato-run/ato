@@ -104,6 +104,9 @@ pub fn project(
     derivation: &BoundDerivation,
     contract: &BoundContract,
 ) -> Result<DerivationProjection, ProjectionError> {
+    if !derivation.runtime_port_operations.is_empty() {
+        return Err(ProjectionError::Unprojectable { detail: "HTTP Port operations require the scoped common Runtime; legacy projection cannot bind them".into() });
+    }
     let mut overrides: BTreeMap<String, String> = BTreeMap::new();
 
     let serving: Vec<_> = derivation

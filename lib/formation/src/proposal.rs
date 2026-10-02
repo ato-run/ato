@@ -103,6 +103,8 @@ pub struct OperationCatalog {
 pub enum OperationDomain {
     #[serde(rename = "execution_plan@1")]
     ExecutionPlan {
+        #[serde(default, skip_serializing_if = "crate::port_operations::is_false")]
+        runtime_port_operations: bool,
         toolchains: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
@@ -246,6 +248,7 @@ impl ProposalAuthorization {
         let mut operations = Vec::new();
         if let Some(plan) = &self.execution_plan {
             operations.push(OperationDomain::ExecutionPlan {
+                runtime_port_operations: plan.runtime_port_operations,
                 toolchains: plan.toolchains.clone(),
                 source_oci: plan.source_oci.clone(),
                 sources: plan.catalog_sources(),

@@ -45,6 +45,7 @@ impl ReasoningProviderConfig {
                                 | deepseek::PROMPT_VERSION_V10
                                 | deepseek::PROMPT_VERSION_V11
                                 | deepseek::PROMPT_VERSION_V12
+                                | deepseek::PROMPT_VERSION_V13
                         ),
                     "invalid session provider"
                 );
@@ -80,6 +81,7 @@ impl ReasoningProviderConfig {
                 | deepseek::PROMPT_VERSION_V10
                 | deepseek::PROMPT_VERSION_V11
                 | deepseek::PROMPT_VERSION_V12
+                | deepseek::PROMPT_VERSION_V13
         ) {
             lowering_capabilities_for(auth, runtimes, prompt_version)
         } else {
@@ -166,6 +168,12 @@ impl ReasoningInput {
                         auth,
                         &self.runtime_capabilities,
                         deepseek::PROMPT_VERSION_V11
+                    )
+                || self.lowering_capabilities
+                    == lowering_capabilities_for(
+                        auth,
+                        &self.runtime_capabilities,
+                        deepseek::PROMPT_VERSION_V12
                     ),
             "lowering capability mismatch"
         );
@@ -276,7 +284,21 @@ fn lowering_capabilities(
     let node_bound = bound_toolchains
         .iter()
         .any(|t| t["name"] == "node" && t["bound"] == true);
-    json!({"schema":"ato.formation-lowering-capabilities/4",
+    let http_operations_bound = auth
+        .execution_plan
+        .as_ref()
+        .is_some_and(|a| a.runtime_port_operations)
+        && runtimes
+            .iter()
+            .filter(|r| r["availability"]["online"] == true && r["availability"]["health"] == "ok")
+            .any(|r| {
+                r["environments"].as_array().into_iter().flatten().any(|e| {
+                    e["facts"][ato_formation::port_operations::RUNTIME_CAPABILITY] == "true"
+                        && e["facts"]["runtime.process"] == "true"
+                })
+            });
+    json!({"schema":"ato.formation-lowering-capabilities/5",
+        "runtime_port_operations":{"available":http_operations_bound,"routes":["node","python"],"max_operations":4,"methods":["GET","POST"],"input":"declared Runtime variable references with artifact_embedding:false; current scoped grants only", "target":"assigned frozen logical Port, relative path; no host/query/headers/response capture", "authority":"runtime ato.http@1 execute on the same logical Port in addition to bind", "when":"optional explicit source-backed GET/status guard", "no_automatic_replay":true,"limits":"same original monotonic execution deadline; bounded body and status line"},
         "static_http":{
             "available":toolchains.is_some_and(|t| t.contains_key("node") && t.contains_key("npm")),
             "entrypoint":"source manifest package.json reference",
@@ -308,7 +330,17 @@ fn lowering_capabilities_for(
     prompt_version: &str,
 ) -> Value {
     let mut capabilities = lowering_capabilities(auth, runtimes);
-    if prompt_version != deepseek::PROMPT_VERSION_V12 {
+    if prompt_version != deepseek::PROMPT_VERSION_V13 {
+        capabilities["schema"] = json!("ato.formation-lowering-capabilities/4");
+        capabilities
+            .as_object_mut()
+            .expect("capability object")
+            .remove("runtime_port_operations");
+    }
+    if !matches!(
+        prompt_version,
+        deepseek::PROMPT_VERSION_V12 | deepseek::PROMPT_VERSION_V13
+    ) {
         capabilities["schema"] = json!("ato.formation-lowering-capabilities/3");
         capabilities["http_process"]
             .as_object_mut()
@@ -632,6 +664,46 @@ fn priority_context(mut entries: Vec<SourceContextEntry>, cap: usize) -> Vec<Sou
 mod autonomous_tests {
     use super::*;
     #[test]
+    fn http_port_capability_requires_current_bound_runtime_and_preserves_old_prompts() {
+        let mut auth:ato_formation::proposal::ProposalAuthorization=serde_json::from_value(json!({
+            "execution_plan":{"files":{},"toolchains":{"python":"3.12.7"},"runtime_port_operations":true},
+            "modifiable_derivation_refs":[],"source_domain":{"entrypoints":{},"modules":{}},
+            "policy":{"max_proposal_rounds":3,"max_proposals":1,"timeout_ms":30000,"allow_source_text":true,"max_source_bytes":16384}
+        })).unwrap();
+        assert_eq!(
+            lowering_capabilities(&auth, &[])["runtime_port_operations"]["available"],
+            false
+        );
+        let runtime = json!({"availability":{"online":true,"health":"ok"},"environments":[{"facts":{"runtime.process":"true",ato_formation::port_operations::RUNTIME_CAPABILITY:"true"}}]});
+        assert_eq!(
+            lowering_capabilities(&auth, std::slice::from_ref(&runtime))["runtime_port_operations"]
+                ["available"],
+            true
+        );
+        let old = lowering_capabilities_for(
+            &auth,
+            std::slice::from_ref(&runtime),
+            deepseek::PROMPT_VERSION_V12,
+        );
+        assert_eq!(old["schema"], "ato.formation-lowering-capabilities/4");
+        assert!(old.get("runtime_port_operations").is_none());
+        assert!(old["http_process"]["setup_scripts"].is_string());
+        let mut offline = runtime.clone();
+        offline["availability"]["online"] = json!(false);
+        assert_eq!(
+            lowering_capabilities(&auth, &[offline])["runtime_port_operations"]["available"],
+            false
+        );
+        auth.execution_plan
+            .as_mut()
+            .unwrap()
+            .runtime_port_operations = false;
+        assert_eq!(
+            lowering_capabilities(&auth, &[runtime])["runtime_port_operations"]["available"],
+            false
+        );
+    }
+    #[test]
     fn lowering_capabilities_are_source_independent_and_toolchain_scoped() {
         use ato_formation::proposal::{PlanAuthorization, ProposalAuthorization};
         let mut auth: ProposalAuthorization=serde_json::from_value(json!({
@@ -657,7 +729,7 @@ mod autonomous_tests {
         assert_eq!(caps["static_http"]["available"], true);
         assert_eq!(caps["static_http"]["guest_port"], 0);
         assert_eq!(caps["network"]["inbound_HTTP_requires_egress"], false);
-        assert_eq!(caps["schema"], "ato.formation-lowering-capabilities/4");
+        assert_eq!(caps["schema"], "ato.formation-lowering-capabilities/5");
         assert!(caps["http_process"]["setup_scripts"].is_string());
         let legacy = lowering_capabilities_for(&auth, &[], deepseek::PROMPT_VERSION_V11);
         assert_eq!(legacy["schema"], "ato.formation-lowering-capabilities/3");
@@ -668,6 +740,7 @@ mod autonomous_tests {
                 .contains("derivation_ref")
         );
         auth.execution_plan = Some(PlanAuthorization {
+            runtime_port_operations: false,
             files: BTreeMap::new(),
             toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
             source_oci: None,
@@ -691,7 +764,7 @@ mod autonomous_tests {
         let image_key = format!("formation.oci.image.{}", "e".repeat(64));
         let mut runtime = json!({"availability":{"online":true,"health":"ok"},"environments":[{"facts":{"formation.source_oci.bound":"true","formation.source_oci.available":"false","runtime.oci":"false"}}]});
         runtime["environments"][0]["facts"][&image_key] = json!("true");
-        let caps = lowering_capabilities(&auth, &[runtime.clone()]);
+        let caps = lowering_capabilities(&auth, std::slice::from_ref(&runtime));
         assert_eq!(
             caps["source_oci"]["unavailable_reason"],
             "runtime_unavailable"
@@ -735,6 +808,7 @@ mod autonomous_tests {
     fn root_scope_requires_an_acquired_reference_and_preserves_its_digest() {
         use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
         let domain = PlanAuthorization {
+            runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),
             files: [
@@ -795,6 +869,7 @@ mod autonomous_tests {
                 "unrelated/package.json".to_owned(),
             ]);
         let mut domain = PlanAuthorization {
+            runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),
             files: paths
@@ -853,6 +928,7 @@ mod autonomous_tests {
     fn explicit_python_import_exposes_only_module_or_initializer() {
         use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
         let domain = PlanAuthorization {
+            runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),
             files: [
@@ -921,6 +997,7 @@ mod autonomous_tests {
     fn relative_js_imports_use_exact_bounded_files_and_reject_ambiguity() {
         use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
         let mut domain = PlanAuthorization {
+            runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),
             files: [
@@ -2158,7 +2235,7 @@ impl ReasoningProducer {
                 let scope_ok = parsed.as_ref().is_ok_and(|batch|batch.proposals.iter().all(|proposal| {
                     let operations=match proposal {Proposal::ProposeDerivation{operations}|Proposal::ModifyDerivation{operations,..}=>operations,_=>return true};
                     operations.iter().all(|operation|if let ato_formation::proposal::OperationInvocation::ExecutionPlan{plan}=operation {
-                        let mut references=vec![&plan.entrypoint];references.extend(plan.basis.iter().map(|b|&b.source));
+                        let mut references=vec![&plan.entrypoint];references.extend(plan.basis.iter().map(|b|&b.source));references.extend(plan.runtime_port_operations.iter().map(|o| &o.basis));
                         for dependency in &plan.dependencies { match dependency {
                             ato_formation::proposal::DependencyOperation::PythonRequirements{requirements}|ato_formation::proposal::DependencyOperation::PythonResolveRequirements{requirements}|ato_formation::proposal::DependencyOperation::PythonBuildRequirements{requirements,..}=>references.push(requirements),
                             ato_formation::proposal::DependencyOperation::NpmCi{manifest,lockfile,..}|ato_formation::proposal::DependencyOperation::NpmRebuild{manifest,lockfile,..}=>references.extend([manifest,lockfile]),

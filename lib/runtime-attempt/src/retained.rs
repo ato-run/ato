@@ -51,6 +51,14 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
             })
         };
         let d = &self.descriptor.derivation;
+        if !d.runtime_port_operations.is_empty()
+            && profile.get(ato_formation::port_operations::RUNTIME_CAPABILITY) != Some("true")
+        {
+            return refuse(
+                "unsupported_capability",
+                "retained HTTP Port operations require a current bound adapter".into(),
+            );
+        }
         if let Some(exploration) = &self.exploration {
             if let Err(e) = d.requirements.within(exploration.ceiling) {
                 return refuse(
@@ -66,6 +74,7 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
         } else if !d.requirements.is_empty()
             || d.source_oci.is_some()
             || !d.variable_bindings.is_empty()
+            || !d.runtime_port_operations.is_empty()
         {
             return refuse("exploration_requirement_enforcement_unavailable","a retained descriptor never carries a previous exploration grant into ordinary replay".into());
         }

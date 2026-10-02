@@ -657,6 +657,12 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             one_of: r.one_of,
         }),
     );
+    if !planned.derivation.runtime_port_operations.is_empty() {
+        requirements.push(Requirement {
+            fact: ato_formation::port_operations::RUNTIME_CAPABILITY.into(),
+            one_of: Some(vec!["true".into()]),
+        });
+    }
     requirements.extend(
         ato_formation::proposal::native_runtime_requirements(&planned.derivation)
             .into_iter()
@@ -1598,7 +1604,7 @@ impl Client {
             .context("runtime_capabilities_invalid")?;
         let capabilities = rows.iter().filter(|v| match constraint { RuntimeConstraintWire::Any => true, RuntimeConstraintWire::Exact{runtime_id,..} => v["descriptor"]["runtime_id"] == runtime_id.as_str() }).take(16).map(|v| {
             let environments = v["descriptor"]["execution_environments"].as_array().into_iter().flatten().map(|e| {
-                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.") || k.starts_with("formation.source_oci.") || k.starts_with("formation.oci.image.")) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:/-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
+                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.") || k.starts_with("formation.source_oci.") || k.starts_with("formation.oci.image.") || k.as_str() == ato_formation::port_operations::RUNTIME_CAPABILITY) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:/-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
                 serde_json::json!({"environment_id":e["environment_id"],"facts_ref":e["facts_ref"],"facts":facts})
             }).collect::<Vec<_>>();
             serde_json::json!({"runtime_id":v["descriptor"]["runtime_id"], "environments": environments, "availability": v["availability"]})
@@ -1881,6 +1887,11 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
         .exploration
         .as_ref()
         .and_then(|e| e.source_oci.as_ref());
+    facts.insert(
+        ato_formation::port_operations::RUNTIME_CAPABILITY.into(),
+        (config.exploration.is_some() && facts.get("runtime.process").is_some_and(|v| v == "true"))
+            .to_string(),
+    );
     let oci_available = source_oci.is_some_and(|o| o.available());
     facts.insert(
         "formation.source_oci.bound".into(),
