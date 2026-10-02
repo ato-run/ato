@@ -5,10 +5,10 @@ No deployment, remote migration, feature flag or ordinary Run permission.
 
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
 `9e0031900836090612b94e775e26f980a68f32d7`. Current execution candidate:
-Ato `e02d4ca327c2dff6ef960863ebc6f1a24538b979`, API
-`fe541c31111ec03b5b46ffda93cd5acb4036a5a7`, prompt 12. Receipt authority
-WASM SHA-256 `38c2983a73d2ff25b47e80a345fdcb95b047bb8ce98990afffabd74899b766a2`,
-2,119,998 bytes, source Ato `e02d4ca327c2dff6ef960863ebc6f1a24538b979`.
+Ato code `70e8ba07d0aa5a1f16c525d41108db9916f359c6`, API
+`4da63b1f472870929f29ee84f8959aace8127d20`, prompt 12. Receipt authority
+WASM SHA-256 `86cc2c24619488e26dfa3f246538f5e34f6f8589db92528aa8447c9ec4e5fd7b`,
+2,123,769 bytes, source Ato `70e8ba07d0aa5a1f16c525d41108db9916f359c6`.
 The new pin requires new real application acceptance; earlier PASS does not
 prove these later changes. The review stack remains Draft.
 
@@ -124,6 +124,61 @@ failures remain recorded and are not counted as application failures.
 Current historical unique OSS successes: Codex **1**, API **0**. Codex SVGOMG is
 a repair PASS, not first-attempt PASS. OCI is a separate infrastructure fixture.
 No final-pin success rate or 100-case reachability rate is asserted yet.
+
+## Later real observations and remaining materialization gaps
+
+These observations supersede earlier claims that native execution, browser input
+or embedding enforcement had not yet been exercised. Original trials above are
+preserved at their actual pins; none becomes acceptance of a newer pin.
+
+| Target | Actual pin | Observation |
+| --- | --- | --- |
+| SVGOMG, trial 11 | Ato `5143a6dc`, API `4af64035`, authority `5143a6dc` | Zero known D; first install audit FAIL, typed es5-ext rebuild fresh same-K repair PASS. Three rounds, three session exchanges. |
+| SVGOMG function | Common retained Runtime `7d0822a1`; artifact creation `5143a6dc` | Fresh same-K PASS, SVG paste/optimization, smaller valid download (186 → 131 bytes), Multipass toggle/reset and cleanup PASS. Separate functional measurement; no ordinary Run grant. |
+| Single-service OCI, trial 11 | Ato `5143a6dc`, API `4af64035` | Zero known D, root Dockerfile build, normal Runtime launch, first generated D fresh same-K PASS. Two rounds/two exchanges, 190.005 seconds; result SHA-256 `7d3a784b504e46c9c6774d40bc8280dbd5f455b1aa84c1ef63b1843b079cd112`. Infrastructure fixture, excluded from OSS counts. |
+| changedetection.io, trial 11 | Ato `5143a6dc`, API `4af64035` | Unchanged requirements; 168 fixed wheels, isolated sdists, offline install and root fresh K PASS. Publication failed on the complete artifact size. One execution/two exchanges; no usable submitted D. |
+| changedetection.io, trial 12 | Ato `d2d70601`, API `4af64035`, authority `5143a6dc` | Same K/D, root fresh PASS after native operations; gzip stored bytes 303,582,164, expanded regular bytes 558,325,853. Exceeds retained transport 256 MiB and expanded limit 512 MiB. No usable submitted D or functional PASS. |
+| Kutt, trial 8 | Ato `e02d4ca3`, API `fe541c31` | Native rebuild/audit, private temporary JWT, source-owned migration and isolated state launch succeeded. Both receipts observed HTTP 302 against frozen root 200; no K/function/persistence PASS. |
+
+SVG trial-11 Search `search_643977059bcd1da2e0eafb18f5d19e3b`, successful
+attempt `01M3WW80ZMV1ZE9A2B5XSDRB8T`, retains the original SVG K and repair D.
+OCI Search `search_36c14132a496577190c3928e39456789`, attempt
+`01M3WW4NNEK4M6R78B3FVFSG5H`, retains the original OCI K and D.
+
+Python trial-12 Search `search_5494c591e956590ee50186dc7ff9fcda`, attempt
+`01M3WX0VEQJCMHBMR3K1KVECEC`, D
+`sha256:298cb3ac5d58809ba45eb09ef182cbb05ac5fbd1ff55ddeaafbcd8e3c6f153df`;
+result SHA-256 `2eaa0aa8cc976e23b5e66f44fafba92c47781718892c10c33728d018ae71f79e`.
+One execution, two rounds, four session exchanges (one schema repair within
+round 2), 784.368 seconds. Completed wheel archives use 137,102,363 bytes;
+installed files use 402,724,732. There are no .pyc files. Read-only measurement
+found only 1,153,971 bytes of large identical installed files, insufficient to
+resolve the expanded overflow. No artifacts were removed or limits raised.
+The build Record retention draft addresses this separately from execution.
+
+Kutt's explicitly referenced root routing source redirects an empty local user
+store to `/create-admin`; toggling anonymous-link policy does not initialize
+that store. The repeated 302 is not a missing native tool or migration failure.
+Connect source-owned local initialization and state bindings through the normal
+Runtime, then verify the unchanged K and stop/restart persistence. No app preset,
+secret-bearing D, weaker K or external service account has been added.
+
+Real private-input observations are recorded in
+`formation-embedding-failure-evidence-20261002.md`: PWA permission-required
+409/explicit allow/save/fresh PASS; typed embedding refusal reaches common
+reasoning; ambiguity stops for owner selection; TTL expiry stops before source
+execution; selection/resume preserve deadlines and budgets. The final input
+store has zero live metadata and zero encrypted values, and 215 public files
+contain no protected configuration. Paid API calls are zero for these fixtures.
+Earlier custom retry/lost-response/restart/UNKNOWN observations remain at their
+separate pins. The old WBO UNKNOWN has not been replayed.
+
+Current unique OSS apps with usable submitted D: Codex 1 (SVG repair PASS),
+API 0. Runtime K reached without successful publication additionally includes
+changedetection.io; that is reported separately, not added to usable successes.
+The OCI and private-input fixtures are not OSS app successes. Native claims
+repair `70e8ba07` is proven by native integration and actual WASM tests; whole-app
+acceptance remains required after the remaining materialization/state changes.
 
 ## Accounting
 
