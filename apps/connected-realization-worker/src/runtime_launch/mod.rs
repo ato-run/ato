@@ -7,7 +7,9 @@
 
 // Process launch lives in the shared Runtime crate; the Runner uses it
 // through these paths.
-pub use ato_runtime_attempt::launch::{process_executor, resolved, sandbox, sandbox_exec};
+pub use ato_runtime_attempt::launch::{
+    host_boundary, process_executor, resolved, sandbox, sandbox_exec,
+};
 
 pub mod lease;
 pub mod network_broker;
