@@ -1059,6 +1059,67 @@ fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
     let ProposalOutcome::Admitted(d) = &result[0] else {
         panic!("{result:?}")
     };
+    let roots = python_build_outputs(&d.compiled().derivation).unwrap();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(
+        roots[0].requirements_ref,
+        format!("sha256:{}", "c".repeat(64))
+    );
+    use ato_formation::build_record::*;
+    let reference = ato_formation::retained::content_ref(b"lineage");
+    let manifest = BuildRecordManifest {
+        schema: BUILD_RECORD_SCHEMA.into(),
+        creation_attempt_id: "record-attempt".into(),
+        contract_ref: s.frozen.contract_ref.clone(),
+        derivation_ref: d.compiled().derivation.derivation_ref().unwrap(),
+        source_closure_ref: s
+            .frozen
+            .initial_source
+            .as_ref()
+            .unwrap()
+            .closure_ref
+            .clone(),
+        roots: vec![EvidenceRoot {
+            path: roots[0].root.clone(),
+            requirements_ref: roots[0].requirements_ref.clone(),
+            plan_ref: roots[0].plan_ref.clone(),
+            provenance_ref: reference.clone(),
+        }],
+        files: vec![EvidenceFile {
+            path: format!("{}/provenance.json", roots[0].root),
+            content_ref: reference.clone(),
+            bytes: 7,
+            chunks: vec![EvidenceChunk {
+                content_ref: reference,
+                bytes: 7,
+            }],
+            package: None,
+            version: None,
+        }],
+    };
+    manifest
+        .match_assignment(
+            &s.frozen.contract_ref,
+            &d.compiled().derivation,
+            &manifest.source_closure_ref,
+            "record-attempt",
+        )
+        .unwrap();
+    assert!(
+        manifest
+            .match_assignment(
+                &s.frozen.contract_ref,
+                &d.compiled().derivation,
+                &manifest.source_closure_ref,
+                "another-attempt"
+            )
+            .is_err()
+    );
+    let mut changed = d.compiled().derivation.clone();
+    changed
+        .steps
+        .retain(|step| !step.argv.iter().any(|arg| arg == "cleanup"));
+    assert!(python_build_outputs(&changed).is_err());
     assert!(d.compiled().capsule_toml.len() <= 65_536);
     assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
     let steps = &d.compiled().derivation.steps;
