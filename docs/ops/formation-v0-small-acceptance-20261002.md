@@ -290,8 +290,12 @@ artifact without feeding it to the API provider. First and second actual
 contained launches at `e185f2d9` passed unchanged K. The first non-PTY helper
 received stdin EOF and confirmed cleanup before UI interaction; preserve that
 receipt/cleanup evidence. A separately controlled second launch created, edited
-and paused a test watch through Chromium, then confirmed stop. The next launch's
-retention check is in progress. Preregistration, additive harness correction and
+and paused a test watch through Chromium, then confirmed stop. The third launch
+found the same title and paused state in a fresh process and browser context,
+passed unchanged K, deleted the own test watch and confirmed final cleanup.
+All three fresh receipts PASS, zero allowed Runtime network bytes. Proof SHA-256
+`f925202933e2e2ea25b4f00e118e5232650c4cc891a2b24abb63ad462790e5ac`.
+Preregistration, additive harness correction and
 helper versions are separately recorded. This is an explicitly owned local
 state-binding fixture, not Coordinator state-assignment authentication. It does
 not complete Kutt, current-owner/current-assignment or stale-fence acceptance.
