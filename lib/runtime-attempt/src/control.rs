@@ -42,6 +42,37 @@ pub fn now_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+/// Runtime-private operational input for the source-owned preparation wrapper.
+/// Source proposals and variable declarations already forbid the ATO_ namespace.
+pub(crate) fn apply_launch_deadline_environment(
+    environment: &mut std::collections::BTreeMap<String, String>,
+    control: Option<&ExecutionControl>,
+) -> Result<()> {
+    let bound = control
+        .map(|c| {
+            c.remaining(AttemptPhase::Launch)
+                .map(|remaining| (c.deadline_ms(), remaining))
+        })
+        .transpose()?;
+    for name in [
+        "ATO_FORMATION_EXECUTION_DEADLINE_MS",
+        "ATO_FORMATION_EXECUTION_REMAINING_MS",
+    ] {
+        environment.remove(name);
+    }
+    if let Some((deadline, remaining)) = bound {
+        environment.insert(
+            "ATO_FORMATION_EXECUTION_DEADLINE_MS".into(),
+            deadline.to_string(),
+        );
+        environment.insert(
+            "ATO_FORMATION_EXECUTION_REMAINING_MS".into(),
+            remaining.as_millis().to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl ExecutionControl {
     pub fn deadline_ms(&self) -> u64 {
         self.deadline_ms
@@ -123,6 +154,43 @@ impl Drop for PhaseTimer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_wrapper_gets_remaining_original_budget_and_no_captured_override() {
+        let control = ExecutionControl::new(now_ms() + 1_000);
+        let mut environment = std::collections::BTreeMap::from([
+            ("APP_SETTING".into(), "unchanged".into()),
+            (
+                "ATO_FORMATION_EXECUTION_DEADLINE_MS".into(),
+                u64::MAX.to_string(),
+            ),
+            (
+                "ATO_FORMATION_EXECUTION_REMAINING_MS".into(),
+                u64::MAX.to_string(),
+            ),
+        ]);
+        std::thread::sleep(Duration::from_millis(25));
+        apply_launch_deadline_environment(&mut environment, Some(&control)).unwrap();
+        assert_eq!(
+            environment["ATO_FORMATION_EXECUTION_DEADLINE_MS"],
+            control.deadline_ms().to_string()
+        );
+        let remaining: u64 = environment["ATO_FORMATION_EXECUTION_REMAINING_MS"]
+            .parse()
+            .unwrap();
+        assert!(remaining > 0 && remaining < 1_000);
+        assert_eq!(environment["APP_SETTING"], "unchanged");
+        apply_launch_deadline_environment(&mut environment, None).unwrap();
+        assert_eq!(environment.len(), 1);
+        assert_eq!(environment["APP_SETTING"], "unchanged");
+        assert!(
+            apply_launch_deadline_environment(
+                &mut environment,
+                Some(&ExecutionControl::new(now_ms().saturating_sub(1)))
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn expired_control_refuses_effects_but_records_cleanup() {
