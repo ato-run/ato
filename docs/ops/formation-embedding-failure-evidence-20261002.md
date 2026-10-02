@@ -64,12 +64,16 @@ and 78 Runtime attempt tests, with one existing ignored test.
 * Search `search_62e0287ddecfecb20645f696f32c3cda`: a reusable value with a
   separately scoped resource expired after its 15-second TTL. The common input
   view returned `expired` and zero selectable values; no source execution was
-  permitted. Its original Search/round deadline was not extended. This is a
-  paused input case, not an application PASS or a terminal Search yet.
+  permitted. Resume after the original round deadline recorded
+  `round_deadline_exceeded` at Source admission without starting the build.
+  Visible expired/revoked metadata led to `needs_input` at
+  `2026-10-02T00:08:09.965Z`, with zero outstanding byte reservations. Original
+  Search/round deadlines were not extended. Result SHA-256:
+  `95934585357a1ca938bea352cae0511f3473b8a822cd36fc5fbde6e31148af5b`.
 
 Owned reusable metadata from these tests was revoked through the normal API.
 The final observed encrypted store contained 10 metadata rows, nine assignments,
-zero live metadata rows and zero value rows. A scan of 203 public input/journal/
+zero live metadata rows and zero value rows. A scan of 215 public input/journal/
 report files found zero occurrences of the private configuration. The
 explicitly permitted embedded artifact is excluded from that scan; permission
 does not authorize disclosure in model input or traces.

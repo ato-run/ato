@@ -25,5 +25,15 @@ Earlier real Runtime sdists used a host with bound native tools and consequently
 did not expose this scheduling defect. They remain observations at their original
 pins; they are not reclassified as final-code acceptance.
 
-API actual-WASM regression, updated binary provenance, Linux tests and final
-native app publication remain pending. No deployment or remote migration.
+Linux independently passed the same 119 unit and 33 integration tests at
+execution source `70e8ba07d0aa5a1f16c525d41108db9916f359c6`.
+
+The API regression first reached an admitted proposal with the previous
+`5143a6dc` WASM but lacked its gcc requirement. Invalid preliminary fixture
+requests are separately retained; they are not that regression. The corrected
+request passes with the WASM built from `70e8ba07`, SHA-256
+`86cc2c24619488e26dfa3f246538f5e34f6f8589db92528aa8447c9ec4e5fd7b`,
+2,123,769 bytes, toolchain 1.96.0. The updated API provenance records this exact
+source. Full receipt/Search regression and typecheck results follow in the API
+PR. Final native app publication remains pending: successful Runtime K receipts
+do not establish a usable retained submission. No deployment or remote migration.
