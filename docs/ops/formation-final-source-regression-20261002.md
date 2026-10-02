@@ -113,18 +113,32 @@ these distinct counters are not treated as the same measurement. The corrected
 run followed a preexecution infrastructure failure; it is not represented as an
 uninterrupted first-Search success or another unique OSS app.
 
-The separate current-pin functional/state acceptance is still in progress.
-Its first observer timed out before readiness, then queued confirmed stop;
-the common Runtime produced a fully satisfied receipt, committed its assigned
-state and released the writer. No browser was started, so no UI PASS is claimed.
-The failed trial is preserved and the next separately assigned functional
-verification changes the observer window only (220 seconds); each helper's
-original 300-second execution allowance remains intact.
+[Current-pin functional/state evidence](evidence/formation-changedetection-functional-state-final-20261002.json)
+(SHA-256 `174643c9822c7d945481fcede1c1944ca92df86983b2c3d33ea5a6a94b90b833`)
+records two separately assigned common Runtime Runs using the exact newly
+retained artifact. Both issued fresh fully satisfied receipts for the same K/D.
+The real browser created an owned watch, edited its title and paused it. After
+confirmed stop, writer fence 1 committed revision
+`isrev_01M3XX7R8X44PAKN3NEJ5Z57M6`. A new Run restored that exact revision under
+fence 2, verified the title and paused state, deleted the watch, confirmed stop
+and committed child revision `isrev_01M3XXD0KF5M448XN0FXRV0KE4`. The state slot
+ended at writer epoch 2 with no active writer or quarantine. Runtime egress was
+zero. External site fetch was denied and is unverified.
+
+The first functional observer timed out before readiness, then queued confirmed
+stop; its receipt/state commit and writer release succeeded, but no browser was
+started and no UI PASS is claimed for it. That failure remains in the evidence.
+The successful separate fixture changed only the observer readiness window to
+220 seconds; each helper retained its original 300-second execution allowance.
+The closed Source Search was never resumed. Production StateService assignment,
+artifact, commit and fencing routes are exercised through a private filesystem
+dispatch fixture; automatic production Source state provisioning remains pending.
 
 ## Remaining acceptance and accounting
 
 SVGOMG, OCI and changedetection.io final-pin Source regressions are complete;
-changedetection.io functional/state verification remains in progress.
+changedetection.io functional/state verification is also complete within the
+explicit private acceptance boundary above.
 Current-grant Kutt native/migration/function/state/restart evidence is
 [recorded separately](formation-state-verification-input-grants-20261002.md).
 Fixed-artifact functional/state arms do not count as independent Source
