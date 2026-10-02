@@ -88,10 +88,43 @@ uses a separately created owned parent and `/opt/ato/.tmp/fc3/r2`; it is a new
 preregistered Search with the same Source/K/plan and zero-known-D initial input,
 not a retry/resume that replenishes the failed Search's limits.
 
+## changedetection.io Source regression
+
+[Source native dependency evidence](evidence/formation-changedetection-source-final-20261002.json)
+(SHA-256 `dc9dec18a70edab88d4015550df8b565cb3508cebd95e88b38a14fe54317c2d4`)
+records corrected infrastructure Search `search_6eb04bad8d5678c5d01b4990e3faa338`.
+The proposal inspected the wrapper declared by root setup/Dockerfile, followed
+its explicit `changedetectionio` import, and used Source-documented datastore,
+host and port arguments. Source-owned requirements used generic
+`python_build_requirements`, Python 3.12.7, explicit GCC 13.3.0/Make 4.3.0/pkg-config
+1.8.1 and isolated setuptools 83.0.0/wheel 0.45.1/packaging 25.0 build dependencies.
+Only PyPI HTTPS was granted for dependencies/build; Runtime egress was denied.
+The operation built feedgen, jstyleson and websockets from sdists, saved 168
+wheel identities/hashes/provenance, and installed completed wheels offline.
+
+The first actual execution produced fresh same-K PASS for D `6c934956…`.
+It consumed 2 rounds and 4 session exchanges, including two inspections within
+round 1, and completed in 592.080 seconds. The original 09:06:40 UTC Search
+deadline was retained. Source result/BuildRecord/retained publication were
+ACKed, metadata mismatches empty and Search reservations zero. Stored usage was
+306,003,211 bytes; measured Source input expansion was 16,887,438 bytes. The
+separately retained artifact is 167,289,522 bytes with 419,612,170 expanded bytes;
+these distinct counters are not treated as the same measurement. The corrected
+run followed a preexecution infrastructure failure; it is not represented as an
+uninterrupted first-Search success or another unique OSS app.
+
+The separate current-pin functional/state acceptance is still in progress.
+Its first observer timed out before readiness, then queued confirmed stop;
+the common Runtime produced a fully satisfied receipt, committed its assigned
+state and released the writer. No browser was started, so no UI PASS is claimed.
+The failed trial is preserved and the next separately assigned functional
+verification changes the observer window only (220 seconds); each helper's
+original 300-second execution allowance remains intact.
+
 ## Remaining acceptance and accounting
 
-changedetection.io is the next serial final-pin Source regression;
-its original K and zero-known-D initial information are preregistered.
+SVGOMG, OCI and changedetection.io final-pin Source regressions are complete;
+changedetection.io functional/state verification remains in progress.
 Current-grant Kutt native/migration/function/state/restart evidence is
 [recorded separately](formation-state-verification-input-grants-20261002.md).
 Fixed-artifact functional/state arms do not count as independent Source
