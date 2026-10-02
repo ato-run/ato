@@ -50,10 +50,33 @@ as a functional PASS. The successful fixture used an owned short `.tmp` path.
 The standalone helper source/lock and binary hashes are in the evidence; its
 new state field is explicitly `None` for this static-only observation.
 
+## OCI single service
+
+[OCI Source evidence](evidence/formation-oci-source-final-20261002.json)
+(SHA-256 `71935dddaa3ccc7ce150c7056f3bd9cf37d2428649931b724e64f0c55caeff7c`)
+records a new zero-known-D Search at the same code/API pins. Its verified root
+Dockerfile declares a single BusyBox HTTP service, a digest-pinned base image,
+literal `site/index.html` COPY, image-owned CMD and port 8080. The proposal used
+the explicitly bound builder recipe, no runtime egress or state/variable grant,
+and explicit logical HTTP Bind authority. The common builder produced an OCI
+artifact and the normal contained Runtime issued a fresh same-K fully satisfied
+receipt on its first execution. The proof retains base/completed image identity,
+build provenance, network reports, execution facts and phase timings.
+
+Search `search_ff3e9c7b9c810954c75573b4beede527` executed once, used 2 rounds
+and 3 session exchanges, and completed in 262.384 seconds. An omitted required
+empty `build_scripts` list was corrected within the first round before any
+execution. After measured K success, the second round proposed no duplicate
+build or execution. Original deadline `2026-10-02T08:49:28.841Z` remained
+unchanged. Result delivery was durably ACKed, metadata mismatches were empty
+and all reservations zero. This controlled representative fixture contributes
+no additional unique OSS app. Compose, multiple services and source/Dockerfile
+rewriting remain outside v0.
+
 ## Remaining acceptance and accounting
 
-OCI and changedetection.io are the next serial final-pin Source regressions;
-their original K and zero-known-D initial information are preregistered.
+changedetection.io is the next serial final-pin Source regression;
+its original K and zero-known-D initial information are preregistered.
 Current-grant Kutt native/migration/function/state/restart evidence is
 [recorded separately](formation-state-verification-input-grants-20261002.md).
 Fixed-artifact functional/state arms do not count as independent Source
