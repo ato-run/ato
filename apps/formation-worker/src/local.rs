@@ -424,9 +424,20 @@ pub(crate) enum PreparedArtifact<'a> {
 }
 
 pub(crate) fn prepare_artifact(executed: &ExecutedCandidate) -> Result<PreparedArtifact<'_>> {
+    prepare_artifact_with_record(executed, None)
+}
+
+pub(crate) fn prepare_artifact_with_record<'a>(
+    executed: &'a ExecutedCandidate,
+    record: Option<&crate::build_record::ReadyBuildRecord>,
+) -> Result<PreparedArtifact<'a>> {
     Ok(match executed {
         ExecutedCandidate::Process { workspace_root } => PreparedArtifact::Process {
-            packed: crate::pack::pack_process_artifact(workspace_root)?,
+            packed: if let Some(record) = record {
+                crate::pack::pack_process_artifact_with_record(workspace_root, record)?
+            } else {
+                crate::pack::pack_process_artifact(workspace_root)?
+            },
         },
         ExecutedCandidate::StaticWeb { output } => PreparedArtifact::StaticWeb {
             output,

@@ -36,6 +36,18 @@ use ato_formation::containment::validate_contained_symlink_target;
 /// Small archives preserve their existing byte identity.
 pub fn pack_process_artifact(root: &Path) -> Result<Vec<u8>> {
     let raw = pack_tree(root)?;
+    compress_process_artifact(raw)
+}
+
+pub(crate) fn pack_process_artifact_with_record(
+    root: &Path,
+    record: &crate::build_record::ReadyBuildRecord,
+) -> Result<Vec<u8>> {
+    record.verify_workspace(root)?;
+    compress_process_artifact(pack_tree_projected(root, &record.roots())?)
+}
+
+fn compress_process_artifact(raw: Vec<u8>) -> Result<Vec<u8>> {
     if raw.len() < 8 * 1024 * 1024 {
         return Ok(raw);
     }
@@ -54,10 +66,21 @@ pub fn pack_process_artifact(root: &Path) -> Result<Vec<u8>> {
 
 /// Pack `root` into a deterministic archive.
 pub fn pack_tree(root: &Path) -> Result<Vec<u8>> {
+    pack_tree_projected(root, &BTreeSet::new())
+}
+
+fn pack_tree_projected(root: &Path, recorded: &BTreeSet<PathBuf>) -> Result<Vec<u8>> {
     let mut files = BTreeSet::new();
     let mut directories = BTreeSet::new();
     let mut links = BTreeMap::new();
-    collect(root, root, &mut files, &mut directories, &mut links)?;
+    collect(
+        root,
+        root,
+        &mut files,
+        &mut directories,
+        &mut links,
+        recorded,
+    )?;
     let mut bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut bytes);
@@ -140,6 +163,7 @@ fn collect(
     files: &mut BTreeSet<PathBuf>,
     directories: &mut BTreeSet<PathBuf>,
     links: &mut BTreeMap<PathBuf, String>,
+    recorded: &BTreeSet<PathBuf>,
 ) -> Result<()> {
     let relative_of = |path: &Path| -> Result<PathBuf> {
         Ok(path
@@ -154,6 +178,9 @@ fn collect(
         let entry = entry?;
         let path = entry.path();
         let relative = relative_of(&path)?;
+        if recorded.contains(&relative) {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&path)
             .with_context(|| format!("cannot read {}", relative.display()))?;
         if metadata.is_symlink() {
@@ -170,12 +197,41 @@ fn collect(
                     )
                 },
             )?;
+            if !recorded.is_empty() {
+                // A runtime link cannot depend on evidence omitted from its
+                // materialization, including through another contained link.
+                let mut logical = relative.parent().unwrap_or(Path::new("")).to_path_buf();
+                for component in Path::new(&target).components() {
+                    match component {
+                        std::path::Component::ParentDir => {
+                            logical.pop();
+                        }
+                        std::path::Component::CurDir => {}
+                        std::path::Component::Normal(name) => logical.push(name),
+                        _ => anyhow::bail!("build_record_runtime_link_invalid"),
+                    }
+                }
+                anyhow::ensure!(
+                    !recorded.iter().any(|r| logical.starts_with(r)),
+                    "build_record_runtime_link_refused"
+                );
+                if let Ok(resolved) = std::fs::canonicalize(&path) {
+                    let base = std::fs::canonicalize(root)?;
+                    let resolved = resolved
+                        .strip_prefix(base)
+                        .context("build_record_runtime_link_invalid")?;
+                    anyhow::ensure!(
+                        !recorded.iter().any(|r| resolved.starts_with(r)),
+                        "build_record_runtime_link_refused"
+                    );
+                }
+            }
             links.insert(relative, target);
             continue;
         }
         if metadata.is_dir() {
             directories.insert(relative);
-            collect(root, &path, files, directories, links)?;
+            collect(root, &path, files, directories, links, recorded)?;
         } else if metadata.is_file() {
             files.insert(relative);
         }

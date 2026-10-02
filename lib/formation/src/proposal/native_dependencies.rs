@@ -6,6 +6,124 @@ use super::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+fn registered_operation(step: &crate::authoring::BoundStep) -> Option<(&str, &str, &str)> {
+    if step.protocol != "ato.process@1" || step.op != "exec" {
+        return None;
+    }
+    match step.argv.as_slice() {
+        [_, flag, operation, mode, plan] if flag == "-c" || flag == "-e" => {
+            Some((operation, mode, plan))
+        }
+        [_, isolated, flag, operation, mode, plan] if isolated == "-I" && flag == "-c" => {
+            Some((operation, mode, plan))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonBuildOutput {
+    pub root: String,
+    pub requirements_ref: String,
+    pub plan_ref: String,
+    pub python_version: String,
+    pub build_network: String,
+    pub toolchains: Vec<RuntimeSelection>,
+    pub build_dependencies: Vec<super::PythonBuildDependency>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisteredPythonPlan {
+    schema: String,
+    python_version: String,
+    requirements: String,
+    requirements_sha256: String,
+    root: String,
+    build_dependencies: Vec<super::PythonBuildDependency>,
+    toolchains: Vec<RuntimeSelection>,
+    build_network: String,
+    lock_operation: String,
+}
+
+/// Exact registered output ownership, never a filesystem naming heuristic.
+pub fn python_build_outputs(
+    d: &crate::authoring::BoundDerivation,
+) -> Result<Vec<PythonBuildOutput>, ProposalError> {
+    let mut outputs = Vec::new();
+    for (index, step) in d.steps.iter().enumerate() {
+        let Some((operation, "check", bytes)) = registered_operation(step) else {
+            continue;
+        };
+        if operation != include_str!("python-native-operation.py")
+            && operation != include_str!("python-native-dependencies.py")
+        {
+            continue;
+        }
+        let plan: Value =
+            serde_json::from_str(bytes).map_err(|_| ProposalError("build_record_plan_invalid"))?;
+        let typed: RegisteredPythonPlan = serde_json::from_value(plan.clone())
+            .map_err(|_| ProposalError("build_record_plan_invalid"))?;
+        let expected = format!("/app/.ato-dependencies/python-build-{index}");
+        let Some(requirements_ref) = plan["requirements_sha256"].as_str() else {
+            return Err(ProposalError("build_record_plan_invalid"));
+        };
+        if typed.schema != "ato.python-build-plan/1"
+            || typed.root != expected
+            || semver::Version::parse(&typed.python_version).is_err()
+            || !typed
+                .requirements
+                .strip_prefix("/app/")
+                .is_some_and(super::source_path)
+            || typed.requirements_sha256 != requirements_ref
+            || typed.build_dependencies.is_empty()
+            || typed.build_dependencies.len() > 32
+            || typed.build_dependencies.iter().any(|b| {
+                b.name.is_empty()
+                    || b.name.len() > 128
+                    || !b
+                        .name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+                    || b.version.is_empty()
+                    || b.version.len() > 64
+                    || !b
+                        .version
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b".+_-".contains(&c))
+            })
+            || typed.toolchains.len() > 4
+            || typed.toolchains.iter().any(|t| {
+                !matches!(t.name.as_str(), "python" | "gcc" | "make" | "pkg-config")
+                    || semver::Version::parse(&t.version).is_err()
+            })
+            || !matches!(typed.build_network.as_str(), "denied" | "scoped-build")
+            || typed.lock_operation != include_str!("python-lock-operation.py")
+            || !crate::generation::is_sha256(requirements_ref)
+            || !d.steps[index + 1..].iter().any(|s| {
+                registered_operation(s).is_some_and(|(script, mode, p)| {
+                    script == operation && mode == "cleanup" && p == bytes
+                })
+            })
+        {
+            return Err(ProposalError("build_record_plan_invalid"));
+        }
+        outputs.push(PythonBuildOutput {
+            root: expected.trim_start_matches("/app/").into(),
+            python_version: typed.python_version,
+            build_network: typed.build_network,
+            toolchains: typed.toolchains,
+            build_dependencies: typed.build_dependencies,
+            requirements_ref: requirements_ref.into(),
+            plan_ref: crate::retained::content_ref(
+                &serde_jcs::to_vec(&plan)
+                    .map_err(|_| ProposalError("build_record_plan_invalid"))?,
+            ),
+        });
+    }
+    Ok(outputs)
+}
+
 /// The same canonical registered operations supply scheduler claims and the
 /// Runtime attestation. Tools are prebound requirements, never provisions.
 pub fn runtime_requirements(
@@ -13,15 +131,8 @@ pub fn runtime_requirements(
 ) -> Vec<crate::search::Requirement> {
     let mut facts = BTreeSet::new();
     for step in &d.steps {
-        if step.protocol != "ato.process@1" || step.op != "exec" {
+        let Some((operation, _, plan)) = registered_operation(step) else {
             continue;
-        }
-        let (operation, plan) = match step.argv.as_slice() {
-            [_, flag, operation, _, plan] if flag == "-c" || flag == "-e" => (operation, plan),
-            [_, isolated, flag, operation, _, plan] if isolated == "-I" && flag == "-c" => {
-                (operation, plan)
-            }
-            _ => continue,
         };
         let schema = if operation == include_str!("python-native-operation.py")
             || operation == include_str!("python-native-dependencies.py")

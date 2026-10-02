@@ -29,6 +29,7 @@
 
 pub mod authoring;
 pub mod browser;
+pub mod build_record;
 pub mod capsule_toml;
 #[cfg(feature = "planning")]
 pub mod capsule_toml_v2;
