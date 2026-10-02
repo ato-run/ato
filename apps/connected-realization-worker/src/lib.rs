@@ -1224,6 +1224,31 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
     reexec_without_enrollment_token(&credentials_file)
 }
 
+/// A host-boundary workload runs as another user from a directory under the
+/// work root. If any directory above it withholds search permission from
+/// others — `/root` is the usual one — the workload cannot even be started,
+/// and the failure surfaces as an unexplained "permission denied" at exec.
+/// Refuse at start instead, naming the directory.
+fn ensure_reachable_by_workload(work_root: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let absolute = fs::canonicalize(work_root)
+            .with_context(|| format!("cannot resolve work root {}", work_root.display()))?;
+        for directory in absolute.ancestors() {
+            let mode = fs::metadata(directory)?.permissions().mode();
+            ensure!(
+                mode & 0o001 != 0,
+                "host-boundary isolation needs a work root the workload user can reach, but {} is \
+                 not searchable by others",
+                directory.display()
+            );
+        }
+    }
+    let _ = work_root;
+    Ok(())
+}
+
 /// Create a file only its owner can read, with the mode set at creation so
 /// there is no moment at which it is world-readable.
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1318,6 +1343,7 @@ impl ConnectedWorker {
                 uid,
                 gid,
             })?;
+            ensure_reachable_by_workload(&config.work_root)?;
         }
         let mut api =
             HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
