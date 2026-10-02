@@ -5,8 +5,15 @@ No deployment, remote migration, feature flag or ordinary Run permission.
 
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
 `9e0031900836090612b94e775e26f980a68f32d7`. Latest code candidate:
-Ato `e185f2d97d869615e23a83f950efb147d317f6b7` (explicit verification state
-bindings, #1466); latest actual SVGOMG/OCI source execution used status retry
+Ato `7846b40b9c61fb32ef8823372f013b91dc58b6a0` (Node setup/launch deadlines,
+#1468, typed readiness classification, #1469), API
+`1626faa000018d6fcb26823ade31ac32e22c7725` (compiler #719 and owner phase
+evidence #720). Current authority source
+`b7c322e70d28a986581e6f60fb6d716309e5a6c8`, WASM SHA-256
+`f6067a2797c1b39098da67dcb695c25cb8e44dfd351f3c7cd4781bab74479af4`,
+2,198,190 bytes. Documentation-only subsequent heads do not change that code.
+Explicit verification state bindings remain at #1466; latest actual SVGOMG/OCI
+source execution used status retry
 code `1de0e3a008f73226171d83fa026c50ec20dde976` (#1465), while
 changedetection.io source/functional Runtime used
 `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`. Both use API
@@ -318,6 +325,17 @@ source state provisioning, Kutt or the independent API arm. It supersedes the
 local-fixture-only limitation for this measured transport round trip.
 
 ## Accounting
+
+The [actual deadline control regression](formation-readiness-deadline-classification-20261002.md)
+uses current execution/API pins above with the same immutable Source, K and D.
+Normal setup completes and fresh K passes; six-second Search expires during
+setup, with no app start or subsequent inference. Saved typed deadline result
+recovers after the harness stopped before ACK using the original remaining
+retry. Terminal deadline stop, confirmed cleanup, zero reservations, no extra
+execution/inference and unchanged original Search limits are verified. Numeric
+phase times are visible in owner status for both cases. These fixed fixture
+exchanges add zero autonomous app successes or paid API calls. Public metadata
+SHA-256 `cc84aeb2b30aab4970622d8f97faf249ee9160eece8e0486d5502d3b02a06497`.
 
 The explicit small-gate allowance is at most 24 additional API calls, within
 the original remaining $0.499285; it does not authorize 100-case measurement.
