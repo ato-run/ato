@@ -79,3 +79,11 @@ and a usable retained D, and separately verify function through the common
 Runtime. Codex precedes an independent API arm with the same initial information.
 No remote migration, deployment, 100-case execution, source rewrite or automatic
 Run grant is implied.
+
+The Coordinator advertises the supported evidence schema on the immutable source
+attempt ticket. An absent declaration preserves historical full-workspace publication.
+Projection requires both that declaration and the authenticated ready acknowledgement.
+Publication checkpoint recovery checks the original Runtime journal's completed
+identity before any storage RPC; UNKNOWN remains dominant. If execution finished but
+its detailed report cannot be recovered, redelivery consumes the original resource
+reservation conservatively and never re-enters execution or refunds a fresh budget.
