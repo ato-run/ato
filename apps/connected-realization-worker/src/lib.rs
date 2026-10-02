@@ -103,7 +103,7 @@ const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0
 const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
-    "isolation=untrusted-v1",
+    NAMESPACE_ISOLATION_CAPABILITY,
 ];
 
 /// Capabilities that exist only when this host can actually run Firecracker.
@@ -144,6 +144,31 @@ fn runner_capabilities(
     }
     capabilities
 }
+/// What this Runner advertises, given how it isolates and what it measured.
+///
+/// A host-boundary Runner swaps the namespace isolation capability for its
+/// own: the two are never advertised together, because the control plane
+/// treats `isolation=untrusted-v1` as "may share a host with other tenants".
+/// `gpu` is advertised only when a device actually answered the probe.
+fn advertised_capabilities(
+    mut capabilities: Vec<&'static str>,
+    host_boundary: bool,
+    has_accelerator: bool,
+) -> Vec<&'static str> {
+    if host_boundary {
+        capabilities.retain(|capability| *capability != NAMESPACE_ISOLATION_CAPABILITY);
+        capabilities.push(runtime_launch::host_boundary::ISOLATION_CAPABILITY);
+    }
+    if has_accelerator {
+        capabilities.push(GPU_CAPABILITY);
+    }
+    capabilities
+}
+
+const NAMESPACE_ISOLATION_CAPABILITY: &str = "isolation=untrusted-v1";
+/// The capability the control plane requires for a `gpu` runtime requirement.
+const GPU_CAPABILITY: &str = "gpu";
+
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -1108,8 +1133,132 @@ pub struct WorkerConfig {
     /// Comma-separated exact sockets this slot may own as fixed listeners.
     #[arg(long, env = "ATO_RUNTIME_FIXED_TCP_ALLOWLIST", default_value = "")]
     pub fixed_tcp_allowlist: String,
+    /// How a `process` workload is isolated. `namespace` (default) needs
+    /// bubblewrap. `host-boundary` is for a dedicated machine that cannot
+    /// create namespaces: the machine is the boundary, and the workload runs
+    /// as `workload_uid:workload_gid` under Landlock.
+    #[arg(long, env = "ATO_RUNNER_ISOLATION", value_enum, default_value_t = IsolationMode::Namespace)]
+    pub isolation: IsolationMode,
+    /// The unprivileged user a host-boundary workload runs as. Required in
+    /// that mode; must not be root.
+    #[arg(long, env = "ATO_RUNNER_WORKLOAD_UID")]
+    pub workload_uid: Option<u32>,
+    #[arg(long, env = "ATO_RUNNER_WORKLOAD_GID")]
+    pub workload_gid: Option<u32>,
     #[arg(long)]
     pub once: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum IsolationMode {
+    Namespace,
+    HostBoundary,
+}
+
+/// The single-use token a freshly provisioned machine starts with. Read from
+/// the environment only: a command-line argument is visible to every user of
+/// the host through `/proc/<pid>/cmdline`.
+const ENROLLMENT_TOKEN_ENV: &str = "ATO_RUNNER_ENROLLMENT_TOKEN";
+const CREDENTIALS_FILE_ENV: &str = "ATO_RUNNER_CREDENTIALS_FILE";
+
+/// Exchange an enrollment token for this Runner's identity, then start over
+/// without the token.
+///
+/// ```text
+/// start (token in env, no identity)
+///   -> POST /v1/runners/enroll        the token is single-use; it is now spent
+///   -> write the credentials file     0600, the Runner's user only
+///   -> exec self, token removed       the new process never had it
+/// ```
+///
+/// The re-exec is what removes the token from this process's environment (and
+/// so from `/proc/<pid>/environ`) rather than merely not using it again. From
+/// there the Runner is an ordinary one: same identity file, same heartbeat,
+/// same lease protocol. Returns only when there is nothing to do.
+fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
+    let Some(token) = std::env::var(ENROLLMENT_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let credentials_file = config
+        .runner_credentials_file
+        .clone()
+        .unwrap_or_else(|| config.work_root.join("runner-credentials.json"));
+    // An identity already exists (a restart on the same machine): keep it and
+    // only drop the stale token. The control plane would refuse it anyway.
+    let already_enrolled = credentials_file.is_file() || !config.runner_token.trim().is_empty();
+    if !already_enrolled {
+        fs::create_dir_all(&config.work_root)?;
+        let api_base = config.api_base.trim_end_matches('/');
+        let response: serde_json::Value = reqwest::blocking::Client::new()
+            .post(format!("{api_base}/v1/runners/enroll"))
+            .json(&serde_json::json!({
+                "enrollment_token": token,
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+            }))
+            .send()
+            .context("enrollment request failed")?
+            .error_for_status()
+            .context("the control plane refused the enrollment token")?
+            .json()
+            .context("enrollment response is not JSON")?;
+        let field = |pointer: &str| {
+            response
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .with_context(|| format!("enrollment response has no {pointer}"))
+        };
+        write_private_file(
+            &credentials_file,
+            &serde_json::to_vec(&serde_json::json!({
+                "api_base": api_base,
+                "runner_id": field("/runner/id")?,
+                "runner_token": field("/runner_token")?,
+            }))?,
+        )?;
+    }
+    reexec_without_enrollment_token(&credentials_file)
+}
+
+/// Create a file only its owner can read, with the mode set at creation so
+/// there is no moment at which it is world-readable.
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("cannot create {}", path.display()))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reexec_without_enrollment_token(credentials_file: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt as _;
+    let mut arguments = std::env::args_os();
+    let program = arguments.next().context("missing argv[0]")?;
+    let error = std::process::Command::new(program)
+        .args(arguments)
+        .env_remove(ENROLLMENT_TOKEN_ENV)
+        .env(CREDENTIALS_FILE_ENV, credentials_file)
+        .exec();
+    Err(anyhow::Error::new(error).context("failed to restart after enrollment"))
+}
+
+#[cfg(not(unix))]
+fn reexec_without_enrollment_token(_credentials_file: &Path) -> Result<()> {
+    bail!("enrollment-token start is only implemented on Unix")
 }
 
 /// How a runtime launch ended, and whether its workloads are confirmed
@@ -1155,9 +1304,21 @@ pub struct ConnectedWorker {
 
 impl ConnectedWorker {
     pub fn new(mut config: WorkerConfig) -> Result<Self> {
+        // First: a machine that starts with an enrollment token becomes an
+        // ordinary Runner before anything else looks at its identity.
+        enroll_from_token(&config)?;
         resolve_runner_credentials(&mut config)?;
         validate_config(&config)?;
         fs::create_dir_all(&config.work_root)?;
+        if config.isolation == IsolationMode::HostBoundary {
+            let (Some(uid), Some(gid)) = (config.workload_uid, config.workload_gid) else {
+                bail!("host-boundary isolation needs --workload-uid and --workload-gid");
+            };
+            runtime_launch::host_boundary::enable(runtime_launch::host_boundary::HostBoundary {
+                uid,
+                gid,
+            })?;
+        }
         let mut api =
             HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
         if config.network_controls {
@@ -2556,10 +2717,21 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
         !config.runner_token.trim().is_empty(),
         "runner token is empty"
     );
+    // A namespace Runner sits behind its own ingress and listens on loopback.
+    // A host-boundary Runner is a dedicated machine whose only ingress is the
+    // provider's proxy, which reaches the container from outside; the gate on
+    // this listener is what admits a request.
     ensure!(
-        config.surface_listen.ip().is_loopback(),
+        config.surface_listen.ip().is_loopback() || config.isolation == IsolationMode::HostBoundary,
         "Surface listener must be loopback-only behind existing ingress"
     );
+    if config.isolation == IsolationMode::HostBoundary {
+        // One machine, one owner, one Run at a time.
+        ensure!(
+            config.max_slots == 1,
+            "a host-boundary Runner serves exactly one slot"
+        );
+    }
     ensure!(
         config.hidden_surface_listen.ip().is_loopback(),
         "hidden Surface listener must be loopback-only"
@@ -4097,12 +4269,16 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": runner_capabilities(
-                config.firecracker_configured(),
-                ato_adapter_oci::docker_runtime_available(),
-                self.persistent_volumes,
-                config.network_controls,
-                !config.fixed_tcp_allowlist.trim().is_empty(),
+            "capabilities": advertised_capabilities(
+                runner_capabilities(
+                    config.firecracker_configured(),
+                    ato_adapter_oci::docker_runtime_available(),
+                    self.persistent_volumes,
+                    config.network_controls,
+                    !config.fixed_tcp_allowlist.trim().is_empty(),
+                ),
+                runtime_launch::host_boundary::active().is_some(),
+                !host_resources::cached(&config.work_root).accelerators.is_empty(),
             ),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": [{
@@ -6033,6 +6209,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
+            isolation: IsolationMode::Namespace,
+            workload_uid: None,
+            workload_gid: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -6058,6 +6237,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
+            isolation: IsolationMode::Namespace,
+            workload_uid: None,
+            workload_gid: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -6094,6 +6276,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
+            isolation: IsolationMode::Namespace,
+            workload_uid: None,
+            workload_gid: None,
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -6148,6 +6333,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
+            isolation: IsolationMode::Namespace,
+            workload_uid: None,
+            workload_gid: None,
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
@@ -6202,8 +6390,46 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
+            isolation: IsolationMode::Namespace,
+            workload_uid: None,
+            workload_gid: None,
             once: true,
         }
+    }
+
+    #[test]
+    fn a_host_boundary_runner_never_advertises_namespace_isolation() {
+        let base = runner_capabilities(false, false, false, false, false);
+        assert!(base.contains(&"isolation=untrusted-v1"));
+
+        let host_boundary = advertised_capabilities(base.clone(), true, false);
+        assert!(host_boundary.contains(&"isolation=host-boundary-v1"));
+        assert!(!host_boundary.contains(&"isolation=untrusted-v1"));
+        assert!(!host_boundary.contains(&"gpu"));
+
+        // The default mode is unchanged, byte for byte.
+        assert_eq!(advertised_capabilities(base.clone(), false, false), base);
+    }
+
+    #[test]
+    fn gpu_is_advertised_only_when_a_device_answered() {
+        let base = runner_capabilities(false, false, false, false, false);
+        assert!(advertised_capabilities(base.clone(), false, true).contains(&"gpu"));
+        assert!(!advertised_capabilities(base, false, false).contains(&"gpu"));
+    }
+
+    #[test]
+    fn a_host_boundary_runner_is_one_slot_and_may_listen_beyond_loopback() {
+        let mut config = capability_test_config(None);
+        config.runner_id = "rnr_1".into();
+        config.runner_token = "ato_rnr_x".into();
+        config.surface_listen = "0.0.0.0:8420".parse().unwrap();
+        // Namespace mode keeps the loopback rule.
+        assert!(validate_config(&config).is_err());
+        config.isolation = IsolationMode::HostBoundary;
+        assert!(validate_config(&config).is_ok());
+        config.max_slots = 2;
+        assert!(validate_config(&config).is_err());
     }
 
     #[test]
@@ -6283,6 +6509,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
+            isolation: IsolationMode::Namespace,
+            workload_uid: None,
+            workload_gid: None,
             once: true,
         };
         runtime_launch::recovery::mark_slot_recovered(true);
