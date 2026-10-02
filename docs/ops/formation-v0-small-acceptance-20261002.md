@@ -5,10 +5,13 @@ No deployment, remote migration, feature flag or ordinary Run permission.
 
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
 `9e0031900836090612b94e775e26f980a68f32d7`. Current execution candidate:
-Ato code `70e8ba07d0aa5a1f16c525d41108db9916f359c6`, API
-`4da63b1f472870929f29ee84f8959aace8127d20`, prompt 12. Receipt authority
-WASM SHA-256 `86cc2c24619488e26dfa3f246538f5e34f6f8589db92528aa8447c9ec4e5fd7b`,
-2,123,769 bytes, source Ato `70e8ba07d0aa5a1f16c525d41108db9916f359c6`.
+Ato code `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`, API
+`fa825a176b715962351466dc1a7149bec5979c7f`, prompt 12. Receipt authority
+WASM SHA-256 `cc7445874bcea354b0ea03d96a71e10ea4e34b80b5516111457f1bdc92af3c03`,
+2,196,846 bytes, source Ato `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`.
+The [private build Record retention change](formation-build-record-retention-20261002.md)
+is reviewed in Ato #1464 / API #718; API requires migration 0315, applied only
+to the owned isolated acceptance database, not a remote environment.
 The new pin requires new real application acceptance; earlier PASS does not
 prove these later changes. The review stack remains Draft.
 
@@ -180,6 +183,31 @@ The OCI and private-input fixtures are not OSS app successes. Native claims
 repair `70e8ba07` is proven by native integration and actual WASM tests; whole-app
 acceptance remains required after the remaining materialization/state changes.
 
+## Final code-pin native retention trials
+
+Trial 13 at `3ac36fa2` / `fa825a17` used zero known D and unchanged source/K,
+Search network ceiling 512 MiB / per-attempt 384 MiB, expanded/stored attempt
+caps 512 MiB, retained caps 512 MiB expanded / 256 MiB stored. The first proposal
+used state ID `data` with authority resource `app.data`; admission refused it
+before execution. Its actual network evidence recorded zero bytes, while the
+existing conservative Coordinator rule permanently charged its full claimed
+384 MiB network reservation. A source-derived correction to `app.data` ran in
+the same Search/round sequence, with the remaining 128 MiB attempt allowance.
+Dependency acquisition exhausted that allowance at 134,228,580 shared counter
+bytes; the three phase snapshots repeat that same counter and must not be added.
+The original Search ended `budget_exhausted`, two rounds / three Codex session
+exchanges, no submitted D, no paid API call. Preserve it unchanged:
+`search_ca0eb15b97edd03692d310d24497f60f`; result SHA-256
+`f233ee1e4e7bca2746118767b2dacbb2825811ee11b3ea886a50de7e4932b7e1`.
+This is not a budget reset or a proven settlement defect: existing D1 invariants
+charge full claimed network reservations across rounds and later requests.
+
+Separately preregistered trial 14 uses the exact same source/K/code/toolchains
+and capacity limits, zero known D, original source-owned requirements and a
+source-derived `app.data` state slot. It is in progress; no success is asserted.
+Plan SHA-256 `4af9ffaffdc8f589949d8f8fb7f7b21dcab5b8ac892ef8a2f0669e8955407d51`.
+Neither trial restarts old WBO UNKNOWN or supplies a Codex D to the API arm.
+
 ## Accounting
 
 The explicit small-gate allowance is at most 24 additional API calls, within
@@ -205,11 +233,14 @@ Kutt native dependency, source-owned Runtime migration, temporary JWT, isolated
 state and persistence after stop/restart; actual retry/deadline/lost-response/
 restart/uncertain disconnect; scoped input reuse/revoke/expiry/cleanup and
 embedding observations. These are not replaced by fixture/unit test PASS.
-Local regression evidence at the current pin: 33 compiler tests, 54 Worker
-reasoning tests, 3 retained replay tests, real pip/npm Runtime-script operation
-fixtures, macOS clippy, Linux binary/preflight build and 33 compiler tests;
-API 8 encrypted-binding tests, 5 relevant Coordinator tests, 19 actual WASM
-tests and typecheck PASS. CI absence at skip-ci heads is not CI PASS.
+Current code-pin validation: Formation library 122 and compiler/exploration
+integration 33 PASS; Worker library 73 PASS; Runtime Network 31 PASS / 1
+explicitly ignored; authority 7 library / 8 integration PASS; process transport
+2 PASS; retained replay 3 reported PASS with the macOS process containment
+guard skipping actual Python/Node launch. Rust formatting/clippy and exact-pin
+Linux CLI/Worker/preflight build PASS. Counterpart actual WASM and real isolated
+D1/R2/Coordinator distinct cases 201 complete; migration/wire 15 PASS; API
+typecheck and schema bootstrap PASS. CI absence at skip-ci heads is not CI PASS.
 
 The base/head comparisons already recorded for original macOS/Windows/API/PWA
 failures remain applicable to those tested pins; new unrelated failures require
