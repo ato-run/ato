@@ -13,19 +13,26 @@ pub fn runtime_requirements(
 ) -> Vec<crate::search::Requirement> {
     let mut facts = BTreeSet::new();
     for step in &d.steps {
-        if step.protocol != "ato.process@1" || step.op != "exec" || step.argv.len() != 5 {
+        if step.protocol != "ato.process@1" || step.op != "exec" {
             continue;
         }
-        let schema = if step.argv[2] == include_str!("python-native-operation.py")
-            || step.argv[2] == include_str!("python-native-dependencies.py")
+        let (operation, plan) = match step.argv.as_slice() {
+            [_, flag, operation, _, plan] if flag == "-c" || flag == "-e" => (operation, plan),
+            [_, isolated, flag, operation, _, plan] if isolated == "-I" && flag == "-c" => {
+                (operation, plan)
+            }
+            _ => continue,
+        };
+        let schema = if operation == include_str!("python-native-operation.py")
+            || operation == include_str!("python-native-dependencies.py")
         {
             "ato.python-build-plan/1"
-        } else if step.argv[2] == include_str!("node-native-dependencies.cjs") {
+        } else if operation == include_str!("node-native-dependencies.cjs") {
             "ato.npm-native-plan/1"
         } else {
             continue;
         };
-        let Ok(plan) = serde_json::from_str::<Value>(&step.argv[4]) else {
+        let Ok(plan) = serde_json::from_str::<Value>(plan) else {
             continue;
         };
         if plan["schema"] != schema {
