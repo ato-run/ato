@@ -27,8 +27,9 @@ it takes scratch ownership and proves the existing state sentinel remains.
 Formatting and CLI/Worker/Runtime all-target clippy `-D warnings` PASS.
 
 Existing API state tests at `fa825a17`: 39 PASS / 1 FAIL. The failing recovery test
-reads `runs.run_h3` without having inserted it; same-condition merged-main base
-comparison is pending. Do not count that failure as passing or suppress it.
+reads `runs.run_h3` without having inserted it. Same-condition merged-main
+`9e003190` also reports 39 PASS / 1 identical FAIL. This is a baseline test
+failure, not a new state-binding failure; do not count it as passing or suppress it.
 
 Required next evidence: actual contained stop/restart state survival, control-plane
 current-owner/current-assignment and stale-writer refusal, initialized-state input
