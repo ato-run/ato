@@ -406,7 +406,23 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
                 .saturating_sub(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64),
         );
     loop {
-        let status = reporting_client.satisfy_status(&id)?;
+        let status = if let Some(producer) = &reasoning {
+            producer.coordinator_observation(
+                &id,
+                submission
+                    .request
+                    .policy
+                    .exploration
+                    .as_ref()
+                    .context("exploration policy missing")?
+                    .formation
+                    .max_retries,
+                expires,
+                || reporting_client.satisfy_status(&id),
+            )?
+        } else {
+            reporting_client.satisfy_status(&id)?
+        };
         let settled = Settlement::of(&status)? != Settlement::Running;
         let expired = Instant::now() >= deadline
             || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() >= u128::from(expires);
