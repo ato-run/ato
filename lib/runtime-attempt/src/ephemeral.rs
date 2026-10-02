@@ -14,8 +14,10 @@
 //!     -> LaunchedProcess::stop (TERM -> KILL on the group, proven gone)
 //! ```
 //!
-//! Only the lifecycle differs from a Run. There is no lease, no state
-//! attachment, no stable endpoint and no record pipeline: the realization
+//! The default lifecycle has no lease, durable state attachment, stable
+//! endpoint or record pipeline. Explicit functional verification may borrow
+//! already assigned state through `VerificationStateBindings`; its caller owns
+//! the writer lifecycle and the state survives candidate cleanup. The realization
 //! exists to be measured inside one attempt, and [`TemporaryRealization`] is
 //! destroyed before the attempt returns — on every path, because `Drop` does
 //! it when nothing else did.
@@ -166,14 +168,14 @@ impl TemporaryRealization {
     /// Launch the candidate through the Runtime's process executor and wait
     /// until every required port accepts connections.
     pub fn launch(request: &TemporaryRealizationRequest<'_>) -> Result<Self> {
-        Self::launch_inner(request, None, &[], None)
+        Self::launch_inner(request, None, &[], None, None)
     }
 
     pub fn launch_scoped(
         request: &TemporaryRealizationRequest<'_>,
         runtime_gate: &Path,
     ) -> Result<Self> {
-        Self::launch_inner(request, Some(runtime_gate), &[], None)
+        Self::launch_inner(request, Some(runtime_gate), &[], None, None)
     }
 
     pub fn launch_scoped_with_variables(
@@ -181,7 +183,7 @@ impl TemporaryRealization {
         runtime_gate: &Path,
         variables: &[crate::variables::ResolvedVariable],
     ) -> Result<Self> {
-        Self::launch_inner(request, Some(runtime_gate), variables, None)
+        Self::launch_inner(request, Some(runtime_gate), variables, None, None)
     }
 
     pub fn launch_controlled(
@@ -190,16 +192,42 @@ impl TemporaryRealization {
         variables: &[crate::variables::ResolvedVariable],
         control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Self> {
-        Self::launch_inner(request, runtime_gate, variables, control)
+        Self::launch_inner(request, runtime_gate, variables, None, control)
+    }
+
+    /// Launch with state already assigned by the authenticated control plane.
+    /// Cleanup stops the process and removes candidate scratch, never these
+    /// caller-owned working copies. This does not acquire or release a writer.
+    pub fn launch_controlled_with_state(
+        request: &TemporaryRealizationRequest<'_>,
+        runtime_gate: Option<&Path>,
+        variables: &[crate::variables::ResolvedVariable],
+        state: Option<&crate::state_bindings::VerificationStateBindings<'_>>,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Self> {
+        Self::launch_inner(request, runtime_gate, variables, state, control)
     }
     fn launch_inner(
         request: &TemporaryRealizationRequest<'_>,
         runtime_gate: Option<&Path>,
         variables: &[crate::variables::ResolvedVariable],
+        state: Option<&crate::state_bindings::VerificationStateBindings<'_>>,
         control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Self> {
         let check = || control.map_or(Ok(()), |c| c.remaining(AttemptPhase::Launch).map(|_| ()));
         check()?;
+        if let Some(state) = state {
+            if runtime_gate.is_none() {
+                bail!("verification_state_scoped_grant_required");
+            }
+            // Check ownership boundaries before this realization takes scratch
+            // ownership, so an invalid binding cannot be deleted on rejection.
+            state.validate(
+                &request.derivation.state,
+                request.workspace,
+                request.scratch,
+            )?;
+        }
         #[cfg(not(unix))]
         if runtime_gate.is_some() {
             bail!("scoped runtime requires Unix");
@@ -310,7 +338,9 @@ impl TemporaryRealization {
         let public_env = request.plan.process_environment(request.derivation);
         let mut state_attachments = Vec::new();
         let mut resolved_state = Vec::new();
-        if runtime_gate.is_some() {
+        if let Some(state) = state {
+            (state_attachments, resolved_state) = state.project();
+        } else if runtime_gate.is_some() {
             for slot in &request.derivation.state {
                 if !ato_formation::proposal::isolated_state_id(&slot.id)
                     || !ato_formation::proposal::isolated_state_mount(&slot.mount)
@@ -349,12 +379,14 @@ impl TemporaryRealization {
         })?;
         let spec = RuntimeLaunchSpecV1 {
             protocol: RUNTIME_LAUNCH_SPEC_V1_PROTOCOL.to_owned(),
-            context: LaunchContextV1 {
-                run_id: format!("formation-{}", request.attempt_id),
-                compute_id: "formation".to_owned(),
-                compute_schema_id: "formation".to_owned(),
-                compute_instance_id: format!("formation-{}", request.attempt_id),
-            },
+            context: state
+                .map(|s| s.context.clone())
+                .unwrap_or_else(|| LaunchContextV1 {
+                    run_id: format!("formation-{}", request.attempt_id),
+                    compute_id: "formation".to_owned(),
+                    compute_schema_id: "formation".to_owned(),
+                    compute_instance_id: format!("formation-{}", request.attempt_id),
+                }),
             workspace: LaunchWorkspaceV1 {
                 materialization_ref: format!("formation-attempt:{}", request.attempt_id),
                 cwd_relative: cwd_relative.clone(),
@@ -775,5 +807,108 @@ mod tests {
     fn endpoint_names_follow_the_runtime_abi() {
         assert_eq!(endpoint_name("app.http"), "app_http");
         assert_eq!(endpoint_env_name("app.http"), "ATO_ENDPOINT_APP_HTTP_PORT");
+    }
+
+    #[test]
+    fn invalid_borrowed_state_is_refused_before_scratch_cleanup_ownership() {
+        use crate::state_bindings::{VerificationStateAttachment, VerificationStateBindings};
+        use ato_formation::authoring::{BindingContext, BoundState, StateAccess, bind};
+        let root = tempfile::tempdir().expect("fixture root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let workspace = root.join("workspace");
+        let scratch = root.join("candidate");
+        let state = scratch.join("must-preserve");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir_all(&state).expect("overlapping state");
+        std::fs::write(state.join("sentinel"), "owned state").expect("state sentinel");
+        let draft = ato_formation::capsule_toml::parse_capsule_toml(include_str!(
+            "../../formation/tests/fixtures/proposal-python.toml"
+        ))
+        .expect("draft");
+        let (_, mut derivation) = bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: &format!("sha256:{}", "a".repeat(64)),
+            },
+        )
+        .expect("bind");
+        derivation.state = vec![BoundState {
+            id: "app.data".into(),
+            protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.into(),
+            mount: "/data".into(),
+            access: StateAccess::ReadWrite,
+        }];
+        let plan = ExecutionPlan {
+            lane: ato_formation::intent::Lane::PythonProcess,
+            serving_step: 0,
+            workspace_guest_root: "/app".into(),
+            toolchains: Default::default(),
+            package_manager: None,
+            actions: vec![],
+            toolchain_path: vec![],
+            environment_bindings: Default::default(),
+        };
+        let request = TemporaryRealizationRequest {
+            workspace: &workspace,
+            scratch: &scratch,
+            derivation: &derivation,
+            plan: &plan,
+            ports: &[],
+            shim: &root.join("never-executed-shim"),
+            attempt_id: "no-execution",
+        };
+        let context = LaunchContextV1 {
+            run_id: "assigned-run".into(),
+            compute_id: "assigned-compute".into(),
+            compute_schema_id: "assigned-schema".into(),
+            compute_instance_id: "assigned-instance".into(),
+        };
+        let logical = StateAttachmentV1 {
+            state_key: "app_data".into(),
+            revision_ref: None,
+            mount_target: "/data".into(),
+            access: StateAccessV1::ReadWrite,
+            writer_fence: Some(1),
+        };
+        let resolved = ResolvedStateAttachment::new(
+            "app_data",
+            None,
+            state.clone(),
+            "/data",
+            StateAccessV1::ReadWrite,
+        );
+        let bindings = VerificationStateBindings {
+            context: &context,
+            attachments: &[VerificationStateAttachment {
+                slot_id: "app.data",
+                declaration: &logical,
+                resolved: &resolved,
+            }],
+        };
+        let error = TemporaryRealization::launch_controlled_with_state(
+            &request,
+            Some(&root.join("unused-gate")),
+            &[],
+            Some(&bindings),
+            None,
+        )
+        .err()
+        .expect("rejected before launch");
+        assert!(error.to_string().contains("cleanup_overlap"));
+        assert_eq!(
+            std::fs::read_to_string(state.join("sentinel")).expect("state retained"),
+            "owned state"
+        );
+        let error = TemporaryRealization::launch_controlled_with_state(
+            &request,
+            None,
+            &[],
+            Some(&bindings),
+            None,
+        )
+        .err()
+        .expect("unscoped request refused");
+        assert!(error.to_string().contains("scoped_grant_required"));
+        assert!(state.join("sentinel").exists());
     }
 }
