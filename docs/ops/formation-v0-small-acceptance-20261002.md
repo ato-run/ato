@@ -4,8 +4,10 @@ Status: in progress. Keep historical failures and WBO UNKNOWN unchanged.
 No deployment, remote migration, feature flag or ordinary Run permission.
 
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
-`9e0031900836090612b94e775e26f980a68f32d7`. Current execution candidate:
-Ato code `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`, API
+`9e0031900836090612b94e775e26f980a68f32d7`. Latest code candidate:
+Ato `1de0e3a008f73226171d83fa026c50ec20dde976` (status transport retries,
+#1465); latest actual source execution Ato
+`3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`, API
 `fa825a176b715962351466dc1a7149bec5979c7f`, prompt 12. Receipt authority
 WASM SHA-256 `cc7445874bcea354b0ea03d96a71e10ea4e34b80b5516111457f1bdc92af3c03`,
 2,196,846 bytes, source Ato `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`.
@@ -124,7 +126,8 @@ was created at `3e60a9a5`; this is a separate functional observation, not a new
 automatic exploration or permission. Earlier selector/temporary-path harness
 failures remain recorded and are not counted as application failures.
 
-Current historical unique OSS successes: Codex **1**, API **0**. Codex SVGOMG is
+At that earlier checkpoint, historical unique OSS successes were Codex **1**,
+API **0**. Codex SVGOMG is
 a repair PASS, not first-attempt PASS. OCI is a separate infrastructure fixture.
 No final-pin success rate or 100-case reachability rate is asserted yet.
 
@@ -176,9 +179,10 @@ contain no protected configuration. Paid API calls are zero for these fixtures.
 Earlier custom retry/lost-response/restart/UNKNOWN observations remain at their
 separate pins. The old WBO UNKNOWN has not been replayed.
 
-Current unique OSS apps with usable submitted D: Codex 1 (SVG repair PASS),
-API 0. Runtime K reached without successful publication additionally includes
-changedetection.io; that is reported separately, not added to usable successes.
+Current historical unique OSS apps with usable submitted D: Codex **2**
+(SVG repair PASS and changedetection.io trial-14 first generated D PASS), API **0**.
+The changedetection.io original Requester transport failure and report-only
+publication recovery are recorded below; this is not final-head acceptance.
 The OCI and private-input fixtures are not OSS app successes. Native claims
 repair `70e8ba07` is proven by native integration and actual WASM tests; whole-app
 acceptance remains required after the remaining materialization/state changes.
@@ -202,10 +206,39 @@ exchanges, no submitted D, no paid API call. Preserve it unchanged:
 This is not a budget reset or a proven settlement defect: existing D1 invariants
 charge full claimed network reservations across rounds and later requests.
 
-Separately preregistered trial 14 uses the exact same source/K/code/toolchains
+Separately preregistered trial 14 used the exact same source/K/code/toolchains
 and capacity limits, zero known D, original source-owned requirements and a
-source-derived `app.data` state slot. It is in progress; no success is asserted.
+source-derived `app.data` state slot. Three sdists (feedgen, jstyleson, websockets)
+built into a total 168 hash-fixed wheels, followed by offline installation,
+normal contained Runtime launch and fresh frozen-K PASS. The first generated D
+passed; a later Codex reduction answer made no further execution.
 Plan SHA-256 `4af9ffaffdc8f589949d8f8fb7f7b21dcab5b8ac892ef8a2f0669e8955407d51`.
+
+Requester status transport lost its connection after BuildRecord Ready, stopping
+the original controller/Runtime mid-publication. Preserve its failure summary.
+The confirmed finished/verified checkpoint resumed publication/reporting only,
+without source acquisition, build, launch or inference. Original Search limits
+and deadline are identical before/after; combined stored usage 306,002,627 bytes
+equals BuildRecord 138,713,682 plus retained archive 167,288,945. Expanded usage
+16,887,438 bytes; the dependency network shared counter is 157,248,045 bytes,
+while the conservative claimed network debit remains 402,653,184 bytes.
+BuildRecord `sha256:4b1e581775cc6e8a59a6bae4c2f82b424120f8ba1dd621e7168c3e9c95166ce8`;
+retained `sha256:5a4563db6cd7a412c84ba31e2bcf123eff81be06d1514be61409fabf133a5f0d`.
+
+That recovered attempt PASS did not itself settle the Search: the existing policy
+allows a strict requirements-reduction round. A separate Requester resume opened
+that common-input exchange; its read-only assertion failed and it was stopped
+without another Runtime execution. Its logs remain preserved. The actual input
+included `successful_derivation_ref` and the previous source-owned plan. Codex
+answered `no_progress` because no supported strict authority/network subset kept
+the same execution semantics. Search `search_fa9b884b3a7c0f73836ae5fc6bedf05f`
+then became `satisfied`, two rounds / three session exchanges, one Runtime attempt,
+zero paid API calls, no reservations outstanding. Result SHA-256
+`19f5c89cfc45866c9dabe2a42fb2703eeb13669af0e69122c8fa2528e939a62b`.
+The D awaits assessment; it grants no ordinary Run, deployment or public visibility.
+Fresh retained Runtime replay and representative function checks are separate,
+currently in progress. These source/receipt observations used `3ac36fa2`, before
+the status retry code in `1de0e3a0`; final-head regression remains required.
 Neither trial restarts old WBO UNKNOWN or supplies a Codex D to the API arm.
 
 ## Accounting
