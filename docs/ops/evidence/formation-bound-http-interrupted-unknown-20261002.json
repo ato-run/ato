@@ -1,0 +1,57 @@
+{
+  "schema": "ato.formation-interrupted-http-input-unknown/1",
+  "at": "2026-10-02T06:19:36.939139+00:00",
+  "Search_id": "search_3270ead1e25218d50f87737dfc79f8d7",
+  "attempts": [
+    {
+      "attempt_id": "01M3XJH1NBDEZ64P48D0ND1BPK",
+      "status": "unknown",
+      "claimed_at": "2026-10-02T05:48:52.922Z",
+      "finished_at": null,
+      "unknown_at": "2026-10-02T06:19:36.576Z",
+      "failure": null
+    }
+  ],
+  "coordinator_status": "unknown",
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-02T05:48:51.166Z",
+    "deadline_at": "2026-10-02T05:49:21.166Z",
+    "attempts": {
+      "max": 4,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 3
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 5120,
+      "reserved": 0,
+      "remaining": 1073736704
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 536870912,
+      "reserved": 0,
+      "remaining": 1610612736
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 536870912,
+      "reserved": 0,
+      "remaining": 536870912
+    }
+  },
+  "encrypted_values_after_revoke": 0,
+  "Requester_restarted": false,
+  "Runtime_restarted": false,
+  "inference_restarted": false,
+  "source_executed_again": false,
+  "saved_result_submitted": false,
+  "producer_files_unchanged": true,
+  "original_claim_timeout_minutes": 30,
+  "clock_or_budget_reset": false,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "paid_provider_calls": 0
+}
