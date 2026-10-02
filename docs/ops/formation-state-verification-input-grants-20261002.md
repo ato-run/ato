@@ -127,6 +127,11 @@ original 07:46:20 UTC Search deadline. Its checkpoint stayed byte-identical, no
 Requester/Runtime/inference/execution was restarted, and the conservative
 512 MiB expanded/stored usage stayed charged with zero reservations. Earlier Kutt Source same-K repair PASS remains pinned separately in
 [the HTTP acceptance record](formation-bound-http-port-acceptance-20261002.md).
+The [current-pin changedetection functional/state proof](evidence/formation-changedetection-functional-state-final-20261002.json)
+also records fresh same-K/D receipts, browser watch creation/title edit/pause,
+confirmed stop, exact revision restoration with fence 2, preserved title/pause,
+deletion, child commit and writer release. It uses the input-free helper's
+separate 300-second acceptance allowance; external fetch remains unverified.
 The earlier changedetection state proof and old WBO UNKNOWN are preserved. This
 helper does not implement automatic production Source state provisioning or
 independent API acceptance. No external account authentication or paid API call
