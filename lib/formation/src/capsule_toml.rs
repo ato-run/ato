@@ -181,6 +181,12 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
             "state" => derivation.state = read_state(value)?,
             "contract" => contract.requirements = read_contract(value)?,
             "effects" => derivation.effects = read_effects(value)?,
+            "runtime_port_operations" => {
+                derivation.runtime_port_operations = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| malformed("runtime_port_operations", format!("{e}")))?;
+            }
             "variable_bindings" => {
                 derivation.variable_bindings = value
                     .clone()
@@ -258,6 +264,9 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
         "state":d.state.iter().map(|s|json!({"id":s.id,"use":s.protocol,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
         "platform":d.platforms,"effects":{"default":d.effects},"requirements":d.requirements,"source_oci":d.source_oci,
         "contract":{"require":requirements}});
+    if !d.runtime_port_operations.is_empty() {
+        doc["runtime_port_operations"] = json!(d.runtime_port_operations);
+    }
     if !d.variable_bindings.is_empty() {
         doc["variable_bindings"] = json!(d.variable_bindings);
     }

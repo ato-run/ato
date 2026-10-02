@@ -42,4 +42,5 @@ pub mod static_server;
 pub mod text;
 pub mod verification;
 
+mod port_operations;
 pub mod variables;
