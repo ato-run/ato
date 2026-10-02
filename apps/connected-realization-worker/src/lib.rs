@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod activity_controller;
+mod host_resources;
 pub mod runtime_launch;
 mod slot_state;
 
@@ -4120,6 +4121,9 @@ impl HttpRunnerApi {
             // unrecovered slot claims nothing, so the control plane can tell
             // "alive but quarantined" apart from "alive and ready".
             "slot_recovered": runtime_launch::recovery::slot_recovered(),
+            // Measured once at start. The control plane admits a Derivation's
+            // host requirement against these, never against a host total.
+            "host_resources": host_resources::cached(&config.work_root),
         }))
         .send()?
         .error_for_status()?;
