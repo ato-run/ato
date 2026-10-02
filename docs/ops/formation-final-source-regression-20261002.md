@@ -73,6 +73,21 @@ and all reservations zero. This controlled representative fixture contributes
 no additional unique OSS app. Compose, multiple services and source/Dockerfile
 rewriting remain outside v0.
 
+## Preserved changedetection infrastructure failure
+
+[Initial final-pin path failure](evidence/formation-changedetection-path-failure-20261002.json)
+(SHA-256 `f7d00a2a7bc863b0f41f6d73d5abada2b4b5d19cd7e18721cbe57517755920f4`)
+records Search `search_24c0047081996252c75981adb6f985ec` terminating as
+`infrastructure_failure`: Runtime admission hit the Unix socket path length
+limit before execution. Its attempt was ACKed, original 08:55:31 UTC deadline
+and used transfer/expanded budget remain recorded, and all reservations are zero.
+No unchanged candidate was repeated or Source/K rewritten. A first short-path
+fixture then failed to create a child of the root-owned parent before creating
+any Search or attempt. Both directories remain preserved. The corrected run
+uses a separately created owned parent and `/opt/ato/.tmp/fc3/r2`; it is a new
+preregistered Search with the same Source/K/plan and zero-known-D initial input,
+not a retry/resume that replenishes the failed Search's limits.
+
 ## Remaining acceptance and accounting
 
 changedetection.io is the next serial final-pin Source regression;
