@@ -1065,7 +1065,7 @@ fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
     assert_eq!(steps.len(), 10);
     let build = steps
         .iter()
-        .find(|s| s.argv.get(3).is_some_and(|a| a == "build"))
+        .find(|s| s.argv.iter().any(|a| a == "build"))
         .unwrap();
     assert!(build.network.is_denied());
     assert!(
@@ -1078,6 +1078,25 @@ fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
             .iter()
             .any(|r| r.fact == "toolchain.gcc.13.3.0")
     );
+    let current = native_runtime_requirements(&d.compiled().derivation);
+    assert_eq!(
+        current.len(),
+        1,
+        "isolated Python still claims its compiler"
+    );
+    assert_eq!(current[0].one_of, Some(vec!["present".into()]));
+    let mut legacy = d.compiled().derivation.clone();
+    let mut isolated_steps = 0;
+    for step in &mut legacy.steps {
+        if step.argv.get(1).is_some_and(|arg| arg == "-I")
+            && step.argv.get(2).is_some_and(|arg| arg == "-c")
+        {
+            isolated_steps += 1;
+            step.argv.remove(1);
+        }
+    }
+    assert_eq!(isolated_steps, 7);
+    assert_eq!(native_runtime_requirements(&legacy), current);
     let mut oversized = p.clone();
     oversized["dependencies"] = json!(vec![p["dependencies"][0].clone(); 4]);
     assert!(matches!(
