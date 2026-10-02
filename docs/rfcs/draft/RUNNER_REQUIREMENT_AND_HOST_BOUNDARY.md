@@ -36,12 +36,15 @@ JSON when absent:
 "runner_requirement": {
   "os": "linux",
   "arch": "x86_64",
-  "accelerators": [{ "kind": "nvidia", "count": 1, "min_vram_mib": 24000 }],
-  "min_memory_mib": 32768,
+  "accelerators": [{ "kind": "nvidia", "count": 1, "min_vram_mib": 16000 }],
+  "min_memory_mib": 65536,
   "min_scratch_mib": 102400,
   "runtime_features": ["accelerator=nvidia-cuda"]
 }
 ```
+
+The numbers above are the first measured floor for Wan2.2-Animate with
+block swap (peak 14.9 GiB VRAM, 47 GiB host RSS, 45 GiB disk; 2026-10-02).
 
 Every Derivation formed before this contract keeps its exact bytes and
 `DerivationRef`. A regression test pins an existing pair.
