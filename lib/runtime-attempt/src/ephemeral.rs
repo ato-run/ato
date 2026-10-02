@@ -156,6 +156,9 @@ pub struct RealizedEndpoint {
 /// A running candidate, alive only while this value is.
 pub struct TemporaryRealization {
     launched: Option<LaunchedProcess>,
+    // `stop` consumes its process handle even when termination is uncertain.
+    // Keep that finding so Drop cannot reinterpret an empty handle as stopped.
+    stop_unconfirmed: Option<String>,
     endpoints: Vec<RealizedEndpoint>,
     scratch: PathBuf,
     output: PathBuf,
@@ -255,6 +258,7 @@ impl TemporaryRealization {
                 })
                 .collect(),
             launched: None,
+            stop_unconfirmed: None,
             endpoints: Vec::new(),
             scratch: scratch.to_path_buf(),
             output: scratch.join("candidate.log"),
@@ -609,18 +613,40 @@ impl TemporaryRealization {
     }
 
     fn teardown(&mut self) -> Result<()> {
+        if let Some(reason) = &self.stop_unconfirmed {
+            return Err(crate::realize::CandidateStopFailure::Unconfirmed {
+                reason: reason.clone(),
+                resources: Vec::new(),
+            }
+            .into());
+        }
         let stopped = match self.launched.take() {
             Some(launched) => launched.stop(&LIFECYCLE).map(|_| ()),
             None => Ok(()),
         };
         #[cfg(unix)]
         self.ingress.clear();
-        let removed = if self.scratch.exists() {
-            remove_scratch(&self.scratch)
-        } else {
-            Ok(())
-        };
-        stopped.and(removed)
+        self.cleanup_after_stop(stopped)
+    }
+
+    fn cleanup_after_stop(&mut self, stopped: Result<()>) -> Result<()> {
+        if let Err(error) = stopped {
+            let reason = crate::variables::redact(&format!("{error:#}"), &self.variables);
+            self.stop_unconfirmed = Some(reason.clone());
+            return Err(crate::realize::CandidateStopFailure::Unconfirmed {
+                reason,
+                resources: Vec::new(),
+            }
+            .into());
+        }
+        if self.scratch.exists() {
+            remove_scratch(&self.scratch).map_err(|error| {
+                crate::realize::CandidateStopFailure::ScratchKept {
+                    reason: crate::variables::redact(&format!("{error:#}"), &self.variables),
+                }
+            })?
+        }
+        Ok(())
     }
 
     fn output_tail(&self) -> String {
@@ -818,6 +844,36 @@ fn make_writable(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unconfirmed_stop_keeps_scratch_through_repeated_teardown_and_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("candidate");
+        std::fs::create_dir(&scratch).unwrap();
+        let sentinel = scratch.join("owned-state");
+        std::fs::write(&sentinel, b"must survive uncertain termination").unwrap();
+        let mut realization = TemporaryRealization {
+            launched: None,
+            stop_unconfirmed: None,
+            endpoints: vec![],
+            output: scratch.join("candidate.log"),
+            scratch,
+            variables: vec![],
+            #[cfg(unix)]
+            ingress: vec![],
+        };
+        let result = realization.cleanup_after_stop(Err(anyhow::anyhow!("Runtime link lost")));
+        assert!(!crate::realize::StopClass::of(&result).is_confirmed());
+        assert!(sentinel.exists());
+        let second = realization.teardown();
+        assert!(!crate::realize::StopClass::of(&second).is_confirmed());
+        assert!(sentinel.exists());
+        drop(realization);
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"must survive uncertain termination"
+        );
+    }
 
     #[test]
     fn expired_readiness_preserves_typed_deadline_and_does_not_parse_output() {

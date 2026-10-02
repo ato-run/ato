@@ -443,6 +443,29 @@ pub struct RuntimeAttestation {
     /// `finished`, or `started_unfinished` — the attempt ran and its end is
     /// not durable, so what it did is UNKNOWN whatever the outcome says.
     pub attempt_record: AttemptRecordState,
+    /// Physical candidate stop is distinct from the durable execution record.
+    /// No captured log, private resource path or binding value is transported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_stop: Option<CandidateStopAttestation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateStopAttestation {
+    Confirmed,
+    ScratchKept,
+    Unconfirmed,
+}
+
+impl CandidateStopAttestation {
+    fn of(stop: &ato_runtime_attempt::realize::StopClass) -> Self {
+        use ato_runtime_attempt::realize::StopClass;
+        match stop {
+            StopClass::Confirmed => Self::Confirmed,
+            StopClass::ScratchKept { .. } => Self::ScratchKept,
+            StopClass::Unconfirmed { .. } => Self::Unconfirmed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2030,6 +2053,7 @@ fn attestation() -> RuntimeAttestation {
         provisions: Vec::new(),
         execution_started: false,
         attempt_record: AttemptRecordState::NotStarted,
+        candidate_stop: None,
     }
 }
 
@@ -2251,8 +2275,20 @@ fn execute_ticket_inner(
         &TicketExecution { publisher, control },
     );
     let _cleanup = control.map(|c| c.cleanup());
-    let _ = std::fs::remove_dir_all(&attempt_root);
+    cleanup_attempt_root(&attempt_root, &report.attestation);
     report
+}
+
+fn cleanup_attempt_root(root: &Path, attested: &RuntimeAttestation) {
+    if attested.candidate_stop == Some(CandidateStopAttestation::Unconfirmed)
+        || !matches!(
+            attested.attempt_record,
+            AttemptRecordState::NotStarted | AttemptRecordState::Finished
+        )
+    {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(root);
 }
 
 struct TicketExecution<'a> {
@@ -2646,6 +2682,7 @@ fn execute_planned_ticket(
         outcome
     });
     attested.execution_started = outcome.execution_started();
+    attested.candidate_stop = outcome.stop.as_ref().map(CandidateStopAttestation::of);
     attested.attempt_record = outcome.attempt_record;
     // Exact registered helper evidence is acknowledged before projection.
     // This path checkpoints only a durably finished, verified process; a
@@ -3003,6 +3040,7 @@ fn execute_retained_ticket(
         Ok(permit),
     );
     attested.execution_started = outcome.execution_started();
+    attested.candidate_stop = outcome.stop.as_ref().map(CandidateStopAttestation::of);
     attested.attempt_record = outcome.attempt_record;
     let attempt = outcome.attempt;
     let pass = attempt.status == AttemptStatus::Verified;
@@ -3271,6 +3309,63 @@ fn exploration_build_seconds(deadline_ms: Option<u64>, now_ms: u64) -> u64 {
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
+
+    #[test]
+    fn uncertain_candidate_or_journal_keeps_owned_attempt_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        for (index, record, stop) in [
+            (
+                0,
+                AttemptRecordState::Finished,
+                Some(CandidateStopAttestation::Unconfirmed),
+            ),
+            (1, AttemptRecordState::StartedUnfinished, None),
+            (2, AttemptRecordState::HistoryUnavailable, None),
+        ] {
+            let root = fixture.path().join(index.to_string());
+            std::fs::create_dir(&root).unwrap();
+            let sentinel = root.join("owned-state");
+            std::fs::write(&sentinel, b"keep unknown execution resources").unwrap();
+            let mut attested = attestation();
+            attested.attempt_record = record;
+            attested.candidate_stop = stop;
+            cleanup_attempt_root(&root, &attested);
+            assert!(sentinel.exists());
+            cleanup_attempt_root(&root, &attested);
+            assert!(sentinel.exists());
+        }
+        for stop in [
+            None,
+            Some(CandidateStopAttestation::Confirmed),
+            Some(CandidateStopAttestation::ScratchKept),
+        ] {
+            let root = fixture.path().join(format!("confirmed-{stop:?}"));
+            std::fs::create_dir(&root).unwrap();
+            let mut attested = attestation();
+            attested.attempt_record = AttemptRecordState::Finished;
+            attested.candidate_stop = stop;
+            cleanup_attempt_root(&root, &attested);
+            assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn candidate_stop_wire_preserves_legacy_and_omits_private_context() {
+        let original = attestation();
+        let legacy = serde_json::to_value(&original).unwrap();
+        assert!(legacy.get("candidate_stop").is_none());
+        let decoded: RuntimeAttestation = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.candidate_stop.is_none());
+        let stop = ato_runtime_attempt::realize::StopClass::Unconfirmed {
+            reason: "private stop error".into(),
+            resources: vec!["private resource path".into()],
+        };
+        let mut current = original;
+        current.candidate_stop = Some(CandidateStopAttestation::of(&stop));
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(json.contains("\"candidate_stop\":\"unconfirmed\""));
+        assert!(!json.contains("private"));
+    }
     fn now_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

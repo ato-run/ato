@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import time
+from urllib.request import Request, urlopen
 
 spec = importlib.util.spec_from_file_location('pilot', Path(__file__).with_name('reasoning-pilot.py'))
 pilot = importlib.util.module_from_spec(spec)
@@ -38,6 +40,36 @@ class FinalPilot(pilot.Pilot):
                 process.wait()
         else:
             super().stop(process)
+
+    def app(self, app):
+        super().app(app)
+        cell = self.root/'cells'/f"{app['index']:03}"
+        suffix = '.'+self.suffix if self.a.resume else ''
+        status = pilot.read(cell/('status'+suffix+'.json'))
+        if status['status'] != 'running':
+            return
+        # Requester timeout does not finish a claimed Runtime operation. Keep
+        # the receiver alive for bounded reporting/settlement after expiry;
+        # never resume the requester or renew its frozen execution allowance.
+        headers = {'Authorization': 'Bearer '+self.token.read_text().strip()}
+        end = time.monotonic()+60
+        while time.monotonic() < end:
+            with urlopen(Request(self.plan['api']+'/v1/runtime-network/satisfy/'+status['satisfy_id'],
+                                 headers=headers), timeout=5) as response:
+                status = json.load(response)
+            if status['status'] != 'running':
+                pilot.write(cell/('status.reporting-final'+suffix+'.json'), status)
+                row = pilot.read(cell/('summary'+suffix+'.json'))
+                pilot.write(cell/('summary.reporting-final'+suffix+'.json'), {
+                    **row, 'coordinator_status': status['status'],
+                    'reporting_after_requester_exit': True,
+                    'requester_resumed': False,
+                })
+                return
+            if self.runtime.poll() is not None:
+                raise RuntimeError('Runtime stopped before durable settlement; preserve evidence and retry ledger')
+            time.sleep(.2)
+        raise RuntimeError('bounded post-requester reporting did not settle; preserve evidence and original limits')
 
     def budget_gate(self):
         if self.plan['producer_config']['provider'] == 'codex_session':
