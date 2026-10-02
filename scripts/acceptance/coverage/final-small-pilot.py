@@ -46,7 +46,19 @@ class FinalPilot(pilot.Pilot):
         cell = self.root/'cells'/f"{app['index']:03}"
         suffix = '.'+self.suffix if self.a.resume else ''
         status = pilot.read(cell/('status'+suffix+'.json'))
-        if status['status'] != 'running':
+        def acknowledged(view):
+            expected = {a['attempt_id'] for a in view['attempts']
+                        if a['status'] in ('pass', 'fail', 'inconclusive')}
+            acknowledged_ids = set()
+            for delivery in (Path(self.a.runtime_root)/'out/delivery').iterdir():
+                if not delivery.is_dir() or not (delivery/'closed.json').exists():
+                    continue
+                if (delivery/'result.response.json').exists() and (delivery/'claim.response.json').exists():
+                    ticket = pilot.read(delivery/'claim.response.json')
+                    if ticket:
+                        acknowledged_ids.add(ticket['attempt_id'])
+            return expected <= acknowledged_ids
+        if status['status'] != 'running' and acknowledged(status):
             return
         # Requester timeout does not finish a claimed Runtime operation. Keep
         # the receiver alive for bounded reporting/settlement after expiry;
@@ -57,7 +69,7 @@ class FinalPilot(pilot.Pilot):
             with urlopen(Request(self.plan['api']+'/v1/runtime-network/satisfy/'+status['satisfy_id'],
                                  headers=headers), timeout=5) as response:
                 status = json.load(response)
-            if status['status'] != 'running':
+            if status['status'] != 'running' and acknowledged(status):
                 pilot.write(cell/('status.reporting-final'+suffix+'.json'), status)
                 row = pilot.read(cell/('summary'+suffix+'.json'))
                 pilot.write(cell/('summary.reporting-final'+suffix+'.json'), {
