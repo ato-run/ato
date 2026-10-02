@@ -36,15 +36,18 @@ JSON when absent:
 "runner_requirement": {
   "os": "linux",
   "arch": "x86_64",
-  "accelerators": [{ "kind": "nvidia", "count": 1, "min_vram_mib": 16000 }],
+  "accelerators": [{ "kind": "nvidia", "count": 1, "min_vram_mib": 45000 }],
   "min_memory_mib": 65536,
   "min_scratch_mib": 102400,
   "runtime_features": ["accelerator=nvidia-cuda"]
 }
 ```
 
-The numbers above are the first measured floor for Wan2.2-Animate with
-block swap (peak 14.9 GiB VRAM, 47 GiB host RSS, 45 GiB disk; 2026-10-02).
+The numbers above are the **verified baseline** for Wan2.2-Animate: the one
+configuration that was actually run (NVIDIA A40, 46 GiB VRAM; 47 GiB host RSS
+peak; 45 GiB disk used; 2026-10-02, see ato-api
+`docs/ops/open-compute-wan-phase0-2026-10-02.md`). 64 GiB RAM and 100 GiB
+scratch are initial candidates with headroom, not measured minimums.
 
 Every Derivation formed before this contract keeps its exact bytes and
 `DerivationRef`. A regression test pins an existing pair.
@@ -53,6 +56,39 @@ The requirement is part of the Derivation because it is a fact about *that way
 of running* the Application. Two Derivations of one Contract may differ in it;
 the `ContractRef` does not change, and the set, order and success of D remain
 outside `ContractRef`.
+
+### 1.1.1 Verified baseline versus unverified profiles
+
+A requirement states what a Derivation was shown to run on. Smaller hosts are
+separate profiles and are unverified until run:
+
+| Profile | Status |
+|---|---|
+| 48 GiB-class GPU (A40), block swap 25 | verified |
+| 24 GiB GPU, no block swap | unverified; peak was 23.5 GiB on the A40, no headroom shown |
+| 16 GiB GPU, block swap 25 | unverified; a 14.9 GiB peak on a 46 GiB card does not show a 16 GiB card works |
+
+A profile is promoted by running it, not by reading a peak from a larger host.
+
+### 1.1.2 Placement conditions versus execution-path conditions
+
+Two different things must not be mixed:
+
+- **Placement conditions** — accelerator class, VRAM, RAM, scratch. They are
+  the Runner Requirement and select a host.
+- **Execution-path conditions** — the pinned software the Derivation runs:
+  ComfyUI, ComfyUI-WanVideoWrapper and the other node packages, PyTorch, the
+  CUDA libraries, ONNX Runtime, and the Model Set revision. They are pinned by
+  the Derivation (Runner image digest, dependency hashes, Model Set digest) and
+  are the same on every host.
+
+For the measured configuration, ComfyUI `65787d6` started with PyTorch
+2.8.0+cu126 and did not start with 2.4.1 or 2.6.0. That is a statement about
+this pinned set, not a compatibility claim about other versions.
+
+Pose detection ran on CPU in the measurement (the installed ONNX Runtime GPU
+build could not load its CUDA provider). Moving it to GPU is a separate
+improvement and is accepted only with evidence that the provider loaded.
 
 ### 1.2 What it must not contain
 
@@ -180,13 +216,14 @@ The cache is keyed by digest, is safe to delete at any time, and is never the
 source of truth. Outputs are uploaded by multipart from disk and completed
 through the grant endpoint before the Runner reports the Run finished.
 
-## 6. Watchdog
+## 6. Loss of Coordinator contact
 
-A host-boundary Runner started with `--self-stop-command` runs that command
-after it has had no successful Coordinator contact for the configured grace
-period and no workload is running. The command is supplied by the Runner image
-(for example, a provider's "stop this machine" call using a credential scoped
-to that machine). The Runner does not know which provider it is on.
+A Runner that cannot renew execution authorization tears its workload down
+(existing behaviour), deletes the Run's files, and stops polling. It holds no
+provider credential and does not know which provider it is on, so it cannot
+delete its own machine. Removing the machine is the Coordinator's job
+(reconcile) with the provider's maximum lifetime as the backstop; see the
+Runner Provisioner RFC §4.5.
 
 ## 7. Compatibility
 
