@@ -66,6 +66,7 @@ pub fn required_isolated_authority(
             });
         }
     }
+    required.extend(d.runtime_port_operations.iter().map(|o| o.authority()));
     required.sort();
     required.dedup();
     required
@@ -73,6 +74,14 @@ pub fn required_isolated_authority(
 impl CandidateRealizer for ExplorationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let d = &self.planned.derivation;
+        if !d.runtime_port_operations.is_empty()
+            && profile.get(ato_formation::port_operations::RUNTIME_CAPABILITY) != Some("true")
+        {
+            return refuse(
+                "unsupported_capability",
+                "this Runtime has no bound HTTP Port interaction adapter",
+            );
+        }
         if let Err(error) = d.requirements.within(self.ceiling) {
             return refuse(
                 error.0,
@@ -186,7 +195,8 @@ pub fn admit_isolated_authority(
         // Existing canonical routes express bind through their port
         // declaration. Preserve those exact bytes while checking that
         // implicit authority against the SAME exploration ceiling.
-        let legacy = d.source_oci.is_none()
+        let legacy = d.runtime_port_operations.is_empty()
+            && d.source_oci.is_none()
             && !d.runtimes.contains_key("oci.image")
             && d.requirements.is_empty()
             && d.steps.iter().all(|s| s.network.is_denied());
@@ -214,7 +224,9 @@ pub fn admit_isolated_authority(
             && (d.ports.iter().any(|p| {
                 p.id == a.resource
                     && p.protocol == a.protocol
-                    && a.operation == ResourceOperation::Bind
+                    && (a.operation == ResourceOperation::Bind
+                        || (a.operation == ResourceOperation::Execute
+                            && d.runtime_port_operations.iter().any(|o| o.port == p.id)))
             }) || d.state.iter().any(|s| {
                 s.id == a.resource
                     && s.protocol == a.protocol

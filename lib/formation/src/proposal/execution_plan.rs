@@ -126,6 +126,8 @@ pub struct VerifiedSourceFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAuthorization {
+    #[serde(default, skip_serializing_if = "crate::port_operations::is_false")]
+    pub runtime_port_operations: bool,
     pub files: BTreeMap<String, VerifiedSourceFile>,
     pub toolchains: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,11 +238,17 @@ impl PlanAuthorization {
                 };
                 extra.windows(2).all(|p| p[0].fact < p[1].fact)
                     && extra.iter().all(|r| {
-                        r.one_of.as_deref() == Some(&["present".to_owned()][..])
-                            && self.toolchains.iter().any(|(name, version)| {
-                                matches!(name.as_str(), "python" | "gcc" | "make" | "pkg-config")
-                                    && r.fact == format!("toolchain.{name}.{version}")
-                            })
+                        (process
+                            && self.runtime_port_operations
+                            && r.fact == crate::port_operations::RUNTIME_CAPABILITY
+                            && r.one_of.as_deref() == Some(&["true".to_owned()][..]))
+                            || (r.one_of.as_deref() == Some(&["present".to_owned()][..])
+                                && self.toolchains.iter().any(|(name, version)| {
+                                    matches!(
+                                        name.as_str(),
+                                        "python" | "gcc" | "make" | "pkg-config"
+                                    ) && r.fact == format!("toolchain.{name}.{version}")
+                                }))
                     })
             });
         let oci_valid = c.provisions.is_empty()
@@ -336,6 +344,8 @@ pub struct RequirementBasis {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlanProposal {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_port_operations: Vec<ProposedPortOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub runtime: RuntimeSelection,
     /// Explicit alternative OCI D; only a frozen approved image is selectable.
@@ -376,6 +386,14 @@ pub struct ExecutionPlanProposal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ProposedPortOperation {
+    pub operation: crate::port_operations::RuntimePortOperation,
+    /// An already inspected source reference: no undeclared file discovery.
+    pub basis: SourceReference,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanStateRequirement {
     pub id: String,
     pub mount: String,
@@ -408,6 +426,21 @@ impl ExecutionPlanProposal {
     ) -> Result<(CompiledGeneration, SearchCandidate), ProposalError> {
         authorization.validate()?;
         crate::variables::validate(&self.variable_bindings).map_err(ProposalError)?;
+        if !self.runtime_port_operations.is_empty() {
+            if !authorization.runtime_port_operations
+                || self.runtime.name == "oci"
+                || self.static_output.is_some()
+            {
+                return Err(ProposalError("runtime_port_operations_unbound"));
+            }
+            if self.runtime_port_operations.len() > 4 {
+                return Err(ProposalError("runtime_port_operation_bounds"));
+            }
+            for operation in &self.runtime_port_operations {
+                operation.operation.validate().map_err(ProposalError)?;
+                authorization.resolve(&operation.basis)?;
+            }
+        }
         if self
             .variable_bindings
             .iter()
@@ -849,6 +882,14 @@ impl ExecutionPlanProposal {
             "port":[serving_port],
             "contract":{"require":contract_requirements(&frozen.base_contract)},"requirements":self.requirements,
             "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>()});
+        if !self.runtime_port_operations.is_empty() {
+            document["runtime_port_operations"] = json!(
+                self.runtime_port_operations
+                    .iter()
+                    .map(|p| &p.operation)
+                    .collect::<Vec<_>>()
+            );
+        }
         if !self.variable_bindings.is_empty() {
             document["variable_bindings"] = json!(self.variable_bindings);
         }
@@ -873,6 +914,12 @@ impl ExecutionPlanProposal {
             .map_err(|_| ProposalError("proposal_canonicalization"))?;
         let mut candidate = authorization.candidate(source, derivation_ref.clone());
         candidate.requirements = execution_requirements(self.static_output.is_none(), true);
+        if !self.runtime_port_operations.is_empty() {
+            candidate.requirements.push(crate::search::Requirement {
+                fact: crate::port_operations::RUNTIME_CAPABILITY.into(),
+                one_of: Some(vec!["true".into()]),
+            });
+        }
         candidate.provisions = derivation
             .runtimes
             .iter()
@@ -945,6 +992,14 @@ impl ExecutionPlanProposal {
             "source_oci":recipe,"requirements":self.requirements,
             "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
             "contract":{"require":contract_requirements(&frozen.base_contract)}});
+        if !self.runtime_port_operations.is_empty() {
+            document["runtime_port_operations"] = json!(
+                self.runtime_port_operations
+                    .iter()
+                    .map(|p| &p.operation)
+                    .collect::<Vec<_>>()
+            );
+        }
         if !self.variable_bindings.is_empty() {
             document["variable_bindings"] = json!(self.variable_bindings);
         }

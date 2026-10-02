@@ -192,6 +192,7 @@ pub fn prepare_exploration_submission_auto(
                 .collect::<Result<_>>()?;
             ProposalAuthorization {
                 execution_plan: Some(ato_formation::proposal::PlanAuthorization {
+                    runtime_port_operations: true,
                     files,
                     toolchains,
                     source_oci: None,

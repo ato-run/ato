@@ -690,6 +690,11 @@ fn validate_selected_derivation(
     {
         return Err(profile("derivation reference is not its canonical digest"));
     }
+    if !derivation.runtime_port_operations.is_empty() {
+        return Err(profile(
+            "HTTP Port operation grants are not bound in this portable profile",
+        ));
+    }
     let realization = validate_initial_route(&contract, &application, &derivation)?;
     if let Some(snapshot_ref) = instance_snapshot_ref.as_ref() {
         let snapshot: InstanceSnapshotV1 =
@@ -940,6 +945,7 @@ pub fn build_multi_derivation_bundle(
     let static_draft = AuthoringDraft {
         contract: process_draft.contract.clone(),
         derivation: DerivationDraft {
+            runtime_port_operations: vec![],
             variable_bindings: vec![],
             requirements: Default::default(),
             inputs: vec![input.clone()],
@@ -1178,6 +1184,7 @@ pub fn build_dynamic_routes_bundle(
         content_ref: tree_ref,
     };
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
+        runtime_port_operations: vec![],
         variable_bindings: vec![],
         requirements: Default::default(),
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),

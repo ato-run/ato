@@ -43,6 +43,8 @@ pub const PROMPT_VERSION_V11: &str = "ato.formation-candidate-producer-prompt/11
 pub const PROMPT_V11: &str = include_str!("prompt-v11.txt");
 pub const PROMPT_VERSION_V12: &str = "ato.formation-candidate-producer-prompt/12";
 pub const PROMPT_V12: &str = include_str!("prompt-v12.txt");
+pub const PROMPT_VERSION_V13: &str = "ato.formation-candidate-producer-prompt/13";
+pub const PROMPT_V13: &str = include_str!("prompt-v13.txt");
 pub fn is_autonomous_prompt(version: &str) -> bool {
     matches!(
         version,
@@ -53,6 +55,7 @@ pub fn is_autonomous_prompt(version: &str) -> bool {
             | PROMPT_VERSION_V10
             | PROMPT_VERSION_V11
             | PROMPT_VERSION_V12
+            | PROMPT_VERSION_V13
     )
 }
 pub fn prompt_sha256() -> String {
@@ -72,6 +75,7 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
         PROMPT_VERSION_V10 => Some(PROMPT_V10),
         PROMPT_VERSION_V11 => Some(PROMPT_V11),
         PROMPT_VERSION_V12 => Some(PROMPT_V12),
+        PROMPT_VERSION_V13 => Some(PROMPT_V13),
         _ => None,
     }
 }
@@ -273,6 +277,7 @@ impl DeepSeekCandidateProducer {
                     | PROMPT_VERSION_V10
                     | PROMPT_VERSION_V11
                     | PROMPT_VERSION_V12
+                    | PROMPT_VERSION_V13
             ) || input.schema != super::reasoning::INPUT_SCHEMA
             {
                 return Err(ErrorClass::MalformedResponse);
