@@ -524,6 +524,65 @@ pub struct LeaseStateArtifactTransport {
     token: String,
 }
 
+#[cfg(test)]
+mod execution_deadline_tests {
+    use super::*;
+    use ato_runtime_attempt::control::{ExecutionControl, now_ms};
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        time::Duration,
+    };
+
+    #[test]
+    fn expired_restore_sends_no_request_but_confirmed_cleanup_can_continue() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let transport = LeaseStateArtifactTransport::new(
+            reqwest::blocking::Client::new(),
+            format!("http://{}", listener.local_addr().unwrap()),
+            "lease_owned_test",
+            "owned-test-token",
+        );
+        let control = ExecutionControl::new(now_ms().saturating_sub(1));
+        let bounded = transport.with_execution_control(&control, Duration::from_secs(2));
+        assert!(bounded.acquire_writer("app_data").is_err());
+        assert!(bounded.download("sha256:owned-test-artifact").is_err());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        listener.set_nonblocking(false).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            first
+        });
+        bounded.release_writer("app_data", 1).unwrap();
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .starts_with("POST /v1/runner-leases/lease_owned_test/state/writers/release ")
+        );
+    }
+}
+
 impl LeaseStateArtifactTransport {
     pub fn new(
         client: reqwest::blocking::Client,
@@ -547,13 +606,35 @@ impl LeaseStateArtifactTransport {
     }
 }
 
-impl StateArtifactTransport for LeaseStateArtifactTransport {
-    fn acquire_writer(&self, state_key: &str) -> Result<StateWriterGrant> {
-        let response = self
+impl LeaseStateArtifactTransport {
+    /// Bound preparation requests to the same execution clock. The explicit
+    /// request ceiling is also narrowed; cleanup and commit remain available.
+    pub fn with_execution_control<'a>(
+        &'a self,
+        control: &'a ato_runtime_attempt::control::ExecutionControl,
+        request_ceiling: std::time::Duration,
+    ) -> ExecutionStateArtifactTransport<'a> {
+        ExecutionStateArtifactTransport {
+            transport: self,
+            control,
+            request_ceiling,
+        }
+    }
+    fn acquire_writer_request(
+        &self,
+        state_key: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<StateWriterGrant> {
+        let request = self
             .client
             .post(self.url("writers"))
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({ "state_key": state_key }))
+            .json(&serde_json::json!({ "state_key": state_key }));
+        let request = match timeout {
+            Some(t) => request.timeout(t),
+            None => request,
+        };
+        let response = request
             .send()?
             .error_for_status()
             .context("failed to acquire the state writer")?;
@@ -597,17 +678,96 @@ impl StateArtifactTransport for LeaseStateArtifactTransport {
         })
     }
 
-    fn download(&self, artifact_digest: &str) -> Result<Vec<u8>> {
-        let response = self
+    fn download_request(
+        &self,
+        artifact_digest: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Vec<u8>> {
+        let request = self
             .client
             .get(self.url(&format!("artifacts/{artifact_digest}")))
-            .bearer_auth(&self.token)
+            .bearer_auth(&self.token);
+        let request = match timeout {
+            Some(t) => request.timeout(t),
+            None => request,
+        };
+        let response = request
             .send()?
             .error_for_status()
             .context("failed to download the state artifact")?;
         Ok(response.bytes()?.to_vec())
     }
+}
 
+/// A borrowed execution view; it never constructs or renews a deadline.
+/// Writer release, quarantine and state commit delegate to reporting transport.
+pub struct ExecutionStateArtifactTransport<'a> {
+    transport: &'a LeaseStateArtifactTransport,
+    control: &'a ato_runtime_attempt::control::ExecutionControl,
+    request_ceiling: std::time::Duration,
+}
+impl StateArtifactTransport for ExecutionStateArtifactTransport<'_> {
+    fn acquire_writer(&self, state_key: &str) -> Result<StateWriterGrant> {
+        use ato_runtime_attempt::control::AttemptPhase;
+        let _phase = self.control.phase(AttemptPhase::Source)?;
+        self.transport.acquire_writer_request(
+            state_key,
+            Some(
+                self.control
+                    .cap(AttemptPhase::Source, self.request_ceiling)?,
+            ),
+        )
+    }
+    fn download(&self, artifact_digest: &str) -> Result<Vec<u8>> {
+        use ato_runtime_attempt::control::AttemptPhase;
+        let _phase = self.control.phase(AttemptPhase::Source)?;
+        self.transport.download_request(
+            artifact_digest,
+            Some(
+                self.control
+                    .cap(AttemptPhase::Source, self.request_ceiling)?,
+            ),
+        )
+    }
+    fn commit(
+        &self,
+        key: &str,
+        fence: u64,
+        parent: Option<&str>,
+        request: &str,
+        artifact: &StateArtifact,
+    ) -> Result<String> {
+        self.transport.commit(key, fence, parent, request, artifact)
+    }
+    fn release_writer(&self, key: &str, fence: u64) -> Result<()> {
+        self.transport.release_writer(key, fence)
+    }
+    fn abort_writer(&self, key: &str, fence: u64) -> Result<()> {
+        self.transport.abort_writer(key, fence)
+    }
+    fn quarantine_writer(&self, key: &str, fence: u64, reason: &str) -> Result<()> {
+        self.transport.quarantine_writer(key, fence, reason)
+    }
+    fn report_volume(&self, key: &str, fence: u64, report: &VolumeReport) -> Result<()> {
+        self.transport.report_volume(key, fence, report)
+    }
+    fn complete_volume_operation(
+        &self,
+        id: &str,
+        outcome: VolumeOperationOutcome,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.transport.complete_volume_operation(id, outcome, error)
+    }
+}
+
+impl StateArtifactTransport for LeaseStateArtifactTransport {
+    fn acquire_writer(&self, state_key: &str) -> Result<StateWriterGrant> {
+        self.acquire_writer_request(state_key, None)
+    }
+    fn download(&self, artifact_digest: &str) -> Result<Vec<u8>> {
+        self.download_request(artifact_digest, None)
+    }
     fn release_writer(&self, state_key: &str, writer_fence: u64) -> Result<()> {
         self.client
             .post(self.url("writers/release"))
