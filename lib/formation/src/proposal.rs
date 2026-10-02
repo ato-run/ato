@@ -4,6 +4,7 @@
 mod execution_plan;
 mod native_dependencies;
 pub use native_dependencies::runtime_requirements as native_runtime_requirements;
+pub use native_dependencies::{PythonBuildOutput, python_build_outputs};
 mod node_static_workspace;
 mod python_http;
 mod source_context;
