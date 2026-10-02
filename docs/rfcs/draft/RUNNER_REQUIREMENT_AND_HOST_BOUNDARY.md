@@ -8,8 +8,10 @@ Tracking: ato-api `docs/rfcs/draft/runner-provisioner.md`,
 ## Decision
 
 1. A Derivation may state the host resources it needs as a **Runner
-   Requirement**. It is an admission condition of that Derivation. It is not
-   part of K, of `ContractRef`, or of the Application's identity.
+   Requirement**, carried in the existing `BoundDerivation.requirements`. It is
+   an admission condition of that Derivation. It is not part of K, of
+   `ContractRef`, or of the Application's identity. It is stated per
+   Derivation, never per step: **one `BoundDerivation` runs on one Runner.**
 2. A Runner reports **measured host resources** in its heartbeat. The control
    plane compares requirement to measurement. Advertised capability strings are
    not used for numeric comparison.
@@ -29,19 +31,29 @@ Python and OCI are Adapter implementations.
 
 ### 1.1 Where it lives
 
-`BoundDerivation` gains one additive, optional field, omitted from canonical
-JSON when absent:
+`BoundDerivation` already has `requirements: ExecutionRequirements`
+(`lib/formation/src/requirements.rs`), holding `network` and `authority`. Host
+resources join it as one additive member, `host`, omitted from canonical JSON
+when absent. No new field is added to `BoundDerivation` itself.
 
 ```json
-"runner_requirement": {
-  "os": "linux",
-  "arch": "x86_64",
-  "accelerators": [{ "kind": "nvidia", "count": 1, "min_vram_mib": 45000 }],
-  "min_memory_mib": 65536,
-  "min_scratch_mib": 102400,
-  "runtime_features": ["accelerator=nvidia-cuda"]
+"requirements": {
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "accelerators": [{ "vendor": "nvidia", "count": 1, "min_vram_mib": 45000 }],
+    "min_memory_mib": 65536,
+    "min_scratch_mib": 102400,
+    "runtime_features": ["accelerator=nvidia-cuda"]
+  }
 }
 ```
+
+`BoundStep` does not get a requirement. A route that needs different hosts for
+different steps (download on CPU, inference on GPU, encode elsewhere) is not
+expressed by adding a per-step requirement: that would turn placement into a
+distributed scheduler. It is a Composite Run of sub-Derivations, each of which
+again runs on one Runner, and is out of scope here.
 
 The numbers above are the **verified baseline** for Wan2.2-Animate: the one
 configuration that was actually run (NVIDIA A40, 46 GiB VRAM; 47 GiB host RSS
@@ -106,28 +118,49 @@ reject the D that was.
 
 ## 2. Measured host resources
 
-The heartbeat gains a structured, optional `host_resources` object:
+The heartbeat gains a structured, optional `host_resources` object. Every
+value has a named source, and a value with no trustworthy source is reported
+as unknown, never guessed.
 
 ```json
 {
   "probed_at": "…",
   "arch": "x86_64",
-  "memory_mib": 46000,
+  "memory": { "cgroup_limit_mib": null, "proc_meminfo_mib": 515000 },
+  "cpu": { "cgroup_quota_millis": null, "online": 112 },
   "scratch_mib": 140000,
-  "accelerators": [{ "kind": "nvidia", "vram_mib": 46068, "driver": "550.144.03" }]
+  "accelerators": [{ "vendor": "nvidia", "vram_mib": 46068, "driver": "550.144.03" }]
 }
 ```
 
-Rules:
+| Quantity | Source | Notes |
+|---|---|---|
+| memory | cgroup limit: v2 `memory.max`, else v1 `memory.limit_in_bytes`; a finite value is the container's hard limit | `max`/unreadable → `null` |
+| CPU | cgroup quota first (`cpu.max`, or v1 `cfs_quota_us`/`cfs_period_us`) | online CPU count is diagnostic |
+| GPU VRAM | NVML / `nvidia-smi` for a device that answered | never from configuration |
+| scratch | `statvfs` on the Runner's actual work root | free space at probe time |
 
-- Values come from a probe at Runner start, not from configuration. Memory is
-  the effective limit of the Runner's cgroup when one is readable, else the
-  operator-supplied limit; **host totals are not reported**. (On a RunPod pod,
-  `/proc/meminfo` shows the host's 503 GiB, not the pod's allocation.)
-- `scratch_mib` is free space on the work root at probe time.
-- An accelerator is reported only if a real device query succeeded.
-- Absent object = legacy Runner = satisfies no requirement that names a
-  quantity.
+`/proc/meminfo` is carried as a **diagnostic only**. It is never used for
+admission. On a RunPod pod it reports the host's 503 GiB, and the cgroup files
+were not readable.
+
+### 2.1 Effective memory
+
+The Runner holds no provider credential, so it cannot ask the provider what it
+was allocated. The Coordinator already knows: the backend reports the
+allocation when it creates the machine (`provider_memory_mib` on the provision
+row). Admission therefore computes, on the control plane:
+
+```
+effective_memory = min( finite cgroup limit reported by the Runner,
+                        provider-reported allocation )
+```
+
+using whichever of the two exist. **If neither exists, memory is `unknown`,
+and `unknown` does not satisfy any `min_memory_mib`.** A Runner that can show
+only `/proc/meminfo` is not admitted for a Derivation that states a memory
+floor. The same rule applies to every quantity: absent or unknown never
+satisfies a stated floor.
 
 `accelerator=nvidia-cuda` is added to capability strings only when the probe
 found a usable device and the driver library is loadable.
@@ -175,8 +208,11 @@ contain a hostile workload: there is no pid, network or mount isolation, and a
 kernel or driver escape reaches the whole machine. Safety comes from the
 Coordinator's guarantees, which are part of this contract:
 
-- the machine was created for this owner and is destroyed after use;
+- the machine is pinned to one owner when it is created and is never assigned
+  to another during its life; cross-owner reuse is forbidden in v0;
 - one Run at a time (`max_slots = 1`);
+- between Runs the Runner deletes the previous Run's inputs, outputs and
+  temporary workspace; only the digest-verified model cache survives;
 - the Runner's token is revoked with the machine;
 - the Run's Data Grant covers only that Run's data.
 
@@ -222,8 +258,9 @@ A Runner that cannot renew execution authorization tears its workload down
 (existing behaviour), deletes the Run's files, and stops polling. It holds no
 provider credential and does not know which provider it is on, so it cannot
 delete its own machine. Removing the machine is the Coordinator's job
-(reconcile) with the provider's maximum lifetime as the backstop; see the
-Runner Provisioner RFC §4.5.
+(reconcile, every minute), and a provider-side hard TTL set when the machine is
+created ends it even if the Coordinator is gone; see the Runner Provisioner RFC
+§4.6.
 
 ## 7. Compatibility
 
@@ -234,10 +271,11 @@ Runner Provisioner RFC §4.5.
 
 ## 8. Acceptance
 
-1. A Derivation with and without `runner_requirement` yields the same
-   `ContractRef`.
+1. A Derivation with and without `requirements.host` yields the same
+   `ContractRef`, and one without it keeps its exact bytes and `DerivationRef`.
 2. A Runner without an accelerator is not selected for a D that requires one,
-   and the Run reports `runner_requirement_unsatisfied`.
+   and the Run reports `runner_requirement_unsatisfied`. A Runner whose memory
+   is `unknown` is not selected for a D that states a memory floor.
 3. On a host with no namespace support, a `process` realization runs in
    host-boundary mode, cannot read the Runner credentials file, and its whole
    process tree is gone after stop.
@@ -255,9 +293,12 @@ Runner Provisioner RFC §4.5.
 
 ## 10. Open questions
 
-1. Whether `runner_requirement` belongs on `BoundDerivation` or on a
-   per-`BoundStep` field, for groups whose services need different hosts. v0:
-   Derivation-level, single host.
-2. Authoring syntax in `ato.capsule/2`.
-3. How the effective memory limit is obtained on providers that expose neither
-   a cgroup limit nor an API for it.
+1. Authoring syntax in `ato.capsule/2`. The first end-to-end path needs only
+   the bound form of `requirements.host`; the authoring spelling stays a review
+   item unless forming the Wan application requires it.
+2. Whether RunPod injects a pod-scoped credential into the container; if so it
+   must be kept from the workload (Runner Provisioner RFC §10).
+
+Resolved 2026-10-02: the requirement is Derivation-level and one
+`BoundDerivation` runs on one Runner (§1.1); memory admission uses the cgroup
+limit, then provider metadata, and `/proc/meminfo` only as a diagnostic (§2).
