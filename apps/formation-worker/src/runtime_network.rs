@@ -55,6 +55,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod delivery;
 pub mod proposal;
+mod publication;
 mod source_oci_exploration;
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
@@ -169,6 +170,11 @@ pub struct LegacySourceTicket {
     /// This attempt's caps. A ticket without them is not one this Runtime
     /// runs: it would have nothing to hold the attempt to.
     pub resource_budget: TicketResourceBudget,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BuildRecordRetention {
+    #[serde(rename = "ato.build-record/1")]
+    V1,
 }
 
 impl AttemptTicket {
@@ -358,6 +364,10 @@ pub struct AttemptTicket {
     /// This attempt's caps. A ticket without them is not one this Runtime
     /// runs: it would have nothing to hold the attempt to.
     pub resource_budget: TicketResourceBudget,
+    /// Coordinator-owned evidence transport. Absence preserves historical
+    /// full-workspace publication; it never authorizes projection by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_record_retention: Option<BuildRecordRetention>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,6 +456,8 @@ pub struct AttemptResultReport {
     pub materialization_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_record_ref: Option<String>,
     pub failure: Option<AttemptFailureWire>,
     /// The Formation attempt as the Runtime recorded it: verification,
     /// realization evidence, browser receipt.
@@ -2035,6 +2047,7 @@ fn refused(
         derivation_ref: None,
         materialization_ref: None,
         retained_ref: None,
+        build_record_ref: None,
         failure: Some(AttemptFailureWire {
             code: code.to_owned(),
             stage: "admission".to_owned(),
@@ -2095,13 +2108,36 @@ fn execute_ticket_with_publication(
     source: impl FnOnce() -> Result<File>,
     publisher: Option<&Client>,
 ) -> AttemptResultReport {
+    if let Some(publisher) = publisher {
+        match publication::resume(config, ticket, publisher) {
+            Ok(Some(report)) => return report,
+            Ok(None) => {}
+            Err(_) => {
+                return refused(
+                    ticket,
+                    RuntimeAttestation {
+                        attempt_record: AttemptRecordState::HistoryUnavailable,
+                        execution_started: true,
+                        ..attestation()
+                    },
+                    "publication_history_unavailable",
+                    "saved publication could not be authenticated",
+                );
+            }
+        }
+    }
     let control = ticket
         .exploration
         .as_ref()
         .and_then(|e| e.deadline_ms)
         .map(ato_runtime_attempt::control::ExecutionControl::new);
     let mut report = execute_ticket_inner(config, ticket, source, publisher, control.as_ref());
-    if let Some(control) = control {
+    if let Some(control) = control
+        && !report
+            .verifier_receipts
+            .iter()
+            .any(|r| r["kind"] == "exploration_phase_timings")
+    {
         report.verifier_receipts.push(serde_json::json!({
             "kind":"exploration_phase_timings", "phases":control.timings(),
         }));
@@ -2124,7 +2160,17 @@ fn execute_ticket_inner(
         Err(refusal) => {
             attested.attempt_record = refusal.record_state();
             attested.execution_started = attested.attempt_record.execution_started();
-            return refused(ticket, attested, refusal.code(), &refusal.message());
+            let finished_without_report = attested.attempt_record == AttemptRecordState::Finished;
+            let mut report = refused(ticket, attested, refusal.code(), &refusal.message());
+            if finished_without_report {
+                // The computation finished but its precise evidence was not
+                // recovered. Redelivery cannot refund its original resources.
+                report.resource_usage = ResourceUsage {
+                    expanded_bytes: ticket.resource_budget.expanded_bytes,
+                    stored_bytes: ticket.resource_budget.stored_bytes,
+                };
+            }
+            return report;
         }
     };
     let source_timing = match control
@@ -2601,6 +2647,37 @@ fn execute_planned_ticket(
     });
     attested.execution_started = outcome.execution_started();
     attested.attempt_record = outcome.attempt_record;
+    // Exact registered helper evidence is acknowledged before projection.
+    // This path checkpoints only a durably finished, verified process; a
+    // restart resumes publication and never enters source/build/launch again.
+    if let (
+        Some(publisher),
+        Some(ato_runtime_attempt::executor::ExecutedCandidate::Process { workspace_root }),
+    ) = (publisher, outcome.verified.as_ref())
+        && ticket.build_record_retention.is_some()
+        && planned.derivation.source_oci.is_none()
+        && !planned.derivation.runtimes.contains_key("oci.image")
+        && ato_formation::proposal::python_build_outputs(&planned.derivation)
+            .is_ok_and(|roots| !roots.is_empty())
+    {
+        let mut report = attempt_report(ticket, &outcome.attempt, attested, None, None, usage);
+        if let Some(gates) = scoped.as_ref() {
+            report.verifier_receipts.push(gates.evidence());
+        }
+        if let Ok(facts) = ato_runtime_attempt::execution_facts::read(
+            &attempt_root.join("control/execution-facts.jsonl"),
+        ) {
+            report
+                .verifier_receipts
+                .push(serde_json::json!({"kind":"exploration_execution_facts","facts":facts}));
+        }
+        if let Some(control) = control {
+            report.verifier_receipts.push(
+                serde_json::json!({"kind":"exploration_phase_timings", "phases":control.timings()}),
+            );
+        }
+        return publication::begin(config, ticket, publisher, workspace_root, &planned, report);
+    }
     let mut attempt = outcome.attempt;
     // Keeping the artifact is publication, not verification: a publication
     // that fails — or that the ticket's stored cap does not allow — leaves
@@ -2691,6 +2768,7 @@ fn execute_planned_ticket(
         && planned.derivation.source_oci.is_none()
         && !planned.derivation.runtimes.contains_key("oci.image")
     {
+        let publisher = publisher.for_reporting();
         let publication = (|| -> Result<String> {
             let executed = outcome
                 .verified
@@ -2707,7 +2785,12 @@ fn execute_planned_ticket(
                 "search_stored_budget_exceeded"
             );
             report.resource_usage.stored_bytes = prepared.descriptor.artifact.bytes;
-            publisher.retain(ticket, &prepared, &report)
+            publisher.retain(
+                ticket,
+                &prepared,
+                &report,
+                &publication::delivery(config, ticket)?,
+            )
         })();
         match publication {
             Ok(reference) => report.retained_ref = Some(reference),
@@ -2941,31 +3024,48 @@ impl Client {
         ticket: &AttemptTicket,
         prepared: &crate::retained::PreparedRetained,
         report: &AttemptResultReport,
+        delivery: &delivery::Delivery,
     ) -> Result<String> {
+        let retries = ticket.exploration.as_ref().map_or(3, |e| e.max_retries);
         let reference = prepared.descriptor.retained_ref()?;
         let path = format!("/attempts/{}/retained", ticket.attempt_id);
-        let pending:serde_json::Value=self.send(self.http.post(self.url(&path)).json(&serde_json::json!({
-            "fence":ticket.fence,"retained_ref":reference,"descriptor_json":String::from_utf8(prepared.descriptor.canonical_bytes()?)?,"verification":report
-        })))?.context("missing retained reservation")?;
+        let mut reservation = serde_json::json!({"fence":ticket.fence,"retained_ref":reference,
+            "descriptor_json":String::from_utf8(prepared.descriptor.canonical_bytes()?)?,"verification":report,
+            "build_record_ref":report.build_record_ref});
+        if report.build_record_ref.is_none() {
+            reservation
+                .as_object_mut()
+                .unwrap()
+                .remove("build_record_ref");
+        }
+        let pending: serde_json::Value = delivery.evidence("retained-reserve", retries, || {
+            self.send(self.http.post(self.url(&path)).json(&reservation))?
+                .context("missing retained reservation")
+        })?;
         let id = pending["upload_id"]
             .as_str()
             .context("missing retained upload id")?;
         if pending["status"] != "ready" {
-            let _: Option<serde_json::Value> = self.send(
-                self.http
-                    .put(self.url(&format!("{path}/{id}/content")))
-                    .header("x-ato-attempt-fence", ticket.fence)
-                    .timeout(SOURCE_TRANSFER_TIMEOUT)
-                    .body(prepared.bytes.clone()),
-            )?;
-            let ready: serde_json::Value = self
-                .send(
-                    self.http
-                        .post(self.url(&format!("{path}/{id}/finalize")))
-                        .header("x-ato-attempt-fence", ticket.fence)
-                        .timeout(SOURCE_TRANSFER_TIMEOUT),
-                )?
-                .context("missing retained finalization")?;
+            let _: Option<serde_json::Value> =
+                delivery.evidence("retained-content", retries, || {
+                    self.send(
+                        self.http
+                            .put(self.url(&format!("{path}/{id}/content")))
+                            .header("x-ato-attempt-fence", ticket.fence)
+                            .timeout(SOURCE_TRANSFER_TIMEOUT)
+                            .body(prepared.bytes.clone()),
+                    )
+                })?;
+            let ready: serde_json::Value =
+                delivery.evidence("retained-finalize", retries, || {
+                    self.send(
+                        self.http
+                            .post(self.url(&format!("{path}/{id}/finalize")))
+                            .header("x-ato-attempt-fence", ticket.fence)
+                            .timeout(SOURCE_TRANSFER_TIMEOUT),
+                    )?
+                    .context("missing retained finalization")
+                })?;
             anyhow::ensure!(
                 ready["status"] == "ready" && ready["retained_ref"] == reference,
                 "retained object is not ready"
@@ -3145,6 +3245,7 @@ fn attempt_report(
         derivation_ref: attempt.derivation_ref.clone(),
         materialization_ref,
         retained_ref,
+        build_record_ref: None,
         failure: attempt.failure.as_ref().map(|f| AttemptFailureWire {
             code: f.code.clone(),
             stage: f.stage.clone(),
