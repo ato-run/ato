@@ -39,15 +39,38 @@ are Ready. Combined stored usage is 306,002,627 bytes. The before/after Search
 limits and deadline are identical. Recovery proof SHA-256:
 `1d35bf1939542c65251eb3d92f08169445c881502353121988655edf7f385a28`.
 
-That proof establishes attempt/report success, not completed Search selection:
-the existing exploration policy permits a further strict requirement-reduction
-round. A separate Requester resume opened that round; its initial read-only
-assertion correctly refused to label it an inference-free recovery. No Runtime
-execution or session response was supplied by that failed controller. The original
-failure logs, pending exchange and limits are preserved. Completion and functional
-acceptance are recorded separately once observed.
+That proof establishes attempt/report success, not completed Search selection.
+The existing policy permits a strict requirement-reduction round. A separate
+Requester resume opened that round; its read-only assertion correctly refused
+to label it an inference-free recovery. The failed controller supplied no session
+response or Runtime execution. A separately recorded Codex answer to the existing
+common input then rejected unsupported reduction without another execution.
+Original Search `search_fa9b884b3a7c0f73836ae5fc6bedf05f` became satisfied,
+two rounds / three session exchanges / one Runtime attempt. Old failure logs
+and original limits remain preserved. This source Runtime used `3ac36fa2`.
+
+Actual Linux final-pin acceptance at code
+`1de0e3a008f73226171d83fa026c50ec20dde976`, API `fa825a17`, unchanged
+authority WASM source `3ac36fa2`, completed with zero known D:
+
+- SVGOMG trial 16: a transparent proxy dropped one real Coordinator status
+  HTTP 200 response after the backend completed. Custom `max_retries = 1`
+  recovered with exactly two durable sends, delivery-acknowledgement-only cache,
+  unchanged Search deadline/limits and no extra round for transport retry.
+  Source-evidenced correction of HTTP authority and required es5-ext lifecycle
+  produced fresh same-K PASS. Three rounds / four session exchanges / three
+  claimed attempts, including one admission refusal and two actual executions.
+  Original SVG trial 15 had an authoring schema error, zero Runtime attempts;
+  preserve its no_progress result separately.
+- Single-service OCI trial 15: root Dockerfile, first generated D, normal Runtime
+  launch, fresh unchanged-K PASS and submitted Search. Two rounds / two session
+  exchanges / one execution. This fixture is excluded from OSS unique-app counts.
+
+Proof `status-retry-final15-16-proof.json` SHA-256
+`91f5474fbe2d469fffd84b723bf53443ad95c1c6037d960f11a0449c0d112a70`.
+Both successful Searches await assessment, with zero outstanding reservations.
 
 This change adds no paid API call, remote migration, deployment, feature flag,
 normal Run authorization or public artifact publication. Old WBO UNKNOWN remains
-unchanged. The new retry code has not yet been exercised by that prior trial;
-its Linux final-pin fault/application acceptance remains required.
+unchanged. API-provider acceptance and the remaining whole-app/state/input gates
+remain required. The skip-ci head has no executed CI result; it is not CI PASS.

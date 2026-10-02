@@ -6,16 +6,17 @@ No deployment, remote migration, feature flag or ordinary Run permission.
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
 `9e0031900836090612b94e775e26f980a68f32d7`. Latest code candidate:
 Ato `1de0e3a008f73226171d83fa026c50ec20dde976` (status transport retries,
-#1465); latest actual source execution Ato
-`3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`, API
+#1465); latest actual SVGOMG/OCI source execution uses that same code, while
+changedetection.io source/functional Runtime used
+`3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`. Both use API
 `fa825a176b715962351466dc1a7149bec5979c7f`, prompt 12. Receipt authority
 WASM SHA-256 `cc7445874bcea354b0ea03d96a71e10ea4e34b80b5516111457f1bdc92af3c03`,
 2,196,846 bytes, source Ato `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`.
 The [private build Record retention change](formation-build-record-retention-20261002.md)
 is reviewed in Ato #1464 / API #718; API requires migration 0315, applied only
 to the owned isolated acceptance database, not a remote environment.
-The new pin requires new real application acceptance; earlier PASS does not
-prove these later changes. The review stack remains Draft.
+Remaining state/input changes require a new final acceptance pin; earlier PASS
+does not prove later changes. The review stack remains Draft.
 
 ## Measured previous pins
 
@@ -236,10 +237,42 @@ then became `satisfied`, two rounds / three session exchanges, one Runtime attem
 zero paid API calls, no reservations outstanding. Result SHA-256
 `19f5c89cfc45866c9dabe2a42fb2703eeb13669af0e69122c8fa2528e939a62b`.
 The D awaits assessment; it grants no ordinary Run, deployment or public visibility.
-Fresh retained Runtime replay and representative function checks are separate,
-currently in progress. These source/receipt observations used `3ac36fa2`, before
-the status retry code in `1de0e3a0`; final-head regression remains required.
+Fresh retained Runtime replay and representative function checks completed
+separately at Runtime `3ac36fa2`: original artifact digest and same frozen K
+verified, actual Chromium 149 UI create/edit/pause/delete of an owned test watch
+PASS, stopped Runtime cleanup PASS. Runtime network allowed zero bytes; external
+fetch/change detection and stop/restart persistence are unverified. The corrected
+harness uses the existing deny-all netd gate and Runtime bridge. Earlier missing
+gate and UI modal-selector failures remain preserved, not counted as source/K
+failures. Functional proof SHA-256
+`fd6a1b2b2d61954322d019cd69fda5770f5a2379de3f4f1e122212126191507f`;
+fresh receipt `0307bf218cf4ed9299c0c3054afdb84b0a77d0831a64345e02a0a310400e5e12`.
+These source/receipt/function observations precede Requester retry code
+`1de0e3a0`; final-head changedetection.io regression remains required.
 Neither trial restarts old WBO UNKNOWN or supplies a Codex D to the API arm.
+
+## Actual status-retry pin regressions
+
+Ato `1de0e3a0` / API `fa825a17`, authority source `3ac36fa2`, Linux exact-pin
+CLI/Worker/preflight binaries, zero known D, same source/K as earlier trials:
+
+| Case | Result | Rounds / session exchanges / claimed attempts |
+| --- | --- | --- |
+| SVGOMG trial 15 | Authoring schema failure; no_progress, no Runtime execution. Preserved separately. | 1 / 2 / 0 |
+| SVGOMG trial 16 | Correction PASS: HTTP authority admission refusal, then source-evidenced lifecycle audit, then typed es5-ext rebuild fresh same-K PASS. | 3 / 4 / 3 (one admission refusal, two actual executions) |
+| OCI fixture trial 15 | First generated Dockerfile D fresh same-K PASS. Strict reduction answer made no further execution. | 2 / 2 / 1 |
+
+The real Coordinator proxy dropped exactly one successful status response in
+each SVG trial. Original custom one retry recovered via two durable sends;
+no cached stale status, extra round, paid provider call or deadline/budget reset.
+SVG Search `search_5177b730f7abfe243ed9469cdd2cb3aa`, result SHA-256
+`e4a9012dd239eab568ccb553f3d8249df496dc28fb8a97e290cbd5cfcc7bda46`.
+OCI Search `search_6bbd43b2d1a08575dc97a5eb1481ea41`, result SHA-256
+`6f61ae5605803d867b94e1c2f54da651fe7e0e6f25f23d6a8263e6a741cc8cf4`.
+Both are submitted, awaiting assessment, with zero outstanding reservations.
+Combined final-pin fault proof SHA-256
+`91f5474fbe2d469fffd84b723bf53443ad95c1c6037d960f11a0449c0d112a70`.
+These regressions add no new unique OSS app. API-provider trials remain zero.
 
 ## Accounting
 
@@ -261,13 +294,14 @@ trials must start from the same initial source/K/capabilities with zero known D.
 
 ## Remaining gates
 
-Final-pin Codex then API application acceptance; changedetection.io function;
+Final-pin Codex then API application acceptance; changedetection.io external
+fetch and persistence where explicitly granted;
 Kutt native dependency, source-owned Runtime migration, temporary JWT, isolated
 state and persistence after stop/restart; actual retry/deadline/lost-response/
 restart/uncertain disconnect; scoped input reuse/revoke/expiry/cleanup and
 embedding observations. These are not replaced by fixture/unit test PASS.
 Current code-pin validation: Formation library 122 and compiler/exploration
-integration 33 PASS; Worker library 73 PASS; Runtime Network 31 PASS / 1
+integration 33 PASS; Worker library 75 PASS; Runtime Network 31 PASS / 1
 explicitly ignored; authority 7 library / 8 integration PASS; process transport
 2 PASS; retained replay 3 reported PASS with the macOS process containment
 guard skipping actual Python/Node launch. Rust formatting/clippy and exact-pin
