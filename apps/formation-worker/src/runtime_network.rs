@@ -458,7 +458,7 @@ pub enum CandidateStopAttestation {
 }
 
 impl CandidateStopAttestation {
-    fn of(stop: &ato_runtime_attempt::realize::StopClass) -> Self {
+    pub fn of(stop: &ato_runtime_attempt::realize::StopClass) -> Self {
         use ato_runtime_attempt::realize::StopClass;
         match stop {
             StopClass::Confirmed => Self::Confirmed,
@@ -1611,7 +1611,10 @@ impl Client {
         }).collect::<Vec<_>>();
         Ok(capabilities)
     }
-    fn resolve_variables(
+    /// Redeem only the Coordinator's currently fenced, Rust-validated assignment.
+    /// Values remain private Runtime inputs; callers must retain the ticket's
+    /// original execution deadline and the scoped execution gate.
+    pub fn resolve_variables(
         &self,
         ticket: &AttemptTicket,
         requirements: &[ato_formation::variables::VariableRequirement],
@@ -1696,6 +1699,23 @@ impl Client {
         self.send::<serde_json::Value>(self.http.post(self.url("/attempts/claim")))?
             .map(AttemptTicket::from_wire)
             .transpose()
+    }
+
+    /// Use the Runtime's durable operation identity for a separately owned
+    /// execution driver. Reopening this directory never allocates another claim.
+    pub fn claim_recorded(&self, delivery_root: &Path) -> Result<Option<AttemptTicket>> {
+        delivery::Delivery::open(delivery_root)?.claim(self)
+    }
+
+    /// Deliver an already recorded result with the ticket's frozen retry budget.
+    /// This method performs no source, binding resolution or execution work.
+    pub fn report_recorded(
+        &self,
+        delivery_root: &Path,
+        ticket: &AttemptTicket,
+        report: &AttemptResultReport,
+    ) -> Result<()> {
+        delivery::Delivery::open(delivery_root)?.report(self, ticket, report)
     }
 
     /// The ticket's source, read up to `max_bytes` (the ticket's transfer
@@ -1876,7 +1896,9 @@ fn bind_http_port_capability(
     );
 }
 
-fn ticket_runtime_profile(
+/// Admission facts for a configured scoped execution and current grant client.
+/// Standalone probes remain conservative; a caller must bind the scoped gate.
+pub fn ticket_runtime_profile(
     scoped: bool,
     publisher: Option<&Client>,
 ) -> ato_formation::request::RuntimeProfile {
@@ -2077,7 +2099,7 @@ use crate::admission::effects_name;
 pub use crate::admission::is_disposable;
 
 /// This Runtime's attestation before it has planned anything.
-fn attestation() -> RuntimeAttestation {
+pub fn attestation() -> RuntimeAttestation {
     RuntimeAttestation {
         environment_id: NATIVE_ENVIRONMENT.to_owned(),
         agent_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -3288,7 +3310,8 @@ impl Client {
     }
 }
 
-fn attempt_report(
+/// Encode the common Runtime's recorded attempt without repeating verification.
+pub fn attempt_report(
     ticket: &AttemptTicket,
     attempt: &ato_formation::request::FormationAttempt,
     attested: &RuntimeAttestation,

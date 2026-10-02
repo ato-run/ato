@@ -17,11 +17,13 @@ const source = file => JSON.stringify(path.join(api, file));
 writeFileSync(path.join(out, 'entry.ts'), `
 import {Hono} from ${source('node_modules/hono/dist/index.js')};
 import {runnerLeaseStateRoutes} from ${source('src/routes/runner_lease_state.ts')};
+import {runtimeNetworkRoutes} from ${source('src/routes/runtime_network.ts')};
 import {createDb} from ${source('src/db/index.ts')};
 import {computes, computeSchemas, computeInstances, runnerDevices, runnerLeases, runs} from ${source('src/db/schema.ts')};
 import {bindRunToLease, dispatchRuntimeLaunch} from ${source('src/services/runtime_launch/dispatch.ts')};
 const app = new Hono();
 app.route('/v1/runner-leases', runnerLeaseStateRoutes);
+app.route('/v1/runtime-network', runtimeNetworkRoutes);
 // Only the local filesystem control channel knows this key. The front HTTP
 // listener refuses this path; this entry is never a deployment artifact.
 app.post('/__acceptance/dispatch', async c => {
@@ -52,4 +54,5 @@ await build({entryPoints:[path.join(out, 'entry.ts')], outfile:path.join(out, 'w
   banner:{js:'import * as nodeCrypto from "node:crypto"; var require=name=>{if(name==="crypto")return nodeCrypto;throw new Error(`unbundled require ${name}`)};'},
   plugins:[{name:'wasm', setup(b) {b.onResolve({filter:/\.wasm$/}, args => {const input=path.resolve(args.resolveDir,args.path), name=path.basename(input);copyFileSync(input,path.join(out,name));return {path:'./'+name,external:true};});}}]});
 for (const f of ['schema.sql','schema-baseline.sql','schema-baseline.json']) copyFileSync(path.join(api,'schema',f), path.join(out,f));
+copyFileSync(path.join(api,'src/services/runtime_network/wasm/provenance.json'),path.join(out,'authority-provenance.json'));
 writeFileSync(path.join(out, 'receiver-pin.json'), JSON.stringify({sha:pin, local_functional_verification_only:true, baseline:JSON.parse(readFileSync(path.join(out,'schema-baseline.json'))).baseline_migration}));
