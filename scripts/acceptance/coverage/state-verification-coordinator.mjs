@@ -11,7 +11,7 @@ const port = Number(process.env.C2_PORT);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw Error('explicit local front port required');
 if (existsSync('initialized')) throw Error('use a fresh acceptance directory; preserve earlier evidence');
 const control = randomBytes(32).toString('hex'), bundle = path.resolve('bundle');
-const modules = [{type:'ESModule', path:path.join(bundle,'worker.js')}, ...readdirSync(bundle).filter(f=>f.endsWith('.wasm')).map(f=>({type:'CompiledWasm',path:path.join(bundle,f)}))];
+const modules = [{type:'ESModule', path:path.join(bundle,'worker.js')}, ...readdirSync(bundle).filter(f=>!f.startsWith('.') && f.endsWith('.wasm')).map(f=>({type:'CompiledWasm',path:path.join(bundle,f)}))];
 const mf = new Miniflare({modules, compatibilityDate:'2025-09-01', compatibilityFlags:['nodejs_compat'], host:'127.0.0.1', port:0,
   d1Databases:['DB'], r2Buckets:['STORE_BUCKET'], d1Persist:'state/d1', r2Persist:'state/r2',
   bindings:{ACCEPTANCE_CONTROL:control, BETTER_AUTH_SECRET:randomBytes(32).toString('hex')}});
