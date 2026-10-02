@@ -43,6 +43,7 @@ pub mod exploration;
 pub mod failure;
 #[cfg(feature = "planning")]
 pub mod intent;
+pub mod port_operations;
 #[cfg(feature = "planning")]
 pub mod preset;
 #[cfg(feature = "planning")]
