@@ -93,5 +93,74 @@
     "budget-ci-ubuntu-clippy.log": "0e0fb42acc1f588169ab4504fb5c5b767a467ef792a1eaa94d50bb546b57039b",
     "budget-ci-macos.log": "9793b8c1c6b1d5c29e1dc22fe1b88a404a618876c0aa97188521606a8a59d7ac",
     "budget-ci-windows.log": "3f0acb8392896ef0fda8b9e1c9ad83cd4bb04bb8d5ce00d34e1e7a7ef07893bf"
+  },
+  "latest_checks": {
+    "head": "88ee365ce491b0b72fe5ee35792ab3046cadd633",
+    "checks": [
+      {
+        "name": "plan",
+        "conclusion": "SUCCESS",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741628/job/111131024474"
+      },
+      {
+        "name": "cli (ubuntu-latest)",
+        "conclusion": "SUCCESS",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741620/job/111131024623"
+      },
+      {
+        "name": "snapshot",
+        "conclusion": "SUCCESS",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741682/job/111131024931"
+      },
+      {
+        "name": "cli (macos-latest)",
+        "conclusion": "FAILURE",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741620/job/111131024410"
+      },
+      {
+        "name": "cli (windows-latest)",
+        "conclusion": "FAILURE",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741620/job/111131024658"
+      },
+      {
+        "name": "build-local-artifacts (${{ join(matrix.targets, ', ') }})",
+        "conclusion": "SKIPPED",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741628/job/111131104690"
+      },
+      {
+        "name": "build-global-artifacts",
+        "conclusion": "SKIPPED",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741628/job/111131104808"
+      },
+      {
+        "name": "host",
+        "conclusion": "SKIPPED",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741628/job/111131104886"
+      },
+      {
+        "name": "publish-homebrew-formula",
+        "conclusion": "SKIPPED",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741628/job/111131105242"
+      },
+      {
+        "name": "announce",
+        "conclusion": "SKIPPED",
+        "status": "COMPLETED",
+        "detailsUrl": "https://github.com/ato-run/ato/actions/runs/37097741628/job/111131105400"
+      }
+    ],
+    "Ubuntu_after_lint_fix": "PASS",
+    "macOS": "FAIL",
+    "Windows": "FAIL",
+    "explicit_CI_rerun": false
   }
 }
