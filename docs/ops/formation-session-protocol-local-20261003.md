@@ -32,3 +32,11 @@ Producerの入口は`ato form-session`と`ato-formation-session-mcp --connection
 API取消入口はDraft ato-api #730、CI portability/formatterはAto #1478、共通Skillは後続レビュー単位。Skillの配置・実探索計画はその単位で管理する。API cancellationのremote migrationは未適用。
 
 この測定による推論、独立有料API call、Runtime attemptは0。旧測定pin、失敗Search、UNKNOWN、receipt、台帳へ変更なし。マージ、配備、flag変更、通常Run許可も行っていない。
+
+## 入力待ちの限定メタデータ（別測定）
+
+測定ID `formation-session-protocol-local-20261003-02`、実装pin `02c331ddef0336ee90a1c0ae6de1a4ca211d002d`のSource bytesで実施。上の測定01へ結果を追加・付け替えない。
+
+`needs_input`の公開viewは、共通Rust validatorで検査した変数名・型・resource・operation・phase・secret/embedding/temporaryフラグだけを返す。purpose、account、endpoint、tenant、service、obtain/error、grant候補は掲載しない。不正な要件も掲載しない。入力待ち中は推論入力と応答提出を閉じ、消費済みexchangeを維持する。
+
+Session専用テスト10件PASS。非公開値のcanaryと不正要件を含む新しい入力待ちテストを追加した。Worker all-target strict clippyも同じ変更bytesでPASS。実製品、PWA、Runtimeの受入は引き続き未測定。
