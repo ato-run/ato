@@ -37,10 +37,10 @@ class ProducerIsolationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def prepare(self, codex_version="0.46.0"):
+    def prepare(self, codex_version="0.46.0", **network):
         return HELPER.prepare(self.output, "producer-isolation-unit", "a" * 40,
                               self.selected_binary, self.selected_binary, codex_version,
-                              self.selected_binary, "2.1.288", source=self.source)
+                              self.selected_binary, "2.1.288", source=self.source, **network)
 
     def test_fresh_copy_shared_links_and_old_codex_stays_ineligible(self):
         result = self.prepare()
@@ -171,6 +171,83 @@ class ProducerIsolationTests(unittest.TestCase):
         credential.chmod(0o600)
         with self.assertRaisesRegex(HELPER.Rejected, "native_binary_required"):
             HELPER.binary(credential)
+
+    def test_explicit_endpoints_grant_only_exact_tcp_with_no_dns_or_unix_grant(self):
+        result = self.prepare(relay_endpoint="127.0.0.1:43123",
+                              provider_endpoints=["8.8.8.8:443", "1.1.1.1:443"])
+        policy = (self.output / "codex.prepared.sb").read_text()
+        self.assertIn('(allow network-outbound (remote tcp "127.0.0.1:43123"))', policy)
+        self.assertIn('(allow network-outbound (remote tcp "1.1.1.1:443"))', policy)
+        self.assertIn('(allow network-outbound (remote tcp "8.8.8.8:443"))', policy)
+        self.assertNotIn('(allow network-outbound)', policy)
+        self.assertNotIn('network-inbound', policy)
+        self.assertNotIn('system-socket', policy)
+        self.assertNotIn('unix-socket', policy)
+        self.assertNotIn('mDNSResponder', policy)
+        self.assertNotIn('remote udp', policy)
+        self.assertFalse(result['network_policy']['dns_allowed'])
+        self.assertFalse(result['network_policy']['provider_identity_verified'])
+        self.assertFalse(result['native_acceptance_ready'])
+        self.assertTrue(HELPER.verify(self.output)['network_policy'] == result['network_policy'])
+
+    def test_wildcard_hostname_ipv6_url_range_control_and_zero_ports_are_rejected(self):
+        for value in ['*:443', 'api.example.com:443', 'localhost:1234', '[::1]:1234',
+                      'https://127.0.0.1:443', '127.0.0.1:1-65535', '127.0.0.1:0',
+                      '127.0.0.1:65536', '127.0.0.1:0123', '127.0.0.1:443\n(allow default)']:
+            with self.assertRaises(HELPER.Rejected):
+                self.prepare(relay_endpoint=value)
+            self.assertFalse(self.output.exists())
+
+    def test_relay_must_match_broker_numeric_127_0_0_1(self):
+        for value in ['127.0.0.2:1234', '8.8.8.8:443', '0.0.0.0:1234']:
+            with self.assertRaisesRegex(HELPER.Rejected, 'relay_loopback_required'):
+                self.prepare(relay_endpoint=value)
+            self.assertFalse(self.output.exists())
+
+    def test_provider_cannot_expand_to_private_metadata_multicast_or_non_tls_port(self):
+        for value in ['127.0.0.1:443', '10.0.0.1:443', '169.254.169.254:443',
+                      '192.0.2.1:443', '224.0.0.1:443', '0.0.0.0:443', '8.8.8.8:80']:
+            with self.assertRaisesRegex(HELPER.Rejected, 'provider_public_ipv4_tls_port_required'):
+                self.prepare(provider_endpoints=[value])
+            self.assertFalse(self.output.exists())
+
+    def test_provider_duplicates_and_overlong_allowlist_are_rejected(self):
+        for values in [['8.8.8.8:443'] * 2,
+                       ['8.8.8.8:443', '1.1.1.1:443', '9.9.9.9:443', '8.8.4.4:443', '1.0.0.1:443']]:
+            with self.assertRaisesRegex(HELPER.Rejected, 'provider_endpoint_bounds'):
+                self.prepare(provider_endpoints=values)
+            self.assertFalse(self.output.exists())
+
+    def test_network_claim_tampering_and_rehashed_broad_policy_are_rejected(self):
+        self.prepare(relay_endpoint='127.0.0.1:43123')
+        path = self.output / 'manifest.json'
+        saved = json.loads(path.read_text())
+        changed = json.loads(path.read_text())
+        changed['network_policy']['provider_identity_verified'] = True
+        path.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(HELPER.Rejected, 'network_policy_changed'):
+            HELPER.verify(self.output)
+        path.write_text(json.dumps(saved))
+        policy = self.output / 'codex.prepared.sb'
+        policy.write_text('(version 1)\n(allow default)\n')
+        saved['profiles']['codex'] = HELPER.digest(policy)
+        path.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(HELPER.Rejected, 'profile_policy_mismatch'):
+            HELPER.verify(self.output)
+
+    def test_invalid_endpoint_error_does_not_echo_private_argument(self):
+        canary = secrets.token_hex(32)
+        arguments = [sys.executable, str(SKILL / 'scripts/producer-isolation-preflight.py'),
+                     'prepare', '--output', str(self.output), '--measurement-id', 'unit-network-private',
+                     '--execution-pin', 'a' * 40, '--mcp-binary', str(self.selected_binary),
+                     '--codex-binary', str(self.selected_binary), '--codex-version', '0.46.0',
+                     '--claude-binary', str(self.selected_binary), '--claude-version', '2.1.288',
+                     '--provider-endpoint', canary]
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(canary in result.stdout or canary in result.stderr)
+        self.assertTrue(json.loads(result.stderr)['code'] == 'numeric_tcp_endpoint_required')
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":
