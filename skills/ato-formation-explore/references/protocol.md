@@ -33,11 +33,17 @@ cancel後も保存済み状態を照合する。`cleanup: not_confirmed`をclean
 
 Ownerが終了結果を照合すると、`progress`には実行pin、消費round、receiptのContractRef/DerivationRef/attempt ID/digest/`fully_satisfied`などの公開summaryが追加される。これはreceipt本文や観測bodyをProducerへ公開するものではない。ACKはそのsummaryだけで確認できないため、`unknown`を完了済みに読み替えずOwnerの証拠と照合する。
 
-Bridge切断後は接続ファイルのextensionを`status.json`へ置き換えた公開viewがCLI/MCPのfallbackになる。`connected: false`の保存済みviewを現在のRuntime状態として扱わず、最終既知状態として報告する。接続ファイルの直接表示やowner journalの読取へ切り替えない。Ownerが同じSearch/configuration/agent/capabilityのBridgeを再起動した場合、MCPは同じ固定ファイルからloopback addressだけを更新する。semantic bindingが変わった場合は拒否されるため、別Searchへ自動接続しない。
+Bridge切断後は接続ファイルのextensionを`status.json`へ置き換えた公開viewが、限定CLIとOwner側の固定MCPのfallbackになる。`connected: false`の保存済みviewを現在のRuntime状態として扱わず、最終既知状態として報告する。外部relayは稼働中かつ期限内のbrokerを通じてこのviewを取得する。broker停止・relay期限切れ・通信エラーではOwnerへ状態照合を引き継ぎ、ProducerからOwnerの接続ファイルやstatus fileを読みに行かない。
+
+Ownerが同じSearch/configuration/agent/capabilityのBridgeを再起動した場合、固定MCP brokerは同じ固定ファイルからloopback addressだけを更新する。semantic bindingが変わった場合は拒否されるため、別Searchへ自動接続しない。relay descriptorの再発行はOwnerが新しいpathへ行い、Producerの接続先変更には明示した引き継ぎを必要とする。再発行でもSearchの枠・deadlineを補充しない。
 
 ## 共通入力
 
-入力schemaは`ato.formation-reasoning-input/1`。固定Source identity、`frozen_contract_ref`、検査済みinventory/context、operation catalog、Runtime能力、lowering capabilities、過去のDと失敗証拠、残枠が含まれる。`available_variables`は変数のメタデータであり、値ではない。回答可能な`next`には、固定したprompt versionの共通本文が`instructions`として付く。この本文と`input`を合わせて読み、別versionのpromptで補わない。
+入力schemaは`ato.formation-reasoning-input/1`。固定Source identity、`frozen_contract_ref`、検査済みinventory/context、operation catalog、Runtime能力、lowering capabilities、過去のDと失敗証拠、残枠が含まれる。回答可能な`next`には、固定したprompt versionの共通本文が`instructions`として付く。この本文と`input`を合わせて読み、別versionのpromptで補わない。
+
+公開viewは`input_projection_schema: ato.formation-session-public-input/1`、`input_sha256_scope: owner_saved_input`を示す。変数は検査済みslot制約・reuse・期限・取消時刻だけ、Runtimeはcatalogに対応するexact factと型付きavailabilityだけを公開する。owner情報を含め得る自由文、任意fact、host pathは掲載しない。検査済みSource内容はそのまま探索対象として扱う。`exchange.input_sha256`はOwnerが保存した元入力へ応答を結び付けるdigestであり、公開projectionを再hashして置き換えない。保存済み元入力と過去のdigestは書き換えない。
+
+期限後に保存済み応答を確認した場合、`waiting_reason: closed_response_reconciled`となる。これは受領記録だけの照合であり、提案の採用や実行許可ではない。`input: null`を維持し、Ownerの終端・ACK・cleanup確認へ引き継ぐ。
 
 Bridgeから返された待機理由と次の操作を優先する。API側のcall枠とSession exchange枠の台帳を区別し、読み直し・接続し直し・入力待ちで補充しない。prompt versionごとの能力差は入力のcatalogで判断する。
 
