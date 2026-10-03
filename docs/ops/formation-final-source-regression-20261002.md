@@ -142,6 +142,40 @@ dispatch fixture; automatic production Source state provisioning remains pending
 
 ## Remaining acceptance and accounting
 
+The separately preregistered [Kutt Source regression](evidence/formation-kutt-source-final-20261003.json)
+(SHA-256 `475852aebde08c8f486d152a0b9d0695f3763d958ac0099e406937f57b64c875`)
+completed at Ato `da7c452c` / API `9b483d4a`. It began with zero known D,
+inspected eight files through root declarations and explicit imports, and used
+three rounds / seven Codex exchanges in 769.653 seconds. Initial native audit
+refused missing locked `msgpackr-extract`; round 2 added it to the same generic
+offline rebuild alongside `better-sqlite3`. Source-owned migration ran inside
+the contained Runtime. A Source-backed GET guard observed root 302, then the
+typed owner operation used variable references and observed POST 201. Temporary
+JWT binding remained a private Runtime grant. D `ffcbe50c…` produced a fresh,
+fully satisfied receipt for unchanged K `2940ae2d…`. The third round proposed
+no additional execution after observing this success. Submission remains
+`k_reached_awaiting_assessment`, with no normal Run permission or deployment.
+
+Both attempts were durably ACKed under fence 1; claim, Source acquisition and
+result transport policies all retained `max_retries = 3`. Candidate stop was
+confirmed, metadata mismatches empty, byte/attempt reservations zero and both
+registered owner values revoked with encrypted-value count zero. Original
+Search deadline `2026-10-03T05:06:04.881Z` was unchanged. Structured network,
+execution facts and source/dependency/build/launch/verification/cleanup timings
+are retained in the acknowledged Runtime result records. The ready retained
+artifact has 67,475,730 verified bytes and 181,518,590 expanded bytes; these
+are distinct from Source input expansion and Search stored-byte usage. No new
+BuildRecord upload is claimed for this Search (`build_record_ref = null`).
+Functional/persistence evidence retains its separate earlier pin and artifact.
+
+Producer frames and public measurement records contain no owner value body;
+the password scan covered 882 public files. This statement is scoped to those
+records: inspecting the controller source exposed its fixed nonsecret local
+verification email to orchestration tool output. It was not an external account
+or secret, but whole-orchestration value non-disclosure is not claimed. A future,
+unexecuted controller template generates that email privately. The measured
+controller, original Searches, limits and evidence were not changed or rerun.
+
 The Kutt Source regression at the earlier pin stopped without PASS. [Preserved failure](evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. The common terminal correction is implemented in Ato #1476 / API #727. A separately preregistered new Search uses eight Codex exchanges; its original three-round, 10-minute round / 30-minute Search and retry limits remain fixed.
 
 [Actual pre-dispatch budget control](evidence/formation-pre-dispatch-budget-control-20261003.json)
@@ -157,7 +191,8 @@ receiver startup failures and the final observer's pathname/JSON error remain
 preserved. The valid result was collected from saved records without rerunning.
 
 [CI comparison](evidence/formation-budget-terminal-ci-comparison-20261003.json)
-records the new Ubuntu clippy warning and its correction, a passing local full
+records the new Ubuntu clippy warning and its correction, Ubuntu CI PASS at
+`88ee365c`, a passing local full
 CLI clippy check, and the same 13 Activity/CORS failure names on merged API main
 and the new API head (155/168 PASS each). Local Node 25.6.0 differs from CI Node
 22; Linux WebSocket handshake and the macOS worker-start failure remain
@@ -207,7 +242,8 @@ ACKed and encrypted values removed. The permitted artifact is excluded from
 the public evidence scan. Permission-change resume and PWA UI are not measured
 by this pair; earlier UI records keep their own pins.
 
-SVGOMG, OCI and changedetection.io final-pin Source regressions are complete;
+SVGOMG, OCI, changedetection.io and Kutt Source regressions are complete at the
+explicit individual execution pins above;
 changedetection.io functional/state verification is also complete within the
 explicit private acceptance boundary above.
 Current-grant Kutt native/migration/function/state/restart evidence is
