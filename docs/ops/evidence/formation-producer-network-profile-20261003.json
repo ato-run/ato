@@ -1,0 +1,241 @@
+{
+  "schema": "ato.formation-producer-network-profile-review/1",
+  "date": "2026-10-03",
+  "implementation_pin": "237bac3637688730dd98188bbc5ef2727ccc367b",
+  "base_skill_pin": "2b0541b888898c758d50ef6e00bf108a1a5cf22f",
+  "environment": {
+    "platform": "macOS-15.8.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "clang_version": "Apple clang version 17.0.0 (clang-1700.6.4.2)"
+  },
+  "measurements": [
+    {
+      "measurement_id": "formation-producer-isolation-20261003-03",
+      "execution_pin": "b2277d82a011a0f42651b76bc944e0123fa08c28",
+      "public_package_sha256": "8f2f8fd543e07a832185c7898cd1790920eda7170ddfef0d652bbae895463051",
+      "classification": "FAILED_BEFORE_OS_FIXTURE",
+      "mcp_binary_sha256": "d5359a89607e5228703835ab19ad9194ab33ef92bf6b10674c25af1424606c47",
+      "native_acceptance_ready": false,
+      "reason": "Existing macOS secondary loopback alias was unavailable (bind errno49); harness ended before sandbox execution.",
+      "harness": {
+        "checks": [
+          {
+            "target": "ipv4_primary",
+            "bind": true
+          },
+          {
+            "target": "ipv4_secondary",
+            "bind": false,
+            "errno": 49
+          },
+          {
+            "target": "ipv6_primary",
+            "bind": true
+          }
+        ],
+        "runner_exists": true,
+        "failure_record_exists": false,
+        "native_or_auth_invoked": false
+      },
+      "original_cli_error": "preflight_failed"
+    },
+    {
+      "measurement_id": "formation-producer-isolation-20261003-04",
+      "execution_pin": "95d36192054129ad499ec14faab688eda59e2409",
+      "public_package_sha256": "56729ccde312654e21929345e7e78f2995dd1cfd0ec67f6c3ab05034d3f0fead",
+      "classification": "FAILED_SBPL_COMPILATION",
+      "mcp_binary_sha256": "0aca096859d4f4410d3674c0ef061bd572762774b680995d423f2c8d619a62f8",
+      "native_acceptance_ready": false,
+      "reason": "macOS remote TCP grammar rejected numeric IP host; supported localhost host cannot be assumed loopback-only.",
+      "original_failure": {
+        "schema": "ato.formation-producer-isolation-os-fixture-failure/1",
+        "measurement_id": "formation-producer-isolation-20261003-04",
+        "execution_pin": "95d36192054129ad499ec14faab688eda59e2409",
+        "public_package_sha256": "56729ccde312654e21929345e7e78f2995dd1cfd0ec67f6c3ab05034d3f0fead",
+        "code": "kernel_fixture_failed",
+        "fixture_returncode": 65,
+        "stdout_bytes": 0,
+        "stderr_bytes": 277,
+        "native_agent_or_auth_invoked": false,
+        "native_acceptance_ready": false
+      },
+      "bounded_grammar_diagnostic": {
+        "returncode": 65,
+        "stderr_bytes": 277,
+        "error_fragments": {
+          "host must be": true,
+          "localhost": true,
+          "invalid host": false,
+          "unsupported": false,
+          "not supported": false,
+          "invalid network": false,
+          "tcp": true,
+          "port": false,
+          "Syntax error": false,
+          "syntax error": false,
+          "unbound variable": false
+        }
+      }
+    },
+    {
+      "measurement_id": "formation-producer-isolation-20261003-05",
+      "execution_pin": "f3338d3966cee26384137e858ce2ca690acb8352",
+      "public_package_sha256": "1db5f898c8e79a79625a89b1457532d9243bbd6c5cabf076ee24292d3be4a22e",
+      "classification": "FAILED_LOOPBACK_SCOPE",
+      "mcp_binary_sha256": "0aca096859d4f4410d3674c0ef061bd572762774b680995d423f2c8d619a62f8",
+      "native_acceptance_ready": false,
+      "reason": "Live same-host non-loopback interface connection succeeded at the localhost-allowed port; OS loopback boundary not enforced.",
+      "original_failure": {
+        "schema": "ato.formation-producer-isolation-os-fixture-failure/1",
+        "measurement_id": "formation-producer-isolation-20261003-05",
+        "execution_pin": "f3338d3966cee26384137e858ce2ca690acb8352",
+        "public_package_sha256": "1db5f898c8e79a79625a89b1457532d9243bbd6c5cabf076ee24292d3be4a22e",
+        "code": "kernel_boundary_not_enforced",
+        "fixture_returncode": 0,
+        "stdout_bytes": 690,
+        "stderr_bytes": 0,
+        "native_agent_or_auth_invoked": false,
+        "native_acceptance_ready": false,
+        "checks": {
+          "public_skill_read": true,
+          "public_skill_write_denied": true,
+          "private_eight_classes_read_denied": true,
+          "private_eight_classes_write_denied": true,
+          "scratch_write": true,
+          "symlink_escape_denied": true,
+          "fork_inherits_denial": true,
+          "source_direct_launch_denied": true,
+          "shell_exec_denied": true,
+          "security_exec_denied": true,
+          "curl_exec_denied": true,
+          "docker_unix_socket_denied": true,
+          "relay_tcp_allowed": true,
+          "second_loopback_tcp_allowed": true,
+          "relay_wrong_port_denied": true,
+          "relay_ipv6_same_port_allowed": true,
+          "second_loopback_wrong_port_denied": true,
+          "second_ipv6_same_port_allowed": true,
+          "owner_unix_socket_denied": true,
+          "non_loopback_live_tcp_denied": false,
+          "udp_denied": true,
+          "extra_descriptors_absent": true
+        }
+      },
+      "passed_checks": 21,
+      "total_checks": 22,
+      "bounded_connect_diagnostic": {
+        "measurement_id": "formation-producer-isolation-20261003-05-diagnostic",
+        "execution_pin": "f3338d3966cee26384137e858ce2ca690acb8352",
+        "live_existing_non_loopback_interface": true,
+        "outside_sandbox_reachable": true,
+        "inside_sandbox_connect_succeeded": true,
+        "inside_sandbox_permission_denied": false,
+        "stderr_bytes": 0,
+        "runner_sha256": "9037a99d482c9c5dfd858da5ea243b04f9f1d66ab2d15a5cdee5f320c980c20b",
+        "profile_sha256": "73d22a45db9b19219ef642eeb038df761d5d3a86256af4cb4ae919b5fa648843",
+        "host_interface_changed": false,
+        "native_or_auth_invoked": false,
+        "provider_reached": false
+      },
+      "diagnostic_script_sha256": "05a93fda4f2a1448b6f901e3da54f1c2652168c68bbae7248ca00ca8be0b7c7e",
+      "runner_sha256": "45ee089601cbd6bcdddc273e8aae86a8ee3fa8f0764940f2c7fc4f22f984a74f",
+      "profile_sha256": "cfd212e0705cff87d723e31abb623aca3044b3790b9e44d3810bd9081f21a560"
+    },
+    {
+      "measurement_id": "formation-producer-isolation-20261003-06",
+      "execution_pin": "237bac3637688730dd98188bbc5ef2727ccc367b",
+      "public_package_sha256": "c3fcc2140a05fc43b55dd3baa3a8fa69ef596d41aca62df108f88e989f408174",
+      "classification": "PASS_FAIL_CLOSED_PREFLIGHT_ONLY",
+      "mcp_binary_sha256": "0aca096859d4f4410d3674c0ef061bd572762774b680995d423f2c8d619a62f8",
+      "native_acceptance_ready": false,
+      "reason": "Valid relay and provider endpoint requests reject before publication; default Native profiles remain network-denied.",
+      "prepublication": {
+        "measurement_id": "formation-producer-isolation-20261003-06",
+        "execution_pin": "237bac3637688730dd98188bbc5ef2727ccc367b",
+        "public_package_sha256": "c3fcc2140a05fc43b55dd3baa3a8fa69ef596d41aca62df108f88e989f408174",
+        "checks": {
+          "relay_fresh_rejected_before_publication": true,
+          "relay_existing_rejected_before_publication": true,
+          "relay_fresh_output_absent": true,
+          "relay_existing_output_preserved": true,
+          "provider_fresh_rejected_before_publication": true,
+          "provider_existing_rejected_before_publication": true,
+          "provider_fresh_output_absent": true,
+          "provider_existing_output_preserved": true,
+          "native_profiles_network_denied": true,
+          "descriptor_absent": true,
+          "native_acceptance_ready_false": true
+        },
+        "native_or_auth_invoked": false,
+        "os_fixture_invoked": false,
+        "searches": 0,
+        "runtime_attempts": 0,
+        "paid_api_calls": 0
+      },
+      "profiles": {
+        "codex": "3e7ad7885076267670d07fa587691edab8472e636ebd63905c2f7ceb8b940532",
+        "claude-code": "66f2d12d4242bd68a4bdfe314a2d93d330472e24fd2eb285366d7f14626d538a"
+      },
+      "network_policy": {
+        "relay_endpoint": null,
+        "provider_endpoints": [],
+        "dns_allowed": false,
+        "unix_sockets_allowed": false,
+        "provider_identity_verified": false,
+        "relay_os_scope": "none",
+        "relay_egress": "blocked_scope_wider_than_loopback",
+        "provider_egress": "blocked_fixed_public_ip_unsupported"
+      }
+    }
+  ],
+  "verification": [
+    {
+      "command": "python3 -m unittest discover -s skills/ato-formation-explore/tests -p test_producer_isolation.py",
+      "result": "PASS",
+      "tests": 26
+    },
+    {
+      "command": "/usr/bin/clang -Wall -Wextra -Werror -fsyntax-only skills/ato-formation-explore/scripts/producer-isolation-probe.c",
+      "result": "PASS"
+    },
+    {
+      "command": "git diff --check",
+      "result": "PASS"
+    }
+  ],
+  "gates": {
+    "relay_os_egress": "blocked_scope_wider_than_loopback",
+    "provider_os_egress": "provider_egress_fixed_ip_unsupported",
+    "owner_descriptor": "not_supplied_or_read",
+    "descriptor_binding_and_expiry": "unmeasured_Rust_authority_required",
+    "native_tool_inventory": "unmeasured",
+    "native_auth_and_inference": "unmeasured",
+    "codex_version": "0.46.0_ineligible_below_0.99.0_source_floor",
+    "claude_version": "2.1.288_operator_inventory_only",
+    "native_acceptance_ready": false
+  },
+  "boundaries": {
+    "old_01_02_records_modified": false,
+    "source_or_owner_credentials_read": false,
+    "actual_relay_descriptor_or_capability_read": false,
+    "native_agents_invoked": 0,
+    "auth_or_login_invoked": 0,
+    "formation_searches": 0,
+    "inference_dispatches": 0,
+    "runtime_attempts": 0,
+    "paid_api_calls": 0,
+    "public_provider_connections": 0,
+    "host_interface_changes": 0,
+    "deployments": 0,
+    "remote_migrations": 0,
+    "feature_flag_changes": 0
+  },
+  "redaction": {
+    "private_canary_values_published": false,
+    "private_canary_digests_published": false,
+    "raw_stdout_or_stderr_published": false,
+    "non_loopback_address_or_interface_name_published": false
+  },
+  "agent_internal_llm_calls": "unknown",
+  "agent_internal_cost": "unknown"
+}
