@@ -72,10 +72,10 @@ def next_action(view):
         active = sum(a.get("status") in ("pending", "claimed") for a in attempts)
         return "wait" if active == unresolved and not any(
             a.get("status") == "unknown" for a in attempts) else "stop"
-    if view.get("next_operation") == "submit":
-        return "submit"
     if view.get("exchange", {}) and view["exchange"].get("response_saved") is True:
         return "wait"
+    if view.get("next_operation") == "submit":
+        return "submit"
     return "stop" if view.get("next_operation", "").startswith("owner_") else "wait"
 
 
