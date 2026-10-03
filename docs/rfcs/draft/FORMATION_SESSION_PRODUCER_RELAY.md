@@ -55,6 +55,32 @@ descriptors are retained as evidence. Broker shutdown does not cancel a Search.
 
 ## Transport
 
+### Unix socket
+
+On Unix, an owner may select `--relay-socket /absolute/path/to/fresh.sock`
+alongside `--connection` and `--publish-relay`. The same `--relay` client
+recognizes the strict `ato.formation-session-unix-relay/1` descriptor, which
+replaces `address` with `socket` and retains the same capability and binding.
+The TCP descriptor and its wire bytes stay unchanged. This adds a physical
+transport to the existing four tools, not another CandidateProducer engine.
+
+The socket path must be absolute, canonical through its parent, free of control
+characters and at most 100 UTF-8 bytes. The owner never unlinks a conflicting
+file, socket or symlink. Failed publication removes only the socket just created;
+shutdown removes it only when its saved device/inode still matches. The expired
+descriptor remains as evidence. Cleanup never cancels or reopens a Search.
+
+Both transports call the same authenticated frame handler. Unix connections use
+a bounded connect, nonblocking I/O and poll against the absolute frame deadline.
+Darwin rejects timeout updates after a peer closes even when unread response
+bytes remain; poll lets the same saved response be read and reconciled after a
+disconnect without another inference, execution or budget reservation.
+
+An OS profile can allow only the literal Unix socket, while denying owner files,
+other sockets and TCP. Mode 0600 remains publication hygiene, not isolation.
+Native authentication, provider egress, Skill discovery and real same-K receipt
+acceptance still require separate evidence with the selected product versions.
+
 The broker binds only `127.0.0.1` on an ephemeral port. Both directions use
 bounded newline-delimited JSON, one request/reply per connection. The client
 connects only to its exact saved loopback address, without retries or fallback.
