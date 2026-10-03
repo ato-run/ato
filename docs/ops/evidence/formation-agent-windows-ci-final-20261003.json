@@ -1,0 +1,74 @@
+{
+  "schema": "ato.formation-agent-windows-ci-final/1",
+  "measurement_id": "formation-agent-ci-20261003-02",
+  "date": "2026-10-03",
+  "prior_measurement": "formation-agent-ci-20261003-01",
+  "scope": "follow-up Windows-target clippy after Session lint refactor; no prior measurement rewritten",
+  "environment": {
+    "host": "macOS 15.8.1 arm64",
+    "rust": "1.96.0 (ac68faa20 2026-05-25)",
+    "target": "x86_64-pc-windows-gnu"
+  },
+  "committed_HEAD_at_start": "e4124e1150c4b408ce8a53dee0a99847e5208c65",
+  "committed_HEAD_after_test_import_fix": "b3c97591e9c76ad37eae123f9b5af75d5e332ec0",
+  "parallel_uncommitted_Rust_source_sha256": {
+    "apps/cli/src/formation_exploration.rs": "daa215d56b40226e3e998b8fb939ededb8429889e2707f0262270cb984e4efd7",
+    "apps/cli/src/formation_session.rs": "9eeb84b676e425141a2d10ac43fd932c751295cfedae42ee059f52cb4bd9be3d",
+    "apps/cli/src/lib.rs": "b415e391cb9e6db2963d692442f790876e0a594bcdd78da19edd4e035166b75b",
+    "apps/formation-worker/src/runtime_network.rs": "ac85b6af96331a892b2f0c6cc465d5ac0b34598380febaec542eb25ada8f01bc",
+    "apps/formation-worker/src/runtime_network/exploration.rs": "a96d278a5d571d3df71d3572c3c2935b6e7e4631988c8c8f22af58113578b9c4",
+    "apps/formation-worker/src/runtime_network/proposal.rs": "48f803c7d2e8e75086de283325cd9fcfc9dc84073c08db68977bd0e7c2276862",
+    "apps/formation-worker/src/runtime_network/proposal/reasoning.rs": "a128f72a5cb3ac964c540179bc05f36aad66ca837e20e96e2ff5af50f5eb5d23",
+    "apps/formation-worker/src/runtime_network/proposal/reasoning/session.rs": "c11c2acf2a407c5f5717444d268300a822214bb82b9476fb16e688abf79f4b9d",
+    "apps/formation-worker/src/runtime_network/proposal/tests.rs": "bf51fe4afe95510f18d7523cc7c81db13bb3f70ef53bec86740c7aed7671e7d4",
+    "lib/formation/src/execution.rs": "4957e0cf974fd5b7b2041abde72ee5633ad5c1d74a1fdc0c07df09b19c214364",
+    "lib/formation/src/intent.rs": "6df3bd53b3539f42933758ce3a3e6d10ec2526192cc8286fdf4c56c19a1e28ab",
+    "lib/formation/src/lib.rs": "94236c5dd169662f1b1b854090a0afb6ca054d6dfdc4debb58d80f210b9ee2c6",
+    "lib/formation/src/process_binding.rs": "93925d4cf722a6de72d09377c9d8a86cd525e916bc4d101f3c712af7e007d582",
+    "lib/formation/src/projection.rs": "ece67c1f48aa24eab174dca20980ec8c62198af804b78e28ab61bb99cf703cbb",
+    "lib/formation/src/retained.rs": "d13fa71759d57d233a1cf1fe98ab6319cbe6e542fb7a6475325a6c03fbf81622",
+    "lib/formation/src/search.rs": "a4fa64718c2a066302bc9378c306617e2819cd2245bba6554557547159fd524a",
+    "lib/formation/tests/exploration_search.rs": "1085d252fbb04c2961bc54f568584021b2a72edd4dd14e33d1cc4df6701277ad",
+    "tools/receipt-authority/src/lib.rs": "09905f4a1d6bd4cc0534161fc9b20ea4a87b889686a4c481d8217152b945bc57"
+  },
+  "parallel_source_snapshot_sha256": "a1d2473da8632715d156af1060a566346ccf752fb4d0b99ee9930b533e9c8d9d",
+  "important_source_sha256": {
+    "apps/formation-worker/src/runtime_network/proposal/reasoning/session.rs": "c11c2acf2a407c5f5717444d268300a822214bb82b9476fb16e688abf79f4b9d",
+    "apps/cli/src/formation_session.rs": "9eeb84b676e425141a2d10ac43fd932c751295cfedae42ee059f52cb4bd9be3d",
+    "apps/formation-worker/src/runtime_network/exploration.rs": "a96d278a5d571d3df71d3572c3c2935b6e7e4631988c8c8f22af58113578b9c4",
+    "apps/formation-worker/tests/browser_verifier_protocol_v1.rs": "3fd0fb7a6537b70847d18d5a38a6fbee1d67fe49508ccbcfc67a047f04612cfa"
+  },
+  "command": "CARGO_TARGET_DIR=$PWD/.tmp/ci/windows-target TMPDIR=$PWD/.tmp/ci/scratch cargo +1.96.0 clippy --locked --offline -p ato-cli -p ato-formation-worker --target x86_64-pc-windows-gnu --all-targets -- -D warnings",
+  "first_followup_result": {
+    "exit_code": 101,
+    "failure": "existing browser_verifier_protocol_v1.rs Duration/Instant unused on non-Unix",
+    "file_unchanged_from_31a6d6b4_sha256": "cf56d5877e877eb2e3a77df6f09085aaabb759ddd1fd8d69a376ede776c930df",
+    "log": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/windows-cli-worker-session-final.log",
+      "sha256": "20f93fee17889b0c1977c1a4879167546c764ddc7922be11e1a0c27c4a2be7d9"
+    }
+  },
+  "fix": "add #[cfg(unix)] to time import; its existing uses are inside an existing Unix-only test; no new test skip or lint suppression",
+  "final_result": {
+    "exit_code": 0,
+    "clippy": "PASS for CLI and Formation worker, all targets, warnings denied",
+    "elapsed_compiler_seconds": 3.77,
+    "log": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/windows-cli-worker-session-final-after-import.log",
+      "sha256": "32ab3d87687d8fc8ef384c9db97d098e33f575c18107f33a95e337527d80e89b"
+    }
+  },
+  "Session_modules_modified_by_CI_agent": false,
+  "native_Windows_execution": false,
+  "CI_rerun": false,
+  "new_paid_API_calls": 0,
+  "deployment": false,
+  "remote_migration": false,
+  "feature_flag_change": false,
+  "remaining": [
+    "GNU cross-target check does not replace native Windows/MSVC execution",
+    "native Linux API browser check is still pending",
+    "original macOS CI child log is absent, so its exact cause remains unproven",
+    "prior exact API base/head 13 Activity/CORS failures and telemetry crypto warning remain"
+  ]
+}
