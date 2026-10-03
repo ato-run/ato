@@ -28,15 +28,16 @@ pub(crate) fn execute(
     control: Option<&ExecutionControl>,
     evidence: &mut Vec<PortOperationObservation>,
 ) -> Result<()> {
-    if derivation.runtime_port_operations.is_empty() {
-        return Ok(());
-    }
-    let control = control.filter(|_| bound).ok_or_else(|| {
-        failure(
+    if derivation
+        .runtime_port_operations
+        .iter()
+        .any(|operation| !operation.legacy_exploration_supported())
+    {
+        return Err(failure(
             "unsupported_capability",
-            "HTTP Port operations require a bound scoped Runtime and frozen deadline",
-        )
-    })?;
+            "advanced HTTP operations require a separately approved functional plan",
+        ));
+    }
     ato_formation::port_operations::validate_bound(
         &derivation.runtime_port_operations,
         &derivation.ports,
@@ -50,11 +51,81 @@ pub(crate) fn execute(
             "HTTP Port operation declaration is not bound",
         )
     })?;
+    execute_operations(
+        &derivation.runtime_port_operations,
+        endpoints,
+        variables,
+        bound,
+        control,
+        evidence,
+    )
+}
+
+pub fn execute_acceptance(
+    derivation: &BoundDerivation,
+    plan: &ato_formation::functional_acceptance::FunctionalAcceptanceV1,
+    ceiling: &ato_formation::requirements::ExecutionRequirements,
+    endpoints: &BTreeMap<String, String>,
+    variables: &[ResolvedVariable],
+    control: &ExecutionControl,
+    evidence: &mut Vec<PortOperationObservation>,
+) -> Result<()> {
+    plan.validate(derivation, ceiling).map_err(|_| {
+        failure(
+            "functional_acceptance_invalid",
+            "functional HTTP actions exceed the approved scope",
+        )
+    })?;
+    execute_operations(
+        &plan.operations,
+        endpoints,
+        variables,
+        true,
+        Some(control),
+        evidence,
+    )
+}
+
+fn execute_operations(
+    operations: &[ato_formation::port_operations::RuntimePortOperation],
+    endpoints: &BTreeMap<String, String>,
+    variables: &[ResolvedVariable],
+    bound: bool,
+    control: Option<&ExecutionControl>,
+    evidence: &mut Vec<PortOperationObservation>,
+) -> Result<()> {
+    if operations.is_empty() {
+        return Ok(());
+    }
+    let control = control.filter(|_| bound).ok_or_else(|| {
+        failure(
+            "unsupported_capability",
+            "HTTP Port operations require a bound scoped Runtime and frozen deadline",
+        )
+    })?;
     control.remaining(AttemptPhase::Launch)?;
-    // Resolve exactly the current redeemed grants. No fallback, store search or
-    // value serialization is allowed here. Validate all inputs before dispatch.
-    for operation in &derivation.runtime_port_operations {
-        for name in operation.request.json_bindings.values() {
+    // Validate all initial grants before dispatch. Transient response bindings
+    // are created only by preceding operations on this same logical Port.
+    let mut captured = BTreeMap::new();
+    let mut sessions = BTreeMap::new();
+    for operation in operations {
+        for name in operation
+            .request
+            .binding_names()
+            .chain(operation.response_checks.iter().map(|c| &c.binding))
+            .chain(
+                operation
+                    .response_bindings
+                    .iter()
+                    .filter_map(|c| c.json_object_key.as_ref().map(|selector| &selector.binding)),
+            )
+        {
+            if captured
+                .get(name)
+                .is_some_and(|port| port == &operation.port)
+            {
+                continue;
+            }
             if variables
                 .iter()
                 .filter(|v| v.phase == ExecutionPhase::Runtime && v.value.name() == name)
@@ -67,32 +138,53 @@ pub(crate) fn execute(
                 ));
             }
         }
-    }
-    for (operation_index, operation) in derivation.runtime_port_operations.iter().enumerate() {
-        control.remaining(AttemptPhase::Launch)?;
-        let target: SocketAddr = endpoints
-            .get(&operation.port)
-            .and_then(|s| s.strip_prefix("http://"))
-            .and_then(|s| s.parse().ok())
-            .filter(|a: &SocketAddr| a.ip().is_loopback() && a.port() != 0)
-            .ok_or_else(|| {
+        for capture in &operation.response_bindings {
+            captured.insert(capture.binding.clone(), operation.port.clone());
+        }
+        if !sessions.contains_key(&operation.port) {
+            let target: SocketAddr = endpoints
+                .get(&operation.port)
+                .and_then(|s| s.strip_prefix("http://"))
+                .and_then(|s| s.parse().ok())
+                .filter(|a: &SocketAddr| a.ip().is_loopback() && a.port() != 0)
+                .ok_or_else(|| {
+                    failure(
+                        "unsupported_capability",
+                        "HTTP Port has no assigned loopback endpoint",
+                    )
+                })?;
+            let session = http::Session::new(target).map_err(|_| {
                 failure(
                     "unsupported_capability",
                     "HTTP Port has no assigned loopback endpoint",
                 )
             })?;
+            sessions.insert(operation.port.clone(), session);
+        }
+    }
+    for (operation_index, operation) in operations.iter().enumerate() {
+        control.remaining(AttemptPhase::Launch)?;
+        let session = sessions
+            .get_mut(&operation.port)
+            .expect("prevalidated Port session");
         let mut request = |template: &RequestTemplate, guard: bool| -> Result<u16> {
-            let transport = http::RequestTemplate {
-                method: match template.method {
-                    Method::Get => http::Method::Get,
-                    Method::Post => http::Method::Post,
-                },
-                path: template.path.clone(),
-                json_bindings: template.json_bindings.clone(),
+            // These conversions contain declaration metadata, never resolved values.
+            let transport: http::RequestTemplate =
+                serde_json::from_value(serde_json::to_value(template)?)?;
+            let captures: Vec<http::ResponseBinding> = if guard {
+                vec![]
+            } else {
+                serde_json::from_value(serde_json::to_value(&operation.response_bindings)?)?
             };
-            let result = http::invoke(
-                target,
+            let checks: Vec<http::ResponseCheck> = if guard {
+                vec![]
+            } else {
+                serde_json::from_value(serde_json::to_value(&operation.response_checks)?)?
+            };
+            let result = session.invoke(
                 &transport,
+                &captures,
+                &checks,
                 |name| {
                     variables
                         .iter()
@@ -117,6 +209,23 @@ pub(crate) fn execute(
                         http::Observation::ResponseStatus { status } => {
                             ato_formation::port_operations::Observation::ResponseStatus { status }
                         }
+                        http::Observation::ResponseCheck { check, matched } => {
+                            ato_formation::port_operations::Observation::ResponseCheck {
+                                check: serde_json::from_value(
+                                    serde_json::to_value(check).map_err(|_| {
+                                        AdapterError::Operation(
+                                            "HTTP observation metadata invalid".into(),
+                                        )
+                                    })?,
+                                )
+                                .map_err(|_| {
+                                    AdapterError::Operation(
+                                        "HTTP observation metadata invalid".into(),
+                                    )
+                                })?,
+                                matched,
+                            }
+                        }
                     };
                     evidence.push(PortOperationObservation {
                         operation_index,
@@ -133,7 +242,7 @@ pub(crate) fn execute(
                     control.remaining(AttemptPhase::Launch)?;
                     Err(failure(
                         "source_runtime_http_operation_failed",
-                        "declared HTTP interaction did not return a complete status; request is not automatically replayed",
+                        "declared HTTP interaction did not return its required response; request is not automatically replayed",
                     ))
                 }
             }
@@ -144,6 +253,7 @@ pub(crate) fn execute(
                     method: Method::Get,
                     path: guard.path.clone(),
                     json_bindings: BTreeMap::new(),
+                    ..Default::default()
                 },
                 true,
             )?;
@@ -202,9 +312,11 @@ mod tests {
                 method: Method::Post,
                 path: "/source-declared/owner".into(),
                 json_bindings: BTreeMap::from([("password".into(), "OWNER_INPUT".into())]),
+                ..Default::default()
             },
             accepted_statuses: vec![201],
             when: None,
+            ..Default::default()
         };
         d.requirements.authority.push(operation.authority());
         d.runtime_port_operations.push(operation);
@@ -410,5 +522,182 @@ mod tests {
             "round_deadline_exceeded"
         );
         assert_eq!(evidence.len(), 1);
+    }
+
+    fn functional_chain() -> ato_formation::functional_acceptance::FunctionalAcceptanceV1 {
+        serde_json::from_value(json!({
+            "schema":"ato.functional-http-acceptance/1", "variables":[], "operations":[
+                {"port":"app.http", "request":{"method":"POST","path":"/login","json_bindings":{"password":"OWNER_INPUT"}}, "accepted_statuses":[200], "response_bindings":[{"binding":"TOKEN","json_pointer":"/token","scalar":"string","max_bytes":128}]},
+                {"port":"app.http", "request":{"method":"POST","path":"/entities","json_bindings":{"target":"OWNER_INPUT"},"cookies":true,"cookie_bindings":{"token":"TOKEN"}}, "accepted_statuses":[201], "response_bindings":[{"binding":"ENTITY_ID","json_pointer":"/id","scalar":"string","max_bytes":128},{"binding":"ENABLED","json_pointer":"/enabled","scalar":"boolean","max_bytes":8}], "response_checks":[{"json_pointer":"/target","binding":"OWNER_INPUT"}]},
+                {"port":"app.http", "request":{"method":"PUT","path":"/entities/{id}","path_bindings":{"id":"ENTITY_ID"},"json_bindings":{"paused":"ENABLED"},"header_bindings":{"x-api-key":{"binding":"TOKEN","encoding":"direct"}},"cookies":true}, "accepted_statuses":[200], "response_checks":[{"json_pointer":"/paused","binding":"ENABLED"}]},
+                {"port":"app.http", "request":{"method":"GET","path":"/entities/{id}","path_bindings":{"id":"ENTITY_ID"},"json_bindings":{},"cookies":true}, "accepted_statuses":[302], "response_checks":[{"header_name":"location","binding":"OWNER_INPUT"}]}
+            ]
+        })).unwrap()
+    }
+    fn receive_head_and_json(socket: &mut std::net::TcpStream) -> (String, serde_json::Value) {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).unwrap();
+        (
+            head,
+            if body.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&body).unwrap()
+            },
+        )
+    }
+    fn write_private_json(socket: &mut std::net::TcpStream, status: u16, body: &str) {
+        write!(socket,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+    }
+    #[test]
+    fn approved_functional_plan_uses_private_transient_state_without_changing_d_or_k() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (head, body) = receive_head_and_json(&mut socket);
+            assert!(head.starts_with("POST /login "));
+            assert_eq!(body["password"], "https://private-url-canary.invalid/path");
+            write_private_json(&mut socket, 200, r#"{"token":"private-token-canary"}"#);
+            drop(socket);
+            let (mut socket, _) = listener.accept().unwrap();
+            let (head, body) = receive_head_and_json(&mut socket);
+            assert!(head.starts_with("POST /entities "));
+            assert!(head.contains("cookie: token=private-token-canary\r\n"));
+            assert_eq!(body["target"], "https://private-url-canary.invalid/path");
+            write_private_json(
+                &mut socket,
+                201,
+                r#"{"id":"private-id-canary","enabled":true,"target":"https://private-url-canary.invalid/path"}"#,
+            );
+            drop(socket);
+            let (mut socket, _) = listener.accept().unwrap();
+            let (head, body) = receive_head_and_json(&mut socket);
+            assert!(head.starts_with("PUT /entities/private-id-canary "));
+            assert!(head.contains("x-api-key: private-token-canary\r\n"));
+            assert!(head.contains("cookie: token=private-token-canary\r\n"));
+            assert_eq!(body["paused"], true);
+            write_private_json(&mut socket, 200, r#"{"paused":true}"#);
+            drop(socket);
+            let (mut socket, _) = listener.accept().unwrap();
+            let (head, body) = receive_head_and_json(&mut socket);
+            assert!(head.starts_with("GET /entities/private-id-canary "));
+            assert!(body.is_null());
+            socket.write_all(b"HTTP/1.1 302 OK\r\nLocation: https://private-url-canary.invalid/path\r\nContent-Length: 0\r\n\r\n").unwrap();
+            drop(socket);
+            listener.set_nonblocking(true).unwrap();
+            assert!(listener.accept().is_err());
+        });
+        let d = derivation();
+        let original_d = d.derivation_ref().unwrap();
+        let plan = functional_chain();
+        let values = [ResolvedVariable::new(
+            &d.variable_bindings[0],
+            "formation-variable:owned-current-grant".into(),
+            "https://private-url-canary.invalid/path".into(),
+        )
+        .unwrap()];
+        let control = ExecutionControl::new(crate::control::now_ms() + 2000);
+        let mut evidence = vec![];
+        execute_acceptance(
+            &d,
+            &plan,
+            &d.requirements,
+            &BTreeMap::from([("app.http".into(), format!("http://{target}"))]),
+            &values,
+            &control,
+            &mut evidence,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(d.derivation_ref().unwrap(), original_d);
+        assert_eq!(
+            evidence
+                .iter()
+                .filter(|event| matches!(
+                    event.observation,
+                    ato_formation::port_operations::Observation::ResponseCheck {
+                        matched: true,
+                        ..
+                    }
+                ))
+                .count(),
+            3
+        );
+        let public = serde_json::to_string(&evidence).unwrap();
+        assert!(!public.contains("canary"));
+        assert!(!public.contains("formation-variable:"));
+        assert!(!public.contains("127.0.0.1"));
+    }
+    #[test]
+    fn advanced_d_and_unapproved_input_dependency_refuse_before_dispatch() {
+        let mut d = derivation();
+        let plan = functional_chain();
+        let endpoint = BTreeMap::from([("app.http".into(), "http://127.0.0.1:1".into())]);
+        let control = ExecutionControl::new(crate::control::now_ms() + 2000);
+        let mut evidence = vec![];
+        d.runtime_port_operations = plan.operations.clone();
+        let error = execute(
+            &d,
+            &endpoint,
+            &[input(&d)],
+            true,
+            Some(&control),
+            &mut evidence,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<FormationFailure>().unwrap().code,
+            "unsupported_capability"
+        );
+        assert!(evidence.is_empty());
+        let mut missing = functional_chain();
+        missing.operations[0].response_bindings.clear();
+        let error = execute_acceptance(
+            &derivation(),
+            &missing,
+            &derivation().requirements,
+            &endpoint,
+            &[],
+            &control,
+            &mut evidence,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<FormationFailure>().unwrap().code,
+            "functional_acceptance_invalid"
+        );
+        assert!(evidence.is_empty());
+        let error = execute_acceptance(
+            &derivation(),
+            &plan,
+            &derivation().requirements,
+            &endpoint,
+            &[],
+            &control,
+            &mut evidence,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<FormationFailure>().unwrap().code,
+            "needs_input"
+        );
+        assert!(evidence.is_empty());
     }
 }

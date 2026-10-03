@@ -46,6 +46,7 @@ pub mod intent;
 pub mod port_operations;
 #[cfg(feature = "planning")]
 pub mod preset;
+pub mod process_binding;
 #[cfg(feature = "planning")]
 pub mod projection;
 pub mod receipt;
@@ -67,3 +68,5 @@ pub mod search;
 pub mod proposal;
 
 pub mod source_oci_plan;
+
+pub mod functional_acceptance;
