@@ -46,6 +46,20 @@ macOS/Windows FAIL。CI依存 #1478を含まないheadであり、失敗対象�
 同じ。元macOS worker失敗の具体的な原因は未確定。API `57991090` のActivity/CORS13失敗名は
 exact base/headと一致、WebSocket fixtureはCI #729が未包含。CI全面成功とは扱わない。
 
+後続のCI単独観測は別pinで記録する。Ato CI #1478の `5798e23d` は
+[CLI run](https://github.com/ato-run/ato/actions/runs/37109321016)でUbuntu/macOS PASS。
+Windowsはcompile後にPortable Application 15件中8件がattempt journal保存で失敗した。
+通常のdirectory open/syncがWindowsでAccessDeniedになる境界を、同期済fileの
+same-directory write-through置換とrequest lockへ修正した。新コードは `478ab485`、
+PR内の同じ変更は `384457c9`。macOS journal 7件とWindows GNU strict clippyはPASS、
+Windows nativeの新8件・portable全体はCIで確認する。元macOS失敗の原因確定や
+任意storageの電源断耐久性の証明として扱わない。
+
+API CI #729の `dfd6ec10` は
+[run](https://github.com/ato-run/ato-api/actions/runs/37106840393)の
+instance-state-syncとChromium/WebKitの関連browser stepがPASS。
+Activity/CORSは既存13失敗が残る。CI全面成功とは扱わない。
+
 ## 実探索前のgateと新規計画
 
 新しい計画はSkill PRの `docs/ops/formation-agent-session-acceptance-plan-20261003.json`。
@@ -70,6 +84,14 @@ Runtime案はfreshな隔離Linux Coordinator。実行pin、Node/npm/toolchainと
 実検出/明示起動、認証、固定MCPだけのtool inventory、OS隔離とprovider通信の実測が必要。
 Claude Code 2.1.288もversion確認にとどまる。0600、文書、agent名だけのfixtureを
 private値非露出/実製品対応の証明にしない。未解決attempt/UNKNOWNを再実行しない。
+
+Producer通信の実測で新しい未成立gateが確認された。macOSの数値IP制限はprofileを
+compileできず、localhost制限は同hostの非loopback interfaceにも接続できた。
+Skill補助の実装pin `237bac36` はrelay/provider要求を公開前に拒否する。
+[失敗と拒否の記録](https://github.com/ato-run/ato/blob/755f0b359ab8a3f87699f1abbe46883683e3037f/docs/ops/formation-producer-network-profile-20261003.md)
+を保持し、要求したloopback境界・provider通信・実Native起動を成功と扱わない。
+新計画の承認だけではこのgateを解消しない。必要な通信境界を成立させた環境と
+実製品の認証/tool inventoryを確認してからSearchを開始する。
 
 機能/保存/再起動はAPI #731の
 `docs/ops/formation-v0/functional-acceptance-proposal-20261003.{json,md}` にある別提案。
