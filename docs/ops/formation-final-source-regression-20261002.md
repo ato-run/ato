@@ -9,7 +9,13 @@ three required WASMs. Receipt authority remains `0fd912f6754541a3cbfe33cd6f0f573
 The subsequent head `5f3bd350` changes the acceptance ACK observer only; it
 reads completed attempt IDs from root-owned delivery records without publishing
 tickets or weakening permissions. Earlier `c0eec529` contains evidence/docs only.
-No application or Runtime code changed after this execution pin.
+The SVGOMG, OCI, changedetection.io and input controls below retain these
+execution pins. The later pre-dispatch budget correction uses Ato
+`da7c452c1dcd6011399d2e12c7cb47e653e40ccd` / API
+`9b483d4a7df9aa2370636bd1b60c2fbcda98320b`; it does not relabel those earlier
+measurements. Ato `252d07a0` removes a redundant `Ok(...?)` only, after freezing
+the new binaries. [Budget control evidence](evidence/formation-pre-dispatch-budget-control-20261003.json)
+records the new execution pin and receipt-authority hash.
 
 ## SVGOMG
 
@@ -136,7 +142,26 @@ dispatch fixture; automatic production Source state provisioning remains pending
 
 ## Remaining acceptance and accounting
 
-The final-pin Kutt Source regression stopped without PASS. [Preserved failure](evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. A common terminal-classification fix and fresh Source acceptance remain pending.
+The Kutt Source regression at the earlier pin stopped without PASS. [Preserved failure](evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. The common terminal correction is implemented in Ato #1476 / API #727. A separately preregistered new Search uses eight Codex exchanges; its original three-round, 10-minute round / 30-minute Search and retry limits remain fixed.
+
+[Actual pre-dispatch budget control](evidence/formation-pre-dispatch-budget-control-20261003.json)
+(SHA-256 `3be6a33a946e4f0e3ffa47c8d508967b9b1d2bb1f6180ec0fa2a7b5ced320055`)
+consumes six deliberately invalid repeated inspections in a negative fixture.
+It ends as `budget_exhausted` in 2.212 seconds, creates no seventh input,
+provider-call row or Runtime attempt, and leaves all reservations zero.
+The legacy round status remains `provider_error` with authenticated
+`call_budget_exhausted` pre-dispatch evidence; the shared Rust Search authority
+owns the terminal classification. No actual Requester restart is claimed;
+saved-exchange restart/recovery is covered by the Worker unit test. Three
+receiver startup failures and the final observer's pathname/JSON error remain
+preserved. The valid result was collected from saved records without rerunning.
+
+[CI comparison](evidence/formation-budget-terminal-ci-comparison-20261003.json)
+records the new Ubuntu clippy warning and its correction, a passing local full
+CLI clippy check, and the same 13 Activity/CORS failure names on merged API main
+and the new API head (155/168 PASS each). Local Node 25.6.0 differs from CI Node
+22; Linux WebSocket handshake and the macOS worker-start failure remain
+unreproduced CI limitations. These failures are not billing failures or green CI.
 
  [The interrupted prior exchange](evidence/formation-kutt-unanswered-round-20261003.json)
 (SHA-256 `af14132136eb99ff85201731ce197a6330f8773b6fa6a038876874f641df2bfd`)
