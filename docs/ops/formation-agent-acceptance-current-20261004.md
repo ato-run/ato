@@ -8,6 +8,12 @@ Session共通化 #1479 → 共通Skill #1480 → この受入記録の順でレ�
 
 今回のunique app成功はCodex 1、Claude Code 1、独立API 0。両Nativeは初回PASS 0、失敗後修正PASS 1で、同じSVGOMGなので合算unique appは1。Kutt機能fixtureを加算しない。Claudeの全SDK tool出力/Native stderrで、private生成email、Coordinator credential、RAMだけで照合したNative provider credentialのcanary漏出0。内部LLM call/token/費用はunknown。Claude測定launcher blobはSkill最終headと同一。Codex測定後との差は設定model bindingのguardと文書で、成功pinを後続headへ付け替えない。実Nativeの枠切れ・入力待ちなど、残る停止ケースの受入はSource成功と分け、未確認を完了と扱わない。
 
+停止ケースを追加した。実Claude Codeの新文脈で、値や成功Dなしの制御Node Sourceを読み、未提供のowner入力に対して共通typed declineを提出し、`needs_input`で停止した。1 exchange/1 round/Runtime attempt 0。これはD提案前の不足入力辞退であり、実PWAで確認したRuntime変数pause/resumeとは別。expanded budget 0のケースはCoordinatorがSource admissionを409 `search_budget_exhausted`で拒否し、Search/Bridge/Native文脈/実行を作らなかった。10秒の元deadlineケースはRequester/authorityが`deadline_exceeded`で停止し、後から渡したNative入口も推論前に拒否した。予算拒否・期限拒否では実モデルを起動していない。[停止証拠](evidence/formation-native-stop-20261004.json)。
+
+事前集計に未回答のquota取消roundを含めていなかった誤りがある。Coordinatorが割り当てたroundは13で、計画12を1超過した。応答完成済み11だけを消費総数と扱わない。exchange 15/28、Runtime attempt 7/8、inspection 0/16、時間1368/7200秒、identifierは未作成2を含め10。最後の期限ケースによる追加推論・実行は0だが、超過を保持して追加Native Searchを停止した。元のSearch上限・API台帳・旧結果は変更していない。[集計証拠](evidence/formation-native-budget-audit-20261004.json)。
+
+Owner受入の開始前集計を、既存CLIのstatusと保存済みviewを読む薄い `scripts/acceptance/coverage/native-session-budget.py` へ分離した。取消・未回答・予約attemptも数え、再接続や古いsnapshotで消費量を減らさない。binding変更・不足証拠はfail closed。関連4test PASS、実台帳でも追加開始を拒否した。実SDKによるSource探索/復旧と、厳密fixtureだけで確認したUNKNOWN切断などを分け、完全受入のDoneとはしない。
+
 現在のNative入口へ終了済みCodex/Claude Searchを渡す負例は、両方とも新しいNative文脈・推論・Runtime実行の作成前に停止した。全保存済みJSON/journalのSHAは不変、Search/exchange/attempt追加は0。これは実Native entryのadmission検証で、実LLMによるneeds_input/UNKNOWN停止とは分ける。[終了済みSearchの入口証拠](evidence/formation-native-terminal-entry-20261004.json)。
 
 [Codex実Source証拠](evidence/formation-native-codex-source-20261004.json)、[OS別CI証拠](evidence/formation-native-platform-ci-20261004.json)。Session `8bd25250` のUbuntu/macOS/Windows実CLI CIはPASS。WindowsのMSVC実行stepとjournal検査を記録した。旧Linux WebSocket・macOS worker失敗の原因は未再現であり、現headのgreenを旧原因の解明へ読み替えない。
