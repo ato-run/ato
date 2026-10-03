@@ -1939,6 +1939,15 @@ impl ConnectedWorker {
             result,
             stop_confirmed: true,
         };
+        // A host-boundary Runner is a machine whose public address is the
+        // provider's proxy, reachable by anyone. Its Surface is published
+        // only behind the assertion gate; a lease that carries no key would
+        // publish the workload ungated, so nothing of it starts.
+        if let Err(error) =
+            require_surface_gate(self.config.isolation, lease, &self.config.runner_id)
+        {
+            return not_started(Err(error));
+        }
         let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
             self.api.client.clone(),
             self.api.base.clone(),
@@ -2154,7 +2163,8 @@ impl ConnectedWorker {
         // proves it came through the app proxy. When the claim carried no
         // assertion key the gate is absent and the proxy passes through —
         // that is exactly the state in which the control plane cannot sign
-        // assertions, so nothing enforceable is lost.
+        // assertions, so nothing enforceable is lost. A host-boundary Runner
+        // never reaches here without a key (`require_surface_gate`).
         let _surface_gate = TcpProxy::start_with_mux(
             self.config.surface_listen,
             ProxyTarget::Tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
@@ -4955,6 +4965,25 @@ fn strip_http_prelude_header(head: &[u8], tail: &[u8], name: &str) -> Vec<u8> {
     out
 }
 
+/// Refuse to serve a lease whose Surface could not be gated. Only the
+/// host-boundary mode requires it: there the slot is a public provider URL and
+/// nothing in front of it authenticates. Other modes keep the existing rollout
+/// rule (no key means the control plane signs nothing, so nothing is lost).
+fn require_surface_gate(
+    isolation: IsolationMode,
+    lease: &ClaimedLease,
+    runner_id: &str,
+) -> Result<()> {
+    if isolation == IsolationMode::HostBoundary
+        && HttpProxyGate::for_lease(lease, runner_id).is_none()
+    {
+        anyhow::bail!(
+            "surface_assertion_key_missing: a host-boundary Runner publishes a Surface only behind the assertion gate, and this lease carried no verification key"
+        );
+    }
+    Ok(())
+}
+
 fn proxy_assertion_forbidden(client: &mut TcpStream) {
     let _ = client.write_all(
         b"HTTP/1.1 403 Forbidden\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -6690,6 +6719,56 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(forwarded.contains("Host: s0-runner.ato.run"), "{forwarded}");
         assert!(!forwarded.contains(RUN_ASSERTION_HEADER), "{forwarded}");
         drop(proxy);
+    }
+
+    #[test]
+    fn http_gate_refuses_other_audiences_runners_and_keys() {
+        let key = "k".repeat(32);
+        let exp = OffsetDateTime::now_utc().unix_timestamp() + 60;
+        let sign = |claims: serde_json::Value, key: &str| {
+            let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+            let mut mac = HmacSha256::new_from_slice(key.as_bytes()).unwrap();
+            mac.update(encoded.as_bytes());
+            format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()))
+        };
+        let claims = |kind: &str, lease: &str, runner: &str| {
+            serde_json::json!({
+                "v": 1, "kind": kind, "run_id": "run_1", "lease_id": lease,
+                "runner_id": runner, "exp": exp, "jti": "jti_1",
+            })
+        };
+        let gate = test_gate();
+        // A Run-control credential is signed with the same per-runner key; its
+        // audience is not this gate's.
+        assert!(!gate.verify(&sign(claims("control", "lease_1", "runner_1"), &key)));
+        // The same Run on another lease (a later Run on a reused machine) or
+        // on another Runner opens nothing here.
+        assert!(!gate.verify(&sign(claims("http", "lease_2", "runner_1"), &key)));
+        assert!(!gate.verify(&sign(claims("http", "lease_1", "runner_2"), &key)));
+        // Signed with another Runner's key.
+        assert!(!gate.verify(&sign(
+            claims("http", "lease_1", "runner_1"),
+            &"x".repeat(32)
+        )));
+        assert!(gate.verify(&sign(claims("http", "lease_1", "runner_1"), &key)));
+    }
+
+    #[test]
+    fn a_host_boundary_runner_refuses_a_lease_it_cannot_gate() {
+        let mut ungated = lease(None);
+        assert!(require_surface_gate(IsolationMode::Namespace, &ungated, "runner_1").is_ok());
+        let error = require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("surface_assertion_key_missing"),
+            "{error}"
+        );
+        // A key too short to be the derived one is no key.
+        ungated.proxy_assertion_key = Some("short".to_owned());
+        assert!(require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1").is_err());
+        ungated.proxy_assertion_key = Some("k".repeat(32));
+        assert!(require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1").is_ok());
     }
 
     #[test]
