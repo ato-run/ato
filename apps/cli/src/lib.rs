@@ -6,12 +6,14 @@ mod desktop_control;
 mod formation_exploration;
 mod formation_input;
 mod formation_session;
+mod mcp_stdio;
 mod object_transport;
 mod portable_attempt;
 mod portable_dependency;
 
 pub mod activity_client;
 pub mod activity_mcp;
+pub mod formation_session_mcp;
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};

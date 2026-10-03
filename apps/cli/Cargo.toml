@@ -30,6 +30,10 @@ path = "src/bin/ato-object-graph-upload.rs"
 name = "ato-activity-mcp"
 path = "src/bin/ato-activity-mcp.rs"
 
+[[bin]]
+name = "ato-formation-session-mcp"
+path = "src/bin/ato-formation-session-mcp.rs"
+
 [dependencies]
 anyhow = "1"
 ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
