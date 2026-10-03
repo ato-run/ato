@@ -21,9 +21,11 @@ fn fixture() -> (
             method: Method::Post,
             path: "/action".into(),
             json_bindings: BTreeMap::from([("input".into(), variable.name.clone())]),
+            ..Default::default()
         },
         accepted_statuses: vec![201],
         when: None,
+        ..Default::default()
     };
     let mut ceiling = d.requirements.clone();
     ceiling.authority.push(operation.authority());
