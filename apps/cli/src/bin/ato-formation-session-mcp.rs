@@ -21,11 +21,16 @@ struct Args {
     relay: Option<PathBuf>,
 
     /// Publish a fresh scoped descriptor and serve as the external owner broker.
-    #[arg(long, value_name = "PATH", requires = "connection")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "connection",
+        conflicts_with = "relay"
+    )]
     publish_relay: Option<PathBuf>,
 
     /// Optional shorter expiry, never later than the saved Search deadline.
-    #[arg(long, requires = "publish_relay")]
+    #[arg(long, requires = "publish_relay", conflicts_with = "relay")]
     relay_expiry_ms: Option<u64>,
 }
 
@@ -78,13 +83,19 @@ mod tests {
 
     #[test]
     fn modes_are_mutually_exclusive_and_publication_requires_owner_connection() {
-        for arguments in [
+        for (index, arguments) in [
             vec!["mcp"],
             vec!["mcp", "--connection", "owner", "--relay", "producer"],
             vec!["mcp", "--relay", "producer", "--publish-relay", "new"],
             vec!["mcp", "--relay", "producer", "--relay-expiry-ms", "1"],
-        ] {
-            assert!(Args::try_parse_from(arguments).is_err());
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                Args::try_parse_from(arguments).is_err(),
+                "invalid case {index}"
+            );
         }
         for arguments in [
             vec!["mcp", "--connection", "owner"],
