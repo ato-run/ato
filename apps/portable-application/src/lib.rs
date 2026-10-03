@@ -217,7 +217,7 @@ fn workspace_input(derivation: &BoundDerivation) -> Option<&BoundInput> {
         .find(|input| input.protocol == WORKSPACE_PROTOCOL)
 }
 
-/// v0 portable inputs: exactly one workspace and at most one Model Set, and no
+/// v0 portable inputs: exactly one workspace and at most two Model Sets, and no
 /// protocol this validator cannot resolve.
 fn portable_inputs_supported(derivation: &BoundDerivation) -> bool {
     let workspaces = derivation
@@ -230,7 +230,29 @@ fn portable_inputs_supported(derivation: &BoundDerivation) -> bool {
         .iter()
         .filter(|i| i.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
         .count();
-    workspaces == 1 && model_sets <= 1 && workspaces + model_sets == derivation.inputs.len()
+    let mut names = BTreeSet::from(["WORKSPACE".to_owned(), "ASSETS".to_owned()]);
+    let distinct_paths = derivation
+        .inputs
+        .iter()
+        .filter(|i| i.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+        .all(|input| {
+            let name: String = input
+                .id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            names.insert(name)
+        });
+    workspaces == 1
+        && model_sets <= 2
+        && distinct_paths
+        && workspaces + model_sets == derivation.inputs.len()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2941,14 +2963,51 @@ default = "pure"
                 .content_ref = tree;
         });
         assert!(error.is_err());
-        // A second Model Set input is outside the v0 profile.
+        // A third Model Set input is outside the bounded portable profile.
         let error = revalidate_with_bundle(&bundle, &route, |d| {
             let mut extra = d.inputs[0].clone();
             extra.id = "more".to_owned();
+            d.inputs.push(extra.clone());
+            extra.id = "third".to_owned();
             d.inputs.push(extra);
             d.inputs.sort_by(|a, b| a.id.cmp(&b.id));
         });
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn two_pinned_model_sets_are_validated_without_embedding_external_objects() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-wan-animation");
+        let (_, bundle) = build_authored_bundle_v2(&root).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        assert_eq!(route.model_sets.len(), 2);
+        assert_eq!(route.derivation.inputs.len(), 3);
+        for set in &route.model_sets {
+            assert!(
+                bundle
+                    .descriptor(&ContentRef::parse(set.reference.clone()).unwrap())
+                    .is_some()
+            );
+            for object in &set.manifest.objects {
+                assert!(
+                    bundle
+                        .descriptor(&ContentRef::parse(object.digest.clone()).unwrap())
+                        .is_none()
+                );
+            }
+        }
+        // Aliases must never overwrite the workspace or each other's input path.
+        for invalid_id in ["workspace", "assets", "wan_models"] {
+            assert!(
+                revalidate_with_bundle(&bundle, &route, |d| {
+                    d.inputs.iter_mut().find(|i| i.id == "software").unwrap().id =
+                        invalid_id.to_owned();
+                    d.inputs.sort_by(|a, b| a.id.cmp(&b.id));
+                })
+                .is_err()
+            );
+        }
     }
 
     fn revalidate_with_bundle(
