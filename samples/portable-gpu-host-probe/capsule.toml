@@ -1,0 +1,48 @@
+schema = "ato.capsule/2"
+
+# The smallest route that states a host condition. It serves a fixed page and
+# needs no GPU to do so; the condition is what is under test: it must reach
+# placement unchanged, be met by a Runner's measured host, and never by a
+# runtime that cannot be admitted against it.
+
+[application]
+title = "GPU host probe"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:f188ebf40b95b838c53fb3bb697c9280002543e79b68cb1ebee79d691e675467"
+
+[[derivation]]
+id = "gpu"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[derivation.host]
+os = "linux"
+arch = "x86_64"
+min_memory_mib = 15000
+
+[[derivation.host.accelerators]]
+vendor = "nvidia"
+count = 1
+min_vram_mib = 16000
+
+[effects]
+default = "pure"
