@@ -297,6 +297,9 @@ pub struct PortableDynamicRouteSpec {
     /// Zero for an OCI service group.
     pub guest_port: u16,
     pub services: Vec<PortableServiceRouteSpec>,
+    /// Bound as the route's `requirements.host`. A placement condition the
+    /// Runner that runs this route is admitted against; it grants nothing.
+    pub host: Option<ato_formation::requirements::HostRequirement>,
 }
 
 /// One serving step of an OCI service group.
@@ -1054,12 +1057,14 @@ pub fn build_dynamic_process_oci_bundle(
                     execution: spec.process.clone(),
                     guest_port: spec.guest_port,
                     services: Vec::new(),
+                    host: None,
                 },
                 PortableDynamicRouteSpec {
                     realization: PortableRealizationKind::OciContainer,
                     execution: spec.oci.clone(),
                     guest_port: spec.guest_port,
                     services: Vec::new(),
+                    host: None,
                 },
             ],
             filesystem_state: spec.filesystem_state.clone(),
@@ -1124,6 +1129,7 @@ pub fn build_authored_bundle_v2(
                     bindings: service.bindings,
                 })
                 .collect(),
+            host: derivation.host,
         })
         .collect();
     build_dynamic_routes_bundle(
@@ -1186,7 +1192,10 @@ pub fn build_dynamic_routes_bundle(
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
         runtime_port_operations: vec![],
         variable_bindings: vec![],
-        requirements: Default::default(),
+        requirements: ato_formation::requirements::ExecutionRequirements {
+            host: route.host.clone(),
+            ..Default::default()
+        },
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         inputs: vec![input.clone()],
         runtimes: route.execution.runtimes.clone(),
@@ -2662,6 +2671,35 @@ default = "pure"
         let mut derivation = route.derivation.clone();
         mutate(&mut derivation);
         validate_initial_route(&route.contract, &route.application, &derivation)
+    }
+
+    #[test]
+    fn an_authored_host_condition_is_bound_into_the_route_and_not_the_contract() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-gpu-host-probe");
+        let (_, bundle) = build_authored_bundle_v2(&root).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        let host = routes[0].derivation.requirements.host.as_ref().unwrap();
+        assert_eq!(host.accelerators[0].min_vram_mib, 16_000);
+        assert_eq!(host.min_memory_mib, Some(15_000));
+        // The same tree and Contract without the condition: same K, other D.
+        let plain = tempfile::tempdir().unwrap();
+        for file in ["app.py", CAPSULE_FILE_NAME] {
+            let text = fs::read_to_string(root.join(file)).unwrap();
+            let text = match text.split_once("[derivation.host]") {
+                Some((head, tail)) => {
+                    format!("{head}{}", &tail[tail.find("[effects]").unwrap()..])
+                }
+                None => text,
+            };
+            fs::write(plain.path().join(file), text).unwrap();
+        }
+        let (_, without) = build_authored_bundle_v2(plain.path()).unwrap();
+        assert_eq!(
+            without.index.root_contract_ref,
+            bundle.index.root_contract_ref
+        );
+        assert_ne!(without.index.derivations, bundle.index.derivations);
     }
 
     #[test]
