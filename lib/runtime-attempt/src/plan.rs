@@ -157,7 +157,7 @@ fn recreate_symlink(link: &Path, at: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn recreate_symlink(_link: &Path, at: &Path) -> Result<()> {
-    bail!("cannot recreate the link {} on this platform", at.display())
+    anyhow::bail!("cannot recreate the link {} on this platform", at.display())
 }
 
 pub fn digest(bytes: &[u8]) -> String {
