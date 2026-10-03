@@ -427,10 +427,29 @@ pub fn public_progress(status: &Value) -> Value {
             .map_or(0, Vec::len)
             + usize::from(status["search_state"]["proposal_round"].is_object())
     });
+    let input_requirements: Vec<_> = status["input_requirements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(32)
+        .filter_map(|item| {
+            let requirement: ato_formation::variables::VariableRequirement =
+                serde_json::from_value(item["requirement"].clone()).ok()?;
+            ato_formation::variables::validate(std::slice::from_ref(&requirement)).ok()?;
+            // Account/endpoint, candidate grants and obtain/error text can carry
+            // owner data. Publish only the declared slot and typed constraints.
+            Some(json!({"name":requirement.name,"kind":requirement.kind,
+                "resource":requirement.resource,"operation":requirement.operation,
+                "phase":requirement.phase,"secret":requirement.secret,
+                "artifact_embedding":requirement.artifact_embedding,
+                "temporary":requirement.temporary}))
+        })
+        .collect();
     json!({"status":status["status"],"pause_reason":status["pause_reason"],
         "termination_reason":status["termination_reason"],"contract_ref":status["contract_ref"],
         "rounds_consumed":rounds,
         "search_budget":budget,"attempts":public_attempts,"unresolved_attempts":unresolved,
+        "input_requirements":input_requirements,
         "input_cleanup":status["input_cleanup"],"execution_stop_confirmed":status["execution_stop_confirmed"],
         "approval":"not_assessed","deployed":false,"cleanup":"not_confirmed"})
 }
@@ -1048,6 +1067,28 @@ mod tests {
         let archived = request(&path, Command::Status)?;
         assert_eq!(archived["connected"], false);
         assert!(archived["input"].is_null());
+        Ok(())
+    }
+    #[test]
+    fn input_wait_projects_only_validated_slot_metadata() -> Result<()> {
+        let (_root, producer, _) = fixture()?;
+        let private = "OWNER_VALUE_SENTINEL";
+        let status = json!({"status":"running","pause_reason":"needs_input","attempts":[],
+            "input_requirements":[{"requirement":{"name":"OWNER_EMAIL","kind":"configuration",
+                "purpose":private,"account":private,"endpoint":private,"tenant":private,
+                "service":private,"resource":"account","operation":"read","phase":"runtime",
+                "secret":false},"reason":private,"obtain":private,"candidate_grants":[private]},
+                {"requirement":{"name":private,"value":private}}]});
+        let progress = public_progress(&status);
+        assert_eq!(progress["input_requirements"].as_array().unwrap().len(), 1);
+        assert_eq!(progress["input_requirements"][0]["name"], "OWNER_EMAIL");
+        assert_eq!(progress["input_requirements"][0]["secret"], false);
+        assert!(!serde_json::to_string(&progress)?.contains(private));
+        assert!(!accepts_responses(&progress));
+        let view = producer.session_view("search_test", 1000, 10, &progress, true)?;
+        assert!(view["input"].is_null());
+        assert_eq!(view["exchanges_used"], 1);
+        assert_eq!(view["exchanges_remaining"], 5);
         Ok(())
     }
     #[test]
