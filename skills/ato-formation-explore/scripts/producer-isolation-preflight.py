@@ -139,7 +139,9 @@ def profile(public, scratch, executables, auth_ipc=False):
                  for p in path.parents if str(p) != "/"}
     lines = ["(version 1)", "(deny default)", "(allow process-fork)",
              "(allow signal (target self))", "(allow sysctl-read)",
-             "(allow file-read-metadata (literal \"/\"))"]
+             # libSystem ignition requires opening the root directory. A
+             # literal grants no access to child paths (same as lib/sandbox).
+             "(allow file-read* (literal \"/\"))"]
     lines.extend(f"(allow file-read-metadata (literal {quoted(p)}))"
                  for p in sorted(ancestors))
     lines.extend(f"(allow process-exec (literal {quoted(p)}))" for p in executables)
@@ -320,6 +322,13 @@ def probe(root):
     if any(value in completed.stdout or value in completed.stderr for value in values):
         reject("fixture_canary_exposure")
     if completed.returncode != 0 or len(completed.stdout) > 8192:
+        failure = {"schema": "ato.formation-producer-isolation-os-fixture-failure/1",
+                   "measurement_id": info["measurement_id"], "execution_pin": info["execution_pin"],
+                   "public_package_sha256": info["public_package_sha256"],
+                   "code": "kernel_fixture_failed", "fixture_returncode": completed.returncode,
+                   "stdout_bytes": len(completed.stdout), "stderr_bytes": len(completed.stderr),
+                   "native_agent_or_auth_invoked": False, "native_acceptance_ready": False}
+        (root / "os-fixture-failure.json").write_text(json.dumps(failure, indent=2) + "\n")
         reject("kernel_fixture_failed")
     try:
         checks = json.loads(completed.stdout)
