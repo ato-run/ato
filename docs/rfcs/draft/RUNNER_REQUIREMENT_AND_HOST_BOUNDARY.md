@@ -1,7 +1,7 @@
 # Runner Requirement and Host-Boundary Execution
 
 Status: draft implementation contract  
-Date: 2026-10-02  
+Date: 2026-10-02 (aligned with the implementation 2026-10-03)  
 Tracking: ato-api `docs/rfcs/draft/runner-provisioner.md`,
 `docs/rfcs/draft/managed-data-plane.md`
 
@@ -43,11 +43,40 @@ when absent. No new field is added to `BoundDerivation` itself.
     "arch": "x86_64",
     "accelerators": [{ "vendor": "nvidia", "count": 1, "min_vram_mib": 45000 }],
     "min_memory_mib": 65536,
-    "min_scratch_mib": 102400,
-    "runtime_features": ["accelerator=nvidia-cuda"]
+    "min_scratch_mib": 102400
   }
 }
 ```
+
+Implemented in ato#1477: `os` (`linux`), `arch` (`x86_64` | `aarch64`),
+`accelerators` (NVIDIA only, at most one entry per vendor, `count` 1–16),
+`min_memory_mib`, `min_scratch_mib`, all in MiB, strictly parsed
+(`deny_unknown_fields`) and canonicalized. **`runtime_features` is deferred:**
+nothing would enforce it yet, so it is not accepted.
+
+`ato.capsule/2` authors it per route:
+
+```toml
+[[derivation]]
+id = "gpu"
+use = "ato.process@1"
+# ...
+
+[derivation.host]
+os = "linux"
+arch = "x86_64"
+min_memory_mib = 15000
+
+[[derivation.host.accelerators]]
+vendor = "nvidia"
+count = 1
+min_vram_mib = 16000
+```
+
+The portable bundle binds it into that route's `BoundDerivation.requirements
+.host`; the bundle validator projects it unchanged into the route report, and
+the Coordinator reads placement only from that projection. Nothing in the
+control plane derives one quantity from another.
 
 `BoundStep` does not get a requirement. A route that needs different hosts for
 different steps (download on CPU, inference on GPU, encode elsewhere) is not
@@ -62,7 +91,11 @@ peak; 45 GiB disk used; 2026-10-02, see ato-api
 scratch are initial candidates with headroom, not measured minimums.
 
 Every Derivation formed before this contract keeps its exact bytes and
-`DerivationRef`. A regression test pins an existing pair.
+`DerivationRef` (absent `host` is not serialized). A regression test pins an
+existing pair, and the seeded staging Discover routes keep their refs.
+
+The condition is placement, not authority: an exploration grant neither
+widens nor narrows it, and `within` does not compare it.
 
 The requirement is part of the Derivation because it is a fact about *that way
 of running* the Application. Two Derivations of one Contract may differ in it;
@@ -110,7 +143,20 @@ does not have.
 
 ### 1.3 Admission
 
-Admission is evaluated for the selected D only. A host that does not satisfy
+Admission is evaluated for the selected D only, against the Runner's
+**measured** host (§2), never against what a provider promised.
+
+Formation does not provision. Every attempt-path entry that cannot be admitted
+against a measured host — Formation candidate verification, a local
+`ato run`, an exploration grant — refuses a host-constrained D with
+`compatible_runtime_unavailable` before authority is considered. The D stays
+**not verified** there; it is not a failure of the D, and Formation never
+acquires a machine to verify it. Provisioning for Formation verification is a
+later, separate design whose cost is bounded by the Search budget.
+
+On managed placement a host-constrained route runs only on a machine rented
+for its owner whose measurement satisfies the route's own condition; the
+shared pool is never a fallback. A host that does not satisfy
 the requirement is `runner_requirement_unsatisfied`, reported with the first
 failing dimension. It is not a bundle validation failure and is never reported
 as tampering. A missing capability for a D that was not selected does not
@@ -141,8 +187,10 @@ as unknown, never guessed.
 | scratch | `statvfs` on the Runner's actual work root | free space at probe time |
 
 `/proc/meminfo` is carried as a **diagnostic only**. It is never used for
-admission. On a RunPod pod it reports the host's 503 GiB, and the cgroup files
-were not readable.
+admission. On a RunPod pod it reports the host's 503 GiB. The cgroup v1
+`memory.limit_in_bytes` **was** readable there and matched the provider's
+allocation exactly (62 GB = 59,127 MiB, measured 2026-10-02); an earlier note
+that the cgroup files were unreadable was wrong.
 
 ### 2.1 Effective memory
 
@@ -192,8 +240,10 @@ In this mode a `process` realization is launched with:
   system library paths; read-write only on the declared state mount targets,
   the Run's scratch directory and the model cache mount; no access to the
   Runner's work root, credentials file or environment file;
-- a seccomp filter denying namespace, mount, module and `ptrace` syscalls
-  (new in this mode; the bwrap path has no seccomp filter today);
+- **no seccomp filter (not implemented).** The v0 baseline is uid separation +
+  `no_new_privs` + Landlock + the machine boundary. A seccomp filter denying
+  namespace, mount, module and `ptrace` syscalls is a separate gate required
+  before arbitrary user code, cross-owner reuse or public untrusted Capsules;
 - an environment built from the launch spec only;
 - its own process group, so teardown kills the whole tree.
 
@@ -218,6 +268,21 @@ Coordinator's guarantees, which are part of this contract:
 
 A lease for a host-boundary Runner that would violate any of these is refused
 by the control plane, not by the Runner.
+
+### 3.3.1 Surface
+
+A provisioned Runner's Surface slot is the provider's public proxy URL, so the
+Surface assertion gate is **mandatory** there:
+
+- the gate verifies a compact HMAC under the per-Runner derived key: audience
+  `http`, exact run, lease and Runner, expiry (60 s, minted per proxied
+  request by the app proxy), and strips it before the workload sees the
+  request; anything else is 403;
+- the control plane gives a provisioned Runner no lease when it cannot deliver
+  the key (`503 surface_assertion_unavailable`), and a host-boundary Runner
+  refuses a lease without one (`surface_assertion_key_missing`) before
+  anything of it starts;
+- the key is never passed to the workload.
 
 ### 3.4 Receipts
 
@@ -289,16 +354,21 @@ created ends it even if the Coordinator is gone; see the Runner Provisioner RFC
 
 - GPU sharing between Runs, MIG, fractional GPUs;
 - containment of hostile workloads on hosts without namespaces;
-- interactive Surface exposure from on-demand Runners (separate work).
+- interactive Surface beyond the authenticated HTTP Surface (§3.3.1).
 
 ## 10. Open questions
 
-1. Authoring syntax in `ato.capsule/2`. The first end-to-end path needs only
-   the bound form of `requirements.host`; the authoring spelling stays a review
-   item unless forming the Wan application requires it.
-2. Whether RunPod injects a pod-scoped credential into the container; if so it
-   must be kept from the workload (Runner Provisioner RFC §10).
+1. How a Formation-registered schema carries host placement. Not by copying
+   the condition into the registry result: the Run side should be able to
+   reference the canonical `BoundDerivation` and read its requirements.
+
+The first integration path is the portable v3 bundle:
+`[derivation.host]` → D `requirements.host` → validator projection → Open
+Compute placement → measured admission → ordinary lease.
 
 Resolved 2026-10-02: the requirement is Derivation-level and one
 `BoundDerivation` runs on one Runner (§1.1); memory admission uses the cgroup
 limit, then provider metadata, and `/proc/meminfo` only as a diagnostic (§2).
+Resolved 2026-10-03: authoring syntax is `[derivation.host]` (§1.1); RunPod
+does inject a pod-scoped key, which the start wrapper removes from the
+Runner's and the workload's environment (Runner Provisioner RFC §4.5).
