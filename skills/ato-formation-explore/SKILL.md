@@ -20,7 +20,7 @@ CandidateProducerとして、検査済みSourceから固定Contract Kを満た�
 
 1. 保存済み状態を確認する。未ACK結果、実行中attempt、UNKNOWN、保存済み応答があれば[recovery.md](references/recovery.md)に従って先に照合する。
 2. 次の共通入力を取得する。exchange IDとinput SHA-256をその入力のまま保持する。再取得を新しいexchangeや再推論と扱わない。
-3. 共通入力のprompt・operation catalog・lowering capabilitiesを読み、根拠のある型付き応答を作る。必要なSourceは`inspect_source`で取得し、取得済みの証拠から`propose_derivation`、許可された既存Dを基にする`modify_derivation`、または理由付き`unsupported`を返す。許可されたSource IDと完全digestだけを使う。
+3. nextの共通`instructions`とinputのoperation catalog・lowering capabilitiesを読み、根拠のある型付き応答を作る。必要なSourceは`inspect_source`で取得し、取得済みの証拠から`propose_derivation`、許可された既存Dを基にする`modify_derivation`、または理由付き`unsupported`を返す。許可されたSource IDと完全digestだけを使う。
 4. 型・field組合せのvalidation修正は同じroundの補正として扱う。Runtime失敗後のD変更は失敗証拠に基づく新しい提案として扱う。SourceやKの仕様変更をD修復へ混ぜない。
 5. 入力に結び付いた応答を提出し、保存済み結果を確認する。提出応答だけでRuntime実行やPASSを推定しない。同一Dの根拠なしの繰り返しは停止する。
 
