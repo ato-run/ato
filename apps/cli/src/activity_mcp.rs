@@ -328,7 +328,9 @@ pub fn run_stdio(
     input: impl BufRead,
     output: impl Write,
 ) -> Result<()> {
-    crate::mcp_stdio::run_stdio(input, output, |request| server.handle(request))
+    // Preserve this facade's existing request contract; its memo/Interaction
+    // payloads must not inherit Formation's JSON envelope byte limit.
+    crate::mcp_stdio::run_stdio(input, output, None, |request| server.handle(request))
 }
 
 fn tool_error(error: &anyhow::Error) -> Value {
