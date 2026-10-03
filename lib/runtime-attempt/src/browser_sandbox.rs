@@ -37,12 +37,17 @@
 //! it; where it cannot (again, the userns restriction), the browser runs with
 //! `--no-sandbox` inside ours, and the receipt says so.
 
+#[cfg(unix)]
 use std::io::{BufRead as _, Write as _};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -60,6 +65,7 @@ pub const GUEST_CHROME_LAUNCHER: &str = "/verifier/bin/chrome-contained.cjs";
 /// The worker's browser launcher, as the helper sees it.
 pub const LAUNCHER_SOCKET_NAME: &str = ".browser-launcher.sock";
 /// Browsers one verification may start.
+#[cfg(unix)]
 const MAX_BROWSER_LAUNCHES: usize = 4;
 /// Where the helper finds its model keys: an inherited pipe, read once.
 pub const SECRETS_FD: i32 = 3;
@@ -404,6 +410,12 @@ impl BrowserVerifierSandboxSpec {
 
     /// Start Chrome headless in the browser sandbox until it has opened its
     /// DevTools endpoint, then stop it.
+    #[cfg(not(unix))]
+    fn browser_starts(&self, _scratch: &Path, _mode: ChromeSandbox) -> Result<()> {
+        bail!("the browser verifier sandbox requires a Unix host")
+    }
+
+    #[cfg(unix)]
     fn browser_starts(&self, scratch: &Path, mode: ChromeSandbox) -> Result<()> {
         let profile = format!("probe-{mode:?}");
         std::fs::create_dir_all(scratch.join("home"))?;
@@ -486,6 +498,7 @@ fn run_to_completion(argv: &[String], timeout: Duration) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn kill_group(group: u32) {
     // SAFETY: signalling a process group this module created; one that is
     // already gone makes `kill` fail harmlessly.
@@ -497,6 +510,7 @@ fn kill_group(group: u32) {
 /// The worker's side of `bin/chrome-contained.cjs`: for each request on the
 /// socket, one browser in its own sandbox, alive exactly as long as the
 /// requesting client and never longer than the verification.
+#[cfg(unix)]
 pub struct BrowserLauncher {
     stop: Arc<AtomicBool>,
     groups: Arc<Mutex<Vec<u32>>>,
@@ -504,6 +518,7 @@ pub struct BrowserLauncher {
     socket: PathBuf,
 }
 
+#[cfg(unix)]
 impl BrowserLauncher {
     /// Listen on `<scratch>/.browser-launcher.sock`.
     pub fn start(
@@ -572,6 +587,7 @@ impl BrowserLauncher {
     }
 }
 
+#[cfg(unix)]
 impl Drop for BrowserLauncher {
     fn drop(&mut self) {
         self.shutdown();
@@ -582,6 +598,7 @@ impl Drop for BrowserLauncher {
 /// decides the executable, the sandbox and `--no-sandbox`; the client only
 /// supplies Chrome's arguments. The answer is `exit <code>` when the browser
 /// exits; a client that goes away takes its browser with it.
+#[cfg(unix)]
 fn serve_launch(
     stream: UnixStream,
     spec: &BrowserVerifierSandboxSpec,
@@ -653,6 +670,7 @@ fn serve_launch(
 }
 
 /// Has the client closed its end?
+#[cfg(unix)]
 fn client_gone(stream: &UnixStream) -> bool {
     use std::os::fd::AsRawFd as _;
     let mut byte = 0_u8;
@@ -673,6 +691,26 @@ fn client_gone(stream: &UnixStream) -> bool {
         return error.kind() != std::io::ErrorKind::WouldBlock;
     }
     false
+}
+
+/// Unsupported hosts retain the same API and refuse before opening a socket
+/// or starting a browser. They must never substitute an uncontained process.
+#[cfg(not(unix))]
+pub struct BrowserLauncher {
+    _private: (),
+}
+
+#[cfg(not(unix))]
+impl BrowserLauncher {
+    pub fn start(
+        _spec: &BrowserVerifierSandboxSpec,
+        _scratch: &Path,
+        _chrome: ChromeSandbox,
+    ) -> Result<Self> {
+        bail!("the browser verifier launcher requires a Unix host")
+    }
+
+    pub fn stop(self) {}
 }
 
 /// A program name resolved the way a shell would, then canonicalized.
