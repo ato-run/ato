@@ -62,7 +62,9 @@ pub const DEFAULT_PYTHON: &str = "3.12.7";
 /// temporary directory produces a `pyvenv.cfg` and shebangs pointing somewhere
 /// that does not exist at runtime, and the failure arrives as an import error
 /// far from its cause.
-pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
+pub use crate::process_binding::{
+    SYSTEM_PATH, TOOLCHAIN_ROOT, node_home, package_manager_home, python_home,
+};
 
 /// The release of python-build-standalone this catalog is pinned to.
 ///
@@ -71,10 +73,6 @@ pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
 pub const PYTHON_BUILD_TAG: &str = "20241016";
 
 /// The absolute path of a provisioned interpreter.
-pub fn python_home(version: &str) -> String {
-    format!("{TOOLCHAIN_ROOT}/python/{version}")
-}
-
 /// Where python-build-standalone publishes a relocatable build.
 ///
 /// `install_only_stripped`, not `install_only`. The unstripped build ships a
@@ -503,10 +501,6 @@ pub(crate) const SERVER_FRAMEWORKS: &[&str] = &[
     "socket.io",
     "ws",
 ];
-
-pub fn node_home(version: &str) -> String {
-    format!("{TOOLCHAIN_ROOT}/node/{version}")
-}
 
 /// Where platform-managed build assets live — the compilers and runtimes Ato
 /// owns, as opposed to the toolchains a build provisions for itself.
@@ -1035,10 +1029,6 @@ pub const SUPPORTED_NODE_RUNTIME: &[&str] = &["20.20.2", "22.14.0"];
 
 /// Where a pinned package manager is provisioned, shared by every build and
 /// Run on the host, read-only at run time.
-pub fn package_manager_home(name: &str, version: &str) -> String {
-    format!("{TOOLCHAIN_ROOT}/{name}/{version}")
-}
-
 /// `toolchain.<name>` overrides — the Derivation's `[[runtime]]`s on a route
 /// that provisions them as declared — as `(name, version)`. A different key
 /// from the v1 lane's `runtime.python`, which keeps its own resolution.
@@ -1215,24 +1205,11 @@ pub fn toolchain_bin_dirs(
     runtime: &BTreeMap<String, String>,
     package_manager: Option<&ResolvedPackageManager>,
 ) -> Vec<String> {
-    let mut dirs = Vec::new();
-    if let Some(manager) = package_manager {
-        dirs.push(format!(
-            "{}/bin",
-            package_manager_home(&manager.name, &manager.version)
-        ));
-    }
-    if let Some(version) = runtime.get("node") {
-        dirs.push(format!("{}/bin", node_home(version)));
-    }
-    if let Some(version) = runtime.get("python") {
-        dirs.push(format!("{}/bin", python_home(version)));
-    }
-    dirs
+    crate::process_binding::toolchain_bin_dirs(
+        runtime,
+        package_manager.map(|m| (m.name.as_str(), m.version.as_str())),
+    )
 }
-
-/// The system directories that follow the toolchains on every PATH.
-pub const SYSTEM_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 /// A process route that is not the v1 Python lane: whatever runtimes the
 /// Derivation declares, provisioned exactly, and its authored launch.
