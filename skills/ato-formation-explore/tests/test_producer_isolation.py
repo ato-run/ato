@@ -189,6 +189,11 @@ class ProducerIsolationTests(unittest.TestCase):
         self.assertFalse(result['network_policy']['provider_identity_verified'])
         self.assertFalse(result['native_acceptance_ready'])
         self.assertTrue(HELPER.verify(self.output)['network_policy'] == result['network_policy'])
+        fixed = json.loads((self.output / 'public/fixed-mcp.json').read_text())
+        self.assertTrue(fixed['arguments'] == ['--relay', str(self.output / 'public/session-relay.json')])
+        self.assertFalse(fixed['descriptor_present'])
+        self.assertFalse(fixed['descriptor_binding_checked'])
+        self.assertFalse((self.output / 'public/session-relay.json').exists())
 
     def test_wildcard_hostname_ipv6_url_range_control_and_zero_ports_are_rejected(self):
         for value in ['*:443', 'api.example.com:443', 'localhost:1234', '[::1]:1234',
