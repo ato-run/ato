@@ -131,6 +131,12 @@ pub fn landlock_policy(context: &ResolvedRuntimeLaunchContext, scratch: &Path) -
         .map(PathBuf::from),
     );
     read_only.push(PathBuf::from(TOOLCHAIN_ROOT));
+    read_only.extend(
+        context
+            .read_only_inputs()
+            .iter()
+            .map(|input| input.path.clone()),
+    );
     let (read_write, _) = filter_sensitive_paths(&read_write);
     let (read_only, _) = filter_sensitive_paths(&read_only);
     SandboxPolicy::new()
@@ -348,6 +354,34 @@ mod tests {
         );
         assert!(!read_only.read_write_paths.contains(&state));
         assert!(read_only.read_only_paths.contains(&state));
+    }
+
+    #[test]
+    fn a_delivered_model_set_is_readable_and_never_writable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = workspace.path().join(".ato/state/data");
+        let inputs = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let policy = landlock_policy(
+            &context(workspace.path(), &state, StateAccessV1::ReadWrite).with_read_only_inputs(
+                vec![crate::launch::resolved::ResolvedReadOnlyInput {
+                    env_name: "ATO_INPUT_PATH_MODELS".to_owned(),
+                    path: inputs.path().to_path_buf(),
+                }],
+            ),
+            scratch.path(),
+        );
+        assert!(
+            policy
+                .read_only_paths
+                .contains(&inputs.path().to_path_buf())
+        );
+        assert!(
+            !policy
+                .read_write_paths
+                .contains(&inputs.path().to_path_buf())
+        );
     }
 
     #[test]
