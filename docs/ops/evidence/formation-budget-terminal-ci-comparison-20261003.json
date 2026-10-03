@@ -1,0 +1,97 @@
+{
+  "base": "9e0031900836090612b94e775e26f980a68f32d7",
+  "head": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+  "local_Node": "25.6.0",
+  "CI_Node": "22 (CI setup)",
+  "same_command_as_activity_CI": true,
+  "base_failure_names": [
+    "FAIL  |node| src/tests/node/cors-headers-audit.test.ts > CORS allowHeaders audit (#246) > every custom x-* header a route reads is preflight-allowed or justified as non-browser",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > binds an executor minted across Activity start to the extended live expiry",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > creates one hosted Run and adds the Guest as its second writer",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > does not mint an executor when Activity end wins after authorization",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > keeps a committed shared join successful when Room notification fails and recovers the same capability",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > keeps the first graceful-stop deadline across Activity lifecycle retries",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > mints a hash-only run-scoped executor session after lease claim",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > notifies guests when a multi-slot runner drops exactly one of its runs",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > replaces a runner socket only when its runs are re-claimed and suppresses the phantom disconnect",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > revokes Guest leave without ending the Activity",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > revokes a shared executor and requests lease shutdown on End",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > routes generic shared input to the Runner without issuing canonical order",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > starts shared mode after one Runner Run and both subscriptions are ready"
+  ],
+  "head_failure_names": [
+    "FAIL  |node| src/tests/node/cors-headers-audit.test.ts > CORS allowHeaders audit (#246) > every custom x-* header a route reads is preflight-allowed or justified as non-browser",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > binds an executor minted across Activity start to the extended live expiry",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > creates one hosted Run and adds the Guest as its second writer",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > does not mint an executor when Activity end wins after authorization",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > keeps a committed shared join successful when Room notification fails and recovers the same capability",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > keeps the first graceful-stop deadline across Activity lifecycle retries",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > mints a hash-only run-scoped executor session after lease claim",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > notifies guests when a multi-slot runner drops exactly one of its runs",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > replaces a runner socket only when its runs are re-claimed and suppresses the phantom disconnect",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > revokes Guest leave without ending the Activity",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > revokes a shared executor and requests lease shutdown on End",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > routes generic shared input to the Runner without issuing canonical order",
+    "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > starts shared mode after one Runner Run and both subscriptions are ready"
+  ],
+  "same_failure_names": true,
+  "log_sha256": {
+    "base": "9738f57ae0b78954c55521840ad70940a27806487abe4662466711237e789d0b",
+    "head": "79b7ede7c2e2c08bd5e104e3cf7547491f17ff8d8d88da2b497d0e1e9d90119e"
+  },
+  "base_result": {
+    "passed": 155,
+    "failed": 13
+  },
+  "head_result": {
+    "passed": 155,
+    "failed": 13
+  },
+  "schema": "ato.formation-budget-terminal-ci-comparison/1",
+  "Ato_execution_pin": "da7c452c1dcd6011399d2e12c7cb47e653e40ccd",
+  "Ato_lint_fix_pin": "252d07a0",
+  "Ubuntu_CI": {
+    "run": 37096753815,
+    "job": 111128139984,
+    "cargo_tests": "PASS",
+    "clippy": "FAIL needless_question_mark reasoning.rs:1467; fixed in 252d07a0"
+  },
+  "local_final_CLI_clippy": {
+    "command": "CARGO_TARGET_DIR=.tmp/target TMPDIR=$PWD/.tmp cargo clippy --locked -p ato-cli --all-targets -- -D warnings",
+    "result": "PASS",
+    "log_sha256": "2f299e455384214254678d1a95013d318f08c0dde2ee7ba5a0246c3fbbefa831",
+    "output_tail": "ion-v0/ato/lib/local-execution)\n   Compiling ato-cli v0.7.9 (/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/apps/cli)\n    Checking ato-runtime-attempt v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/lib/runtime-attempt)\n    Checking ato-portable-application v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/apps/portable-application)\n    Checking ato-formation-worker v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/apps/formation-worker)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.96s\n"
+  },
+  "API_CI": {
+    "run": 37096807502,
+    "activity_job": 111128290038,
+    "activity_result": "FAIL Activity join 503/201, D1 undefined, CORS audit; same 13 local failure names on merged main and head",
+    "instance_state_job": 111128290189,
+    "instance_state_result": "FAIL WebSocket handshake, preceding nodeCrypto.randomBytes warning; exact Linux CI failure not reproduced on local baseline",
+    "Node_limit": "Local 25.6.0 differs from CI Node22; this is a local baseline comparison, not an exact Linux CI reproduction"
+  },
+  "cross_platform": {
+    "macOS": {
+      "CI_job": 111128140059,
+      "failure": "portable_application a_process_run_is_owned_by_its_run_until_stopped; local Instance worker exited before becoming active",
+      "CI_result": "14 PASS / 1 FAIL in this suite",
+      "exact_failure_locally_reproduced": false,
+      "files_unchanged_from_PR_base": true,
+      "prior_comparison": "formation-platform-ci-comparison-20261002.json retains prior base/head results with their own pins"
+    },
+    "Windows": {
+      "CI_job": 111128139737,
+      "failure": "ato-runtime-attempt Unix APIs / missing bail macro / process_group; 13 compilation errors",
+      "execution_started": false,
+      "library_unchanged_from_PR_base": true,
+      "prior_exact_base_comparison": "785adb7c/3bb Windows1.96 check also had the same 13 compilation errors; not rerun after budget-only change"
+    }
+  },
+  "CI_rerun": false,
+  "paid_API_calls": 0,
+  "CI_log_sha256": {
+    "budget-ci-ubuntu-clippy.log": "0e0fb42acc1f588169ab4504fb5c5b767a467ef792a1eaa94d50bb546b57039b",
+    "budget-ci-macos.log": "9793b8c1c6b1d5c29e1dc22fe1b88a404a618876c0aa97188521606a8a59d7ac",
+    "budget-ci-windows.log": "3f0acb8392896ef0fda8b9e1c9ad83cd4bb04bb8d5ce00d34e1e7a7ef07893bf"
+  }
+}
