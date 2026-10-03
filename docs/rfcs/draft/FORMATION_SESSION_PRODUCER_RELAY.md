@@ -62,7 +62,8 @@ The outer request is bounded to 270,336 bytes; the MCP request remains bounded
 to 262,144 bytes. The response is bounded to 524,288 bytes. Descriptor size is
 bounded to 8,192 bytes. Read/write/connect timeouts are two seconds; the client
 reply read timeout is eight seconds to accommodate the existing bounded Session
-transport. The broker handles connections serially and rejects new requests
+transport. Read/write deadlines apply to the whole frame, so partial-byte drips
+cannot renew them. The broker handles connections serially and rejects new requests
 after expiry. An in-flight request remains subject to the Session authority's
 deadline and effect/cleanup rules.
 

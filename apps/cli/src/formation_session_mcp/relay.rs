@@ -3,7 +3,7 @@
 //! proposals, deduplication, budgets, deadlines and Runtime state transitions.
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Cursor, Read, Write},
+    io::{BufRead, Cursor, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
     sync::{
@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Result, anyhow, ensure};
@@ -182,8 +182,7 @@ impl Broker {
                         if let Ok(bytes) = serde_json::to_vec(&reply)
                             && bytes.len() < RESPONSE_CAP
                         {
-                            let _ = stream.write_all(&bytes);
-                            let _ = stream.write_all(b"\n");
+                            let _ = write_frame(&mut stream, &bytes);
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -276,8 +275,7 @@ fn forward(descriptor: &Descriptor, request: &Value) -> Result<Option<Value>> {
     let mut stream = TcpStream::connect_timeout(&descriptor.address, STREAM_TIMEOUT)?;
     stream.set_read_timeout(Some(RESPONSE_TIMEOUT))?;
     stream.set_write_timeout(Some(STREAM_TIMEOUT))?;
-    stream.write_all(&bytes)?;
-    stream.write_all(b"\n")?;
+    write_frame(&mut stream, &bytes)?;
     let reply: Reply = serde_json::from_slice(&read_frame(&mut stream, RESPONSE_CAP)?)?;
     ensure!(reply.ok, "relay request rejected");
     verify_proof(
@@ -354,14 +352,39 @@ fn publish(path: &Path, descriptor: &Descriptor) -> Result<()> {
 
 fn read_frame(stream: &mut TcpStream, cap: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    BufReader::new(stream)
-        .take(cap as u64 + 1)
-        .read_until(b'\n', &mut bytes)?;
-    ensure!(
-        bytes.len() <= cap && bytes.last() == Some(&b'\n'),
-        "relay frame bounds"
-    );
-    Ok(bytes)
+    let deadline = Instant::now() + stream.read_timeout()?.unwrap_or(STREAM_TIMEOUT);
+    let mut chunk = [0; 8192];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(!remaining.is_zero(), "relay frame timeout");
+        stream.set_read_timeout(Some(remaining))?;
+        let available = chunk.len().min(cap.saturating_sub(bytes.len()) + 1);
+        let count = stream.read(&mut chunk[..available])?;
+        ensure!(count != 0, "relay frame incomplete");
+        let end = chunk[..count].iter().position(|byte| *byte == b'\n');
+        bytes.extend_from_slice(&chunk[..end.map_or(count, |index| index + 1)]);
+        ensure!(bytes.len() <= cap, "relay frame bounds");
+        if end.is_some() {
+            return Ok(bytes);
+        }
+    }
+}
+
+fn write_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
+    let mut frame = Vec::with_capacity(bytes.len() + 1);
+    frame.extend_from_slice(bytes);
+    frame.push(b'\n');
+    let deadline = Instant::now() + stream.write_timeout()?.unwrap_or(STREAM_TIMEOUT);
+    let mut written = 0;
+    while written < frame.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(!remaining.is_zero(), "relay write timeout");
+        stream.set_write_timeout(Some(remaining))?;
+        let count = stream.write(&frame[written..])?;
+        ensure!(count != 0, "relay write incomplete");
+        written += count;
+    }
+    Ok(())
 }
 
 fn valid_hex(value: &str) -> bool {
@@ -830,6 +853,71 @@ mod tests {
                 .join("reasoning/r001_s001.response.json")
                 .exists()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn slow_partial_frame_cannot_extend_the_absolute_read_deadline() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut stream = TcpStream::connect(listener.local_addr()?)?;
+        let (mut peer, _) = listener.accept()?;
+        let send = thread::spawn(move || {
+            for _ in 0..100 {
+                if peer.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        stream.set_read_timeout(Some(Duration::from_millis(80)))?;
+        let started = Instant::now();
+        assert!(read_frame(&mut stream, REQUEST_CAP).is_err());
+        // A per-read timeout would accept drips for a full second. Use a generous
+        // wall-clock bound while verifying that no successful frame is returned.
+        assert!(started.elapsed() < Duration::from_millis(700));
+        drop(stream);
+        send.join().map_err(|_| anyhow!("fixture sender failed"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn simultaneous_producer_connections_share_one_atomic_submission() -> Result<()> {
+        let (root, _bridge, server, digest) = fixture()?;
+        let path = root.path().join("producer.json");
+        let broker = Broker::start(server, &path, None)?;
+        let before = rpc(&broker.descriptor, call("next", json!({})))?;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let threads = (0..2)
+            .map(|_| {
+                let descriptor = broker.descriptor.clone();
+                let request = submit(&digest, OUTPUT);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    rpc(&descriptor, request)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for submitted in threads {
+            let reply = submitted
+                .join()
+                .map_err(|_| anyhow!("fixture Producer failed"))??;
+            assert!(reply["result"]["isError"] == false);
+        }
+        assert!(
+            root.path()
+                .join("reasoning/r001_s001.response.json")
+                .exists()
+        );
+        let after = rpc(&broker.descriptor, call("next", json!({})))?;
+        for field in ["deadline_ms", "exchanges_used", "exchanges_remaining"] {
+            assert!(
+                before["result"]["structuredContent"][field]
+                    == after["result"]["structuredContent"][field]
+            );
+        }
+        assert!(after["result"]["structuredContent"]["exchange"]["response_saved"] == true);
         Ok(())
     }
 }
