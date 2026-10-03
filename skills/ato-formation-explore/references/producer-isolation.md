@@ -16,7 +16,7 @@ python3 scripts/producer-isolation-preflight.py probe \
   --package /absolute/path/to/workspace/.tmp/fresh-producer-package
 ```
 
-上のpathは共通Skillをcurrent directoryにした場合。`--output`はこのSkillが配置されたproject/repo内の`.tmp`にある未作成directoryに限定する。既存directoryを上書き・再初期化せず、同じpackageでのprobe再実行も拒否する。versionは所有者が`--version`で確認した値であり、helperはNative CLIを呼ばない。
+上のpathは共通Skillをcurrent directoryにした場合。この一時的なOS受入fixtureの`--output`は、Skillが配置されたproject/repo内の`.tmp`にある未作成directoryに限定する。通常のSkill配置は[installation.md](installation.md)、探索の接続は[protocol.md](protocol.md)の永続pathを使う。既存directoryを上書き・再初期化せず、同じpackageでのprobe再実行も拒否する。versionは所有者が`--version`で確認した値であり、helperはNative CLIを呼ばない。
 
 公開packageには`SKILL.md`、`agents/openai.yaml`、Markdown referencesと限定した補助scriptだけをcopyする。repo全体、tests、cache、auth/環境file、過去報告はcopyしない。コピー元のsymlinkや過大fileを拒否し、コピー中の変化、後から追加された公開file、Skill linkやMCP manifest/profile/binaryの変更も拒否する。両製品の配置先はcopy済みの同じSkillへ解決する。これはfilesystemでの確認であり、native Skill discoveryの確認ではない。
 
@@ -36,6 +36,6 @@ Native認証用に`com.apple.secd`と`com.apple.SecurityServer`のMach lookupを
 
 同じNative process内のbuiltin/toolがMach認証IPCへ触れないことは、Seatbeltのfile/exec制限だけでは証明できない。実製品のtool inventoryとread/write/exec負例、設定・hook・plugin・subagentを通じた拡張の拒否を別途測定する。Codexのshell無効化とClaudeの選定済みrestricted/tool/strict MCP設定は、そのversionの実設定で確認する。このhelperは未確認の製品flagや任意agent起動commandを生成しない。
 
-prepared profileはNative providerへのegressも、privateなSession connectionを読むMCP brokerもまだ許可していない。既存stdio MCPは接続fileを必要とするため、同じprofileへそのfileの読取を追加すればNative builtinからも見える可能性がある。fileを0600にして許可することで完成扱いにせず、固定MCPだけへ権限を渡すbroker境界を承認済み計画で確認する。それまではnative起動・ログイン・探索を開始しない。
+prepared profileはNative providerへのegressと限定relay TCPをまだ許可していない。[固定MCP broker](mcp.md)はOwner側でSession connectionを読み、Producer側は独立したrelay descriptorだけを使う。prepared profileへOwnerのfile読取を追加せず、選定したrelay endpointへの接続と実Native tool境界を承認済み計画で確認する。接続fixtureの成功だけで、このOS profileとの統合や実製品の認証分離を完了扱いにしない。それまではnative起動・ログイン・探索を開始しない。
 
 OS fixtureの成功後も、承認済みplan、対応version、native Skill発見、固定MCP inventory、認証とtoolの分離、provider egressの各gateが未完了なら人へ引き継ぐ。過去測定の非露出保証や成功Dは変更しない。

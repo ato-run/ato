@@ -1,12 +1,16 @@
 # 固定Session MCPと受入環境
 
-所有者は実装pinでbuildした`ato-formation-session-mcp`をstdio MCP serverとして設定する。起動引数は既存Session Bridgeの限定接続ファイルだけ。
+所有者は実装pinでbuildした`ato-formation-session-mcp`を、既存Session Bridgeへ接続するbrokerとして起動する。Producer環境には限定relayのdescriptorを渡す。
 
 ```sh
-ato-formation-session-mcp --connection /absolute/path/to/session-connection.json
+ato-formation-session-mcp \
+  --connection /absolute/path/to/owner/session-connection.json \
+  --publish-relay /absolute/path/to/producer/session-relay.json
 ```
 
-この起動はSearchを作らない。所有者の`ato form --session-bridge ...`が準備済みであることを確認する。MCP serverは起動時のファイルpath、Search、configuration、agent、capabilityを固定し、再接続時に同じファイルからloopback addressだけを更新する。model tool引数から別接続先へ切り替えられない。
+所有者の`ato form --session-bridge ...`が準備済みであることを確認する。brokerは接続先のSearch、configuration、agent、capabilityを固定する。Producer側の実コマンドは`ato-formation-session-mcp --relay /absolute/path/to/producer/session-relay.json`。relay descriptorには独立したProducer capabilityと固定binding/loopback/期限だけを持たせ、Ownerの接続ファイルや認証情報を置かない。request/responseはHMACで結び付け、brokerのなりすましとbinding・応答の改変を拒否する。応答再送の冪等性や競合判定は既存Sessionが担う。
+
+publicationは新しいpathへ一度だけ行う。`--relay-expiry-ms`を指定する場合も元のSession deadlineを超えられない。Ownerが同じBridgeを再接続しても枠・deadline・agentを初期化しない。model tool引数から別接続先へ切り替えられない。旧`--connection PATH`のstdio入口も維持するが、隔離したNative環境では上のrelay入口を使う。
 
 | Tool | 引数 | 結果 |
 |---|---|---|
@@ -22,14 +26,14 @@ Codexの選定versionで次の設定fieldに対応していることを確認し
 ```toml
 [mcp_servers.formation]
 command = "/absolute/path/to/ato-formation-session-mcp"
-args = ["--connection", "/absolute/path/to/session-connection.json"]
+args = ["--relay", "/absolute/path/to/producer/session-relay.json"]
 enabled_tools = ["status", "next", "submit", "cancel"]
 ```
 
 Claude Codeの計画専用MCP設定例:
 
 ```json
-{"mcpServers":{"formation":{"command":"/absolute/path/to/ato-formation-session-mcp","args":["--connection","/absolute/path/to/session-connection.json"]}}}
+{"mcpServers":{"formation":{"command":"/absolute/path/to/ato-formation-session-mcp","args":["--relay","/absolute/path/to/producer/session-relay.json"]}}}
 ```
 
 設定形式は[Codex公式MCP資料](https://developers.openai.com/codex/mcp)と[Claude Code公式MCP資料](https://code.claude.com/docs/en/mcp)を参照する。この設定例とRust fixtureの成功は、native agentでの配置・Skill明示呼び出し・探索の実測を証明しない。
