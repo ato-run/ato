@@ -28,7 +28,7 @@ OS_CHECKS = ["public_skill_read", "public_skill_write_denied",
              "curl_exec_denied", "docker_unix_socket_denied", "relay_tcp_allowed",
              "provider_fixture_tcp_allowed", "relay_wrong_port_denied", "relay_wrong_address_denied",
              "provider_wrong_port_denied", "provider_wrong_address_denied", "owner_unix_socket_denied",
-             "ipv6_denied", "udp_denied", "extra_descriptors_absent"]
+             "ipv4_secondary_denied", "udp_denied", "extra_descriptors_absent"]
 MACHO = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
          b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
          b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"}
@@ -245,6 +245,8 @@ def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
     (public / "fixed-mcp.json").write_text(json.dumps({
         "server": "formation", "transport": "stdio", "tools": MCP_TOOLS,
         "binary": selected["mcp"], "connection": "not supplied", "network_policy": network,
+        "arguments": ["--relay", str(public / "session-relay.json")],
+        "descriptor_present": False, "descriptor_binding_checked": False,
     }, sort_keys=True) + "\n")
     (output / "scratch").mkdir(mode=0o700)
     for name, item in selected.items():
@@ -267,6 +269,7 @@ def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
         "mcp_tools": MCP_TOOLS, "mcp_connection_supplied": False,
         "network_policy": network,
         "os_fixture_protocol": 2,
+        "fixed_mcp_recipe": 2,
         "profiles": {name: digest(output / f"{name}.prepared.sb")
                      for name in ["codex", "claude-code"]},
         "native_acceptance_ready": False,
@@ -319,6 +322,9 @@ def verify(root):
             if (root / f"{name}.prepared.sb").read_text() != generated:
                 reject("profile_policy_mismatch")
         expected["network_policy"] = network
+    if info.get("fixed_mcp_recipe") == 2:
+        expected.update({"arguments": ["--relay", str(root / "public/session-relay.json")],
+                         "descriptor_present": False, "descriptor_binding_checked": False})
     if json.loads((root / "public/fixed-mcp.json").read_text()) != expected:
         reject("fixed_mcp_changed")
     return info
@@ -366,21 +372,22 @@ def probe(root):
     def tcp(address, port=0, family=socket.AF_INET):
         endpoint = socket.socket(family, socket.SOCK_STREAM)
         sockets.append(endpoint)
+        if family == socket.AF_INET6:
+            endpoint.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         endpoint.bind((address, port))
         endpoint.listen()
         return endpoint.getsockname()[1]
     try:
         relay_port = tcp("127.0.0.1")
-        provider_port = tcp("127.0.0.2")
+        provider_port = tcp("127.0.0.1")
         wrong_port = tcp("127.0.0.1")
-        wrong_provider_port = tcp("127.0.0.2")
-        tcp("127.0.0.2", relay_port)
-        tcp("127.0.0.1", provider_port)
-        ipv6_port = tcp("::1", family=socket.AF_INET6)
+        wrong_provider_port = tcp("127.0.0.1")
+        tcp("::1", relay_port, family=socket.AF_INET6)
+        tcp("::1", provider_port, family=socket.AF_INET6)
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sockets.append(udp)
         udp.bind(("127.0.0.1", relay_port))
-        fixture_endpoints = [f"127.0.0.1:{relay_port}", f"127.0.0.2:{provider_port}"]
+        fixture_endpoints = [f"127.0.0.1:{relay_port}", f"127.0.0.1:{provider_port}"]
         text = profile(root / "public", root / "scratch", [runner], auth_ipc=True,
                        tcp_endpoints=fixture_endpoints)
         policy.write_text(text)
@@ -402,8 +409,8 @@ def probe(root):
                                     str(root / "public/skill/SKILL.md"), str(private),
                                     str(root / "scratch"), str(escape), "../../scratch/docker.sock",
                                     str(relay_port), str(provider_port), str(wrong_port),
-                                    str(wrong_provider_port), "../../scratch/owner-control.sock",
-                                    str(ipv6_port)], env=clean_env, close_fds=True,
+                                    str(wrong_provider_port), "../../scratch/owner-control.sock"],
+                                   env=clean_env, close_fds=True,
                                    cwd=root / "public/project", capture_output=True, timeout=30)
     finally:
         for endpoint in sockets:
@@ -452,6 +459,9 @@ def probe(root):
         "public_provider_reached": False,
         "relay_descriptor_or_owner_connection_read": False,
         "inherited_extra_descriptors": False,
+        "wrong_address_live_targets": "same_allowed_ports_on_v6_only_loopback",
+        "secondary_ipv4_listener_available": False,
+        "secondary_ipv4_denial_requires_eperm_eacces": True,
         "captured_output_sha256": hashlib.sha256(completed.stdout + completed.stderr).hexdigest(),
         "captured_output_bytes": len(completed.stdout) + len(completed.stderr),
         "auth_IPC_rules_prepared": MACH_AUTH, "native_auth_IPC_invoked": False,
