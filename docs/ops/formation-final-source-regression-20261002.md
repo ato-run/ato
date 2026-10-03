@@ -136,6 +136,51 @@ dispatch fixture; automatic production Source state provisioning remains pending
 
 ## Remaining acceptance and accounting
 
+The final-pin Kutt Source regression is in progress as a new zero-known-D
+Search. [The interrupted prior exchange](evidence/formation-kutt-unanswered-round-20261003.json)
+(SHA-256 `af14132136eb99ff85201731ce197a6330f8773b6fa6a038876874f641df2bfd`)
+closed Search `search_9a1e27fd1a9d5102a86620b2d61e7b93` at its original
+10-minute round deadline before creating any candidate or Runtime attempt.
+Its original Search creation/deadline remain recorded, all reservations zero,
+and both owner values revoked. It is preserved as a failed measurement and
+never resumed, refunded or reset. No old WBO UNKNOWN was reexecuted.
+
+[Final HTTP input controls](evidence/formation-bound-http-controls-final-20261002.json)
+(SHA-256 `f6aecff9ee3ccd2e0fba6e1807861d04acee9531a09d6cfa06ac569d6412725f`)
+use actual Coordinator/Runtime at the same pins with fixed Source exchanges.
+Scope-matched reusable input produced a guarded POST 201 and fresh same-K PASS.
+Out-of-scope input returned `needs_input / scope_mismatch` before execution;
+its original 30-second clock then produced a deadline result without execution.
+A deliberately lost POST response produced
+`source_runtime_http_operation_failed`, one POST request observation, no fresh K
+receipt and no additional attempt. Each claimed ticket retained custom
+`max_retries = 1`; all results were durably ACKed, candidates confirmed stopped
+where execution started, byte reservations zero and encrypted values revoked.
+Public value occurrences were zero. These are controlled fixtures, not provider
+or unique OSS successes. An initial disk preflight rejection occurred before
+Search/Runtime creation and remains preserved.
+
+[Final input lifecycle controls](evidence/formation-input-lifecycle-final-20261002.json)
+(SHA-256 `a07e694a17af3fde4c9a82b5d970943c5932c39dd51a317fcceb6a07e25b257d`)
+measure expired and revoked values, and two matching reusable candidates.
+They report `expired`, `revoked` and `ambiguous_scope` respectively before
+execution. All retained original creation/deadline and attempt usage; each
+post-deadline input request returned HTTP409 without Requester resume or new
+execution. All result ACKs and zero reservations were checked, registered values
+were removed and public scans found zero protected value occurrences.
+
+[Final embedding controls](evidence/formation-embedding-controls-final-20261003.json)
+(SHA-256 `5d1650010c7629f3f980615297c92a40115f69ffa60e1b1b6e505eda4b84854c`)
+use the same Source/K in two new fixed-exchange Searches at the final Runtime pin.
+Source-owned Node build succeeds with nonsecret configuration, but forbidden
+embedding is rejected as `secret_artifact_embedding_refused` before publication
+and reaches the next reasoning input. Explicit owner permission for nonsecret
+embedding allows a fresh same-K PASS and assessment-pending artifact. Neither
+permit exposes the value in a model, D or public JSON/log. Both results were
+ACKed and encrypted values removed. The permitted artifact is excluded from
+the public evidence scan. Permission-change resume and PWA UI are not measured
+by this pair; earlier UI records keep their own pins.
+
 SVGOMG, OCI and changedetection.io final-pin Source regressions are complete;
 changedetection.io functional/state verification is also complete within the
 explicit private acceptance boundary above.
