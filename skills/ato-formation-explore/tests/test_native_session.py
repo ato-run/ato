@@ -124,6 +124,15 @@ class NativeAdmissionTests(unittest.TestCase):
             report = NATIVE.sdk_reported_usage(path, "claude-code")
             self.assertNotIn("PRIVATE_CANARY", json.dumps(report))
 
+    def test_changed_SDK_counter_shape_keeps_saved_outcome_reportable(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            path = Path(directory) / "native-events.jsonl"
+            path.write_text(json.dumps({"type": "result", "modelUsage": None}))
+            report = NATIVE.sdk_reported_usage(path, "claude-code")
+            self.assertEqual(report["coverage"], "SDK counters unavailable")
+            self.assertEqual(report["account_charge_usd"], "unknown")
+
     def test_coalesced_native_frames_complete_without_another_pipe_write(self):
         reader, writer = os.pipe()
         with os.fdopen(reader, "rb") as stream:
