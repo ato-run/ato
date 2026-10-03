@@ -18,6 +18,30 @@ Codexは`agents/openai.yaml`の`allow_implicit_invocation: false`、Claude Code�
 
 配置方法は[Codex公式Skill資料](https://developers.openai.com/codex/skills)と[Claude Code公式Skill資料](https://code.claude.com/docs/en/skills)のlocal skill/symlink仕様に従う。製品versionだけで対応済みと判定せず、実受入でSkill検出・明示呼び出し・CLI操作を測定する。実測と未検証の一覧は受入記録に残す。
 
+## OwnerからのNative Session起動
+
+`scripts/native-session.py`は既存Searchへ接続するNative clientである。Sourceを起動せず、Dやreceiptを作らない。Ownerが既存`ato form --session-bridge`で開始した接続を指定すると、元の状態・agent binding・deadlineを確認し、公開Skill packageと限定Unix relayを用意して製品のSkillを明示呼び出しする。応答JSONの手渡しは不要である。対応を実測したmacOSのCodex 0.160.0／Claude Code 2.1.288に限定し、別versionやOSは開始を拒否する。
+
+```sh
+python3 skills/ato-formation-explore/scripts/native-session.py \
+  --agent codex --version 0.160.0 \
+  --connection "$OWNER_SESSION_CONNECTION" \
+  --output "$WORKSPACE/.tmp/new-native-session" \
+  --socket "$WORKSPACE/.tmp/formation-native.sock" \
+  --binary "$CODEX_BINARY" --code-mode-host "$CODEX_CODE_MODE_HOST" \
+  --mcp-binary "$FORMATION_MCP_BINARY" \
+  --auth-file "$CODEX_AUTH_FILE" --model-catalog "$CODEX_MODEL_CATALOG" \
+  --model "$SESSION_MODEL"
+```
+
+Claude Codeでは`--agent claude-code --version 2.1.288 --binary "$CLAUDE_BINARY"`とし、Codex専用の3引数は省略する。`--model`を指定する場合は開始時のSessionモデルに合わせる。出力先とsocketは新規、socketは100 byte以内の絶対pathとする。既存ファイルや別Searchの接続を上書きしない。
+
+CodexはNative認証ホストとCode Modeを別プロセス・別OS profileにする。ホストは既存Native認証だけを読む。Code Modeには認証ファイル、Owner接続、Source filesystemを公開しない。model catalogからshell・file patch・追加toolを外し、固定MCP以外の実行入口を持たせない。
+
+Claude CodeはOwner adapterが既存同一accountのKeychain credentialをRAMで読み、隔離したNative認証ホストへ渡す。ファイルやargvへ保存しない。[公式OAuth環境変数とsubprocess scrub](https://code.claude.com/docs/en/env-vars)を使い、MCP子プロセスにはcredentialを継承させない。公開するのは固定MCPの4 toolだけで、built-in tool・hook・plugin・追加MCPを無効にする。Native自身の一時出力もworkspace内に固定する。これらの設定はownerのAto credentialやRuntime ticketの共有を許可しない。
+
+各turnは1つのexchangeを処理する。保存後はOwner側で状態を待ち、新しい未応答exchangeが成立したときだけ同じNative文脈で次のturnを始める。入力待ち・UNKNOWN・終端・期限で止まり、launch終了をSearch取消やRuntime cleanupの証拠にしない。`owner/launch-result.json`とNative eventsはOwner証跡であり、公開報告には保存済み結果を検査して必要な項目だけ移す。
+
 ## 検証状況
 
 2026-10-03のglobal製品inventoryは`codex-cli 0.46.0`、`Claude Code 2.1.288`。Installerによる両配置先からの同一Skill/補助ファイル参照、冪等再配置、既存Skill拒否はローカルで確認した。2026-10-04にはglobalのCodexを置き換えず、公式releaseの`Codex 0.160.0`と対応するCode Mode hostを受入専用に固定した。
