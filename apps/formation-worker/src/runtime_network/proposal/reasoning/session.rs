@@ -9,7 +9,234 @@ use std::{
 
 pub const CONNECTION_SCHEMA: &str = "ato.formation-session-connection/1";
 pub const VIEW_SCHEMA: &str = "ato.formation-session-view/1";
+pub const INPUT_PROJECTION_SCHEMA: &str = "ato.formation-session-public-input/1";
 const FRAME_CAP: usize = 96 * 1024;
+
+// Owner metadata is valid for the owner API, but its free text is not public
+// CandidateProducer input. Parse the complete envelope before projecting slots.
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum VariableReuse {
+    ThisFormation,
+    Reusable,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerVariableMetadata {
+    requirement: ato_formation::variables::VariableRequirement,
+    applications: Vec<String>,
+    reuse: VariableReuse,
+    formation_id: Option<String>,
+    expires_at_ms: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerVariable {
+    metadata: OwnerVariableMetadata,
+    revoked_at_ms: Option<u64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerRuntimeEnvironment {
+    environment_id: String,
+    facts_ref: String,
+    facts: BTreeMap<String, String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerRuntimeAvailability {
+    online: bool,
+    observed_at: Option<String>,
+    capacity: Option<u16>,
+    current_slots: Option<u16>,
+    health: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerRuntime {
+    runtime_id: String,
+    environments: Vec<OwnerRuntimeEnvironment>,
+    availability: OwnerRuntimeAvailability,
+}
+
+fn public_variable_requirement(r: &ato_formation::variables::VariableRequirement) -> Value {
+    json!({"name":r.name,"kind":r.kind,"resource":r.resource,"operation":r.operation,
+        "phase":r.phase,"secret":r.secret,"artifact_embedding":r.artifact_embedding,
+        "temporary":r.temporary})
+}
+fn canonical_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+fn public_variable(value: &Value, input: &ReasoningInput) -> Option<Value> {
+    let owner: OwnerVariable = serde_json::from_value(value.clone()).ok()?;
+    let m = owner.metadata;
+    ato_formation::variables::validate(std::slice::from_ref(&m.requirement)).ok()?;
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    if !(1..=MAX_SAFE_INTEGER).contains(&m.expires_at_ms)
+        || owner.revoked_at_ms.is_some_and(|n| n > MAX_SAFE_INTEGER)
+        || !(1..=32).contains(&m.applications.len())
+        || !m.applications.iter().all(|a| canonical_sha256(a))
+        || !m.applications.contains(&input.source_identity.closure_ref)
+        || match m.reuse {
+            VariableReuse::ThisFormation => {
+                m.formation_id.as_deref() != Some(&input.request.search_id)
+            }
+            VariableReuse::Reusable => m.formation_id.is_some() || m.requirement.temporary,
+        }
+    {
+        return None;
+    }
+    Some(
+        json!({"metadata":{"requirement":public_variable_requirement(&m.requirement),
+        "reuse":m.reuse,"expires_at_ms":m.expires_at_ms},"revoked_at_ms":owner.revoked_at_ms}),
+    )
+}
+
+/// Exact fact names come from the same typed authorization as the compiler;
+/// arbitrary toolchain/source-OCI prefixes are never an information boundary.
+fn catalog_fact_allowlist(input: &ReasoningInput) -> BTreeMap<String, &'static str> {
+    let mut facts = BTreeMap::new();
+    if input.request.operation_catalog.schema != "ato.formation-operation-catalog/1" {
+        return facts;
+    }
+    for domain in &input.request.operation_catalog.operations {
+        let ato_formation::proposal::OperationDomain::ExecutionPlan {
+            runtime_port_operations,
+            toolchains,
+            source_oci,
+            ..
+        } = domain
+        else {
+            continue;
+        };
+        let auth = ato_formation::proposal::PlanAuthorization {
+            runtime_port_operations: *runtime_port_operations,
+            files: BTreeMap::new(),
+            toolchains: toolchains.clone(),
+            source_oci: source_oci.clone(),
+        };
+        if auth.validate().is_err() {
+            continue;
+        }
+        for (name, version) in toolchains {
+            facts.insert(format!("toolchain.{name}.{version}"), "present");
+        }
+        if let Some(recipe) = source_oci {
+            for image in &recipe.base_images {
+                facts.insert(
+                    format!(
+                        "formation.oci.image.{}",
+                        image.pinned_digest.trim_start_matches("sha256:")
+                    ),
+                    "boolean",
+                );
+            }
+        }
+    }
+    facts
+}
+fn public_fact(key: &str, value: &str, exact: &BTreeMap<String, &'static str>) -> bool {
+    match key {
+        "runtime.process"
+        | "runtime.oci"
+        | "formation.source_oci.available"
+        | "formation.source_oci.bound"
+        | ato_formation::port_operations::RUNTIME_CAPABILITY => matches!(value, "true" | "false"),
+        "os" => matches!(value, "linux" | "macos" | "windows"),
+        "arch" => matches!(value, "x86_64" | "aarch64" | "x86" | "arm" | "riscv64"),
+        "containment" | "formation.containment" => matches!(value, "bwrap+landlock" | "none"),
+        _ => match exact.get(key) {
+            Some(&"present") => value == "present",
+            Some(&"boolean") => matches!(value, "true" | "false"),
+            _ => false,
+        },
+    }
+}
+fn public_runtime(value: &Value, exact: &BTreeMap<String, &'static str>) -> Option<Value> {
+    let owner: OwnerRuntime = serde_json::from_value(value.clone()).ok()?;
+    let a = owner.availability;
+    if owner.runtime_id.is_empty()
+        || owner.runtime_id.len() > 256
+        || !owner
+            .runtime_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        || !(1..=8).contains(&owner.environments.len())
+        || a.capacity.is_some_and(|n| n > 1024)
+        || a.current_slots.is_some_and(|n| n > 1024)
+        || a.health
+            .as_ref()
+            .is_some_and(|s| s.is_empty() || s.len() > 32)
+        || a.observed_at.as_ref().is_some_and(|s| s.len() > 64)
+        || owner.environments.iter().any(|e| {
+            e.environment_id.is_empty()
+                || e.environment_id.len() > 64
+                || !e.environment_id.as_bytes()[0].is_ascii_lowercase()
+                    && !e.environment_id.as_bytes()[0].is_ascii_digit()
+                || !e
+                    .environment_id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+                || !canonical_sha256(&e.facts_ref)
+                || e.facts.len() > 128
+                || e.facts.iter().any(|(key, value)| {
+                    key.is_empty()
+                        || key.len() > 128
+                        || !key.bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-/".contains(&b)
+                        })
+                        || value.len() > 256
+                })
+        })
+    {
+        return None;
+    }
+    let environments: Vec<_> = owner
+        .environments
+        .into_iter()
+        .map(|e| {
+            let facts: BTreeMap<_, _> = e
+                .facts
+                .into_iter()
+                .filter(|(key, value)| public_fact(key, value, exact))
+                .collect();
+            json!({"environment_id":e.environment_id,"facts_ref":e.facts_ref,"facts":facts})
+        })
+        .collect();
+    Some(
+        json!({"runtime_id":owner.runtime_id,"environments":environments,
+        "availability":{"online":a.online,"capacity":a.capacity,"current_slots":a.current_slots,
+            "health":if a.health.as_deref() == Some("ok") {"ok"} else {"unknown"}}}),
+    )
+}
+fn public_reasoning_input(input: &ReasoningInput) -> Result<Value> {
+    // Keep verified Source and protocol evidence unchanged. This projection is
+    // a view, not a new persisted input or an independently hashed exchange.
+    let mut public = serde_json::to_value(input)?;
+    public["available_variables"] = json!(
+        input
+            .available_variables
+            .iter()
+            .take(128)
+            .filter_map(|v| public_variable(v, input))
+            .collect::<Vec<_>>()
+    );
+    let exact = catalog_fact_allowlist(input);
+    public["runtime_capabilities"] = json!(
+        input
+            .runtime_capabilities
+            .iter()
+            .take(16)
+            .filter_map(|v| public_runtime(v, &exact))
+            .collect::<Vec<_>>()
+    );
+    Ok(public)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -438,11 +665,7 @@ pub fn public_progress(status: &Value) -> Value {
             ato_formation::variables::validate(std::slice::from_ref(&requirement)).ok()?;
             // Account/endpoint, candidate grants and obtain/error text can carry
             // owner data. Publish only the declared slot and typed constraints.
-            Some(json!({"name":requirement.name,"kind":requirement.kind,
-                "resource":requirement.resource,"operation":requirement.operation,
-                "phase":requirement.phase,"secret":requirement.secret,
-                "artifact_embedding":requirement.artifact_embedding,
-                "temporary":requirement.temporary}))
+            Some(public_variable_requirement(&requirement))
         })
         .collect();
     json!({"status":status["status"],"pause_reason":status["pause_reason"],
@@ -630,6 +853,7 @@ impl ReasoningProducer {
             .filter(|(name, _, _)| !self.directory.join(format!("{name}.record.json")).exists())
             .collect();
         let mut view = json!({"schema":VIEW_SCHEMA,"search_id":search_id,
+            "input_projection_schema":INPUT_PROJECTION_SCHEMA,"input_sha256_scope":"owner_saved_input",
             "configuration_ref":self.configuration_ref,"deadline_ms":deadline_ms,
             "search_elapsed_ms":elapsed,
             "exchanges_used":inputs.len(),"exchanges_remaining":self.budget.max_calls.saturating_sub(inputs.len() as u32),
@@ -682,7 +906,7 @@ impl ReasoningProducer {
             });
             view["next_operation"] = json!(if response_saved { "status" } else { "submit" });
             if include_input && !response_saved {
-                view["input"] = serde_json::to_value(input)?;
+                view["input"] = public_reasoning_input(input)?;
                 let ReasoningProviderConfig::Session(config) = &self.config else {
                     bail!("Session configuration missing")
                 };
@@ -822,10 +1046,15 @@ mod tests {
         })
     }
     fn fixture() -> Result<(tempfile::TempDir, Arc<ReasoningProducer>, String)> {
+        fixture_with_agent(None)
+    }
+    fn fixture_with_agent(
+        agent: Option<SessionAgent>,
+    ) -> Result<(tempfile::TempDir, Arc<ReasoningProducer>, String)> {
         std::fs::create_dir_all(".tmp")?;
         let root = tempfile::tempdir_in(".tmp")?;
         let producer = Arc::new(ReasoningProducer::new(
-            config(None),
+            config(agent),
             plan(),
             root.path().join("reasoning"),
             None,
@@ -853,6 +1082,182 @@ mod tests {
     }
     fn output() -> Box<serde_json::value::RawValue> {
         serde_json::value::to_raw_value(&json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"unsupported","reason":"insufficient_source"}]})).unwrap()
+    }
+    fn projection_fixture(producer: &ReasoningProducer) -> Result<(Vec<u8>, String)> {
+        let path = producer.directory.join("r001_s001.input.json");
+        let mut input: Value = serde_json::from_slice(&bounded_read(&path, 64 * 1024)?)?;
+        let application = format!("sha256:{}", "c".repeat(64));
+        input["source_identity"]["closure_ref"] = json!(application);
+        // All free-text canaries below are valid owner API metadata. They are
+        // synthetic values, not a test that relies on an invalid secret field.
+        input["available_variables"] = json!([{"metadata":{
+            "requirement":{"name":"OWNER_TOKEN","kind":"service_credential",
+                "purpose":"PRIVATE_PURPOSE_CANARY","service":"PRIVATE_SERVICE_CANARY",
+                "endpoint":"https://private.invalid/PRIVATE_ENDPOINT_CANARY",
+                "account":"PRIVATE_ACCOUNT_CANARY@example.invalid","tenant":"PRIVATE_TENANT_CANARY",
+                "resource":"app.http","operation":"execute","phase":"runtime","secret":true,
+                "artifact_embedding":false,"temporary":false},
+            "applications":[application],"reuse":"this_formation","formation_id":"search_test",
+            "expires_at_ms":2000},"revoked_at_ms":null}]);
+        let recipe = json!({"schema":"ato.source-oci-recipe/1","dockerfile":"Dockerfile",
+            "platform":"linux/amd64","base_images":[{"reference":"example.invalid/image:fixed",
+                "pinned_digest":format!("sha256:{}","d".repeat(64))}],
+            "build":{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":64},
+            "runtime":{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":64},
+            "build_disk_bytes":536870912,"build_timeout_seconds":60,"max_archive_bytes":1048576});
+        input["request"]["operation_catalog"]["operations"] = json!([{
+            "operation":"execution_plan@1","toolchains":{"node":"22.0.0"},
+            "source_oci":recipe,"sources":[]}]);
+        let approved_image = format!("formation.oci.image.{}", "d".repeat(64));
+        let unapproved_image = format!("formation.oci.image.{}", "e".repeat(64));
+        input["runtime_capabilities"] = json!([{"runtime_id":"runtime-test","environments":[{
+            "environment_id":"linux-test","facts_ref":format!("sha256:{}","f".repeat(64)),
+            "facts":{"os":"linux","arch":"x86_64","runtime.process":"true","runtime.oci":"true",
+                "containment":"bwrap+landlock","formation.source_oci.available":"true",
+                "formation.source_oci.bound":"true","toolchain.node.22.0.0":"present",
+                "toolchain.node.25.0.0":"present","toolchain.root":"/Users/PRIVATE_HOST_PATH_CANARY",
+                "toolchain.private_label":"PRIVATE_TOOLCHAIN_CANARY",
+                "formation.source_oci.private_grant":"formation-variable:PRIVATE_GRANT_CANARY",
+                (approved_image):"true",(unapproved_image):"true"}}],
+            "availability":{"online":true,"observed_at":"PRIVATE_TIMESTAMP_CANARY","capacity":2,
+                "current_slots":1,"health":"PRIVATE_HEALTH_CANARY"}}]);
+        let source_text = "print('PUBLIC_TARGET_SOURCE_CANARY')\n";
+        input["request"]["source_context"] = json!([{"source_id":"src_test","kind":"verified_file",
+            "logical_id":"src.test","encoding":"utf8","truncated":false,
+            "content_sha256":digest(source_text.as_bytes()),"text":source_text}]);
+        let bytes = serde_jcs::to_vec(&input)?;
+        let _: ReasoningInput = serde_json::from_slice(&bytes)?;
+        replace_public_file(&path, &bytes)?;
+        let input_digest = digest(&bytes);
+        replace_public_file(
+            &producer.directory.join("r001_s001.window.json"),
+            &serde_jcs::to_vec(&json!({"exchange_id":"search_test_r1_s1",
+                "input_sha256":input_digest,"deadline_ms":1000}))?,
+        )?;
+        Ok((bytes, input_digest))
+    }
+
+    #[test]
+    fn session_projection_removes_owner_metadata_and_arbitrary_runtime_facts_without_rebinding()
+    -> Result<()> {
+        let (_root, producer, _) = fixture()?;
+        let (saved, input_digest) = projection_fixture(&producer)?;
+        let progress = json!({"status":"pending","unresolved_attempts":0});
+        let view = producer.session_view("search_test", 1000, 10, &progress, true)?;
+        assert_eq!(view["input_projection_schema"], INPUT_PROJECTION_SCHEMA);
+        assert_eq!(view["input_sha256_scope"], "owner_saved_input");
+        assert_eq!(view["exchange"]["input_sha256"], input_digest);
+        let public = serde_json::to_string(&view)?;
+        assert!(!public.contains("PRIVATE_"));
+        assert!(public.contains("PUBLIC_TARGET_SOURCE_CANARY"));
+        let available = &view["input"]["available_variables"][0];
+        assert_eq!(available["metadata"]["requirement"]["name"], "OWNER_TOKEN");
+        assert!(available["metadata"]["formation_id"].is_null());
+        assert!(available["metadata"]["applications"].is_null());
+        let facts = &view["input"]["runtime_capabilities"][0]["environments"][0]["facts"];
+        assert_eq!(facts["toolchain.node.22.0.0"], "present");
+        assert_eq!(
+            facts[format!("formation.oci.image.{}", "d".repeat(64))],
+            "true"
+        );
+        assert!(facts["toolchain.node.25.0.0"].is_null());
+        assert!(facts[format!("formation.oci.image.{}", "e".repeat(64))].is_null());
+        assert_eq!(
+            view["input"]["runtime_capabilities"][0]["availability"]["health"],
+            "unknown"
+        );
+        assert_ne!(digest(&serde_jcs::to_vec(&view["input"])?), input_digest);
+        assert_eq!(
+            view,
+            producer.session_view("search_test", 1000, 10, &progress, true)?
+        );
+        assert_eq!(
+            bounded_read(&producer.directory.join("r001_s001.input.json"), 64 * 1024)?,
+            saved
+        );
+        assert!(String::from_utf8(saved.clone())?.contains("PRIVATE_ACCOUNT_CANARY"));
+        // Submission uses the advertised owner-saved digest, never a hash of
+        // the projection. Valid typed output continues to bind to that input.
+        let reply = producer.submit_session_response(
+            "search_test",
+            "search_test_r1_s1",
+            &input_digest,
+            &output(),
+            ResponseWindow {
+                deadline_ms: 1000,
+                now_ms: 10,
+                accepting: true,
+            },
+        )?;
+        assert_eq!(reply["response_saved"], true);
+        assert_eq!(
+            bounded_read(&producer.directory.join("r001_s001.input.json"), 64 * 1024)?,
+            saved
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_and_claude_receive_identical_projection_for_same_saved_input() -> Result<()> {
+        let mut projections = Vec::new();
+        for kind in [SessionAgentKind::Codex, SessionAgentKind::ClaudeCode] {
+            let (_root, producer, _) = fixture_with_agent(Some(SessionAgent {
+                kind,
+                version: "fixture-version".into(),
+                model: None,
+            }))?;
+            let (_, input_digest) = projection_fixture(&producer)?;
+            let view = producer.session_view(
+                "search_test",
+                1000,
+                10,
+                &json!({"status":"pending","unresolved_attempts":0}),
+                true,
+            )?;
+            assert_eq!(view["exchange"]["input_sha256"], input_digest);
+            projections.push(view["input"].clone());
+        }
+        assert_eq!(projections[0], projections[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_malformed_and_out_of_scope_metadata_is_not_projected() -> Result<()> {
+        let (_root, producer, _) = fixture()?;
+        let (saved, _) = projection_fixture(&producer)?;
+        let mut input: ReasoningInput = serde_json::from_slice(&saved)?;
+        let valid_variable = input.available_variables[0].clone();
+        let mut unknown = valid_variable.clone();
+        unknown["private_grant"] = json!("PRIVATE_UNKNOWN_GRANT_CANARY");
+        let mut malformed = valid_variable.clone();
+        malformed["metadata"]["requirement"]["secret"] = json!("true");
+        let mut unscoped = valid_variable.clone();
+        unscoped["metadata"]["formation_id"] = json!("other_search");
+        let mut other_application = valid_variable.clone();
+        other_application["metadata"]["applications"] =
+            json!([format!("sha256:{}", "e".repeat(64))]);
+        input.available_variables = vec![unknown, malformed, unscoped, other_application];
+        let valid_runtime = input.runtime_capabilities[0].clone();
+        let mut unknown_runtime = valid_runtime.clone();
+        unknown_runtime["owner_user_id"] = json!("PRIVATE_UNKNOWN_OWNER_CANARY");
+        let mut malformed_runtime = valid_runtime.clone();
+        malformed_runtime["availability"]["capacity"] = json!(1025);
+        input.runtime_capabilities = vec![unknown_runtime, malformed_runtime];
+        let public = public_reasoning_input(&input)?;
+        assert_eq!(public["available_variables"], json!([]));
+        assert_eq!(public["runtime_capabilities"], json!([]));
+        // A malformed catalog cannot authorize an arbitrary exact toolchain.
+        input.runtime_capabilities = vec![valid_runtime];
+        if let ato_formation::proposal::OperationDomain::ExecutionPlan { toolchains, .. } =
+            &mut input.request.operation_catalog.operations[0]
+        {
+            toolchains.insert("PRIVATE_TOOLCHAIN_CANARY".into(), "22.0.0".into());
+        }
+        let facts =
+            &public_reasoning_input(&input)?["runtime_capabilities"][0]["environments"][0]["facts"];
+        assert!(facts["toolchain.node.22.0.0"].is_null());
+        assert_eq!(facts["runtime.process"], "true");
+        Ok(())
     }
     #[test]
     fn saved_response_crossing_poll_deadline_is_receipted_without_admission() -> Result<()> {
