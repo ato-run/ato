@@ -17,6 +17,33 @@ measurements. Ato `252d07a0` removes a redundant `Ok(...?)` only, after freezing
 the new binaries. [Budget control evidence](evidence/formation-pre-dispatch-budget-control-20261003.json)
 records the new execution pin and receipt-authority hash.
 
+## v0 scope and remaining gates
+
+| Area | Implemented / measured scope | Remaining or outside v0 |
+| --- | --- | --- |
+| Search control | Shared persisted round/budget/deadline state, custom retry transport, bounded phases and backoff, typed terminal distinctions; new pre-dispatch budget control and original-clock input controls | Actual provider usage/fees for the Codex session are unavailable; independent paid API acceptance awaits valid credential input |
+| Routes | Static Web, one Node/Python process and one OCI service; typed common proposals; bound capability checks and unchanged-K Runtime receipt | Compose/multiple services, undeclared monorepo/multi-repo traversal and automatic source/Dockerfile edits are outside v0 |
+| Dependencies | Source-owned Python requirements, isolated sdist wheel building, pinned wheel artifacts/offline installation; explicit npm lifecycle/native rebuild plans with bound toolchains and limits | No application-specific setup commands in presets; unrestricted build/runtime networking is not admitted |
+| Private input | Encrypted store, scoped metadata/assignment/grants and dedicated input surfaces; measured matched/outside/expired/revoked/ambiguous inputs, temporary cleanup and embedding controls | Final-pin PWA input/permission-change resume is unmeasured; fixed nonsecret owner email in the measurement controller limits the orchestration privacy claim |
+| Function/state | SVG UI; changedetection watch create/edit/pause across restart; Kutt native dependencies, migration, owner/API operations and committed state across stop/new Run | These retain separate functional pins/artifacts; automatic production Source state provisioning and external credential authentication remain unverified |
+| Admission | Success submitted as assessment pending, with no conversion to normal Run permission | Deployment, feature flags, remote migrations, production enablement and 100-app rerun are separate, unperformed work |
+
+The historical unique OSS count remains **Codex 3 / API 0**: SVGOMG,
+changedetection.io and Kutt. The OCI representative is a controlled single
+service fixture and adds no unique OSS app. SVGOMG and Kutt are repair PASS;
+changedetection.io passed its first executing build after a preserved
+preexecution infrastructure failure; OCI passed its first execution after a
+same-round schema correction. Failed/interrupted Searches and UNKNOWN remain
+separate records, rather than being removed from the denominator. New 100-app
+in-scope success rate and overall reach are not claimed before remeasurement.
+
+Code after the prior `3bb28192` measurement adds only the pre-dispatch budget
+boundary and its strict API completion/migration/authority wiring. New Kutt and
+budget controls ran at `da7c452c` / `9b483d4a`; later Ato `252d07a0` fixes a
+redundant clippy expression, and subsequent Ato commits add evidence/docs only.
+Earlier SVG/OCI/Python/input/function/state results keep their exact old pins.
+Local/CI/fixture acceptance is not reported as staging or production validation.
+
 ## SVGOMG
 
 [Source and separate functional evidence](evidence/formation-svg-source-functional-final-20261002.json)
