@@ -311,6 +311,10 @@ fn replace_public_file(path: &Path, bytes: &[u8]) -> Result<()> {
 pub fn read_connection(path: &Path) -> Result<Connection> {
     let connection: Connection = serde_json::from_slice(&bounded_read(path, 4096)?)
         .map_err(|_| anyhow::anyhow!("invalid Session connection"))?;
+    validate_connection(&connection)?;
+    Ok(connection)
+}
+fn validate_connection(connection: &Connection) -> Result<()> {
     ensure!(
         connection.schema == CONNECTION_SCHEMA
             && connection.address.ip().is_loopback()
@@ -318,19 +322,32 @@ pub fn read_connection(path: &Path) -> Result<Connection> {
             && connection.access_token.len() == 44,
         "invalid Session connection"
     );
-    Ok(connection)
+    Ok(())
 }
 /// Token-free CLI configuration: only this scoped capability reaches the agent.
 pub fn request(connection_file: &Path, command: Command) -> Result<Value> {
     let connection = read_connection(connection_file)?;
+    request_bound(
+        &connection,
+        &connection_file.with_extension("status.json"),
+        command,
+    )
+}
+/// Fixed-scope tool facades reuse this transport without rereading or replacing
+/// their accepted Search/configuration/capability binding.
+pub fn request_bound(
+    connection: &Connection,
+    status_file: &Path,
+    command: Command,
+) -> Result<Value> {
+    validate_connection(connection)?;
     let mut stream = match TcpStream::connect_timeout(&connection.address, Duration::from_secs(2)) {
         Ok(stream) => stream,
         Err(error) if matches!(command, Command::Status | Command::Next) => {
-            let path = connection_file.with_extension("status.json");
-            if !path.exists() {
+            if !status_file.exists() {
                 return Err(error.into());
             }
-            let mut saved: Value = serde_json::from_slice(&bounded_read(&path, FRAME_CAP)?)?;
+            let mut saved: Value = serde_json::from_slice(&bounded_read(status_file, FRAME_CAP)?)?;
             ensure!(
                 saved["schema"] == VIEW_SCHEMA
                     && saved["search_id"] == connection.search_id
@@ -348,9 +365,9 @@ pub fn request(connection_file: &Path, command: Command) -> Result<Value> {
     // Preserve RawValue bytes (including duplicate fields for strict rejection).
     // JCS's Value conversion would erase this boundary before validation.
     let bytes = serde_json::to_vec(&Request {
-        access_token: connection.access_token,
-        search_id: connection.search_id,
-        configuration_ref: connection.configuration_ref,
+        access_token: connection.access_token.clone(),
+        search_id: connection.search_id.clone(),
+        configuration_ref: connection.configuration_ref.clone(),
         command,
     })?;
     ensure!(bytes.len() < FRAME_CAP, "session request bounds");
@@ -489,6 +506,22 @@ impl ReasoningProducer {
         include_input: bool,
     ) -> Result<Value> {
         let inputs = self.session_inputs(search_id)?;
+        let start_path = self.directory.with_extension("start.json");
+        let elapsed = if start_path.exists() {
+            let start: Value = serde_json::from_slice(&bounded_read(&start_path, 4096)?)?;
+            if start["search_id"] == search_id
+                && start["configuration_ref"] == self.configuration_ref
+                && start["deadline_ms"] == deadline_ms
+            {
+                start["started_at_ms"]
+                    .as_u64()
+                    .map(|started| now.saturating_sub(started))
+            } else {
+                None // Older checkpoints have no trustworthy start-time binding.
+            }
+        } else {
+            None
+        };
         let records = self.records()?;
         let completed_inspections = records
             .iter()
@@ -503,6 +536,7 @@ impl ReasoningProducer {
             .collect();
         let mut view = json!({"schema":VIEW_SCHEMA,"search_id":search_id,
             "configuration_ref":self.configuration_ref,"deadline_ms":deadline_ms,
+            "search_elapsed_ms":elapsed,
             "exchanges_used":inputs.len(),"exchanges_remaining":self.budget.max_calls.saturating_sub(inputs.len() as u32),
             "inspection_exchanges_completed":completed_inspections,"inspection_elapsed_ms":inspection_ms,
             "source_identity":inputs.first().map(|(_, _, i)| &i.source_identity),
@@ -717,6 +751,38 @@ mod tests {
     fn output() -> Box<serde_json::value::RawValue> {
         serde_json::value::to_raw_value(&json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"unsupported","reason":"insufficient_source"}]})).unwrap()
     }
+    #[test]
+    fn elapsed_time_uses_only_the_original_bound_start_checkpoint() -> Result<()> {
+        let (_root, producer, _) = fixture()?;
+        let progress = public_progress(&json!({"status":"running","attempts":[]}));
+        let path = producer.directory.with_extension("start.json");
+        save(&path, &serde_jcs::to_vec(&json!({"deadline_ms":1000}))?)?;
+        assert!(
+            producer.session_view("search_test", 1000, 100, &progress, false)?["search_elapsed_ms"]
+                .is_null()
+        );
+        replace_public_file(
+            &path,
+            &serde_jcs::to_vec(&json!({
+                "search_id":"search_test","configuration_ref":producer.configuration_ref,
+                "deadline_ms":1000,"started_at_ms":10
+            }))?,
+        )?;
+        assert_eq!(
+            producer.session_view("search_test", 1000, 100, &progress, false)?["search_elapsed_ms"],
+            90
+        );
+        assert_eq!(
+            producer.session_view("search_test", 1000, 200, &progress, false)?["search_elapsed_ms"],
+            190
+        );
+        assert!(
+            producer.session_view("search_test", 2000, 200, &progress, false)?["search_elapsed_ms"]
+                .is_null()
+        );
+        Ok(())
+    }
+
     #[test]
     fn legacy_digest_and_both_agent_bindings_are_preserved() -> Result<()> {
         let legacy = config(None);
