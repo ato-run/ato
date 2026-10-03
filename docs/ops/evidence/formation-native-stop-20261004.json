@@ -1,0 +1,246 @@
+{
+  "schema": "ato.formation-native-stop-acceptance/1",
+  "native_launcher_pin": "e021eecb287165bdd25ff75d08115f7e27197345",
+  "Rust_binary_source_pin": "5cc4e1b8f037db7f8f5e69b635b5204861e8fe10",
+  "API_source_pin": "353c06fef9fd945e0286b686670e253a9f04c243",
+  "needs_input": {
+    "agent": "claude_code",
+    "version": "2.1.288",
+    "model": "claude-opus-5-5",
+    "actual_native_inference": true,
+    "fixed_response_fixture": false,
+    "controlled_Source": true,
+    "known_D_seed": false,
+    "owner_input_value_supplied": false,
+    "fixed_contract_ref": "sha256:6b627cd1a213a3459ee586251eb0ed2c8c04355af07bb8cfd70e605d59a109b7",
+    "snapshot": {
+      "configuration_ref": "sha256:b018d70161a6e1d743f90f4a7294bb1b7f7caa4d6057d22a0c37786ff1611bfe",
+      "connected": false,
+      "cost": "unknown",
+      "deadline_ms": 1791057024811,
+      "exchange": null,
+      "exchanges_remaining": 1,
+      "exchanges_used": 1,
+      "input": null,
+      "input_projection_schema": "ato.formation-session-public-input/1",
+      "input_sha256_scope": "owner_saved_input",
+      "inspection_elapsed_ms": 0,
+      "inspection_exchanges_completed": 0,
+      "internal_LLM_calls": "unknown",
+      "next_operation": "owner_reconcile_or_assess",
+      "observed_at_ms": 1791056174907,
+      "progress": {
+        "ACK": "unknown; reconcile the owner and Runtime evidence",
+        "approval": "not_assessed",
+        "attempts": [],
+        "cleanup": "not_confirmed",
+        "contract_ref": "sha256:6b627cd1a213a3459ee586251eb0ed2c8c04355af07bb8cfd70e605d59a109b7",
+        "deployed": false,
+        "execution_pin": {
+          "git_commit": "693bb45be4a394878be3a9af205ce32e5d239a46",
+          "git_dirty": "false",
+          "profile": "debug",
+          "version": "0.7.9"
+        },
+        "execution_stop_confirmed": null,
+        "input_cleanup": null,
+        "input_requirements": [],
+        "pause_reason": null,
+        "receipt": null,
+        "rounds_consumed": 1,
+        "search_budget": {
+          "attempts": {
+            "max": 1,
+            "remaining": 1,
+            "reserved": 0,
+            "used": 0
+          },
+          "expanded_bytes": {
+            "max": 2147483648,
+            "remaining": 2147483648,
+            "reserved": 0,
+            "used": 0
+          },
+          "stored_bytes": {
+            "max": 1073741824,
+            "remaining": 1073741824,
+            "reserved": 0,
+            "used": 0
+          },
+          "transfer_bytes": {
+            "max": 1073741824,
+            "remaining": 1073741824,
+            "reserved": 0,
+            "used": 0
+          }
+        },
+        "status": "unsatisfied",
+        "termination_reason": "needs_input",
+        "unresolved_attempts": 0
+      },
+      "responses_reconciled_after_deadline": 0,
+      "schema": "ato.formation-session-view/1",
+      "search_elapsed_ms": 50090,
+      "search_id": "search_89d080d445216ac0c0ae58bace1cbb80",
+      "source_identity": {
+        "archive_digest": "sha256:8f4e349750b7ae3a41e3341f523b4219b5d82fb70f42be2dc36ef5f03fd1eb83",
+        "closure_ref": "sha256:65fe30ae9092f17e971793dee33191a9b71e3abadf0765460a8f6c989fec69a2"
+      },
+      "token_usage": "unknown",
+      "waiting_reason": "coordinator_wait_or_terminal"
+    },
+    "stop": {
+      "reason": "needs_input",
+      "status": "not_reached",
+      "stopped_at": "2026-10-03T19:36:13.973Z"
+    },
+    "exchanges": 1,
+    "D_rounds": 1,
+    "Runtime_attempts": 0,
+    "reason_scope": "pre-D owner-input decline, not the separate Runtime variable pause/resume gate",
+    "Source_programs_started_on_agent_host": false,
+    "canary_scan": {
+      "schema": "ato.formation-agent-output-leak-scan/1",
+      "canary_count": 3,
+      "records": [
+        {
+          "transcript": "native-events.jsonl",
+          "bytes": 127249,
+          "sha256": "af84cef0d6cbf2af705cf32b534c9e91dc4d11e9fbfec0e7603510d3b531b19a",
+          "private_value_detected": false
+        },
+        {
+          "transcript": "claude.stderr",
+          "bytes": 206,
+          "sha256": "de8f61180dfd6b00ad02c9688d8fbe00b27cad193f4531c9e2017688bbeca57d",
+          "private_value_detected": false
+        },
+        {
+          "transcript": "broker.stderr",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "private_value_detected": false
+        }
+      ],
+      "leak_detected": false,
+      "scope": "supplied private canaries; not proof of every possible secret",
+      "private_values_or_paths_reported": false
+    }
+  },
+  "budget_exhausted": {
+    "Coordinator_error": "search_budget_exhausted",
+    "admission_HTTP": 409,
+    "after_refusal_read_only_HTTP": 404,
+    "Search_identifier": "search_c1bd4a704f2a711e9c067ca86261ea9f",
+    "Bridge_created": false,
+    "Native_context_created": false,
+    "inference_started": false,
+    "Runtime_execution_started": false,
+    "scope": "source expanded-byte budget refused before a Session Bridge was created"
+  },
+  "deadline_exceeded": {
+    "snapshot": {
+      "configuration_ref": "sha256:a03930c0810e3fc12dc65a75a9d6d74dec8f90c193da777ce59cd26c9f1e1afa",
+      "connected": false,
+      "cost": "unknown",
+      "deadline_ms": 1791056181153,
+      "exchange": null,
+      "exchanges_remaining": 1,
+      "exchanges_used": 1,
+      "input": null,
+      "input_projection_schema": "ato.formation-session-public-input/1",
+      "input_sha256_scope": "owner_saved_input",
+      "inspection_elapsed_ms": 0,
+      "inspection_exchanges_completed": 0,
+      "internal_LLM_calls": "unknown",
+      "next_operation": "owner_reconcile_or_assess",
+      "observed_at_ms": 1791056183696,
+      "progress": {
+        "ACK": "unknown; reconcile the owner and Runtime evidence",
+        "approval": "not_assessed",
+        "attempts": [],
+        "cleanup": "not_confirmed",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "deployed": false,
+        "execution_pin": {
+          "git_commit": "693bb45be4a394878be3a9af205ce32e5d239a46",
+          "git_dirty": "false",
+          "profile": "debug",
+          "version": "0.7.9"
+        },
+        "execution_stop_confirmed": null,
+        "input_cleanup": null,
+        "input_requirements": [],
+        "pause_reason": null,
+        "receipt": null,
+        "rounds_consumed": 1,
+        "search_budget": {
+          "attempts": {
+            "max": 1,
+            "remaining": 1,
+            "reserved": 0,
+            "used": 0
+          },
+          "expanded_bytes": {
+            "max": 2147483648,
+            "remaining": 2147483648,
+            "reserved": 0,
+            "used": 0
+          },
+          "stored_bytes": {
+            "max": 1073741824,
+            "remaining": 1073741824,
+            "reserved": 0,
+            "used": 0
+          },
+          "transfer_bytes": {
+            "max": 1073741824,
+            "remaining": 1073741824,
+            "reserved": 0,
+            "used": 0
+          }
+        },
+        "status": "unsatisfied",
+        "termination_reason": "deadline_exceeded",
+        "unresolved_attempts": 0
+      },
+      "responses_reconciled_after_deadline": 0,
+      "schema": "ato.formation-session-view/1",
+      "search_elapsed_ms": 12528,
+      "search_id": "search_af878b3bab6dbbe3597fbab86389ea86",
+      "source_identity": {
+        "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+        "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c"
+      },
+      "token_usage": "unknown",
+      "waiting_reason": "deadline_exceeded"
+    },
+    "stop": {
+      "reason": "deadline_exceeded",
+      "status": "not_reached",
+      "stopped_at": "2026-10-03T19:36:23.269Z"
+    },
+    "Native_entry_rejected_after_original_deadline": true,
+    "Native_context_created": false,
+    "new_inference": false,
+    "Runtime_attempts": 0,
+    "exchange_allocated_but_unanswered": 1,
+    "original_deadline_preserved": true
+  },
+  "transport_preparation_failure": {
+    "Search_identifier": "search_e0beff667d6e44e0236e57fdd371e3ab",
+    "read_only_Coordinator_status": 404,
+    "Source_Search_not_created": true,
+    "LLM_inference_started": false,
+    "Runtime_execution_started": false,
+    "saved_transport_dispatches": 2,
+    "retry_cap_not_reset": true,
+    "old_preparation_kept": true
+  },
+  "ordinary_Run_authorized": false,
+  "unique_OSS_success_count_increase": 0,
+  "Ato_direct_LLM_calls": 0,
+  "native_internal_calls_tokens_cost": "unknown",
+  "remaining_UNKNOWN_disconnection_gate": "strict fixture/entry admission; no old UNKNOWN rerun",
+  "budget_audit": "allocated rounds13 exceeds prior aggregate12 by1; preserved and further starts blocked"
+}
