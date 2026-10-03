@@ -28,15 +28,6 @@ pub(crate) fn execute(
     control: Option<&ExecutionControl>,
     evidence: &mut Vec<PortOperationObservation>,
 ) -> Result<()> {
-    if derivation.runtime_port_operations.is_empty() {
-        return Ok(());
-    }
-    let control = control.filter(|_| bound).ok_or_else(|| {
-        failure(
-            "unsupported_capability",
-            "HTTP Port operations require a bound scoped Runtime and frozen deadline",
-        )
-    })?;
     ato_formation::port_operations::validate_bound(
         &derivation.runtime_port_operations,
         &derivation.ports,
@@ -50,10 +41,62 @@ pub(crate) fn execute(
             "HTTP Port operation declaration is not bound",
         )
     })?;
+    execute_operations(
+        &derivation.runtime_port_operations,
+        endpoints,
+        variables,
+        bound,
+        control,
+        evidence,
+    )
+}
+
+pub fn execute_acceptance(
+    derivation: &BoundDerivation,
+    plan: &ato_formation::functional_acceptance::FunctionalAcceptanceV1,
+    ceiling: &ato_formation::requirements::ExecutionRequirements,
+    endpoints: &BTreeMap<String, String>,
+    variables: &[ResolvedVariable],
+    control: &ExecutionControl,
+    evidence: &mut Vec<PortOperationObservation>,
+) -> Result<()> {
+    plan.validate(derivation, ceiling).map_err(|_| {
+        failure(
+            "functional_acceptance_invalid",
+            "functional HTTP actions exceed the approved scope",
+        )
+    })?;
+    execute_operations(
+        &plan.operations,
+        endpoints,
+        variables,
+        true,
+        Some(control),
+        evidence,
+    )
+}
+
+fn execute_operations(
+    operations: &[ato_formation::port_operations::RuntimePortOperation],
+    endpoints: &BTreeMap<String, String>,
+    variables: &[ResolvedVariable],
+    bound: bool,
+    control: Option<&ExecutionControl>,
+    evidence: &mut Vec<PortOperationObservation>,
+) -> Result<()> {
+    if operations.is_empty() {
+        return Ok(());
+    }
+    let control = control.filter(|_| bound).ok_or_else(|| {
+        failure(
+            "unsupported_capability",
+            "HTTP Port operations require a bound scoped Runtime and frozen deadline",
+        )
+    })?;
     control.remaining(AttemptPhase::Launch)?;
     // Resolve exactly the current redeemed grants. No fallback, store search or
     // value serialization is allowed here. Validate all inputs before dispatch.
-    for operation in &derivation.runtime_port_operations {
+    for operation in operations {
         for name in operation.request.json_bindings.values() {
             if variables
                 .iter()
@@ -68,7 +111,7 @@ pub(crate) fn execute(
             }
         }
     }
-    for (operation_index, operation) in derivation.runtime_port_operations.iter().enumerate() {
+    for (operation_index, operation) in operations.iter().enumerate() {
         control.remaining(AttemptPhase::Launch)?;
         let target: SocketAddr = endpoints
             .get(&operation.port)

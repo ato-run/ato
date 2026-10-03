@@ -51,6 +51,12 @@ pub enum EffectAuthorization<'a> {
         derivation_ref: &'a str,
         grant: &'a ExecutionRequirements,
     },
+    /// Separately owner-authorized functional verification of a fixed D on a
+    /// scoped Run. It confers no ordinary Run or exploration assessment grant.
+    FunctionalVerification {
+        derivation_ref: &'a str,
+        grant: &'a ExecutionRequirements,
+    },
 }
 
 impl EffectAuthorization<'_> {
@@ -60,6 +66,7 @@ impl EffectAuthorization<'_> {
             Self::Unattended => "unattended",
             Self::UserInvoked { .. } => "user_invoked",
             Self::Exploration { .. } => "exploration",
+            Self::FunctionalVerification { .. } => "functional_verification",
         }
     }
 }
@@ -80,6 +87,10 @@ pub fn admit(
 ) -> Option<AttemptFailure> {
     match authorization {
         EffectAuthorization::Exploration {
+            derivation_ref,
+            grant,
+        }
+        | EffectAuthorization::FunctionalVerification {
             derivation_ref,
             grant,
         } => {

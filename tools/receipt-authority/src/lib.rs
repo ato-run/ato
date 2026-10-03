@@ -282,6 +282,15 @@ enum SearchRequest {
         retained_ref: String,
         descriptor_json: String,
     },
+    ProjectRetainedVerification {
+        state: Box<ato_formation::search::SearchStateV1>,
+        submission: Box<ato_formation::exploration::ExplorationSubmission>,
+        retained_ref: String,
+        descriptor_json: String,
+        ceiling: ato_formation::requirements::ExecutionRequirements,
+        #[serde(default)]
+        acceptance: Option<ato_formation::functional_acceptance::FunctionalAcceptanceV1>,
+    },
     AssembleExplorationSubmission {
         state: Box<ato_formation::search::SearchStateV1>,
         capsule_toml: String,
@@ -371,6 +380,61 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                     .map_err(|e| e.0.to_owned())?;
                 Ok(
                     serde_json::json!({"status":"retained_registration_ready","projection":projection}),
+                )
+            }
+            SearchRequest::ProjectRetainedVerification {
+                state,
+                submission,
+                retained_ref,
+                descriptor_json,
+                ceiling,
+                acceptance,
+            } => {
+                state
+                    .validate()
+                    .map_err(|_| "registration_search_invalid")?;
+                submission
+                    .validate(&state)
+                    .map_err(|_| "registration_submission_invalid")?;
+                let descriptor = ato_formation::retained::RetainedCandidateV1::parse(
+                    descriptor_json.as_bytes(),
+                    &retained_ref,
+                )
+                .map_err(|_| "registration_descriptor_invalid")?;
+                descriptor
+                    .match_assignment(&state.frozen.contract_ref, &submission.derivation_ref)
+                    .map_err(|_| "registration_assignment_mismatch")?;
+                let source = state
+                    .frozen
+                    .initial_source
+                    .as_ref()
+                    .ok_or("registration_source_required")?;
+                if descriptor.source_closure_ref != source.closure_ref
+                    || descriptor.creation_attempt_id != submission.attempt_id
+                    || descriptor.derivation != submission.derivation
+                    || descriptor.base_contract != submission.contract
+                {
+                    return Err("registration_source_mismatch".into());
+                }
+                ceiling
+                    .validate()
+                    .map_err(|_| "verification_ceiling_invalid")?;
+                descriptor
+                    .derivation
+                    .requirements
+                    .within(&ceiling)
+                    .map_err(|_| "verification_ceiling_exceeded")?;
+                let variable_requirements = if let Some(plan) = &acceptance {
+                    plan.validate(&descriptor.derivation, &ceiling)
+                        .map_err(|_| "functional_acceptance_invalid")?
+                } else {
+                    descriptor.derivation.variable_bindings.clone()
+                };
+                let projection = descriptor
+                    .verification_registration()
+                    .map_err(|e| e.0.to_owned())?;
+                Ok(
+                    serde_json::json!({"status":"retained_verification_ready","projection":projection,"verification":{"source_closure_ref":descriptor.source_closure_ref,"variable_requirements":variable_requirements}}),
                 )
             }
             SearchRequest::AssembleExplorationSubmission {
@@ -1000,6 +1064,21 @@ mod exploration_submission_tests {
         let mut state = r["state"].clone();
         state["attempts"][0]["route_accepted"] = json!(true);
         let mut req = json!({"operation":"project_retained_registration","state":state,"submission":submission,"retained_ref":descriptor.retained_ref().unwrap(),"descriptor_json":String::from_utf8(descriptor.canonical_bytes().unwrap()).unwrap()});
+        let mut verification = req.clone();
+        verification["operation"] = "project_retained_verification".into();
+        verification["ceiling"] =
+            serde_json::to_value(&descriptor.derivation.requirements).unwrap();
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&verification).unwrap())["status"],
+            "retained_verification_ready"
+        );
+        verification["ceiling"] = serde_json::json!({"network":[],"authority":[]});
+        if !descriptor.derivation.requirements.is_empty() {
+            assert_eq!(
+                evaluate_search(&serde_json::to_vec(&verification).unwrap())["status"],
+                "rejected"
+            );
+        }
         let projected = evaluate_search(&serde_json::to_vec(&req).unwrap());
         assert_eq!(
             projected["status"], "retained_registration_ready",

@@ -68,3 +68,5 @@ pub mod search;
 pub mod proposal;
 
 pub mod source_oci_plan;
+
+pub mod functional_acceptance;
