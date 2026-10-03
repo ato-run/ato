@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use ato_formation_worker::runtime_network::proposal::reasoning::SessionAgent;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,9 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 
 use super::{FormationSessionMcpServer, MAX_REQUEST_BYTES};
+
+#[cfg(unix)]
+mod unix;
 
 const DESCRIPTOR_SCHEMA: &str = "ato.formation-session-relay/1";
 const REQUEST_SCHEMA: &str = "ato.formation-session-relay-request/1";
@@ -125,64 +128,13 @@ impl Broker {
             {
                 match listener.accept() {
                     Ok((mut stream, peer)) => {
-                        let reply = (|| -> Result<Reply> {
-                            ensure!(peer.ip().is_loopback(), "relay peer rejected");
-                            stream.set_read_timeout(Some(STREAM_TIMEOUT))?;
-                            stream.set_write_timeout(Some(STREAM_TIMEOUT))?;
-                            let bytes = read_frame(&mut stream, REQUEST_CAP)?;
-                            let request: Request = serde_json::from_slice(&bytes)?;
-                            ensure!(
-                                request.schema == REQUEST_SCHEMA
-                                    && valid_hex(&request.nonce)
-                                    && request.binding == identity.binding
-                                    && now_ms()? < identity.binding.expires_at_ms,
-                                "relay request rejected"
+                        if peer.ip().is_loopback() && stream.set_nonblocking(false).is_ok() {
+                            handle_stream(
+                                &mut stream,
+                                &mut server,
+                                &identity.binding,
+                                &identity.capability,
                             );
-                            verify_proof(
-                                &identity.capability,
-                                &request_message(&request)?,
-                                &request.proof,
-                            )?;
-                            // Use the existing MCP framing/handler unchanged, including
-                            // JSON-RPC validation and typed output_json preservation.
-                            let mut frame = serde_json::to_vec(&request.request)?;
-                            ensure!(frame.len() < MAX_REQUEST_BYTES, "relay frame rejected");
-                            frame.push(b'\n');
-                            let mut output = Vec::new();
-                            crate::mcp_stdio::run_stdio(
-                                Cursor::new(frame),
-                                &mut output,
-                                Some(MAX_REQUEST_BYTES),
-                                |request| server.handle(request),
-                            )?;
-                            ensure!(output.len() < RESPONSE_CAP, "relay response rejected");
-                            let response = if output.is_empty() {
-                                None
-                            } else {
-                                Some(serde_json::from_slice(&output)?)
-                            };
-                            let mut reply = Reply {
-                                ok: true,
-                                response,
-                                proof: None,
-                            };
-                            reply.proof = Some(proof(
-                                &identity.capability,
-                                &reply_message(&request, &reply)?,
-                            )?);
-                            Ok(reply)
-                        })()
-                        .unwrap_or(Reply {
-                            ok: false,
-                            response: None,
-                            proof: None,
-                        });
-                        // Never expose a parser error, connection path, descriptor,
-                        // capability, or attacker-provided transport bytes.
-                        if let Ok(bytes) = serde_json::to_vec(&reply)
-                            && bytes.len() < RESPONSE_CAP
-                        {
-                            let _ = write_frame(&mut stream, &bytes);
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -198,6 +150,93 @@ impl Broker {
             stop,
             thread: Some(thread),
         })
+    }
+}
+
+// Both transports use the same authenticated frames and Session handler.
+fn handle_stream(
+    stream: &mut impl RelayStream,
+    server: &mut FormationSessionMcpServer,
+    binding: &Binding,
+    capability: &str,
+) {
+    let reply = (|| -> Result<Reply> {
+        stream.set_read_timeout(Some(STREAM_TIMEOUT))?;
+        stream.set_write_timeout(Some(STREAM_TIMEOUT))?;
+        let bytes = read_frame(stream, REQUEST_CAP)?;
+        let request: Request = serde_json::from_slice(&bytes)?;
+        ensure!(
+            request.schema == REQUEST_SCHEMA
+                && valid_hex(&request.nonce)
+                && request.binding == *binding
+                && now_ms()? < binding.expires_at_ms,
+            "relay request rejected"
+        );
+        verify_proof(capability, &request_message(&request)?, &request.proof)?;
+        // Use the existing MCP framing/handler unchanged, including
+        // JSON-RPC validation and typed output_json preservation.
+        let mut frame = serde_json::to_vec(&request.request)?;
+        ensure!(frame.len() < MAX_REQUEST_BYTES, "relay frame rejected");
+        frame.push(b'\n');
+        let mut output = Vec::new();
+        crate::mcp_stdio::run_stdio(
+            Cursor::new(frame),
+            &mut output,
+            Some(MAX_REQUEST_BYTES),
+            |request| server.handle(request),
+        )?;
+        ensure!(output.len() < RESPONSE_CAP, "relay response rejected");
+        let response = if output.is_empty() {
+            None
+        } else {
+            Some(serde_json::from_slice(&output)?)
+        };
+        let mut reply = Reply {
+            ok: true,
+            response,
+            proof: None,
+        };
+        reply.proof = Some(proof(capability, &reply_message(&request, &reply)?)?);
+        Ok(reply)
+    })()
+    .unwrap_or(Reply {
+        ok: false,
+        response: None,
+        proof: None,
+    });
+    // Never expose transport bytes, private paths or parser details.
+    if let Ok(bytes) = serde_json::to_vec(&reply)
+        && bytes.len() < RESPONSE_CAP
+    {
+        let _ = write_frame(stream, &bytes);
+    }
+}
+
+trait RelayStream: Read + Write {
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>>;
+    fn write_timeout(&self) -> std::io::Result<Option<Duration>>;
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+    fn wait_readable(&self, timeout: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+    fn wait_writable(&self, timeout: Duration) -> std::io::Result<()> {
+        self.set_write_timeout(Some(timeout))
+    }
+}
+
+impl RelayStream for TcpStream {
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        TcpStream::read_timeout(self)
+    }
+    fn write_timeout(&self) -> std::io::Result<Option<Duration>> {
+        TcpStream::write_timeout(self)
+    }
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
     }
 }
 
@@ -237,6 +276,9 @@ pub fn serve_owner(
     Ok(())
 }
 
+#[cfg(unix)]
+pub use unix::serve_owner as serve_owner_unix;
+
 /// Model-facing stdio process reads only its Producer descriptor. It never
 /// opens the owner's connection or credentials and never retries transport.
 pub fn run_relay_stdio(
@@ -244,7 +286,13 @@ pub fn run_relay_stdio(
     input: impl BufRead,
     output: impl Write,
 ) -> Result<()> {
-    let descriptor = read_descriptor(descriptor_file)?;
+    let bytes = read_descriptor_bytes(descriptor_file)?;
+    #[cfg(unix)]
+    if serde_json::from_slice::<Value>(&bytes)?["schema"] == unix::DESCRIPTOR_SCHEMA {
+        return unix::run_stdio(&bytes, input, output);
+    }
+    let descriptor: Descriptor = serde_json::from_slice(&bytes)?;
+    validate(&descriptor)?;
     crate::mcp_stdio::run_stdio(input, output, Some(MAX_REQUEST_BYTES), |request| {
         forward(&descriptor, request).unwrap_or_else(|_| {
             Some(crate::mcp_stdio::rpc_error(
@@ -302,7 +350,7 @@ fn validate(descriptor: &Descriptor) -> Result<()> {
     Ok(())
 }
 
-fn read_descriptor(path: &Path) -> Result<Descriptor> {
+fn read_descriptor_bytes(path: &Path) -> Result<Vec<u8>> {
     let expected = std::fs::symlink_metadata(path)?;
     ensure!(
         expected.file_type().is_file() && expected.len() <= DESCRIPTOR_CAP as u64,
@@ -327,12 +375,17 @@ fn read_descriptor(path: &Path) -> Result<Descriptor> {
     file.take(DESCRIPTOR_CAP as u64 + 1)
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= DESCRIPTOR_CAP, "relay descriptor bounds");
-    let descriptor: Descriptor = serde_json::from_slice(&bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn read_descriptor(path: &Path) -> Result<Descriptor> {
+    let descriptor = serde_json::from_slice(&read_descriptor_bytes(path)?)?;
     validate(&descriptor)?;
     Ok(descriptor)
 }
 
-fn publish(path: &Path, descriptor: &Descriptor) -> Result<()> {
+fn publish(path: &Path, descriptor: &impl Serialize) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -350,17 +403,26 @@ fn publish(path: &Path, descriptor: &Descriptor) -> Result<()> {
     Ok(())
 }
 
-fn read_frame(stream: &mut TcpStream, cap: usize) -> Result<Vec<u8>> {
+fn read_frame(stream: &mut impl RelayStream, cap: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    let deadline = Instant::now() + stream.read_timeout()?.unwrap_or(STREAM_TIMEOUT);
+    let deadline = Instant::now()
+        + stream
+            .read_timeout()
+            .context("relay timeout query")?
+            .unwrap_or(STREAM_TIMEOUT);
     let mut chunk = [0; 8192];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         ensure!(!remaining.is_zero(), "relay frame timeout");
-        stream.set_read_timeout(Some(remaining))?;
+        stream
+            .wait_readable(socket_timeout(remaining)?)
+            .context("relay remaining read timeout")?;
         let available = chunk.len().min(cap.saturating_sub(bytes.len()) + 1);
-        let count = stream.read(&mut chunk[..available])?;
+        let count = stream
+            .read(&mut chunk[..available])
+            .context("relay socket read")?;
         ensure!(count != 0, "relay frame incomplete");
+        ensure!(Instant::now() <= deadline, "relay frame timeout");
         let end = chunk[..count].iter().position(|byte| *byte == b'\n');
         bytes.extend_from_slice(&chunk[..end.map_or(count, |index| index + 1)]);
         ensure!(bytes.len() <= cap, "relay frame bounds");
@@ -370,7 +432,7 @@ fn read_frame(stream: &mut TcpStream, cap: usize) -> Result<Vec<u8>> {
     }
 }
 
-fn write_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
+fn write_frame(stream: &mut impl RelayStream, bytes: &[u8]) -> Result<()> {
     let mut frame = Vec::with_capacity(bytes.len() + 1);
     frame.extend_from_slice(bytes);
     frame.push(b'\n');
@@ -379,12 +441,21 @@ fn write_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
     while written < frame.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         ensure!(!remaining.is_zero(), "relay write timeout");
-        stream.set_write_timeout(Some(remaining))?;
+        stream.wait_writable(socket_timeout(remaining)?)?;
         let count = stream.write(&frame[written..])?;
         ensure!(count != 0, "relay write incomplete");
         written += count;
+        ensure!(Instant::now() <= deadline, "relay write timeout");
     }
     Ok(())
+}
+
+// Keep timeout values at microsecond precision and retain the absolute frame
+// deadline, including after each completed read/write.
+fn socket_timeout(remaining: Duration) -> Result<Duration> {
+    Ok(Duration::from_micros(
+        u64::try_from(remaining.as_micros())?.max(1),
+    ))
 }
 
 fn valid_hex(value: &str) -> bool {
