@@ -29,6 +29,15 @@ struct Args {
     )]
     publish_relay: Option<PathBuf>,
 
+    /// Bind the owner broker at one fresh Unix socket instead of loopback TCP.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "publish_relay",
+        conflicts_with = "relay"
+    )]
+    relay_socket: Option<PathBuf>,
+
     /// Optional shorter expiry, never later than the saved Search deadline.
     #[arg(long, requires = "publish_relay", conflicts_with = "relay")]
     relay_expiry_ms: Option<u64>,
@@ -64,6 +73,20 @@ fn run(args: Args) -> Result<()> {
     let stdout = std::io::stdout();
     match (args.connection, args.relay, args.publish_relay) {
         (Some(connection), None, Some(descriptor)) => {
+            if let Some(socket) = args.relay_socket {
+                #[cfg(unix)]
+                return relay::serve_owner_unix(
+                    &connection,
+                    &descriptor,
+                    &socket,
+                    args.relay_expiry_ms,
+                );
+                #[cfg(not(unix))]
+                {
+                    let _ = socket;
+                    anyhow::bail!("Unix relay unavailable");
+                }
+            }
             relay::serve_owner(&connection, &descriptor, args.relay_expiry_ms)
         }
         (Some(connection), None, None) => {
@@ -88,6 +111,8 @@ mod tests {
             vec!["mcp", "--connection", "owner", "--relay", "producer"],
             vec!["mcp", "--relay", "producer", "--publish-relay", "new"],
             vec!["mcp", "--relay", "producer", "--relay-expiry-ms", "1"],
+            vec!["mcp", "--connection", "owner", "--relay-socket", "socket"],
+            vec!["mcp", "--relay", "producer", "--relay-socket", "socket"],
         ]
         .into_iter()
         .enumerate()
@@ -101,6 +126,15 @@ mod tests {
             vec!["mcp", "--connection", "owner"],
             vec!["mcp", "--relay", "producer"],
             vec!["mcp", "--connection", "owner", "--publish-relay", "new"],
+            vec![
+                "mcp",
+                "--connection",
+                "owner",
+                "--publish-relay",
+                "new",
+                "--relay-socket",
+                "socket",
+            ],
         ] {
             assert!(Args::try_parse_from(arguments).is_ok());
         }
