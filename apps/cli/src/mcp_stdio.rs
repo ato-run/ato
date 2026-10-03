@@ -4,14 +4,13 @@ use std::io::{BufRead, Write};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-pub(crate) const MAX_FRAME_BYTES: usize = 256 * 1024;
-
 pub(crate) fn run_stdio(
     mut input: impl BufRead,
     mut output: impl Write,
+    max_request_bytes: Option<usize>,
     mut handle: impl FnMut(&Value) -> Option<Value>,
 ) -> Result<()> {
-    while let Some(frame) = read_frame(&mut input)? {
+    while let Some(frame) = read_frame(&mut input, max_request_bytes)? {
         let bytes = match frame {
             Ok(bytes) => bytes,
             Err(()) => {
@@ -22,7 +21,7 @@ pub(crate) fn run_stdio(
                 continue;
             }
         };
-        if bytes.iter().all(u8::is_ascii_whitespace) {
+        if std::str::from_utf8(&bytes).is_ok_and(|line| line.trim().is_empty()) {
             continue;
         }
         let request: Value = match serde_json::from_slice(&bytes) {
@@ -50,9 +49,14 @@ pub(crate) fn run_stdio(
     Ok(())
 }
 
-// Drain an oversized line without retaining attacker-controlled bytes. A final
-// line at EOF remains supported for the existing Activity stdio interface.
-fn read_frame(input: &mut impl BufRead) -> Result<Option<Result<Vec<u8>, ()>>> {
+// Drain an oversized line only when the caller has a bounded request contract.
+// None preserves the existing Activity framing, including JSON escaping that
+// expands a valid memo or Interaction beyond Formation's envelope limit.
+// A final line at EOF remains supported for both stdio interfaces.
+fn read_frame(
+    input: &mut impl BufRead,
+    max_request_bytes: Option<usize>,
+) -> Result<Option<Result<Vec<u8>, ()>>> {
     let mut bytes = Vec::new();
     let mut oversized = false;
     loop {
@@ -69,7 +73,7 @@ fn read_frame(input: &mut impl BufRead) -> Result<Option<Result<Vec<u8>, ()>>> {
         let newline = buffer.iter().position(|byte| *byte == b'\n');
         let count = newline.map_or(buffer.len(), |position| position + 1);
         if !oversized {
-            if bytes.len().saturating_add(count) > MAX_FRAME_BYTES {
+            if max_request_bytes.is_some_and(|cap| bytes.len().saturating_add(count) > cap) {
                 oversized = true;
                 bytes.clear();
             } else {
@@ -115,11 +119,13 @@ mod tests {
 
     #[test]
     fn oversized_and_malformed_frames_are_redacted_and_next_frame_survives() -> Result<()> {
+        let limit = 256 * 1024;
         let sentinel = "private-canary";
-        let mut input = sentinel.repeat(MAX_FRAME_BYTES / sentinel.len() + 1);
+        let mut input = "\u{2003}\n".to_owned();
+        input.push_str(&sentinel.repeat(limit / sentinel.len() + 1));
         input.push_str("\n{private-canary\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}");
         let mut output = Vec::new();
-        run_stdio(Cursor::new(input), &mut output, |request| {
+        run_stdio(Cursor::new(input), &mut output, Some(limit), |request| {
             Some(json!({"jsonrpc":"2.0","id":request["id"],"result":{}}))
         })?;
         let output = String::from_utf8(output)?;
