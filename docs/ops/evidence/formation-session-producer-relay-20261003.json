@@ -1,0 +1,135 @@
+{
+  "schema": "ato.formation-session-producer-relay-evidence/1",
+  "date": "2026-10-03",
+  "kind": "synthetic_session_mcp_fixture",
+  "acceptance_complete": false,
+  "base_pin": "5f9df83592cbc735696e190b13635e76be8da9be",
+  "branch": "feat/formation-session-producer-relay",
+  "runtime": {
+    "os": "macOS 15.8.1",
+    "os_build": "24H32",
+    "arch": "arm64",
+    "rust_toolchain": "1.96.0",
+    "locked": true,
+    "offline": true,
+    "cargo_incremental": "0",
+    "target_cache": "shared_previous_formation_target",
+    "temporary_directories": "workspace_worktree_dot_tmp_only"
+  },
+  "measurements": [
+    {
+      "measurement_id": "formation-session-producer-relay-20261003-01",
+      "source_pin": "d0f3d5df1de94763132ca6d4794b0261d69fc219",
+      "compile": "PASS",
+      "mcp_lib": {"passed": 18, "failed": 0, "ignored": 0, "fixture_seconds": 1.29},
+      "cli_modes": {"passed": 0, "failed": 1, "ignored": 0},
+      "classification": "cli_requires_group_grammar_mismatch",
+      "invalid_case": "relay_with_owner_publication",
+      "authority_effect": "runtime_already_rejected_before_reading_any_connection",
+      "diagnostic_repeat": "only_a_public_case_index_was_added_to_the_failure_message;_production_code_unchanged",
+      "preserved_as_failure": true
+    },
+    {
+      "measurement_id": "formation-session-producer-relay-20261003-02",
+      "source_pin": "0936434435b7f3ed07741f7669690fd12b24c971",
+      "fixes": ["explicit_conflicts_with_relay", "absolute_whole_frame_read_write_deadlines"],
+      "mcp_lib": {"passed": 20, "failed": 0, "ignored": 0, "relay_tests": 13, "legacy_mcp_tests": 7, "fixture_seconds": 1.27},
+      "cli_modes": {"passed": 1, "failed": 0, "ignored": 0},
+      "native_strict_clippy": "PASS",
+      "format": "PASS",
+      "native_fixed_mcp_build": "PASS",
+      "binary": {
+        "bytes": 6033384,
+        "sha256": "d5359a89607e5228703835ab19ad9194ab33ef92bf6b10674c25af1424606c47",
+        "preserved_copy_mode": "0555",
+        "preserved_copy": ".tmp/formation-session-producer-relay-20261003-02/ato-formation-session-mcp"
+      },
+      "startup_checks": {
+        "help_exit_zero": true,
+        "help_has_all_modes": true,
+        "invalid_descriptor_rejected": true,
+        "invalid_mode_rejected_before_connection": true,
+        "no_private_canary_in_outputs": true,
+        "startup_error_redacted": true,
+        "mode_error_redacted": true
+      },
+      "startup_metadata": ".tmp/formation-session-producer-relay-20261003-02/startup-fixture.json"
+    }
+  ],
+  "commands": {
+    "compile": "cargo +1.96.0 check --locked --offline -p ato-cli --lib --bin ato-formation-session-mcp",
+    "mcp_lib": "cargo +1.96.0 test --locked --offline -p ato-cli --lib formation_session_mcp",
+    "cli_modes": "cargo +1.96.0 test --locked --offline -p ato-cli --bin ato-formation-session-mcp",
+    "native_clippy": "cargo +1.96.0 clippy --locked --offline -p ato-cli --lib --bin ato-formation-session-mcp -- -D warnings",
+    "fixed_mcp_build": "cargo +1.96.0 build --locked --offline -p ato-cli --bin ato-formation-session-mcp",
+    "windows_crossclippy": "cargo +1.96.0 clippy --locked --offline --target x86_64-pc-windows-gnu -p ato-cli --lib --bin ato-formation-session-mcp -- -D warnings"
+  },
+  "broker_contract": {
+    "owner": "--connection OWNER_CONNECTION --publish-relay NEW_DESCRIPTOR",
+    "optional_shorter_expiry": "--relay-expiry-ms UNIX_MS",
+    "producer": "--relay PRODUCER_DESCRIPTOR",
+    "legacy_stdio": "--connection OWNER_CONNECTION",
+    "descriptor_schema": "ato.formation-session-relay/1",
+    "tools": ["status", "next", "submit", "cancel"],
+    "capability_entropy_bits": 256,
+    "capability_transmitted_on_tcp": false,
+    "authentication": "HMAC-SHA256 request and domain-separated reply using existing locked hmac0.12.1",
+    "immutable_binding": ["search_id", "configuration_ref", "agent", "expires_at_ms"],
+    "expiry_ceiling": "original_saved_search_deadline",
+    "publication": "fsynced_tempfile_persist_noclobber_and_unix_directory_sync",
+    "owner_private_data_in_descriptor": false,
+    "source_path_url_arguments": "rejected_by_existing_fixed_tool_contract",
+    "json_output_duplicate_fields": "preserved_until_common_rust_authority",
+    "descriptor_bytes": 8192,
+    "outer_request_bytes": 270336,
+    "mcp_request_bytes": 262144,
+    "reply_bytes": 524288,
+    "absolute_frame_io_seconds": 2,
+    "client_absolute_reply_seconds": 8,
+    "fallback": "none",
+    "retry": "none",
+    "budgets_and_runtime_authority": "existing_session_coordinator_rust_authority"
+  },
+  "windows_comparison": {
+    "target": "x86_64-pc-windows-gnu",
+    "native_msvc": "NOT_MEASURED",
+    "base": {"source_pin": "5f9df83592cbc735696e190b13635e76be8da9be", "result": "FAIL", "errors": 15, "failed_package": "ato-runtime-attempt"},
+    "head": {"source_pin": "0936434435b7f3ed07741f7669690fd12b24c971", "result": "FAIL", "errors": 15, "failed_package": "ato-runtime-attempt"},
+    "same_toolchain_target_feature_arguments": true,
+    "cli_reached": false,
+    "classification": "known_unapplied_ci_review_1478_dependency",
+    "integration_order": ["CI_review_1478", "Session_with_Producer_relay"],
+    "base_raw_log": "../ato-session-relay-base/.tmp/windows-gnu-crossclippy.log",
+    "unchanged_blobs": {
+      "lib/runtime-attempt/src/browser_sandbox.rs": "d3e7cac585d433d88330982926e4ffe7dcb10932",
+      "lib/runtime-attempt/src/network_bridge.rs": "6e6b8078e03f4223e162e1036fc0bd83f93e05ae",
+      "lib/runtime-attempt/src/ephemeral.rs": "7f1de8c11fcc549450988dd82e128e75c9041125"
+    },
+    "ci_files_changed_by_this_unit": false,
+    "additional_broad_checks_stopped_after_comparison": true
+  },
+  "separate_unmeasured_gates": [
+    "final_integrated_safe_public_projection_and_post_deadline_reconciliation_pin",
+    "owner_approved_agent_and_functional_acceptance_plans",
+    "actual_codex_and_claude_skill_discovery_and_tool_inventory",
+    "native_os_private_source_owner_db_socket_read_write_exec_negative_inventory",
+    "native_credential_store_auth_ipc_without_model_keychain_read_capability",
+    "fixed_broker_connectivity_inside_the_native_os_profile",
+    "provider_egress_policy",
+    "actual_known_D_free_search_repair_and_fresh_same_K_receipts",
+    "live_ack_unknown_reservation_release_and_input_cleanup"
+  ],
+  "execution_counts": {
+    "native_agent_invocations": 0,
+    "native_auth_invocations": 0,
+    "new_logins": 0,
+    "real_searches": 0,
+    "real_runtime_attempts": 0,
+    "functional_runs": 0,
+    "paid_api_calls": 0,
+    "agent_internal_actual_llm_calls": "unknown",
+    "agent_internal_actual_cost": "unknown"
+  },
+  "historical_measurements_and_ledgers_modified": false,
+  "deployment_remote_migration_flags_merge_global_settings": "NOT_PERFORMED"
+}

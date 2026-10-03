@@ -523,6 +523,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
         provider: "codex_session".into(),
         model: "codex-session".into(),
         prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+        agent: None,
     });
     let budget = budget::BudgetPlan {
         max_calls: 6,

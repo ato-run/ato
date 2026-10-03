@@ -5,12 +5,15 @@
 mod desktop_control;
 mod formation_exploration;
 mod formation_input;
+mod formation_session;
+mod mcp_stdio;
 mod object_transport;
 mod portable_attempt;
 mod portable_dependency;
 
 pub mod activity_client;
 pub mod activity_mcp;
+pub mod formation_session_mcp;
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -125,6 +128,8 @@ enum Commands {
     Form(Box<FormArgs>),
     /// Inspect or supply scoped input to an existing Formation Search.
     FormInput(formation_input::InputArgs),
+    /// Produce bounded Formation proposals through a scoped Session bridge.
+    FormSession(formation_session::SessionArgs),
     /// Take part in the Runtime Network: advertise this host's execution
     /// environments and run the Formation attempts addressed to it.
     #[command(subcommand)]
@@ -483,6 +488,10 @@ struct FormArgs {
     /// pinned provider/spend config (JSON or TOML). No normal Run approval.
     #[arg(long, requires = "runtime_network", conflicts_with_all = ["generation_provider", "verify_browser"])]
     exploration_config: Option<PathBuf>,
+    /// Publish a scoped connection for a logged-in CandidateProducer agent.
+    /// Only the trusted requester may access its own token and private journal.
+    #[arg(long, requires = "exploration_config")]
+    session_bridge: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -600,6 +609,7 @@ pub fn run() -> Result<()> {
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
         Commands::FormInput(args) => formation_input::run(args),
+        Commands::FormSession(args) => formation_session::run(args),
         Commands::RuntimeNetwork(RuntimeNetworkCommand::Serve(args)) => runtime_network_serve(args),
         Commands::Worker {
             project,
@@ -3310,6 +3320,39 @@ mod tests {
                 "https://staging.api.ato.run",
                 "--auth-token",
                 "redacted",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn session_commands_require_a_scoped_connection_and_have_valid_help() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        for operation in ["status", "next", "cancel"] {
+            assert!(
+                Cli::try_parse_from([
+                    "ato",
+                    "form-session",
+                    "--connection",
+                    "session.json",
+                    operation,
+                ])
+                .is_ok()
+            );
+            assert!(Cli::try_parse_from(["ato", "form-session", operation]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "form-session",
+                "--connection",
+                "session.json",
+                "submit",
+                "--exchange-id",
+                "search_r1_s1",
+                "--input-sha256",
+                "digest",
             ])
             .is_ok()
         );

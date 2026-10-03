@@ -1,0 +1,121 @@
+{
+  "evidence_id": "formation-native-integration-cache-20261003-01",
+  "source_pin": "8bb3a2b1dd1a3ab3b8e10da270ed9a627d53c0ec",
+  "source_edits": false,
+  "runtime_http_tests": 7,
+  "worker_lib_tests": 100,
+  "controlled_fixture": {
+    "target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/cargo-shared-target-probe/target",
+    "mechanism_reproduced": true,
+    "original_failed_shared_artifact_identified": false,
+    "steps": [
+      "two workspaces with identical package names/versions/relative paths and different Source bytes; set all fixture Source mtimes to 2024-01-01 before base check",
+      "base cargo check builds old dependency metadata",
+      "head cargo check reports both packages Fresh and reuses base artifacts",
+      "touch head dependent Source only; head cargo check rebuilds dependent with old dependency metadata, fails E0425/exit101",
+      "clean probe-formation only in fixture target; head cargo check compiles new dependency and succeeds"
+    ],
+    "source_files": {
+      "base/Cargo.toml": "[workspace]\nresolver=\"3\"\nmembers=[\"formation\",\"runtime\"]\n",
+      "base/formation/Cargo.toml": "[package]\nname=\"probe-formation\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+      "base/formation/src/lib.rs": "pub fn old_api() {}\n",
+      "base/runtime/Cargo.toml": "[package]\nname=\"probe-runtime\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\nprobe-formation={path=\"../formation\"}\n",
+      "base/runtime/src/lib.rs": "pub fn check() { probe_formation::old_api(); }\n",
+      "head/Cargo.toml": "[workspace]\nresolver=\"3\"\nmembers=[\"formation\",\"runtime\"]\n",
+      "head/formation/Cargo.toml": "[package]\nname=\"probe-formation\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+      "head/formation/src/lib.rs": "pub fn old_api() {}\npub fn new_api() {}\n",
+      "head/runtime/Cargo.toml": "[package]\nname=\"probe-runtime\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\nprobe-formation={path=\"../formation\"}\n",
+      "head/runtime/src/lib.rs": "pub fn check() { probe_formation::new_api(); }\n"
+    }
+  },
+  "actual_application_run": false,
+  "logs": [
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/runtime-attempt-integration-after-clean.log",
+      "sha256": "041633688d1f0f8f835f21ac66dd2c794696922835858a1e699f86ec191a99cb"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/worker-integration-after-clean.log",
+      "sha256": "e3a5d960eccaf124d393ff49fe699a6c4bc810758c26f838a040d34ed1c36eff"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-formation-package-clean.log",
+      "sha256": "037ea8c15d65c67b3412575f4808ce1bd8919f5553b3f132b74d35e172deb5db"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/cargo-shared-target-probe/base.log",
+      "sha256": "c764854fb1793640699478513860a4126f7b6d6cb0c722d90c52e80ab416ae1a"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/cargo-shared-target-probe/head.log",
+      "sha256": "119aaec329dab10fa14a15f126a001ce89cd1fb831a1f3ad94bf8083dce5d54f"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/cargo-shared-target-probe/head-dependent-changed.log",
+      "sha256": "996f0fae883c9ff7ad6aaab061dcd8d778d710b55b9ed825aa6929ac80d9336a"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/cargo-shared-target-probe/head-after-formation-clean.log",
+      "sha256": "40d38a854be36e1f5975e9050f7fd48811d84202d4ada13e0a561065d681bba7"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/initial-worker-tool-observation.json",
+      "sha256": "cd169d1dafd9b679eba4d4d39a0d0d36c7a4c5400bf8172bca868c54c6807f58"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/cli-lib.log",
+      "sha256": "1774fbae561433d012dde4675be92a712ce1f7f506224c4fad8a60e67b6f7c59"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/integration-results.json",
+      "sha256": "dcbf2be80938a978ff08183e4d40e0b079e9cc56a20ad6bef41ecdce350ea7b0"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/cargo-shared-target-probe/formation-only-clean.log",
+      "sha256": "f9b35970ef9b3e108d2a1372ba6a0c0f4ece26bb12d936bdefac992664125d8f"
+    }
+  ],
+  "toolchain": "1.96.0-aarch64-apple-darwin",
+  "tested_target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/target",
+  "failed_shared_target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/.tmp/target",
+  "failed_shared_target_invalidated": false,
+  "package_invalidation": {
+    "command": "cargo clean -p ato-formation",
+    "target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/target",
+    "scope": "unique integration target only; failed shared target was not invalidated"
+  },
+  "environment": {
+    "runtime_worker_tests": "default integration worktree target; verbose rustc output confirms -C incremental under that target",
+    "root_final_job": "explicit unique integration target; CARGO_INCREMENTAL=0 per independent root record",
+    "failed_shared_target": "root command targeted the prior shared path; consumed artifact identity was not saved"
+  },
+  "original_failures": [
+    {
+      "command": "cargo test -p ato-formation-worker --lib",
+      "target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/.tmp/target",
+      "exit_code": 101,
+      "compile_errors": 10,
+      "evidence_kind": "transcription of tool output; original stderr file not saved",
+      "original_artifact_id": "unknown",
+      "log": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/initial-worker-tool-observation.json"
+    },
+    {
+      "command": "cargo test -p ato-cli --lib",
+      "target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/.tmp/target",
+      "exit_code": 101,
+      "compile_errors": 10,
+      "evidence_kind": "saved stderr/stdout",
+      "original_artifact_id": "unknown",
+      "log": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/cli-lib.log"
+    }
+  ],
+  "conclusion": "Current integrated Source compiled successfully in its unique target. The independent fixture reproduces stale path dependency reuse. The exact original shared artifacts and their fingerprints remain unknown; the original shared target was not repaired or retested successfully.",
+  "target_path_correction": "An intermediate report incorrectly called the default integration target the existing shared target. This record corrects that attribution and preserves both shared-target failures.",
+  "additional_acceptance": {
+    "native_codex": false,
+    "native_claude_code": false,
+    "pwa_runtime_input_resume": false,
+    "oss_function_state_restart": false,
+    "direct_paid_llm_api_calls": 0
+  }
+}

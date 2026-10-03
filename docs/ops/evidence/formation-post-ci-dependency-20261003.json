@@ -1,0 +1,334 @@
+{
+  "schema": "ato.formation-post-ci-dependency-review/1",
+  "evidence_id": "formation-post-ci-dependency-20261003-01",
+  "native_cli": [
+    {
+      "unit": "session",
+      "source_pin": "f8fe576f17e46e20c58d3706532b98d86664dca5",
+      "run": 37114199921,
+      "url": "https://github.com/ato-run/ato/actions/runs/37114199921",
+      "status": "completed",
+      "conclusion": "success",
+      "jobs": [
+        {
+          "name": "cli (windows-latest)",
+          "job": 111177711978,
+          "conclusion": "success",
+          "steps": [
+            {
+              "number": 6,
+              "name": "Windows durable attempt journal",
+              "conclusion": "success"
+            },
+            {
+              "number": 7,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 8,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "success"
+            },
+            {
+              "number": 9,
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ],
+          "url": "https://github.com/ato-run/ato/actions/runs/37114199921/job/111177711978"
+        },
+        {
+          "name": "cli (macos-latest)",
+          "job": 111177712076,
+          "conclusion": "success",
+          "steps": [
+            {
+              "number": 6,
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 7,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "number": 8,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 9,
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ],
+          "url": "https://github.com/ato-run/ato/actions/runs/37114199921/job/111177712076"
+        },
+        {
+          "name": "cli (ubuntu-latest)",
+          "job": 111177712082,
+          "conclusion": "success",
+          "steps": [
+            {
+              "number": 6,
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 7,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "number": 8,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 9,
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ],
+          "url": "https://github.com/ato-run/ato/actions/runs/37114199921/job/111177712082"
+        }
+      ],
+      "failed_steps": [],
+      "failed_log_required": false,
+      "final_log_sha256": "e45162ab878bcc216abc403cfd435a507f4d439bb87b6a47bf6a7cd7a15e6d54",
+      "final_metadata_sha256": "01bcfd876a79ef679d0e1b0b5f615223a08c00dc167d203487919e12815c933b",
+      "windows_journal_test_results": [
+        "ok. 8 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.63s"
+      ]
+    },
+    {
+      "unit": "state",
+      "source_pin": "574a556a8b843656e4db82fbc2e313a8e7243fc3",
+      "run": 37114230773,
+      "url": "https://github.com/ato-run/ato/actions/runs/37114230773",
+      "status": "completed",
+      "conclusion": "success",
+      "jobs": [
+        {
+          "name": "cli (windows-latest)",
+          "job": 111177793271,
+          "conclusion": "success",
+          "steps": [
+            {
+              "number": 6,
+              "name": "Windows durable attempt journal",
+              "conclusion": "success"
+            },
+            {
+              "number": 7,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 8,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "success"
+            },
+            {
+              "number": 9,
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ],
+          "url": "https://github.com/ato-run/ato/actions/runs/37114230773/job/111177793271"
+        },
+        {
+          "name": "cli (macos-latest)",
+          "job": 111177793339,
+          "conclusion": "success",
+          "steps": [
+            {
+              "number": 6,
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 7,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "number": 8,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 9,
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ],
+          "url": "https://github.com/ato-run/ato/actions/runs/37114230773/job/111177793339"
+        },
+        {
+          "name": "cli (ubuntu-latest)",
+          "job": 111177793372,
+          "conclusion": "success",
+          "steps": [
+            {
+              "number": 6,
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 7,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "number": 8,
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "number": 9,
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ],
+          "url": "https://github.com/ato-run/ato/actions/runs/37114230773/job/111177793372"
+        }
+      ],
+      "failed_steps": [],
+      "failed_log_required": false,
+      "final_log_sha256": "e65d813a4cc4215030d910c133a556b56a43cd0f9d47f4e1d1559e76e57a052b",
+      "final_metadata_sha256": "925831639d6b275affbca80a0447ec2b51963030b22180ee2ae5b79e745419cd",
+      "windows_journal_test_results": [
+        "ok. 8 passed; 0 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.30s"
+      ]
+    }
+  ],
+  "api": {
+    "repo": "ato-run/ato-api",
+    "run": 37113949799,
+    "source_pin": "e3b6aad20e03d6c02028ac69b7ca40248547862f",
+    "status": "completed",
+    "conclusion": "failure",
+    "created_at": "2026-10-03T09:42:21Z",
+    "updated_at": "2026-10-03T09:45:29Z",
+    "url": "https://github.com/ato-run/ato-api/actions/runs/37113949799",
+    "jobs": [
+      {
+        "job": 111177005190,
+        "name": "activity-control-plane",
+        "conclusion": "failure",
+        "failed_step_number": 8,
+        "failed_step": "Activity lifecycle, Room, placement, RTC, token, and migration tests",
+        "typecheck": "success",
+        "schema_splitter": "success"
+      },
+      {
+        "job": 111177005327,
+        "name": "instance-state-sync",
+        "conclusion": "success",
+        "instance_browser_acceptance": "success",
+        "browser_independent_operation": "success",
+        "chromium_webkit_auth_recovery": "success"
+      },
+      {
+        "job": 111177320085,
+        "name": "full-serial",
+        "conclusion": "skipped"
+      }
+    ],
+    "failure_names": [
+      "src/tests/activities.test.ts > Activity Run placement control plane > binds an executor minted across Activity start to the extended live expiry",
+      "src/tests/activities.test.ts > Activity Run placement control plane > creates one hosted Run and adds the Guest as its second writer",
+      "src/tests/activities.test.ts > Activity Run placement control plane > does not mint an executor when Activity end wins after authorization",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps a committed shared join successful when Room notification fails and recovers the same capability",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps the first graceful-stop deadline across Activity lifecycle retries",
+      "src/tests/activities.test.ts > Activity Run placement control plane > mints a hash-only run-scoped executor session after lease claim",
+      "src/tests/activities.test.ts > Activity Run placement control plane > notifies guests when a multi-slot runner drops exactly one of its runs",
+      "src/tests/activities.test.ts > Activity Run placement control plane > replaces a runner socket only when its runs are re-claimed and suppresses the phantom disconnect",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes Guest leave without ending the Activity",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes a shared executor and requests lease shutdown on End",
+      "src/tests/activities.test.ts > Activity Run placement control plane > routes generic shared input to the Runner without issuing canonical order",
+      "src/tests/activities.test.ts > Activity Run placement control plane > starts shared mode after one Runner Run and both subscriptions are ready",
+      "src/tests/node/cors-headers-audit.test.ts > CORS allowHeaders audit (#246) > every custom x-* header a route reads is preflight-allowed or justified as non-browser"
+    ],
+    "failed_tests": 13,
+    "baseline_evidence": "docs/ops/evidence/formation-budget-terminal-ci-comparison-20261003.json",
+    "baseline_source": "9e0031900836090612b94e775e26f980a68f32d7",
+    "baseline_local_node": "25.6.0",
+    "same_failure_names_as_saved_base": true,
+    "new_failure_names": [],
+    "log_sha256": "a757aa04cb6796be5849c5d47a0acf912751aedba3bd536dd4f78e0de057f283",
+    "classification": "Existing failure names; exact current-base rerun not performed by this read-only task.",
+    "ci_rerun_triggered": false,
+    "code_or_branch_modified": false
+  },
+  "api_exact_saved_comparison": {
+    "evidence_id": "formation-post-ci-dependency-20261003-api-comparison-02",
+    "source_pin": "e3b6aad20e03d6c02028ac69b7ca40248547862f",
+    "run": 37113949799,
+    "failed_tests": 13,
+    "failure_names": [
+      "src/tests/activities.test.ts > Activity Run placement control plane > binds an executor minted across Activity start to the extended live expiry",
+      "src/tests/activities.test.ts > Activity Run placement control plane > creates one hosted Run and adds the Guest as its second writer",
+      "src/tests/activities.test.ts > Activity Run placement control plane > does not mint an executor when Activity end wins after authorization",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps a committed shared join successful when Room notification fails and recovers the same capability",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps the first graceful-stop deadline across Activity lifecycle retries",
+      "src/tests/activities.test.ts > Activity Run placement control plane > mints a hash-only run-scoped executor session after lease claim",
+      "src/tests/activities.test.ts > Activity Run placement control plane > notifies guests when a multi-slot runner drops exactly one of its runs",
+      "src/tests/activities.test.ts > Activity Run placement control plane > replaces a runner socket only when its runs are re-claimed and suppresses the phantom disconnect",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes Guest leave without ending the Activity",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes a shared executor and requests lease shutdown on End",
+      "src/tests/activities.test.ts > Activity Run placement control plane > routes generic shared input to the Runner without issuing canonical order",
+      "src/tests/activities.test.ts > Activity Run placement control plane > starts shared mode after one Runner Run and both subscriptions are ready",
+      "src/tests/node/cors-headers-audit.test.ts > CORS allowHeaders audit (#246) > every custom x-* header a route reads is preflight-allowed or justified as non-browser"
+    ],
+    "comparisons": [
+      {
+        "role": "exact_saved_measurement_base",
+        "source_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+        "same_failure_names": true,
+        "saved_log_sha256": "9a7208cc1176d494981b687c00cf9b25e78827cff9f25ce9d6ccc4d449fb3029"
+      },
+      {
+        "role": "exact_saved_measurement_head",
+        "source_pin": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+        "same_failure_names": true,
+        "saved_log_sha256": "da58e15c898b229c4984e02c0f2cd9531cc40310e3a59f564f7f3e1b9660566b"
+      },
+      {
+        "role": "separate_saved_main_comparison",
+        "source_pin": "9e0031900836090612b94e775e26f980a68f32d7",
+        "same_failure_names": true,
+        "local_node": "25.6.0",
+        "evidence": "docs/ops/evidence/formation-budget-terminal-ci-comparison-20261003.json"
+      }
+    ],
+    "saved_exact_comparison_evidence": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/review-ato-session/docs/ops/evidence/formation-current-api-ci-comparison-20261003.json",
+    "saved_exact_comparison_evidence_sha256": "32c378a2bd3b84009fdbf0b3ac45341b2637759b70035986993e215e0f3c5d5f",
+    "new_failure_names_against_exact_base": [],
+    "new_failure_names_against_exact_head": [],
+    "current_api_failed_log_sha256": "a757aa04cb6796be5849c5d47a0acf912751aedba3bd536dd4f78e0de057f283",
+    "source_pins_reassigned": false,
+    "current_base_or_head_test_rerun": false,
+    "read_only": true
+  },
+  "scope": {
+    "read_only": true,
+    "code_or_branches_modified": false,
+    "ci_reruns_triggered": false,
+    "deployment_or_remote_migration_or_flags": false,
+    "native_agent_auth_inference_invoked": false,
+    "formation_search_or_functional_runs_created": false,
+    "old_measurements_modified": false
+  },
+  "classification": {
+    "new_failed_test_names": [],
+    "api_activity_cors": "Same saved13 failure names at exact02a9e58b/9b483d4a; currentexactbase rerun not performed.",
+    "api_instance_state_sync": "PASS including browser acceptance and Chromium/WebKit auth recovery",
+    "native_cli": "Both runs completedSUCCESS on nativeUbuntu/macOS/Windows; later docs-only source not substituted.",
+    "original_macos_worker_exit_root_cause": "Not established solely by these passing runs.",
+    "producer_os_isolation_and_actual_agent_acceptance": "Not validated by this CI observation."
+  }
+}
