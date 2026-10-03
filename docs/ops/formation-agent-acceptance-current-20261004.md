@@ -14,4 +14,8 @@ Session共通化 #1479 → 共通Skill #1480 → この受入記録の順でレ�
 
 測定PWA pinは `b4e2c3b`、最終 `3c8ec7aa` の差分はharness診断の漏出抑止だけで、製品input componentは同じblob。失敗したharness測定も保持した。[PWA/Runtime証拠](evidence/formation-product-input-runtime-20261004.json)。canary検査は今回の生成値と対象出力に限る。旧測定の固定emailなどの制約を遡って修正しない。
 
-Kutt新artifact `38fb9315…` の機能・状態保存・新Run復元と、通常Source経路からの自動state provisioningは未完了。元のCLI Source SearchにはSource Instanceがなく、現製品APIの登録には同じclosureのFormationResult/既存sealed namespaceが必要。仮のInstanceやCapsuleRefを挿入して製品経路の成立を主張しない。旧private fixtureの別D/artifactによる成功はこの新artifactの証拠にならない。
+Kutt新artifact `38fb9315…` は、既存Rust authority・実Runtime・StateServiceによる別の機能受入を完了した。2つの新規Runで元と同じK/Dのfresh PASS、ACK、停止、予約解放、入力cleanupを確認した。1回目はログイン・リンク作成・一覧・外部へ追従しないリダイレクト観測、2回目は新Runでの保存revision復元・ログイン・リンク削除・旧JWT拒否を確認した。writer fenceは1→2、active writerとencrypted値は最終0。既知Dを再利用した機能受入であり、独立Agent/APIのSource探索成功には数えない。[Kutt機能・状態証拠](evidence/formation-kutt-current-functional-state-20261004.json)。
+
+このKutt測定は明示したprivate StateService dispatch namespaceのfixtureで、通常Source経路からの自動state provisioningは未完了。元のCLI Source SearchにはSource Instanceがなく、現製品APIの登録には同じclosureのFormationResult/既存sealed namespaceが必要。仮のInstanceやCapsuleRefを挿入して製品経路の成立を主張しない。過去の別artifactの成功とは分けた。検証用email/passwordはprivate生成し、公開Owner報告で漏出0を確認した。この機能fixtureに実エージェントのtool transcriptはなく、Runtime内のprivate DB/stateを公開証跡として検査したとは主張しない。
+
+実測API pin `7fae389b` は、base `353c06fe` の最小Worker起動で再現したschema循環importを修正している。registration/projection validatorを副作用のない共通leafへ移し、同じNode 22.14・entryでheadの起動を確認した。schema・Source closure guardは変更していない。typecheckと既存retained関連2testはPASS。API #731の同じ修正は `a27397ee`。修正前の起動失敗と、canonical D登録前の既知Dによる未実行失敗は保全し、後者は同じattemptの保存済みadmission refusalで精算・writer解放した。再推論・再実行や旧Source Searchの再開はしていない。
