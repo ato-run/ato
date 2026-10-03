@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod activity_controller;
+mod data_plane;
 mod host_resources;
 pub mod runtime_launch;
 mod slot_state;
@@ -2012,7 +2013,58 @@ impl ConnectedWorker {
             runtime_root: lease_root.join("process-runtime"),
             output: None,
         };
-        let resolved = match runtime_launch::lease::resolve_run(
+        // Data Plane: deliver the Run's granted Model Sets before anything of
+        // the Run is acquired. No grant, no data plane. The download keeps the
+        // lease's execution authorization fresh and stops if the Run is.
+        let data = data_plane::LeaseData {
+            client: &self.api.client,
+            base: &self.api.base,
+            token: &self.api.token,
+            lease_id: &lease.id,
+        };
+        let delivered = match data_plane::deliver(
+            &data,
+            &lease.run_id,
+            &self.config.work_root,
+            lease_root,
+            || {
+                if self
+                    .refresh_execution_authorization(&lease.id, execution_authorization.as_mut())?
+                {
+                    anyhow::bail!("the Run was stopped during data delivery");
+                }
+                Ok(())
+            },
+        ) {
+            Ok(delivered) => delivered,
+            Err(error) => return not_started(Err(error.context("data delivery failed"))),
+        };
+        let (read_only_inputs, output_plan) = match delivered {
+            Some(delivered) => {
+                if self.config.isolation != IsolationMode::HostBoundary {
+                    return not_started(Err(anyhow::anyhow!(
+                        "data_plane_unsupported: data-plane Runs are served only by a host-boundary Runner in v0"
+                    )));
+                }
+                if let Err(error) = data.report(&delivered.report) {
+                    eprintln!("[data-plane] delivery report not recorded: {error:#}");
+                }
+                let inputs = delivered
+                    .inputs
+                    .into_iter()
+                    .map(|input| runtime_launch::resolved::ResolvedReadOnlyInput {
+                        env_name: input.env_name,
+                        path: input.path,
+                    })
+                    .collect();
+                (
+                    inputs,
+                    delivered.output_dir.map(|dir| (dir, delivered.outputs)),
+                )
+            }
+            None => (Vec::new(), None),
+        };
+        let mut resolved = match runtime_launch::lease::resolve_run(
             spec,
             lease_root,
             &workspace,
@@ -2024,6 +2076,10 @@ impl ConnectedWorker {
             Ok(resolved) => resolved,
             Err(error) => return not_started(Err(error)),
         };
+        resolved.context = resolved
+            .context
+            .with_read_only_inputs(read_only_inputs)
+            .with_output_dir(output_plan.as_ref().map(|(dir, _)| dir.clone()));
         entry.writer_fences = resolved.prepared.writer_fences();
         entry.phase = runtime_launch::recovery::RunPhase::Launching;
         if let Err(error) = journal.record(entry) {
@@ -2102,6 +2158,20 @@ impl ConnectedWorker {
             })
         );
         let stop_confirmed = stopped.overall.is_confirmed();
+        // Outputs are saved only after the workload is confirmed gone: its
+        // files are final. Generated and saved are reported separately; a save
+        // that fails leaves the generation recorded and the output unsaved.
+        if stop_confirmed && let Some((dir, limits)) = &output_plan {
+            for saved in data_plane::save_outputs(&data, dir, limits) {
+                eprintln!(
+                    "[data-plane] run={} output={} {}{}",
+                    lease.run_id,
+                    saved.output_key,
+                    saved.save_status,
+                    saved.error.map(|e| format!(" ({e})")).unwrap_or_default()
+                );
+            }
+        }
         let result = serving.and_then(|execution_id| {
             let committed = committed?;
             for entry in &committed {

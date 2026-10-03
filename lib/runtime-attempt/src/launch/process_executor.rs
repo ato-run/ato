@@ -392,6 +392,12 @@ fn launch_process_inner(
     }
 
     let policy_path = host.runtime_root.join("sandbox-policy.json");
+    if super::host_boundary::active().is_none() {
+        ensure!(
+            context.read_only_inputs().is_empty() && context.output_dir().is_none(),
+            "delivered inputs and saved outputs run only on a host-boundary Runner in v0"
+        );
+    }
     if let Some(boundary) = super::host_boundary::active() {
         // No namespace exists on this host, so there is no isolated network to
         // put a broker in front of. Refuse rather than share the host network
@@ -538,6 +544,24 @@ fn launch_host_boundary(
         .to_owned();
     environment.insert("TMPDIR".into(), scratch_text.clone());
     environment.insert("HOME".into(), scratch_text);
+    if let Some(dir) = context.output_dir() {
+        environment.insert(
+            "ATO_OUTPUT_DIR".into(),
+            dir.to_str()
+                .context("output path is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
+    for input in context.read_only_inputs() {
+        environment.insert(
+            input.env_name.clone(),
+            input
+                .path
+                .to_str()
+                .context("input path is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
     environment
         .entry("PATH".into())
         .or_insert_with(|| "/usr/local/bin:/usr/bin:/bin".into());
