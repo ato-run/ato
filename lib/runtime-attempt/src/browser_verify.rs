@@ -283,6 +283,7 @@ fn process_alive(_pid: i32) -> bool {
 }
 
 /// The helper's model keys, as the JSON it reads from its secrets pipe.
+#[cfg(unix)]
 fn secrets_payload() -> Vec<u8> {
     let secrets: serde_json::Map<String, serde_json::Value> = SECRET_ENV
         .iter()
