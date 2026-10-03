@@ -53,7 +53,7 @@ Activity/CORSの13失敗名・155 PASSはexact base `02a9e58b` / head `9b483d4a`
 [比較記録](evidence/formation-current-api-ci-comparison-20261003.json)にlog hashと
 失敗名を保存した。instance-state-syncはCI #729のfixture修正が含まれないため、
 同じWebSocket handshake失敗。修正単独のnative Linux比較は
-[CI記録](formation-agent-linux-ci-comparison-20261003.md)を参照する。
+[CI記録](https://github.com/ato-run/ato/blob/5798e23d28aaebd4fabd6d44cecef51ab869c717/docs/ops/formation-agent-linux-ci-comparison-20261003.md)を参照する。
 
 ## 実受入の境界
 
