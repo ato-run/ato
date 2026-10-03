@@ -196,6 +196,41 @@ pub struct ValidatedPortableApplication {
     pub tree: PortableTreeV1,
     pub tree_schema: String,
     pub realization: PortableRealizationKind,
+    /// The route's `ato.model-set@1` inputs, each verified against the
+    /// manifest object the bundle carries. Their objects are not in the bundle.
+    pub model_sets: Vec<ValidatedModelSet>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedModelSet {
+    pub input_id: String,
+    pub reference: String,
+    pub manifest: ato_formation::model_set::ModelSetManifest,
+}
+
+/// The one workspace input of a portable route. `BoundInput` is resolved per
+/// protocol, so the workspace is found by protocol, never by position.
+fn workspace_input(derivation: &BoundDerivation) -> Option<&BoundInput> {
+    derivation
+        .inputs
+        .iter()
+        .find(|input| input.protocol == WORKSPACE_PROTOCOL)
+}
+
+/// v0 portable inputs: exactly one workspace and at most one Model Set, and no
+/// protocol this validator cannot resolve.
+fn portable_inputs_supported(derivation: &BoundDerivation) -> bool {
+    let workspaces = derivation
+        .inputs
+        .iter()
+        .filter(|i| i.protocol == WORKSPACE_PROTOCOL)
+        .count();
+    let model_sets = derivation
+        .inputs
+        .iter()
+        .filter(|i| i.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+        .count();
+    workspaces == 1 && model_sets <= 1 && workspaces + model_sets == derivation.inputs.len()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -330,6 +365,9 @@ pub struct PortableAuthoredBundleSpec {
     pub bindings: Vec<ApplicationBindingV1>,
     pub requirements: Vec<PortableHttpRequirementSpec>,
     pub effects: EffectClass,
+    /// `(input id, manifest path in the source, canonical manifest)` consumed
+    /// by every route. The manifest file is an input, not workspace content.
+    pub model_sets: Vec<(String, String, ato_formation::model_set::ModelSetManifest)>,
 }
 
 /// Every `(image, platform)` an OCI route runs: one for a single-container
@@ -730,12 +768,7 @@ fn validate_selected_derivation(
     let tree_reference = surface
         .artifact_ref
         .as_deref()
-        .or_else(|| {
-            derivation
-                .inputs
-                .first()
-                .map(|input| input.content_ref.as_str())
-        })
+        .or_else(|| workspace_input(&derivation).map(|input| input.content_ref.as_str()))
         .ok_or_else(|| profile("portable derivation omitted its workspace input"))?;
     let tree_ref = parse_ref(tree_reference, "workspace tree reference")?;
     let tree_schema = bundle
@@ -752,6 +785,10 @@ fn validate_selected_derivation(
     if realization == PortableRealizationKind::StaticWeb {
         validate_static_http_paths(&contract, &application, &tree)?;
     }
+    let model_sets = validated_model_sets(bundle, &derivation)?;
+    if !model_sets.is_empty() && realization != PortableRealizationKind::LocalProcess {
+        return Err(profile("v0 delivers a Model Set only to a process route"));
+    }
 
     Ok(ValidatedPortableApplication {
         contract_ref,
@@ -765,7 +802,45 @@ fn validate_selected_derivation(
         tree,
         tree_schema,
         realization,
+        model_sets,
     })
+}
+
+/// Each `ato.model-set@1` input must name a structured object of the Model
+/// Set schema in this bundle whose bytes are exactly its canonical form and
+/// whose digest is the input's `content_ref`.
+fn validated_model_sets(
+    bundle: &PortableApplicationBundle,
+    derivation: &BoundDerivation,
+) -> Result<Vec<ValidatedModelSet>, PortableApplicationError> {
+    use ato_formation::model_set::{MODEL_SET_PROTOCOL, MODEL_SET_SCHEMA, ModelSetManifest};
+    derivation
+        .inputs
+        .iter()
+        .filter(|input| input.protocol == MODEL_SET_PROTOCOL)
+        .map(|input| {
+            let reference = parse_ref(&input.content_ref, "Model Set reference")?;
+            let schema = bundle
+                .descriptor(&reference)
+                .and_then(|descriptor| descriptor.schema.clone());
+            if schema.as_deref() != Some(MODEL_SET_SCHEMA) {
+                return Err(profile(
+                    "a Model Set input must name a Model Set manifest in the bundle",
+                ));
+            }
+            let bytes = bundle.payload_bytes(&reference)?;
+            let (manifest, digest) = ModelSetManifest::from_canonical_bytes(&bytes)
+                .map_err(|e| profile(format!("Model Set manifest is invalid: {e}")))?;
+            if digest != input.content_ref {
+                return Err(profile("Model Set manifest does not match its reference"));
+            }
+            Ok(ValidatedModelSet {
+                input_id: input.id.clone(),
+                reference: digest,
+                manifest,
+            })
+        })
+        .collect()
 }
 
 fn validated_application(
@@ -1071,6 +1146,7 @@ pub fn build_dynamic_process_oci_bundle(
             bindings: spec.bindings.clone(),
             requirements: spec.requirements.clone(),
             effects: EffectClass::Pure,
+            model_sets: Vec::new(),
         },
     )
 }
@@ -1164,6 +1240,28 @@ pub fn build_authored_bundle_v2(
                 })
                 .collect(),
             effects: draft.effects,
+            model_sets: draft
+                .model_sets
+                .iter()
+                .map(|input| {
+                    let bytes = read(source_root.join(&input.manifest_path))?;
+                    let (manifest, digest) =
+                        ato_formation::model_set::ModelSetManifest::from_canonical_bytes(&bytes)
+                            .map_err(|e| {
+                                profile(format!(
+                                    "Model Set manifest {} is invalid: {e}",
+                                    input.manifest_path
+                                ))
+                            })?;
+                    if digest != input.content_ref {
+                        return Err(profile(format!(
+                            "Model Set manifest {} is {digest}, not the pinned {}",
+                            input.manifest_path, input.content_ref
+                        )));
+                    }
+                    Ok((input.id.clone(), input.manifest_path.clone(), manifest))
+                })
+                .collect::<Result<_, PortableApplicationError>>()?,
         },
     )
 }
@@ -1182,13 +1280,37 @@ pub fn build_dynamic_routes_bundle(
             "dynamic application requires between one and sixteen routes",
         ));
     }
-    let (mut objects, tree_ref) =
-        build_portable_tree_with_schema(source_root, PORTABLE_TREE_V2_SCHEMA)?;
+    let (mut objects, tree_ref) = build_portable_tree_with_schema(
+        source_root,
+        PORTABLE_TREE_V2_SCHEMA,
+        &spec
+            .model_sets
+            .iter()
+            .map(|(_, path, _)| path.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let input = BoundInput {
         id: "workspace".to_owned(),
         protocol: WORKSPACE_PROTOCOL.to_owned(),
         content_ref: tree_ref,
     };
+    let mut route_inputs = vec![input.clone()];
+    for (id, _, manifest) in &spec.model_sets {
+        let reference = add_structured(
+            &mut objects,
+            manifest,
+            ato_formation::model_set::MODEL_SET_SCHEMA,
+        )?;
+        if Some(reference.as_str()) != manifest.reference().ok().as_deref() {
+            return Err(profile("a Model Set manifest must be canonical"));
+        }
+        route_inputs.push(BoundInput {
+            id: id.clone(),
+            protocol: ato_formation::model_set::MODEL_SET_PROTOCOL.to_owned(),
+            content_ref: reference,
+        });
+    }
+    route_inputs.sort_by(|a, b| a.id.cmp(&b.id));
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
         runtime_port_operations: vec![],
         variable_bindings: vec![],
@@ -1197,7 +1319,7 @@ pub fn build_dynamic_routes_bundle(
             ..Default::default()
         },
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
-        inputs: vec![input.clone()],
+        inputs: route_inputs.clone(),
         runtimes: route.execution.runtimes.clone(),
         platforms: Vec::new(),
         steps: if route.realization == PortableRealizationKind::OciServiceGroup {
@@ -1428,11 +1550,13 @@ fn validate_initial_route(
     }
     if derivation.steps.len() > 1 {
         let surface_port = validate_oci_service_group(application, derivation)?;
-        validate_route_requirements(contract, &derivation.inputs[0], surface_port)?;
+        let input = workspace_input(derivation)
+            .ok_or_else(|| profile("route omitted its workspace input"))?;
+        validate_route_requirements(contract, input, surface_port)?;
         return Ok(PortableRealizationKind::OciServiceGroup);
     }
     if application.surfaces.len() != 1
-        || derivation.inputs.len() != 1
+        || !portable_inputs_supported(derivation)
         || derivation.steps.len() != 1
         || derivation.ports.len() != 1
     {
@@ -1449,7 +1573,8 @@ fn validate_initial_route(
             "the initial profile permits at most one state and forbids builds and non-pure effects",
         ));
     }
-    let input = &derivation.inputs[0];
+    let input =
+        workspace_input(derivation).ok_or_else(|| profile("route omitted its workspace input"))?;
     let step = &derivation.steps[0];
     let port = &derivation.ports[0];
     // Step-scoped runtimes, state and Bindings belong to a service group. A
@@ -1776,8 +1901,7 @@ fn validate_oci_service_group<'a>(
 
     if application.schema != APPLICATION_V2_SCHEMA
         || application.surfaces.len() != 1
-        || derivation.inputs.len() != 1
-        || derivation.inputs[0].protocol != WORKSPACE_PROTOCOL
+        || !portable_inputs_supported(derivation)
     {
         return Err(profile(
             "an OCI service group requires one ato.application/2 Surface and one workspace input",
@@ -2198,6 +2322,7 @@ fn portable_reference_registry() -> Result<PortableReferenceRegistry, PortableAp
     registry.register(Arc::new(TreeReferences))?;
     registry.register(Arc::new(TreeV2References))?;
     registry.register(Arc::new(InstanceSnapshotReferences))?;
+    registry.register(Arc::new(ModelSetReferences))?;
     Ok(registry)
 }
 
@@ -2293,6 +2418,27 @@ impl PortableReferenceExtractor for TreeReferences {
 
 struct TreeV2References;
 
+/// A Model Set manifest references nothing inside the bundle: the objects it
+/// lists are resolved by digest through the data plane (`BoundInput` is
+/// resolved per protocol). The manifest itself must still be canonical.
+struct ModelSetReferences;
+
+impl PortableReferenceExtractor for ModelSetReferences {
+    fn schema(&self) -> &str {
+        ato_formation::model_set::MODEL_SET_SCHEMA
+    }
+
+    fn outgoing(&self, bytes: &[u8]) -> Result<Vec<ContentRef>, PortableBundleError> {
+        ato_formation::model_set::ModelSetManifest::from_canonical_bytes(bytes).map_err(
+            |error| PortableBundleError::ReferenceExtraction {
+                schema: ato_formation::model_set::MODEL_SET_SCHEMA.to_owned(),
+                reason: error.to_string(),
+            },
+        )?;
+        Ok(Vec::new())
+    }
+}
+
 struct InstanceSnapshotReferences;
 
 impl PortableReferenceExtractor for InstanceSnapshotReferences {
@@ -2356,14 +2502,20 @@ fn read_authoring_draft(source_root: &Path) -> Result<AuthoringDraft, PortableAp
 fn build_portable_tree(
     source_root: &Path,
 ) -> Result<(BTreeMap<String, ObjectToEncode>, String), PortableApplicationError> {
-    build_portable_tree_with_schema(source_root, PORTABLE_TREE_SCHEMA)
+    build_portable_tree_with_schema(source_root, PORTABLE_TREE_SCHEMA, &[])
 }
 
 fn build_portable_tree_with_schema(
     source_root: &Path,
     tree_schema: &str,
+    // Files that are another input of the route (a Model Set manifest), not
+    // workspace content.
+    exclude: &[String],
 ) -> Result<(BTreeMap<String, ObjectToEncode>, String), PortableApplicationError> {
-    let files = collect_portable_files(source_root, tree_schema)?;
+    let files: Vec<_> = collect_portable_files(source_root, tree_schema)?
+        .into_iter()
+        .filter(|(relative, _, _)| !exclude.contains(relative))
+        .collect();
     let mut objects = BTreeMap::<String, ObjectToEncode>::new();
     let mut entries = Vec::with_capacity(files.len());
     for (relative, path, media_type) in files {
@@ -2671,6 +2823,143 @@ default = "pure"
         let mut derivation = route.derivation.clone();
         mutate(&mut derivation);
         validate_initial_route(&route.contract, &route.application, &derivation)
+    }
+
+    #[test]
+    fn a_model_set_is_a_route_input_whose_manifest_travels_and_whose_objects_do_not() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");
+        let (bytes, bundle) = build_authored_bundle_v2(&root).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        let route = &routes[0];
+        // Found by protocol: "models" sorts before "workspace".
+        assert_eq!(
+            route.derivation.inputs[0].protocol,
+            ato_formation::model_set::MODEL_SET_PROTOCOL
+        );
+        assert_eq!(workspace_input(&route.derivation).unwrap().id, "workspace");
+        let set = &route.model_sets[0];
+        assert_eq!(set.input_id, "models");
+        assert_eq!(set.manifest.objects.len(), 2);
+        assert_eq!(route.derivation.inputs[0].content_ref, set.reference);
+        // Only the manifest is in the bundle; no object it lists is.
+        assert!(
+            bundle
+                .descriptor(&ContentRef::parse(set.reference.clone()).unwrap())
+                .is_some()
+        );
+        for object in &set.manifest.objects {
+            assert!(
+                bundle
+                    .descriptor(&ContentRef::parse(object.digest.clone()).unwrap())
+                    .is_none()
+            );
+        }
+        assert!(bytes.len() < 64 * 1024);
+
+        // Same source without the Model Set: same K, another D.
+        let plain = tempfile::tempdir().unwrap();
+        fs::write(
+            plain.path().join("app.py"),
+            fs::read(root.join("app.py")).unwrap(),
+        )
+        .unwrap();
+        let toml = fs::read_to_string(root.join(CAPSULE_FILE_NAME)).unwrap();
+        let start = toml.find("[[input]]\nid = \"models\"").unwrap();
+        let end = toml[start..].find("[contract]").unwrap() + start;
+        fs::write(
+            plain.path().join(CAPSULE_FILE_NAME),
+            format!("{}{}", &toml[..start], &toml[end..]),
+        )
+        .unwrap();
+        let (_, without) = build_authored_bundle_v2(plain.path()).unwrap();
+        assert_eq!(
+            without.index.root_contract_ref,
+            bundle.index.root_contract_ref
+        );
+        assert_ne!(without.index.derivations, bundle.index.derivations);
+    }
+
+    #[test]
+    fn a_model_set_whose_manifest_is_not_the_pinned_digest_is_refused() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");
+        let copy = tempfile::tempdir().unwrap();
+        fs::create_dir_all(copy.path().join("models")).unwrap();
+        fs::write(
+            copy.path().join("app.py"),
+            fs::read(root.join("app.py")).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            copy.path().join(CAPSULE_FILE_NAME),
+            fs::read(root.join(CAPSULE_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        // A different (still canonical) manifest under the same pinned ref.
+        let other = ato_formation::model_set::ModelSetManifest {
+            schema: ato_formation::model_set::MODEL_SET_SCHEMA.to_owned(),
+            objects: vec![ato_formation::model_set::ModelSetEntry {
+                path: "probe/a.bin".to_owned(),
+                digest: format!("sha256:{}", "0".repeat(64)),
+                bytes: 1,
+            }],
+        };
+        fs::write(
+            copy.path().join("models/probe.model-set.json"),
+            other.canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        let error = build_authored_bundle_v2(copy.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not the pinned"), "{error}");
+        // Non-canonical bytes are refused even with the right content.
+        let canonical = fs::read(root.join("models/probe.model-set.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        fs::write(
+            copy.path().join("models/probe.model-set.json"),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(build_authored_bundle_v2(copy.path()).is_err());
+    }
+
+    #[test]
+    fn a_derivation_naming_a_non_manifest_object_as_its_model_set_is_refused() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");
+        let (_, bundle) = build_authored_bundle_v2(&root).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        // Point the Model Set input at the workspace tree (another schema).
+        let error = revalidate_with_bundle(&bundle, &route, |d| {
+            let tree = workspace_input(d).unwrap().content_ref.clone();
+            d.inputs
+                .iter_mut()
+                .find(|i| i.id == "models")
+                .unwrap()
+                .content_ref = tree;
+        });
+        assert!(error.is_err());
+        // A second Model Set input is outside the v0 profile.
+        let error = revalidate_with_bundle(&bundle, &route, |d| {
+            let mut extra = d.inputs[0].clone();
+            extra.id = "more".to_owned();
+            d.inputs.push(extra);
+            d.inputs.sort_by(|a, b| a.id.cmp(&b.id));
+        });
+        assert!(error.is_err());
+    }
+
+    fn revalidate_with_bundle(
+        bundle: &ato_objects::PortableApplicationBundle,
+        route: &ValidatedPortableApplication,
+        mutate: impl FnOnce(&mut BoundDerivation),
+    ) -> Result<(), PortableApplicationError> {
+        let mut derivation = route.derivation.clone();
+        mutate(&mut derivation);
+        validate_initial_route(&route.contract, &route.application, &derivation)?;
+        validated_model_sets(bundle, &derivation).map(|_| ())
     }
 
     #[test]
