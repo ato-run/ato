@@ -355,15 +355,26 @@ mod tests {
     }
 
     fn socket_root() -> Result<tempfile::TempDir> {
-        let directory = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(".tmp"));
-        let directory = directory.canonicalize()?;
-        ensure!(
-            directory.components().any(|c| c.as_os_str() == ".tmp"),
-            "test workspace temp directory required"
-        );
-        Ok(tempfile::tempdir_in(directory)?)
+        let local = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp");
+        fs::create_dir_all(&local)?;
+        // Native macOS CI supplies /var/folders as TMPDIR. Keep fixtures in
+        // the workspace and use a short existing ancestor .tmp when a
+        // nested worktree would exceed the Unix socket path bound.
+        for directory in std::iter::once(local).chain(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .map(|parent| parent.join(".tmp")),
+        ) {
+            if !directory.is_dir() {
+                continue;
+            }
+            let directory = directory.canonicalize()?;
+            if directory.as_os_str().as_encoded_bytes().len() + 20 > 100 {
+                continue;
+            }
+            return Ok(tempfile::Builder::new().prefix("u").tempdir_in(directory)?);
+        }
+        anyhow::bail!("short workspace .tmp directory required for Unix socket fixture")
     }
 
     #[test]
