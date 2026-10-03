@@ -28,7 +28,7 @@ python3 scripts/producer-isolation-preflight.py probe \
 
 Native認証用に`com.apple.secd`と`com.apple.SecurityServer`のMach lookupを準備する。Keychainの実値を読み出すfixtureは実行せず、global login/設定も変更しない。Codexでは機能下限0.99.0以上と、計画専用のOS credential storeが必要。`cli_auth_credentials_store = "keyring"`はfile fallbackを避ける設定であり、既存global entryのコピーや新loginはhelperの仕事ではない。0600 credential fileを公開する代替もない。Claude Code 2.1.288のlocal helpとCodexの[対応下限](installation.md)は、実tool inventoryの測定と区別する。
 
-`probe`は公開package内の固定C fixtureをclangでbuildし、追加でそのfixture binaryだけを実行可能にした専用profileを`sandbox-exec`へ渡す。fixtureはNative binaryやMCPを起動しない。Source、owner credential、private grant、Runtime ticket、DB、過去報告、credential store fileの7クラスのprivate canaryを内部生成する。読取・書込、symlink escape、fork後の権限継承、Source直接実行、shell/security/curl実行、Docker相当Unix socket、任意TCP接続を確認する。存在する同一UIDのcanaryへの`EPERM/EACCES`を必要とし、file欠損やconnection refusedを拒否成功とは扱わない。
+`probe`は公開package内の固定C fixtureをclangでbuildし、共通のprofile generatorでそのfixture binary一つだけを実行可能にした専用profileを`sandbox-exec`へ渡す。Native用profileは生成済みだが実製品へ未適用であり、fixtureはNative binaryやMCPを起動しない。Source、owner credential、private grant、Runtime ticket、DB、過去報告、credential store fileの7クラスのprivate canaryを内部生成する。読取・書込、symlink escape、fork後の権限継承、Source直接実行、shell/security/curl実行、Docker相当Unix socket、任意TCP接続を確認する。存在する同一UIDのcanaryへの`EPERM/EACCES`を必要とし、file欠損やconnection refusedを拒否成功とは扱わない。
 
 実値、captured stdout/stderr、例外、file bodyを出力しない。OSfixture結果はbool/count/digestで保存し、private canaryの値をdigestへ含めない。取得できないエージェント内部のcall数と費用は`unknown`。結果の`os_fixture_pass`は実Codex/Claude Code対応やsame-K PASSではなく、`native_acceptance_ready`は常にfalse。
 
