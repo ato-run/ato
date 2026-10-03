@@ -58,13 +58,39 @@ static bool denied_unix(const char *path) {
   return denied;
 }
 
-static bool denied_tcp(int port) {
+static bool tcp_connect(const char *host, int port, bool expected_allowed) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return !expected_allowed && blocked();
+  struct sockaddr_in address = {0};
+  address.sin_family = AF_INET;
+  address.sin_port = htons((unsigned short)port);
+  inet_pton(AF_INET, host, &address.sin_addr);
+  int result = connect(fd, (struct sockaddr *)&address, sizeof(address));
+  bool passed = expected_allowed ? result == 0 : result < 0 && blocked();
+  close(fd);
+  return passed;
+}
+
+static bool denied_udp(int port) {
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) return blocked();
   struct sockaddr_in address = {0};
   address.sin_family = AF_INET;
   address.sin_port = htons((unsigned short)port);
   inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+  int result = (int)sendto(fd, "probe", 5, 0, (struct sockaddr *)&address, sizeof(address));
+  bool denied = result < 0 && blocked();
+  close(fd);
+  return denied;
+}
+
+static bool denied_ipv6(int port) {
+  int fd = socket(AF_INET6, SOCK_STREAM, 0);
+  if (fd < 0) return blocked();
+  struct sockaddr_in6 address = {0};
+  address.sin6_family = AF_INET6;
+  address.sin6_port = htons((unsigned short)port);
+  inet_pton(AF_INET6, "::1", &address.sin6_addr);
   int result = connect(fd, (struct sockaddr *)&address, sizeof(address));
   bool denied = result < 0 && blocked();
   close(fd);
@@ -72,8 +98,12 @@ static bool denied_tcp(int port) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7) return 2;
-  const char *names[] = {"source", "owner-credential", "private-grant", "runtime-ticket",
+  if (argc != 12) return 2;
+  bool no_extra_descriptors = true;
+  for (int fd = 3; fd < 1024; fd++) {
+    if (fcntl(fd, F_GETFD) >= 0 || errno != EBADF) no_extra_descriptors = false;
+  }
+  const char *names[] = {"source", "owner-credential", "owner-connection", "private-grant", "runtime-ticket",
                          "state-db", "old-measurements", "credential-store-file"};
   char path[4096];
   bool private_read = true, private_write = true;
@@ -99,17 +129,32 @@ int main(int argc, char **argv) {
   bool security = denied_exec("/usr/bin/security");
   bool curl = denied_exec("/usr/bin/curl");
   bool unix_denied = denied_unix(argv[5]);
-  bool tcp_denied = denied_tcp(atoi(argv[6]));
+  bool relay_allowed = tcp_connect("127.0.0.1", atoi(argv[6]), true);
+  bool provider_allowed = tcp_connect("127.0.0.2", atoi(argv[7]), true);
+  bool wrong_port = tcp_connect("127.0.0.1", atoi(argv[8]), false);
+  bool wrong_address = tcp_connect("127.0.0.2", atoi(argv[6]), false);
+  bool provider_wrong_port = tcp_connect("127.0.0.2", atoi(argv[9]), false);
+  bool provider_wrong_address = tcp_connect("127.0.0.1", atoi(argv[7]), false);
+  bool owner_unix = denied_unix(argv[10]);
+  bool ipv6 = denied_ipv6(atoi(argv[11]));
+  bool udp = denied_udp(atoi(argv[6]));
 #define JSON_BOOL(value) ((value) ? "true" : "false")
   printf("{\"public_skill_read\":%s,\"public_skill_write_denied\":%s,"
-         "\"private_seven_classes_read_denied\":%s,\"private_seven_classes_write_denied\":%s,"
+         "\"private_eight_classes_read_denied\":%s,\"private_eight_classes_write_denied\":%s,"
          "\"scratch_write\":%s,\"symlink_escape_denied\":%s,\"fork_inherits_denial\":%s,"
          "\"source_direct_launch_denied\":%s,\"shell_exec_denied\":%s,"
          "\"security_exec_denied\":%s,\"curl_exec_denied\":%s,"
-         "\"docker_unix_socket_denied\":%s,\"arbitrary_tcp_denied\":%s}\n",
+         "\"docker_unix_socket_denied\":%s,\"relay_tcp_allowed\":%s,"
+         "\"provider_fixture_tcp_allowed\":%s,\"relay_wrong_port_denied\":%s,"
+         "\"relay_wrong_address_denied\":%s,\"provider_wrong_port_denied\":%s,"
+         "\"provider_wrong_address_denied\":%s,\"owner_unix_socket_denied\":%s,"
+         "\"ipv6_denied\":%s,\"udp_denied\":%s,\"extra_descriptors_absent\":%s}\n",
          JSON_BOOL(public_read), JSON_BOOL(public_write), JSON_BOOL(private_read),
          JSON_BOOL(private_write), JSON_BOOL(scratch_write), JSON_BOOL(escape_denied),
          JSON_BOOL(inherited), JSON_BOOL(direct), JSON_BOOL(shell), JSON_BOOL(security),
-         JSON_BOOL(curl), JSON_BOOL(unix_denied), JSON_BOOL(tcp_denied));
+         JSON_BOOL(curl), JSON_BOOL(unix_denied), JSON_BOOL(relay_allowed),
+         JSON_BOOL(provider_allowed), JSON_BOOL(wrong_port), JSON_BOOL(wrong_address),
+         JSON_BOOL(provider_wrong_port), JSON_BOOL(provider_wrong_address),
+         JSON_BOOL(owner_unix), JSON_BOOL(ipv6), JSON_BOOL(udp), JSON_BOOL(no_extra_descriptors));
   return 0;
 }

@@ -22,13 +22,15 @@ python3 scripts/producer-isolation-preflight.py probe \
 
 `public/fixed-mcp.json`は固定server名・binary digest・4toolの準備manifestである。製品のMCP設定fileや接続credentialではない。Session connectionをここへcopyしない。実MCP設定と限定接続は既存[MCP手順](mcp.md)に従い、承認済みのprivileged broker境界で結合する必要がある。
 
+Ownerが通信先を固定した場合だけ、`prepare`へ`--relay-endpoint 127.0.0.1:PORT`と、最大4件の`--provider-endpoint NUMERIC_PUBLIC_IPV4:443`を明示できる。defaultは通信許可なし。endpointは数値IPv4と単一portに限定し、hostname、URL、wildcard、range、IPv6、providerへのprivate/loopback/link-local/multicast addressを拒否する。DNSや接続先の自動取得・変更・fallbackは行わない。このhelperはrelay descriptorやOwner接続fileを読まない。指定したTCP addressだけでSearchのscope/auth/expiryを証明せず、実descriptorの照合は既存Rust relay protocolへ残す。
+
 ## profileと測定範囲
 
-既存の`lib/sandbox/src/macos.rs`とCapsule用profileは変更しない。専用profileは`deny default`を基準に、公開treeの読取、専用scratchの読書き、system libraryの読取、選定したNative binaryと固定MCP binaryへのliteral `process-exec`だけを許可する。libSystemの起動に必要なroot directoryのliteral読取は既存sandboxと同じであり、root配下の包括読取は許可しない。shell/security/curl、任意binary、Sourceの直接起動、network/Unix socket、homeやKeychain fileへの包括許可は持たない。Sourceやowner directoryをmount/allow-listへ追加しない。
+既存の`lib/sandbox/src/macos.rs`とCapsule用profileは変更しない。専用profileは`deny default`を基準に、公開treeの読取、専用scratchの読書き、system libraryの読取、選定したNative binaryと固定MCP binaryへのliteral `process-exec`を許可する。libSystemの起動に必要なroot directoryのliteral読取は既存sandboxと同じであり、root配下の包括読取は許可しない。通信先を明示した場合も、exact `remote tcp "IP:PORT"`以外への許可、inbound、DNS、UDP、IPv6、Unix socket、system-socketの包括許可は追加しない。shell/security/curl、任意binary、Sourceの直接起動、homeやKeychain fileへの包括許可は持たない。Sourceやowner directoryをmount/allow-listへ追加しない。
 
 Native認証用に`com.apple.secd`と`com.apple.SecurityServer`のMach lookupを準備する。Keychainの実値を読み出すfixtureは実行せず、global login/設定も変更しない。Codexでは機能下限0.99.0以上と、計画専用のOS credential storeが必要。`cli_auth_credentials_store = "keyring"`はfile fallbackを避ける設定であり、既存global entryのコピーや新loginはhelperの仕事ではない。0600 credential fileを公開する代替もない。Claude Code 2.1.288のlocal helpとCodexの[対応下限](installation.md)は、実tool inventoryの測定と区別する。
 
-`probe`は公開package内の固定C fixtureをclangでbuildし、共通のprofile generatorでそのfixture binary一つだけを実行可能にした専用profileを`sandbox-exec`へ渡す。Native用profileは生成済みだが実製品へ未適用であり、fixtureはNative binaryやMCPを起動しない。Source、owner credential、private grant、Runtime ticket、DB、過去報告、credential store fileの7クラスのprivate canaryを内部生成する。読取・書込、symlink escape、fork後の権限継承、Source直接実行、shell/security/curl実行、Docker相当Unix socket、任意TCP接続を確認する。存在する同一UIDのcanaryへの`EPERM/EACCES`を必要とし、file欠損やconnection refusedを拒否成功とは扱わない。
+`probe`は公開package内の固定C fixtureをclangでbuildし、共通のprofile generatorでそのfixture binary一つだけを実行可能にした専用profileを`sandbox-exec`へ渡す。Native用profileは生成済みだが実製品へ未適用であり、fixtureはNative binaryやMCPを起動しない。Source、owner credential、owner connection、private grant、Runtime ticket、DB、過去報告、credential store fileの8クラスのprivate canaryを内部生成する。二つの制御されたloopback TCP endpointでrelay/providerルールのpositive接続と、wrong port/address、UDP、IPv6、Docker/owner相当Unix socketの拒否を同じOS profileで測る。public provider、実relay descriptor、Native認証には接続しない。extra fdを閉じ、C process内でも追加descriptorがないことを確認する。読取・書込、symlink escape、fork後の権限継承、Source直接実行、shell/security/curl実行も確認する。存在する同一UIDのcanaryと実際にlistenした拒否先への`EPERM/EACCES`を必要とし、file欠損やconnection refusedを拒否成功とは扱わない。旧packageのprobeや旧測定の再解釈はせず、新しいpackage/測定IDを使う。
 
 実値、captured stdout/stderr、例外、file bodyを出力しない。OSfixture結果はbool/count/digestで保存し、private canaryの値をdigestへ含めない。取得できないエージェント内部のcall数と費用は`unknown`。結果の`os_fixture_pass`は実Codex/Claude Code対応やsame-K PASSではなく、`native_acceptance_ready`は常にfalse。
 
@@ -36,6 +38,6 @@ Native認証用に`com.apple.secd`と`com.apple.SecurityServer`のMach lookupを
 
 同じNative process内のbuiltin/toolがMach認証IPCへ触れないことは、Seatbeltのfile/exec制限だけでは証明できない。実製品のtool inventoryとread/write/exec負例、設定・hook・plugin・subagentを通じた拡張の拒否を別途測定する。Codexのshell無効化とClaudeの選定済みrestricted/tool/strict MCP設定は、そのversionの実設定で確認する。このhelperは未確認の製品flagや任意agent起動commandを生成しない。
 
-prepared profileはNative providerへのegressと限定relay TCPをまだ許可していない。[固定MCP broker](mcp.md)はOwner側でSession connectionを読み、Producer側は独立したrelay descriptorだけを使う。prepared profileへOwnerのfile読取を追加せず、選定したrelay endpointへの接続と実Native tool境界を承認済み計画で確認する。接続fixtureの成功だけで、このOS profileとの統合や実製品の認証分離を完了扱いにしない。それまではnative起動・ログイン・探索を開始しない。
+prepared profileには明示されたexact relay/provider TCP endpointだけを設定できる。[固定MCP broker](mcp.md)はOwner側でSession connectionを読み、Producer側は独立したrelay descriptorだけを使う。prepared profileへOwnerのfile読取を追加せず、選定したrelay endpointへの実MCP接続と実Native tool境界を承認済み計画で確認する。providerのIP:443許可はTLS/SNI identityやDNSを保証せず、共有CDNの同じIP上の別originも区別できない。Ownerがprovider identity・固定IP・TLS・実Nativeの接続方法を確認できない場合は停止する。未確認のDNS/Mach/network許可や製品flagを補って動作済みにしない。loopbackのprovider代用fixture成功をpublic provider到達やこのOS profileでの実製品認証・推論へ読み替えない。それまではnative起動・ログイン・探索を開始しない。
 
 OS fixtureの成功後も、承認済みplan、対応version、native Skill発見、固定MCP inventory、認証とtoolの分離、provider egressの各gateが未完了なら人へ引き継ぐ。過去測定の非露出保証や成功Dは変更しない。
