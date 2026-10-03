@@ -136,8 +136,9 @@ dispatch fixture; automatic production Source state provisioning remains pending
 
 ## Remaining acceptance and accounting
 
-The final-pin Kutt Source regression is in progress as a new zero-known-D
-Search. [The interrupted prior exchange](evidence/formation-kutt-unanswered-round-20261003.json)
+The final-pin Kutt Source regression stopped without PASS. [Preserved failure](evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. A common terminal-classification fix and fresh Source acceptance remain pending.
+
+ [The interrupted prior exchange](evidence/formation-kutt-unanswered-round-20261003.json)
 (SHA-256 `af14132136eb99ff85201731ce197a6330f8773b6fa6a038876874f641df2bfd`)
 closed Search `search_9a1e27fd1a9d5102a86620b2d61e7b93` at its original
 10-minute round deadline before creating any candidate or Runtime attempt.
