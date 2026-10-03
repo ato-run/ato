@@ -14,6 +14,10 @@ Session共通化 #1479 → 共通Skill #1480 → この受入記録の順でレ�
 
 Owner受入の開始前集計を、既存CLIのstatusと保存済みviewを読む薄い `scripts/acceptance/coverage/native-session-budget.py` へ分離した。取消・未回答・予約attemptも数え、再接続や古いsnapshotで消費量を減らさない。binding変更・不足証拠はfail closed。関連4test PASS、実台帳でも追加開始を拒否した。実SDKによるSource探索/復旧と、厳密fixtureだけで確認したUNKNOWN切断などを分け、完全受入のDoneとはしない。
 
+SDKの保存記録から取得できたtoken数を補う。Codexの最終SDK累計はinput 554,685（cached 489,984）/output 3,555。15回のusage updateを15 LLM callとは数えない。Claudeの再接続文脈はSDK list価格推計$0.6573648、入力不足の制御文脈は$0.2069404。最初の切断文脈は累計result未取得でpartial。SDK推計はaccountへの実請求ではなく、DeepSeek台帳へ合算しない。内部LLM call数と実請求額はunknownを維持する。[SDK報告値](evidence/formation-native-sdk-reported-usage-20261004.json)。
+
+測定後のlauncher integration `79ee6e47` はSDK報告値の抽出・終了出力だけを追加した。現在のNative/Skill testは38 PASS。Claude累計resultをturnごとに足さず、未知fieldをコピーせず、欠損を費用0にしない。保存済みSDK streamの読取で確認し、Source/Runtime受入を新headで再実行したとは報告しない。
+
 現在のNative入口へ終了済みCodex/Claude Searchを渡す負例は、両方とも新しいNative文脈・推論・Runtime実行の作成前に停止した。全保存済みJSON/journalのSHAは不変、Search/exchange/attempt追加は0。これは実Native entryのadmission検証で、実LLMによるneeds_input/UNKNOWN停止とは分ける。[終了済みSearchの入口証拠](evidence/formation-native-terminal-entry-20261004.json)。
 
 [Codex実Source証拠](evidence/formation-native-codex-source-20261004.json)、[OS別CI証拠](evidence/formation-native-platform-ci-20261004.json)。Session `8bd25250` のUbuntu/macOS/Windows実CLI CIはPASS。WindowsのMSVC実行stepとjournal検査を記録した。旧Linux WebSocket・macOS worker失敗の原因は未再現であり、現headのgreenを旧原因の解明へ読み替えない。
