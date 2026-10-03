@@ -734,8 +734,11 @@ dependencies = [
  "ato-materializer-static-web",
  "ato-sandbox",
  "base64 0.22.1",
+ "fs2",
  "libc",
+ "rand 0.8.6",
  "reqwest",
+ "rustix",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -743,6 +746,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
