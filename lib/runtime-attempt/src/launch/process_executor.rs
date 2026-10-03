@@ -638,7 +638,11 @@ fn resolve_python_from_root(
         output.status.success()
             && reported
                 .trim()
-                .starts_with(&format!("Python {}.", requirement.version)),
+                .strip_prefix("Python ")
+                .is_some_and(|version| {
+                    version == requirement.version
+                        || version.starts_with(&format!("{}.", requirement.version))
+                }),
         "provisioned Python does not satisfy {}: {}",
         requirement.version,
         reported.trim()
@@ -961,6 +965,29 @@ mod tests {
         };
         let error = resolve_python_from_root(&requirement, root.path()).unwrap_err();
         assert!(error.to_string().contains("is not provisioned"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_patch_pinned_python_runtime_is_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("3.11.11/bin/python3");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\necho 'Python 3.11.11'\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for version in ["3.11.11", "3.11"] {
+            let requirement = ato_ipc::runtime_launch::ExecutableRequirementV1 {
+                name: "python".to_owned(),
+                version: version.to_owned(),
+            };
+            assert_eq!(
+                resolve_python_from_root(&requirement, root.path())
+                    .unwrap()
+                    .1,
+                "Python 3.11.11"
+            );
+        }
     }
 
     #[cfg(unix)]

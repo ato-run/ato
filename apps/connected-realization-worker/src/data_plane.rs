@@ -79,7 +79,12 @@ pub struct ObjectDelivery {
     pub digest: String,
     /// `hit` (marker matched), `rehash` (present, re-verified), `miss` (fetched).
     pub cache: &'static str,
+    /// Sum of requested byte ranges, including retries (zero for cache hits).
+    pub bytes_requested: u64,
+    /// Bytes actually read from responses, including partial failed transfers.
     pub bytes_transferred: u64,
+    /// Marker checks and full-file SHA-256 verification, excluding download.
+    pub verification_millis: u128,
     pub millis: u128,
 }
 
@@ -355,6 +360,19 @@ fn hash_file(path: &Path) -> Result<(String, u64)> {
     Ok((format!("sha256:{}", hex::encode(hasher.finalize())), total))
 }
 
+struct CountedRead<'a> {
+    reader: Box<dyn Read>,
+    transferred: &'a mut u64,
+}
+
+impl Read for CountedRead<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.reader.read(buffer)?;
+        *self.transferred += count as u64;
+        Ok(count)
+    }
+}
+
 impl ModelCache {
     /// Under the Runner's work root, outside every lease directory.
     pub fn open(work_root: &Path) -> Result<Self> {
@@ -431,23 +449,34 @@ impl ModelCache {
         mut keepalive: impl FnMut() -> Result<()>,
     ) -> Result<ObjectDelivery> {
         let started = Instant::now();
+        let mut verification = Duration::ZERO;
         let object = self.object_path(&entry.digest)?;
         if object.exists() {
-            if self.marker_matches(entry, &object) {
+            let verifying = Instant::now();
+            let marker_matches = self.marker_matches(entry, &object);
+            verification += verifying.elapsed();
+            if marker_matches {
                 return Ok(ObjectDelivery {
                     digest: entry.digest.clone(),
                     cache: "hit",
+                    bytes_requested: 0,
                     bytes_transferred: 0,
+                    verification_millis: verification.as_millis(),
                     millis: started.elapsed().as_millis(),
                 });
             }
-            match hash_file(&object) {
+            let verifying = Instant::now();
+            let checked = hash_file(&object);
+            verification += verifying.elapsed();
+            match checked {
                 Ok((digest, size)) if digest == entry.digest && size == entry.bytes => {
                     self.seal(entry, &object)?;
                     return Ok(ObjectDelivery {
                         digest: entry.digest.clone(),
                         cache: "rehash",
+                        bytes_requested: 0,
                         bytes_transferred: 0,
+                        verification_millis: verification.as_millis(),
                         millis: started.elapsed().as_millis(),
                     });
                 }
@@ -456,6 +485,7 @@ impl ModelCache {
         }
 
         let partial = object.with_extension("partial");
+        let mut requested = 0_u64;
         let mut transferred = 0_u64;
         loop {
             let have = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
@@ -471,7 +501,13 @@ impl ModelCache {
             let mut attempt = 0;
             loop {
                 let result = (|| -> Result<u64> {
-                    let mut reader = fetch(have, end)?;
+                    requested += end - have + 1;
+                    let reader = CountedRead {
+                        reader: fetch(have, end)?,
+                        transferred: &mut transferred,
+                    };
+                    // A bad range response cannot fill unbounded scratch space.
+                    let mut reader = reader.take(end - have + 2);
                     let mut file = OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -482,10 +518,7 @@ impl ModelCache {
                     Ok(copied)
                 })();
                 match result {
-                    Ok(copied) => {
-                        transferred += copied;
-                        break;
-                    }
+                    Ok(_) => break,
                     Err(error) if attempt + 1 < CHUNK_RETRIES => {
                         attempt += 1;
                         // A short write leaves a prefix that is still valid;
@@ -503,7 +536,9 @@ impl ModelCache {
                 }
             }
         }
+        let verifying = Instant::now();
         let (digest, size) = hash_file(&partial)?;
+        verification += verifying.elapsed();
         if digest != entry.digest || size != entry.bytes {
             let _ = fs::remove_file(&partial);
             bail!(
@@ -516,7 +551,9 @@ impl ModelCache {
         Ok(ObjectDelivery {
             digest: entry.digest.clone(),
             cache: "miss",
+            bytes_requested: requested,
             bytes_transferred: transferred,
+            verification_millis: verification.as_millis(),
             millis: started.elapsed().as_millis(),
         })
     }
@@ -563,6 +600,16 @@ pub fn deliver(
         return Ok(None);
     };
     ensure!(grant.run_id == run_id, "the data grant names another Run");
+    let mut input_names = std::collections::BTreeSet::new();
+    for set in &grant.model_sets {
+        ensure!(
+            safe_relative(&set.input_id)
+                && !set.input_id.contains('/')
+                && set.input_id != "assets"
+                && input_names.insert(env_name(&set.input_id)),
+            "data grant has an unsafe or colliding input name"
+        );
+    }
     let started = Instant::now();
     let cache = ModelCache::open(work_root)?;
     let mut inputs = Vec::new();
@@ -842,10 +889,13 @@ mod tests {
             (first.cache, first.bytes_transferred),
             ("miss", data.len() as u64)
         );
+        assert_eq!(first.bytes_requested, data.len() as u64);
+        assert!(first.verification_millis <= first.millis);
         let second = cache
             .ensure(&e, serve(data.clone(), &fetched), || Ok(()))
             .unwrap();
         assert_eq!((second.cache, second.bytes_transferred), ("hit", 0));
+        assert_eq!(second.bytes_requested, 0);
         assert_eq!(fetched.get(), data.len() as u64);
         fs::remove_file(cache.marker_path(&e.digest).unwrap()).unwrap();
         assert_eq!(
@@ -862,6 +912,35 @@ mod tests {
                 .mode()
                 & 0o777,
             0o444
+        );
+    }
+
+    #[test]
+    fn retry_counts_the_short_response_as_transferred_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = ModelCache::open(root.path()).unwrap();
+        let data = b"verified-object";
+        let mut requests = 0;
+        let report = cache
+            .ensure(
+                &entry(data),
+                |_, _| {
+                    requests += 1;
+                    let bytes = if requests == 1 {
+                        data[..3].to_vec()
+                    } else {
+                        data.to_vec()
+                    };
+                    Ok(Box::new(Cursor::new(bytes)))
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(report.bytes_requested, data.len() as u64 * 2);
+        assert_eq!(report.bytes_transferred, data.len() as u64 + 3);
+        assert_eq!(
+            fs::read(cache.object_path(&entry(data).digest).unwrap()).unwrap(),
+            data
         );
     }
 
