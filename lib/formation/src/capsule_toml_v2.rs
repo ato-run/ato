@@ -46,7 +46,7 @@ pub struct PortableAuthoringDraftV2 {
     pub observations: Vec<PortableHttpObservationDraftV2>,
     pub derivations: Vec<PortableDerivationDraftV2>,
     pub effects: EffectClass,
-    /// `ato.model-set@1` inputs every route consumes (at most one in v0).
+    /// `ato.model-set@1` inputs every route consumes (at most two in v0).
     pub model_sets: Vec<PortableModelSetInputDraftV2>,
 }
 
@@ -366,8 +366,28 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
         ));
     }
     let mut model_sets = Vec::new();
+    let mut input_names = BTreeSet::from(["WORKSPACE".to_owned()]);
     for input in other_inputs {
         validate_id("input.id", &input.id)?;
+        // The process adapter exposes each input through ATO_INPUT_PATH_<ID>.
+        // Distinct authoring IDs must not overwrite the same environment name.
+        let env_id: String = input
+            .id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if input.id == "assets" || !input_names.insert(env_id) {
+            return Err(invalid(
+                "input.id",
+                "duplicate or reserved input environment name",
+            ));
+        }
         if input.protocol != MODEL_SET_PROTOCOL {
             return Err(invalid(
                 "input.use",
@@ -396,10 +416,10 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             content_ref,
         });
     }
-    if model_sets.len() > 1 {
+    if model_sets.len() > 2 {
         return Err(invalid(
             "input",
-            "portable v0 supports at most one Model Set input",
+            "portable v0 supports at most two Model Set inputs",
         ));
     }
     if document.state.len() > 1 {
@@ -923,15 +943,42 @@ default = "pure"
             ("escapes", base.replace("models/probe.model-set.json", "../x.json")),
             ("unknown protocol", base.replace("ato.model-set@1", "ato.model-set@2")),
             (
-                "two model sets",
+                "three model sets",
                 base.replace(
                     "[contract]",
-                    &format!("[[input]]\nid = \"more\"\nuse = \"ato.model-set@1\"\npath = \"m.json\"\nref = \"{pinned}\"\n\n[contract]"),
+                    &format!("[[input]]\nid = \"more\"\nuse = \"ato.model-set@1\"\npath = \"m.json\"\nref = \"{pinned}\"\n\n[[input]]\nid = \"third\"\nuse = \"ato.model-set@1\"\npath = \"t.json\"\nref = \"{pinned}\"\n\n[contract]"),
                 ),
             ),
         ] {
             assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
         }
+    }
+
+    #[test]
+    fn two_immutable_inputs_have_distinct_process_paths() {
+        let base = include_str!("../../../samples/portable-model-set-probe/capsule.toml");
+        let pinned = parse_capsule_toml_v2(base).unwrap().model_sets[0]
+            .content_ref
+            .clone();
+        let add = |id: &str| {
+            base.replace("[contract]", &format!(
+            "[[input]]\nid = \"{id}\"\nuse = \"ato.model-set@1\"\npath = \"software.json\"\nref = \"{pinned}\"\n\n[contract]"
+        ))
+        };
+        let draft = parse_capsule_toml_v2(&add("software")).unwrap();
+        assert_eq!(
+            draft
+                .model_sets
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["models", "software"]
+        );
+        for id in ["models", "workspace", "assets"] {
+            assert!(parse_capsule_toml_v2(&add(id)).is_err(), "{id}");
+        }
+        let colliding = add("model-data").replace("id = \"models\"", "id = \"model_data\"");
+        assert!(parse_capsule_toml_v2(&colliding).is_err());
     }
 
     #[test]
