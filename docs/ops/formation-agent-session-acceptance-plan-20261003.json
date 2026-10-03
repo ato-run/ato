@@ -82,10 +82,11 @@
     "freeze clean Ato/API commits and built binary/WASM hashes before Search creation",
     "verify immutable source archives and recompute K by Rust authority; no saved D/artifact/history enters Producer",
     "verify native explicit Skill discovery on both installed agent versions, not just file loading; compatible installation is a separate visible change",
-    "new isolated producer context receives only Skill, scoped bridge connection and bounded common input",
+    "new isolated producer context receives only Skill, independently published limited relay descriptor and bounded common input; never the Owner connection",
     "enforce and test OS/tool isolation: owner credentials/private grants/Runtime tickets/Source filesystem/DB are inaccessible; 0600 alone is insufficient",
     "generate any Kutt owner input in private controller; scan Producer input, tool output, errors and public evidence for generated values",
-    "check disk/runtime availability; retain original per-Search deadlines and limits during every reconnect"
+    "check disk/runtime availability; retain original per-Search deadlines and limits during every reconnect",
+    "establish and measure the native producer loopback-only relay and provider communication boundary; a default network-denying prepared fixture or broader localhost policy is not readiness"
   ],
   "installed_versions_inventory": {
     "codex": "0.46.0 native Skill unsupported; isolated acceptance tools version >=0.99.0 must be selected and native discovery/invocation measured",
@@ -108,5 +109,13 @@
     "100-app remeasurement",
     "old terminal Search reset/old UNKNOWN rerun"
   ],
-  "functional_state_acceptance": "Separate proposed permission after retained-artifact registration support; not granted by this plan or exploration PASS."
+  "functional_state_acceptance": "Separate proposed permission after retained-artifact registration support; not granted by this plan or exploration PASS.",
+  "proposal_revision": 2,
+  "producer_environment": {
+    "status": "not_ready",
+    "owner_connection_exposed_to_producer": false,
+    "fixed_mcp_mode": "--relay with independently published, Search/config/agent/expiry-bound descriptor",
+    "macos_network_gate": "loopback-only and provider endpoint constraints unestablished; prepare/verify fail closed at implementation 237bac3637688730dd98188bbc5ef2727ccc367b",
+    "approval_does_not_override_environment_gates": true
+  }
 }
