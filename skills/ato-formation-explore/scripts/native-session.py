@@ -59,6 +59,26 @@ def status(mcp, connection):
     return response["result"]["structuredContent"]
 
 
+def next_action(view):
+    """Wait for a known active attempt, never turn waiting into inference."""
+    progress = view.get("progress", {})
+    if (view.get("connected") is not True
+            or progress.get("status") not in ("pending", "running")
+            or progress.get("pause_reason") == "needs_input"):
+        return "stop"
+    unresolved = progress.get("unresolved_attempts", 0)
+    if unresolved:
+        attempts = progress.get("attempts", [])
+        active = sum(a.get("status") in ("pending", "claimed") for a in attempts)
+        return "wait" if active == unresolved and not any(
+            a.get("status") == "unknown" for a in attempts) else "stop"
+    if view.get("next_operation") == "submit":
+        return "submit"
+    if view.get("exchange", {}) and view["exchange"].get("response_saved") is True:
+        return "wait"
+    return "stop" if view.get("next_operation", "").startswith("owner_") else "wait"
+
+
 def admission(view, binding, agent, version):
     expected = "claude_code" if agent == "claude-code" else agent
     if (not binding.get("agent") or binding["agent"].get("kind") != expected
@@ -354,7 +374,9 @@ def run(args):
             turns = 0
             while time.time() < end:
                 current = status(mcp, connection)
-                if current.get("next_operation") == "submit":
+                result["saved_status"] = current
+                action = next_action(current)
+                if action == "submit":
                     admission(current, binding, args.agent, args.version)
                     exchange = current["exchange"]
                     if exchange == previous_exchange:
@@ -369,10 +391,7 @@ def run(args):
                     previous_exchange = exchange
                     turns += 1
                     result["native_turns_completed"] = turns
-                elif (current.get("progress", {}).get("status") not in ("pending", "running")
-                      or current.get("progress", {}).get("pause_reason") == "needs_input"
-                      or current.get("progress", {}).get("unresolved_attempts", 0) != 0
-                      or current.get("next_operation", "").startswith("owner_")):
+                elif action == "stop":
                     break
                 else:
                     time.sleep(.5)
@@ -416,7 +435,9 @@ def run(args):
             end = deadline / 1000
             while time.time() < end:
                 current = status(mcp, connection)
-                if current.get("next_operation") == "submit":
+                result["saved_status"] = current
+                action = next_action(current)
+                if action == "submit":
                     admission(current, binding, args.agent, args.version)
                     exchange = current["exchange"]
                     if exchange == previous_exchange:
@@ -452,15 +473,16 @@ def run(args):
                     previous_exchange = exchange
                     turns += 1
                     result["native_turns_completed"] = turns
-                elif (current.get("progress", {}).get("status") not in ("pending", "running")
-                      or current.get("progress", {}).get("pause_reason") == "needs_input"
-                      or current.get("progress", {}).get("unresolved_attempts", 0) != 0
-                      or current.get("next_operation", "").startswith("owner_")):
+                elif action == "stop":
                     break
                 else:
                     time.sleep(.5)
             result["native_turn_completed"] = turns > 0
         result["saved_status"] = status(mcp, connection)
+    except (ISOLATION.Rejected, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        result["failure_code"] = str(error) if isinstance(error, ISOLATION.Rejected) else "native_launch_failed"
+        result["next_operation"] = "owner_reconcile"
+        raise
     finally:
         for process in reversed(processes):
             stop(process)
