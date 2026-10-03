@@ -1,0 +1,127 @@
+{
+  "schema": "ato.formation-independent-api-preparation/1",
+  "at": "2026-10-03T05:02:04.051038+00:00",
+  "execution_code_pin": "da7c452c1dcd6011399d2e12c7cb47e653e40ccd",
+  "API_pin": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+  "old_journals": [
+    {
+      "journal": "/home/ubuntu/formation-foundation/.tmp/formation-autonomous-api-20261001/cells/057/producer.jsonl",
+      "sha256": "2cc34a00cad8bdff73cf5d6dc5e35fbd1b41c64f628c481c639411f886fb13a4",
+      "slots": 2,
+      "estimated_cost_usd_micros": 5625,
+      "unsettled_reservation_usd_micros": 0
+    },
+    {
+      "journal": "/home/ubuntu/formation-foundation/.tmp/formation-autonomous-api2-20261001/cells/057/producer.jsonl",
+      "sha256": "b046a28130b11f6cd8ad985cfac265a7fa494da8536c91f1dd09c4b4084bd30d",
+      "slots": 6,
+      "estimated_cost_usd_micros": 17254,
+      "unsettled_reservation_usd_micros": 0
+    },
+    {
+      "journal": "/home/ubuntu/formation-foundation/.tmp/formation-autonomous-api3-20261001/cells/057/producer.jsonl",
+      "sha256": "dcd1d4382b5500f9c66c8d7e6011dd4303afb2e1b1312eccfdaf74c748337569",
+      "slots": 3,
+      "estimated_cost_usd_micros": 13014,
+      "unsettled_reservation_usd_micros": 0
+    },
+    {
+      "journal": "/home/ubuntu/formation-foundation/.tmp/formation-autonomous-api4-20261001/cells/057/producer.jsonl",
+      "sha256": "cd32520be6398b29d5336430e4c736ceb65373a454f287e9c671df676e0e7102",
+      "slots": 2,
+      "estimated_cost_usd_micros": 9273,
+      "unsettled_reservation_usd_micros": 0
+    },
+    {
+      "journal": "/home/ubuntu/formation-foundation/.tmp/formation-autonomous-api5-20261001/cells/057/producer.jsonl",
+      "sha256": "6a4064a7b45832ad079f1f10f91b426caed9e4c2339bc2ab6b480455349aba12",
+      "slots": 4,
+      "estimated_cost_usd_micros": 20455,
+      "unsettled_reservation_usd_micros": 0
+    },
+    {
+      "journal": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-svg/cells/057/producer.jsonl",
+      "sha256": "5bd9d46f25d4e594a52180691841896b889e550f187cfaaea68e95161b7ecc83",
+      "slots": 1,
+      "estimated_cost_usd_micros": 17204,
+      "unsettled_reservation_usd_micros": 0
+    }
+  ],
+  "archived_duplicate_exports_excluded": true,
+  "small_allocation_max_calls": 24,
+  "small_calls_used": 1,
+  "small_calls_remaining": 23,
+  "aggregate_max_calls": 41,
+  "aggregate_calls_used": 18,
+  "estimated_spend_usd_micros": 82825,
+  "remaining_usd_micros": 482081,
+  "unsettled_reservation_usd_micros": 0,
+  "remaining_call_worst_reservation_usd_micros": 395692,
+  "plans": {
+    "svg": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-da7-svg-plan-prepared.json",
+      "sha256": "37817f5af49ca79370c198ca3edbde8103c0131c2d979821b1acdf56f9c8cc91",
+      "Source_archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+      "K": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "source_initial_plan_sha256": "f8c636cc6b9002c2c2e4022748e8942b5225a833ba55d0028173b952292a0731",
+      "known_D": false,
+      "credential_gate": false,
+      "current_pricing_gate": true,
+      "per_Search_call_cap": 6,
+      "matches_Codex_formation_policy": {
+        "max_rounds": 3,
+        "max_retries": 1
+      }
+    },
+    "oci": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-da7-oci-plan-prepared.json",
+      "sha256": "b2388500a89c7e4a5f3bf7c306fc0be1242a127a748cc1ffad97ae1131754a8b",
+      "Source_archive_sha256": "d089fd97b7d621120aa1854a45e793dcbbe702c8ebada2a55d5ecc623fa920c3",
+      "K": "sha256:e4fa58e07858ae71ce33b07fd016663ab3cb1713584685171dfb9c76f52ba862",
+      "source_initial_plan_sha256": "e37e5c30c5c0fb495e353248ac8ac33635d47c1c4bbe40c2c26f799ea7dc4d39",
+      "known_D": false,
+      "credential_gate": false,
+      "current_pricing_gate": true,
+      "per_Search_call_cap": 6,
+      "matches_Codex_formation_policy": {
+        "max_rounds": 3,
+        "max_retries": 3
+      }
+    },
+    "changedetection": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-da7-changedetection-plan-prepared.json",
+      "sha256": "b62238e35275c41a8faf3aa1a89c1828491e9d195ee03180673fac9ef7d60e96",
+      "Source_archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+      "K": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+      "source_initial_plan_sha256": "5899f42f17a7f4794cac041170ae72e4dfd607684dedc9fb08cbd050bc0b26f2",
+      "known_D": false,
+      "credential_gate": false,
+      "current_pricing_gate": true,
+      "per_Search_call_cap": 6,
+      "matches_Codex_formation_policy": {
+        "max_rounds": 3,
+        "max_retries": 3
+      }
+    },
+    "kutt": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-da7-kutt-plan-prepared.json",
+      "sha256": "3eaef6e041030aa4ad9975e4dc7e8643f3ee59c65501387185001393c2899979",
+      "Source_archive_sha256": "6fd86408c5ec917506aa0b081e72532dfaf78542855c1b9e1d984c1b6d2f52ae",
+      "K": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "source_initial_plan_sha256": "a1ef1181a88ff4997297d61f2455a7ca9cf31ddfc7a8d831ef8f8f1f240fec5f",
+      "known_D": false,
+      "credential_gate": false,
+      "current_pricing_gate": true,
+      "per_Search_call_cap": 8,
+      "matches_Codex_formation_policy": {
+        "max_rounds": 3,
+        "max_retries": 3
+      }
+    }
+  },
+  "paid_API_calls_added": 0,
+  "new_Searches_created": 0,
+  "private_owner_input_controller_template": "Unexecuted next template generates owner email/password internally; only scoped metadata enters producer frames",
+  "old_UNKNOWN_rerun": false,
+  "deployment_or_remote_migration": false
+}
