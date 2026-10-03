@@ -42,6 +42,8 @@ Claude CodeはOwner adapterが既存同一accountのKeychain credentialをRAMで
 
 各turnは1つのexchangeを処理する。保存後はOwner側で状態を待ち、新しい未応答exchangeが成立したときだけ同じNative文脈で次のturnを始める。入力待ち・UNKNOWN・終端・期限で止まり、launch終了をSearch取消やRuntime cleanupの証拠にしない。`owner/launch-result.json`とNative eventsはOwner証跡であり、公開報告には保存済み結果を検査して必要な項目だけ移す。
 
+Launcherの終了出力は、SDKから取得できたtoken/cached-token counterと費用推計を `SDK_reported_usage` へ自動でまとめる。Claudeの累計resultをturnごとに加算せず、切断した文脈はpartialとする。SDKのlist価格推計をaccountへの実請求と扱わない。token update数やSDK turn数を実LLM call数に代用しない。内部call数・実請求額は取得不能ならunknownのまま残す。未知のSDK fieldや非数値の内容は報告へコピーしない。
+
 ## 検証状況
 
 2026-10-03のglobal製品inventoryは`codex-cli 0.46.0`、`Claude Code 2.1.288`。Installerによる両配置先からの同一Skill/補助ファイル参照、冪等再配置、既存Skill拒否はローカルで確認した。2026-10-04にはglobalのCodexを置き換えず、公式releaseの`Codex 0.160.0`と対応するCode Mode hostを受入専用に固定した。

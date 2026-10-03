@@ -8,6 +8,7 @@ Only the public Skill and scoped relay descriptor enter the native project.
 import argparse
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -39,6 +40,54 @@ def write(path, value):
         json.dump(value, stream, indent=2)
         stream.write("\n")
     path.chmod(0o600)
+
+
+def sdk_reported_usage(path, agent):
+    """Read SDK counters as observations, never as calls or account charges."""
+    report = {"scope": "native context; SDK reported counters only",
+              "internal_LLM_calls": "unknown", "account_charge_usd": "unknown"}
+    def metrics(value, fields):
+        if not isinstance(value, dict):
+            return {}
+        return {k: value[k] for k in fields if k in value
+                and type(value[k]) in (int, float) and math.isfinite(value[k]) and value[k] >= 0}
+    try:
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        if agent == "codex":
+            counters = [r["params"]["tokenUsage"]["total"] for r in rows
+                        if r.get("method") == "thread/tokenUsage/updated"]
+            if counters:
+                report["last_cumulative_tokens"] = metrics(counters[-1], (
+                    "totalTokens", "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",
+                    "outputTokens", "reasoningOutputTokens"))
+                report["coverage"] = "last SDK update; update events are not LLM calls"
+        else:
+            completed = [r for r in rows if r.get("type") == "result"]
+            if completed:
+                # modelUsage/total_cost_usd are context cumulative. Adding each
+                # turn's result would double-charge the same earlier usage.
+                last = completed[-1]
+                report["last_cumulative_model_usage"] = {
+                    name: metrics(usage, ("inputTokens", "outputTokens", "cacheReadInputTokens",
+                        "cacheCreationInputTokens", "thinkingTokens", "costUSD"))
+                    for name, usage in last.get("modelUsage", {}).items()
+                    if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,80}", name)}
+                estimate = metrics(last, ("total_cost_usd",))
+                if estimate:
+                    report["SDK_cost_estimate_usd"] = estimate["total_cost_usd"]
+                report["cost_basis"] = "SDK estimate; not proof of account billing"
+                report["coverage"] = "last SDK context result"
+            else:
+                report["coverage"] = "partial SDK context; cumulative totals unavailable"
+                partial = [r["message"]["usage"] for r in rows
+                           if isinstance(r.get("message"), dict) and "usage" in r["message"]]
+                if partial:
+                    report["last_observed_message_tokens"] = metrics(partial[-1], (
+                        "input_tokens", "output_tokens", "cache_creation_input_tokens",
+                        "cache_read_input_tokens"))
+    except (OSError, ValueError, KeyError, TypeError):
+        report["coverage"] = "SDK counters unavailable"
+    return report
 
 
 def toml(value):
@@ -501,6 +550,7 @@ def run(args):
             stop(process)
         for handle in handles:
             handle.close()
+        result["SDK_reported_usage"] = sdk_reported_usage(owner / "native-events.jsonl", args.agent)
         # Broker termination is not a Search cancellation or Runtime cleanup.
         if selected.exists():
             info = selected.stat()
@@ -508,7 +558,8 @@ def run(args):
                 selected.unlink()
         write(owner / "launch-result.json", result)
     return {key: result[key] for key in ("schema", "agent", "version", "search_id",
-                                        "deadline_ms", "internal_LLM_calls", "cost")}
+                                        "deadline_ms", "internal_LLM_calls", "cost",
+                                        "SDK_reported_usage")}
 
 
 def main():
