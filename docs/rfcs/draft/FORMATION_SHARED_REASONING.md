@@ -68,3 +68,23 @@ An optional bounded owner-authored `reasoning.goal` freezes an acceptance protoc
 (e.g. a least-privilege egress probe) and appears verbatim in the common input.
 It grants no execution rights and cannot change K or the ceiling. Both providers
 receive it; deliberate probes are reported separately from accidental failures.
+
+## Pre-dispatch call allowance exhaustion
+
+The per-Search exchange allowance is independent of the maximum reasoning rounds.
+Inspection and validation exchanges consume their actual call allowance without
+consuming an extra round. Reading a saved input/answer can recover delivery; a new
+input must be refused after the original allowance is consumed, including after
+Requester restart. API transport cells count against the same provider ceiling.
+
+A refusal before dispatch is an owner-local operational fact, not a provider
+call or an inference result. The claimed completion uses legacy `provider_error`
+with `pre_dispatch_error: call_budget_exhausted`, no raw output or provenance.
+The receiver persists the fact with the original completion fence and projects
+`reasoning_call_budget_exhausted` into the authenticated round diagnostics. Rust
+returns terminal `budget_exhausted`; expired clocks still yield
+`deadline_exceeded`, previously satisfied K still yields an assessment-pending
+submission, and unresolved workload effects keep their existing UNKNOWN fence.
+No allowance, round, Search deadline, reservation or cost is reset. Old records
+with no pre-dispatch fact retain their original classification. Receiver support
+and its additive migration must precede sending the new optional field.
