@@ -8,6 +8,7 @@
 //! is `inconclusive`, never a pass.
 
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use ato_formation::browser::{

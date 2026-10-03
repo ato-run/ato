@@ -924,7 +924,11 @@ fn default_next(
             } else {
                 if now_ms >= round.expires_at_ms {
                     Termination::DeadlineExceeded
-                } else if round.diagnostics.iter().any(|d| d == "reasoning_call_budget_exhausted") {
+                } else if round
+                    .diagnostics
+                    .iter()
+                    .any(|d| d == "reasoning_call_budget_exhausted")
+                {
                     Termination::BudgetExhausted
                 } else {
                     Termination::InfrastructureFailure
