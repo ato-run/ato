@@ -45,3 +45,38 @@ be silently downgraded into this process route. Live functionality, same artifac
 restart, private authentication, and final-pin PWA input/resume require separate
 approved acceptance plans. Historical fixture results and measurement pins are
 unchanged.
+
+## Separately authorized functional verification (implementation extension)
+
+An owner may approve a fresh functional verification Search for the exact retained
+artifact/K/D. This permission is distinct from assessment and ordinary Run
+permission. The Coordinator creates an Instance using the same registry and state
+namespace, grants the existing StateService writer, and persists the common
+launch spec/digest on an immutable functional Run mapping before issuing a ticket.
+Historical tickets omit `verification_state`. Private variables are assigned to
+this fresh Search; no original exploration assignment is copied.
+
+The Runtime reuses retained replay and `LeaseStateArtifactTransport`. It restores
+one declared filesystem slot, verifies the original K, executes only separately
+approved bounded HTTP Adapter operations, confirms workload stop, and commits
+state through the same writer fence. The durable attempt finish is deferred until
+this entire interval settles. Disconnect after K therefore leaves UNKNOWN and
+cannot replay an accepted HTTP action. This path does not create a normal Run
+VerifiedRoute. The same registration/Instance is reused for a separately approved
+next Run; it receives the StateService head revision and a new fence.
+
+The initial functional action contract permits at most four GET/POST operations
+with fixed relative paths, declared private JSON bindings and status assertions.
+The explicit ceiling must authorize each HTTP operation. Additional private
+binding metadata cannot replace D's bindings or permit artifact embedding; K and
+D are not rewritten. Cookie/session authentication, response-id binding, method
+extensions and body assertions are not represented by this initial contract.
+Consequently it is not yet sufficient evidence for Kutt link create/edit or
+changedetection watch create/edit/stop. Those product gates remain open and need
+an approved concrete action plan plus the corresponding common HTTP Adapter
+contract. Synthetic state/receipt fixtures are not real application acceptance.
+
+No remote migration, deployment, flag enablement or ordinary Run permission is
+part of this implementation. Actual functional execution requires the separately
+presented Source/artifact/K/D, Runtime, fresh input scope, operation/attempt limits
+and deadline to be approved before starting.
