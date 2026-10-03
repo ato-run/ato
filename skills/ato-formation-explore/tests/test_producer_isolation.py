@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SKILL = Path(__file__).resolve().parents[1]
@@ -172,13 +173,13 @@ class ProducerIsolationTests(unittest.TestCase):
         with self.assertRaisesRegex(HELPER.Rejected, "native_binary_required"):
             HELPER.binary(credential)
 
-    def test_explicit_endpoints_grant_only_exact_tcp_with_no_dns_or_unix_grant(self):
-        result = self.prepare(relay_endpoint="127.0.0.1:43123",
-                              provider_endpoints=["8.8.8.8:443", "1.1.1.1:443"])
+    def test_relay_grants_only_localhost_port_with_explicit_ipv4_and_ipv6_scope(self):
+        result = self.prepare(relay_endpoint="127.0.0.1:43123")
         policy = (self.output / "codex.prepared.sb").read_text()
-        self.assertIn('(allow network-outbound (remote tcp "127.0.0.1:43123"))', policy)
-        self.assertIn('(allow network-outbound (remote tcp "1.1.1.1:443"))', policy)
-        self.assertIn('(allow network-outbound (remote tcp "8.8.8.8:443"))', policy)
+        self.assertIn('(allow network-outbound (remote tcp "localhost:43123"))', policy)
+        self.assertEqual(policy.count('(allow network-outbound'), 1)
+        self.assertNotIn('(remote tcp "127.0.0.1:', policy)
+        self.assertNotIn('(remote tcp "*:', policy)
         self.assertNotIn('(allow network-outbound)', policy)
         self.assertNotIn('network-inbound', policy)
         self.assertNotIn('system-socket', policy)
@@ -187,6 +188,10 @@ class ProducerIsolationTests(unittest.TestCase):
         self.assertNotIn('remote udp', policy)
         self.assertFalse(result['network_policy']['dns_allowed'])
         self.assertFalse(result['network_policy']['provider_identity_verified'])
+        self.assertEqual(result['network_policy']['relay_os_scope'],
+                         'ipv4_ipv6_localhost_at_selected_port')
+        self.assertEqual(result['network_policy']['provider_egress'],
+                         'blocked_fixed_public_ip_unsupported')
         self.assertFalse(result['native_acceptance_ready'])
         self.assertTrue(HELPER.verify(self.output)['network_policy'] == result['network_policy'])
         fixed = json.loads((self.output / 'public/fixed-mcp.json').read_text())
@@ -194,6 +199,22 @@ class ProducerIsolationTests(unittest.TestCase):
         self.assertFalse(fixed['descriptor_present'])
         self.assertFalse(fixed['descriptor_binding_checked'])
         self.assertFalse((self.output / 'public/session-relay.json').exists())
+
+    def test_valid_public_provider_request_fails_before_binary_read_or_publication(self):
+        with mock.patch.object(HELPER, 'binary') as binary_read:
+            with self.assertRaisesRegex(HELPER.Rejected, 'provider_egress_fixed_ip_unsupported'):
+                self.prepare(relay_endpoint='127.0.0.1:43123',
+                             provider_endpoints=['8.8.8.8:443'])
+            self.assertFalse(binary_read.called)
+        self.assertFalse(self.output.exists())
+
+    def test_profile_never_emits_unsupported_numeric_public_ip_rule(self):
+        public = self.root / 'public'
+        scratch = self.root / 'scratch'
+        public.mkdir()
+        scratch.mkdir()
+        with self.assertRaisesRegex(HELPER.Rejected, 'macos_fixed_tcp_address_unsupported'):
+            HELPER.profile(public, scratch, [self.selected_binary], tcp_endpoints=['8.8.8.8:443'])
 
     def test_wildcard_hostname_ipv6_url_range_control_and_zero_ports_are_rejected(self):
         for value in ['*:443', 'api.example.com:443', 'localhost:1234', '[::1]:1234',
