@@ -4,11 +4,11 @@ import importlib.util
 import json
 from pathlib import Path
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 
 SKILL = Path(__file__).resolve().parents[1]
@@ -38,10 +38,10 @@ class ProducerIsolationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def prepare(self, codex_version="0.46.0", **network):
+    def prepare(self, codex_version="0.46.0"):
         return HELPER.prepare(self.output, "producer-isolation-unit", "a" * 40,
                               self.selected_binary, self.selected_binary, codex_version,
-                              self.selected_binary, "2.1.288", source=self.source, **network)
+                              self.selected_binary, "2.1.288", source=self.source)
 
     def test_fresh_copy_shared_links_and_old_codex_stays_ineligible(self):
         result = self.prepare()
@@ -61,6 +61,65 @@ class ProducerIsolationTests(unittest.TestCase):
         self.assertTrue(result["codex_version_eligible"])
         self.assertFalse(result["native_acceptance_ready"])
         self.assertIn("native_auth_ipc_without_tool_access", result["gates"])
+
+    def test_selected_unix_socket_is_literal_and_does_not_grant_tcp_or_other_sockets(self):
+        name = "r-" + secrets.token_hex(3)
+        endpoint = next(parent / ".tmp" / name for parent in SKILL.parents
+                        if (parent / ".tmp").is_dir()
+                        and len(str(parent / ".tmp" / name).encode()) <= 100)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(endpoint)); listener.listen()
+            try:
+                result = HELPER.prepare(self.output, "producer-isolation-unit", "a" * 40,
+                    self.selected_binary, self.selected_binary, "0.160.0",
+                    self.selected_binary, "2.1.288", source=self.source, relay_socket=endpoint)
+                self.assertFalse(result["native_acceptance_ready"])
+                policy = (self.output / "codex.prepared.sb").read_text()
+                self.assertIn(f'(remote unix-socket (literal "{endpoint}"))', policy)
+                self.assertNotIn('(allow network-outbound)', policy)
+                self.assertNotIn('(remote tcp', policy)
+                self.assertEqual(HELPER.verify(self.output)["relay_socket"], str(endpoint))
+            finally:
+                endpoint.unlink()
+
+    def test_regular_file_cannot_be_prepared_as_a_relay_socket(self):
+        endpoint = self.root / "not-a-socket"
+        endpoint.write_text("public fixture")
+        with self.assertRaisesRegex(HELPER.Rejected, "fixed_unix_relay_socket_required"):
+            HELPER.prepare(self.output, "producer-isolation-unit", "a" * 40,
+                self.selected_binary, self.selected_binary, "0.160.0",
+                self.selected_binary, "2.1.288", source=self.source, relay_socket=endpoint)
+        self.assertFalse(self.output.exists())
+
+    def test_code_mode_host_is_pinned_without_enabling_another_agent_or_network(self):
+        host = self.root / "selected-code-mode-host"
+        host.write_bytes(self.selected_binary.read_bytes())
+        host.chmod(0o555)
+        result = HELPER.prepare(self.output, "producer-isolation-unit", "a" * 40,
+            self.selected_binary, self.selected_binary, "0.160.0",
+            self.selected_binary, "2.1.288", source=self.source,
+            codex_code_mode_host=host)
+        codex = (self.output / "codex.prepared.sb").read_text()
+        claude = (self.output / "claude-code.prepared.sb").read_text()
+        self.assertIn(f'(allow process-exec (literal "{host}"))', codex)
+        self.assertNotIn(str(host), claude)
+        self.assertNotIn('(allow network-outbound)', codex)
+        self.assertFalse(result["native_acceptance_ready"])
+        host.chmod(0o755)
+        host.write_bytes(host.read_bytes() + b"changed")
+        with self.assertRaisesRegex(HELPER.Rejected, "fixed_binary_changed"):
+            HELPER.verify(self.output)
+
+    def test_code_mode_host_script_is_rejected_before_publication(self):
+        host = self.root / "untrusted-helper"
+        host.write_text("#!/bin/sh\nexit 0\n")
+        host.chmod(0o700)
+        with self.assertRaisesRegex(HELPER.Rejected, "native_macho_required"):
+            HELPER.prepare(self.output, "producer-isolation-unit", "a" * 40,
+                self.selected_binary, self.selected_binary, "0.160.0",
+                self.selected_binary, "2.1.288", source=self.source,
+                codex_code_mode_host=host)
+        self.assertFalse(self.output.exists())
 
     def test_existing_output_is_preserved_and_not_reinitialized(self):
         self.prepare()
@@ -172,132 +231,6 @@ class ProducerIsolationTests(unittest.TestCase):
         credential.chmod(0o600)
         with self.assertRaisesRegex(HELPER.Rejected, "native_binary_required"):
             HELPER.binary(credential)
-
-    def test_fixture_rule_has_local_host_port_scope_without_unrestricted_networking(self):
-        result = self.prepare()
-        policy = HELPER.profile(self.output / 'public', self.output / 'scratch',
-                                [self.selected_binary], tcp_endpoints=['127.0.0.1:43123'])
-        self.assertIn('(allow network-outbound (remote tcp "localhost:43123"))', policy)
-        self.assertEqual(policy.count('(allow network-outbound'), 1)
-        self.assertNotIn('(remote tcp "127.0.0.1:', policy)
-        self.assertNotIn('(remote tcp "*:', policy)
-        self.assertNotIn('(allow network-outbound)', policy)
-        self.assertNotIn('network-inbound', policy)
-        self.assertNotIn('system-socket', policy)
-        self.assertNotIn('unix-socket', policy)
-        self.assertNotIn('mDNSResponder', policy)
-        self.assertNotIn('remote udp', policy)
-        self.assertFalse(result['network_policy']['dns_allowed'])
-        self.assertFalse(result['network_policy']['provider_identity_verified'])
-        self.assertEqual(HELPER.network_policy('127.0.0.1:43123')['relay_os_scope'],
-                         'local_host_interfaces_at_selected_port')
-        self.assertEqual(result['network_policy']['relay_egress'],
-                         'blocked_scope_wider_than_loopback')
-        self.assertEqual(result['network_policy']['provider_egress'],
-                         'blocked_fixed_public_ip_unsupported')
-        self.assertFalse(result['native_acceptance_ready'])
-        self.assertTrue(HELPER.verify(self.output)['network_policy'] == result['network_policy'])
-        fixed = json.loads((self.output / 'public/fixed-mcp.json').read_text())
-        self.assertTrue(fixed['arguments'] == ['--relay', str(self.output / 'public/session-relay.json')])
-        self.assertFalse(fixed['descriptor_present'])
-        self.assertFalse(fixed['descriptor_binding_checked'])
-        self.assertFalse((self.output / 'public/session-relay.json').exists())
-
-    def test_relay_request_fails_before_binary_read_or_publication(self):
-        with mock.patch.object(HELPER, 'binary') as binary_read:
-            with self.assertRaisesRegex(HELPER.Rejected, 'blocked_scope_wider_than_loopback'):
-                self.prepare(relay_endpoint='127.0.0.1:43123')
-            self.assertFalse(binary_read.called)
-        self.assertFalse(self.output.exists())
-
-    def test_endpoint_rejection_preserves_existing_output_without_binary_reads(self):
-        self.prepare()
-        before = (self.output / 'manifest.json').read_bytes()
-        for arguments, code in [({'relay_endpoint': '127.0.0.1:43123'},
-                                 'blocked_scope_wider_than_loopback'),
-                                ({'provider_endpoints': ['8.8.8.8:443']},
-                                 'provider_egress_fixed_ip_unsupported')]:
-            with mock.patch.object(HELPER, 'binary') as binary_read:
-                with self.assertRaisesRegex(HELPER.Rejected, code):
-                    self.prepare(**arguments)
-                self.assertFalse(binary_read.called)
-            self.assertTrue(before == (self.output / 'manifest.json').read_bytes())
-        self.assertTrue(HELPER.verify(self.output)['native_acceptance_ready'] is False)
-
-    def test_valid_public_provider_request_fails_before_binary_read_or_publication(self):
-        with mock.patch.object(HELPER, 'binary') as binary_read:
-            with self.assertRaisesRegex(HELPER.Rejected, 'provider_egress_fixed_ip_unsupported'):
-                self.prepare(relay_endpoint='127.0.0.1:43123',
-                             provider_endpoints=['8.8.8.8:443'])
-            self.assertFalse(binary_read.called)
-        self.assertFalse(self.output.exists())
-
-    def test_profile_never_emits_unsupported_numeric_public_ip_rule(self):
-        public = self.root / 'public'
-        scratch = self.root / 'scratch'
-        public.mkdir()
-        scratch.mkdir()
-        with self.assertRaisesRegex(HELPER.Rejected, 'macos_fixed_tcp_address_unsupported'):
-            HELPER.profile(public, scratch, [self.selected_binary], tcp_endpoints=['8.8.8.8:443'])
-
-    def test_wildcard_hostname_ipv6_url_range_control_and_zero_ports_are_rejected(self):
-        for value in ['*:443', 'api.example.com:443', 'localhost:1234', '[::1]:1234',
-                      'https://127.0.0.1:443', '127.0.0.1:1-65535', '127.0.0.1:0',
-                      '127.0.0.1:65536', '127.0.0.1:0123', '127.0.0.1:443\n(allow default)']:
-            with self.assertRaises(HELPER.Rejected):
-                self.prepare(relay_endpoint=value)
-            self.assertFalse(self.output.exists())
-
-    def test_relay_must_match_broker_numeric_127_0_0_1(self):
-        for value in ['127.0.0.2:1234', '8.8.8.8:443', '0.0.0.0:1234']:
-            with self.assertRaisesRegex(HELPER.Rejected, 'relay_loopback_required'):
-                self.prepare(relay_endpoint=value)
-            self.assertFalse(self.output.exists())
-
-    def test_provider_cannot_expand_to_private_metadata_multicast_or_non_tls_port(self):
-        for value in ['127.0.0.1:443', '10.0.0.1:443', '169.254.169.254:443',
-                      '192.0.2.1:443', '224.0.0.1:443', '0.0.0.0:443', '8.8.8.8:80']:
-            with self.assertRaisesRegex(HELPER.Rejected, 'provider_public_ipv4_tls_port_required'):
-                self.prepare(provider_endpoints=[value])
-            self.assertFalse(self.output.exists())
-
-    def test_provider_duplicates_and_overlong_allowlist_are_rejected(self):
-        for values in [['8.8.8.8:443'] * 2,
-                       ['8.8.8.8:443', '1.1.1.1:443', '9.9.9.9:443', '8.8.4.4:443', '1.0.0.1:443']]:
-            with self.assertRaisesRegex(HELPER.Rejected, 'provider_endpoint_bounds'):
-                self.prepare(provider_endpoints=values)
-            self.assertFalse(self.output.exists())
-
-    def test_network_claim_tampering_and_rehashed_broad_policy_are_rejected(self):
-        self.prepare()
-        path = self.output / 'manifest.json'
-        saved = json.loads(path.read_text())
-        changed = json.loads(path.read_text())
-        changed['network_policy']['provider_identity_verified'] = True
-        path.write_text(json.dumps(changed))
-        with self.assertRaisesRegex(HELPER.Rejected, 'network_policy_changed'):
-            HELPER.verify(self.output)
-        path.write_text(json.dumps(saved))
-        policy = self.output / 'codex.prepared.sb'
-        policy.write_text('(version 1)\n(allow default)\n')
-        saved['profiles']['codex'] = HELPER.digest(policy)
-        path.write_text(json.dumps(saved))
-        with self.assertRaisesRegex(HELPER.Rejected, 'profile_policy_mismatch'):
-            HELPER.verify(self.output)
-
-    def test_invalid_endpoint_error_does_not_echo_private_argument(self):
-        canary = secrets.token_hex(32)
-        arguments = [sys.executable, str(SKILL / 'scripts/producer-isolation-preflight.py'),
-                     'prepare', '--output', str(self.output), '--measurement-id', 'unit-network-private',
-                     '--execution-pin', 'a' * 40, '--mcp-binary', str(self.selected_binary),
-                     '--codex-binary', str(self.selected_binary), '--codex-version', '0.46.0',
-                     '--claude-binary', str(self.selected_binary), '--claude-version', '2.1.288',
-                     '--provider-endpoint', canary]
-        result = subprocess.run(arguments, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 1)
-        self.assertFalse(canary in result.stdout or canary in result.stderr)
-        self.assertTrue(json.loads(result.stderr)['code'] == 'numeric_tcp_endpoint_required')
-        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":
