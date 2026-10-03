@@ -14,7 +14,7 @@ python3 skills/ato-formation-explore/scripts/install.py \
 
 片方だけの配置には`--agent codex`または`--agent claude-code`を使う。symlink先のSkill treeだけをProducerへ公開し、元repoやOwner credential directoryへのアクセス権は付与しない。別hostへ移すときは共通Skill packageをそのhostへ配置してInstallerを実行する。
 
-Codexは`agents/openai.yaml`の`allow_implicit_invocation: false`、Claude Codeは共通`SKILL.md`の`disable-model-invocation: true`で明示呼び出しを基本にする。これらは探索の認可・OS隔離を提供しない。
+Codexは`agents/openai.yaml`の`allow_implicit_invocation: false`、Claude Codeは共通`SKILL.md`の`disable-model-invocation: true`で明示呼び出しを基本にする。これらは探索の認可・OS隔離を提供しない。shellを公開しない固定MCP入口の設定と実探索前の環境gateは[mcp.md](mcp.md)を読む。
 
 配置方法は[Codex公式Skill資料](https://developers.openai.com/codex/skills)と[Claude Code公式Skill資料](https://code.claude.com/docs/en/skills)のlocal skill/symlink仕様に従う。製品versionだけで対応済みと判定せず、実受入でSkill検出・明示呼び出し・CLI操作を測定する。実測と未検証の一覧は受入記録に残す。
 
