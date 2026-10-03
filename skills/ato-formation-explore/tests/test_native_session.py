@@ -97,6 +97,33 @@ class NativeAdmissionTests(unittest.TestCase):
             self.assertEqual(narrowed[0]["shell_type"], "disabled")
             self.assertEqual(narrowed[0]["experimental_supported_tools"], [])
 
+    def test_SDK_cumulative_usage_is_not_added_across_turns_or_called_billing(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            path = Path(directory) / "native-events.jsonl"
+            rows = [{"type": "result", "total_cost_usd": .2, "modelUsage": {"model": {"inputTokens": 10}}},
+                    {"type": "result", "total_cost_usd": .3, "modelUsage": {"model": {"inputTokens": 15}}}]
+            path.write_text("\n".join(json.dumps(r) for r in rows))
+            report = NATIVE.sdk_reported_usage(path, "claude-code")
+            self.assertEqual(report["SDK_cost_estimate_usd"], .3)
+            self.assertEqual(report["last_cumulative_model_usage"]["model"]["inputTokens"], 15)
+            self.assertEqual(report["account_charge_usd"], "unknown")
+            self.assertEqual(report["internal_LLM_calls"], "unknown")
+
+    def test_incomplete_SDK_stream_does_not_claim_zero_inference_cost(self):
+        report = NATIVE.sdk_reported_usage(Path("missing-SDK-fixture"), "claude-code")
+        self.assertNotIn("SDK_cost_estimate_usd", report)
+        self.assertEqual(report["account_charge_usd"], "unknown")
+
+    def test_SDK_reporting_does_not_copy_unrecognized_fields(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            path = Path(directory) / "native-events.jsonl"
+            path.write_text(json.dumps({"type": "result", "modelUsage": {
+                "model": {"inputTokens": 1, "unrecognized_private_field": "PRIVATE_CANARY"}}}))
+            report = NATIVE.sdk_reported_usage(path, "claude-code")
+            self.assertNotIn("PRIVATE_CANARY", json.dumps(report))
+
     def test_coalesced_native_frames_complete_without_another_pipe_write(self):
         reader, writer = os.pipe()
         with os.fdopen(reader, "rb") as stream:
