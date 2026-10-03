@@ -391,33 +391,15 @@ fn runtime_environment(
     package_manager: Option<&ResolvedPackageManager>,
     guest_root: &str,
 ) -> BTreeMap<String, String> {
-    let mut environment_bindings = BTreeMap::new();
-    if lane == Lane::PythonProcess {
-        let version = &toolchains["python"];
-        let minor = version.rsplit_once('.').map(|(m, _)| m).unwrap_or(version);
-        environment_bindings.insert(
-            "PYTHONPATH".into(),
-            format!(
-                "{}/.venv/lib/python{minor}/site-packages",
-                guest_root.trim_end_matches('/')
-            ),
-        );
-    } else if lane == Lane::Process {
-        environment_bindings.insert(
-            "PATH".into(),
-            intent::toolchain_bin_dirs(toolchains, package_manager)
-                .into_iter()
-                .chain([intent::SYSTEM_PATH.into()])
-                .collect::<Vec<_>>()
-                .join(":"),
-        );
-        environment_bindings.insert("HOME".into(), "/tmp".into());
-        if toolchains.contains_key("node") {
-            environment_bindings.insert("npm_config_cache".into(), "/tmp/.npm".into());
-            environment_bindings.insert("npm_config_update_notifier".into(), "false".into());
-        }
+    if !matches!(lane, Lane::PythonProcess | Lane::Process) {
+        return BTreeMap::new();
     }
-    environment_bindings
+    crate::process_binding::environment(
+        lane == Lane::PythonProcess,
+        toolchains,
+        package_manager.map(|m| (m.name.as_str(), m.version.as_str())),
+        guest_root,
+    )
 }
 
 /// Bind a validated retained materialization without input detection, authoring
