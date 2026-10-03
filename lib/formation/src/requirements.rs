@@ -41,6 +41,85 @@ pub struct AuthorityRequirement {
     pub operation: ResourceOperation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostOs {
+    Linux,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostArch {
+    X86_64,
+    Aarch64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceleratorVendor {
+    Nvidia,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceleratorRequirement {
+    pub vendor: AcceleratorVendor,
+    pub count: u32,
+    pub min_vram_mib: u64,
+}
+
+/// The host one Runner must measurably provide for this route to run there.
+///
+/// A placement condition, not authority: it grants nothing, and it is matched
+/// against what a Runner measured about itself, never against what a provider
+/// promised. Absent means the route states no host condition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostRequirement {
+    pub os: HostOs,
+    pub arch: HostArch,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accelerators: Vec<AcceleratorRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_memory_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_scratch_mib: Option<u64>,
+}
+
+const MAX_ACCELERATOR_COUNT: u32 = 16;
+const MAX_VRAM_MIB: u64 = 1 << 20; // 1 TiB per device
+const MAX_MEMORY_MIB: u64 = 16 << 20; // 16 TiB
+const MAX_SCRATCH_MIB: u64 = 1 << 30; // 1 PiB
+
+impl HostRequirement {
+    pub fn validate(&self) -> Result<(), RequirementError> {
+        let bounded = |value: Option<u64>, max: u64| value.is_none_or(|v| (1..=max).contains(&v));
+        if self.accelerators.len() > 4
+            || self.accelerators.iter().any(|a| {
+                !(1..=MAX_ACCELERATOR_COUNT).contains(&a.count)
+                    || !(1..=MAX_VRAM_MIB).contains(&a.min_vram_mib)
+            })
+            || !bounded(self.min_memory_mib, MAX_MEMORY_MIB)
+            || !bounded(self.min_scratch_mib, MAX_SCRATCH_MIB)
+        {
+            return Err(RequirementError("host_requirement_invalid"));
+        }
+        // One entry per vendor: two entries for the same vendor would need a
+        // rule for combining them, and none is defined.
+        if self
+            .accelerators
+            .iter()
+            .map(|a| a.vendor)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != self.accelerators.len()
+        {
+            return Err(RequirementError("execution_requirements_duplicate"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRequirements {
@@ -48,6 +127,10 @@ pub struct ExecutionRequirements {
     pub network: Vec<NetworkRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authority: Vec<AuthorityRequirement>,
+    /// Absent from every route formed before it existed, so those routes keep
+    /// their exact bytes and `DerivationRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostRequirement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -73,7 +156,7 @@ fn hostname(host: &str) -> bool {
 
 impl ExecutionRequirements {
     pub fn is_empty(&self) -> bool {
-        self.network.is_empty() && self.authority.is_empty()
+        self.network.is_empty() && self.authority.is_empty() && self.host.is_none()
     }
 
     pub fn validate(&self) -> Result<(), RequirementError> {
@@ -108,6 +191,9 @@ impl ExecutionRequirements {
         {
             return Err(RequirementError("execution_requirements_duplicate"));
         }
+        if let Some(host) = &self.host {
+            host.validate()?;
+        }
         Ok(())
     }
 
@@ -116,10 +202,17 @@ impl ExecutionRequirements {
         let mut requirements = self.clone();
         requirements.network.sort();
         requirements.authority.sort();
+        if let Some(host) = &mut requirements.host {
+            host.accelerators.sort();
+        }
         Ok(requirements)
     }
 
     /// Exact subset only. Neither wildcard matching nor inferred grants.
+    ///
+    /// `host` is not compared: it is a placement condition, and a grant can
+    /// neither widen nor narrow it. Runtimes that cannot honour a host
+    /// condition refuse it at admission instead.
     pub fn within(&self, ceiling: &Self) -> Result<(), RequirementError> {
         self.validate()?;
         ceiling.validate()?;

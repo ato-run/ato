@@ -16,6 +16,10 @@ use ato_formation::requirements::ExecutionRequirements;
 use crate::browser_verify::BrowserVerification;
 use crate::spec::{AttemptSpec, CandidateShape};
 
+/// The route states a host condition this runtime cannot be admitted against.
+/// The route stays unverified; it is not a failure of the route.
+pub const COMPATIBLE_RUNTIME_UNAVAILABLE: &str = "compatible_runtime_unavailable";
+
 /// Effect classes a Runtime executes without a confirmed authorization: an
 /// attempt of one of these can fail and be retried without anything leaking
 /// out of it.
@@ -78,6 +82,16 @@ pub fn admit(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
 ) -> Option<AttemptFailure> {
+    // No entry into this attempt path measures its host against a route's
+    // host condition, so none may run such a route. The route is not wrong;
+    // it is unverified here, and only a Runner admitted against the condition
+    // runs it. Before authority, so an exploration grant cannot bypass it.
+    if spec.derivation.requirements.host.is_some() {
+        return refused(
+            COMPATIBLE_RUNTIME_UNAVAILABLE,
+            "D states a host condition this runtime does not admit against",
+        );
+    }
     match authorization {
         EffectAuthorization::Exploration {
             derivation_ref,
@@ -254,5 +268,48 @@ mod tests {
             check(EffectClass::Pure, other).as_deref(),
             Some("authorization_mismatch")
         );
+    }
+
+    #[test]
+    fn a_host_condition_is_refused_by_every_entry_before_authority() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let mut derivation = derivation(EffectClass::Pure);
+        derivation.requirements = serde_json::from_value(serde_json::json!({
+            "host": {
+                "os": "linux", "arch": "x86_64",
+                "accelerators": [{ "vendor": "nvidia", "count": 1, "min_vram_mib": 16000 }]
+            }
+        }))
+        .expect("a host condition");
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+        };
+        // A grant that would cover the route's authority does not admit it:
+        // the host condition is not authority and no grant satisfies it.
+        let grant = derivation.requirements.clone();
+        for authorization in [
+            EffectAuthorization::Unattended,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+            EffectAuthorization::Exploration {
+                derivation_ref: "sha256:d",
+                grant: &grant,
+            },
+        ] {
+            assert_eq!(
+                admit(&spec, authorization, None).map(|f| f.code).as_deref(),
+                Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
+            );
+        }
     }
 }
