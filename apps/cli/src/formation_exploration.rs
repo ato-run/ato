@@ -177,7 +177,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             .is_none_or(|r| r == &provider_ref),
         "provider config mismatch"
     );
-    config.exploration.provider_configuration_ref = Some(provider_ref);
+    config.exploration.provider_configuration_ref = Some(provider_ref.clone());
     let api = args.api.context("--runtime-network needs --api")?;
     let token = super::read_token(
         &args
@@ -362,11 +362,14 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
     let expires = if start_deadline.exists() {
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&start_deadline)?)?["deadline_ms"].as_u64().context("start deadline missing")?
     } else {
-        let expires = (SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
-            .saturating_add(args.deadline_seconds.saturating_mul(1000));
+        let started_at_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+        let expires = started_at_ms.saturating_add(args.deadline_seconds.saturating_mul(1000));
         ato_formation_worker::runtime_network::proposal::reasoning::save_owner_checkpoint(
             &start_deadline,
-            &serde_jcs::to_vec(&serde_json::json!({"deadline_ms": expires}))?,
+            &serde_jcs::to_vec(&serde_json::json!({
+                "deadline_ms": expires,"started_at_ms":started_at_ms,"search_id":search_id,
+                "configuration_ref":provider_ref
+            }))?,
         )?;
         expires
     };
