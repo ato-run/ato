@@ -98,7 +98,7 @@ static bool denied_ipv6(int port) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 12) return 2;
+  if (argc != 11) return 2;
   bool no_extra_descriptors = true;
   for (int fd = 3; fd < 1024; fd++) {
     if (fcntl(fd, F_GETFD) >= 0 || errno != EBADF) no_extra_descriptors = false;
@@ -130,13 +130,13 @@ int main(int argc, char **argv) {
   bool curl = denied_exec("/usr/bin/curl");
   bool unix_denied = denied_unix(argv[5]);
   bool relay_allowed = tcp_connect("127.0.0.1", atoi(argv[6]), true);
-  bool provider_allowed = tcp_connect("127.0.0.2", atoi(argv[7]), true);
+  bool provider_allowed = tcp_connect("127.0.0.1", atoi(argv[7]), true);
   bool wrong_port = tcp_connect("127.0.0.1", atoi(argv[8]), false);
-  bool wrong_address = tcp_connect("127.0.0.2", atoi(argv[6]), false);
-  bool provider_wrong_port = tcp_connect("127.0.0.2", atoi(argv[9]), false);
-  bool provider_wrong_address = tcp_connect("127.0.0.1", atoi(argv[7]), false);
+  bool wrong_address = denied_ipv6(atoi(argv[6]));
+  bool provider_wrong_port = tcp_connect("127.0.0.1", atoi(argv[9]), false);
+  bool provider_wrong_address = denied_ipv6(atoi(argv[7]));
   bool owner_unix = denied_unix(argv[10]);
-  bool ipv6 = denied_ipv6(atoi(argv[11]));
+  bool secondary_ipv4 = tcp_connect("127.0.0.2", atoi(argv[6]), false);
   bool udp = denied_udp(atoi(argv[6]));
 #define JSON_BOOL(value) ((value) ? "true" : "false")
   printf("{\"public_skill_read\":%s,\"public_skill_write_denied\":%s,"
@@ -148,13 +148,13 @@ int main(int argc, char **argv) {
          "\"provider_fixture_tcp_allowed\":%s,\"relay_wrong_port_denied\":%s,"
          "\"relay_wrong_address_denied\":%s,\"provider_wrong_port_denied\":%s,"
          "\"provider_wrong_address_denied\":%s,\"owner_unix_socket_denied\":%s,"
-         "\"ipv6_denied\":%s,\"udp_denied\":%s,\"extra_descriptors_absent\":%s}\n",
+         "\"ipv4_secondary_denied\":%s,\"udp_denied\":%s,\"extra_descriptors_absent\":%s}\n",
          JSON_BOOL(public_read), JSON_BOOL(public_write), JSON_BOOL(private_read),
          JSON_BOOL(private_write), JSON_BOOL(scratch_write), JSON_BOOL(escape_denied),
          JSON_BOOL(inherited), JSON_BOOL(direct), JSON_BOOL(shell), JSON_BOOL(security),
          JSON_BOOL(curl), JSON_BOOL(unix_denied), JSON_BOOL(relay_allowed),
          JSON_BOOL(provider_allowed), JSON_BOOL(wrong_port), JSON_BOOL(wrong_address),
          JSON_BOOL(provider_wrong_port), JSON_BOOL(provider_wrong_address),
-         JSON_BOOL(owner_unix), JSON_BOOL(ipv6), JSON_BOOL(udp), JSON_BOOL(no_extra_descriptors));
+         JSON_BOOL(owner_unix), JSON_BOOL(secondary_ipv4), JSON_BOOL(udp), JSON_BOOL(no_extra_descriptors));
   return 0;
 }
