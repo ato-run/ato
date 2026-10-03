@@ -173,9 +173,10 @@ class ProducerIsolationTests(unittest.TestCase):
         with self.assertRaisesRegex(HELPER.Rejected, "native_binary_required"):
             HELPER.binary(credential)
 
-    def test_relay_grants_only_localhost_port_with_explicit_ipv4_and_ipv6_scope(self):
-        result = self.prepare(relay_endpoint="127.0.0.1:43123")
-        policy = (self.output / "codex.prepared.sb").read_text()
+    def test_fixture_rule_has_local_host_port_scope_without_unrestricted_networking(self):
+        result = self.prepare()
+        policy = HELPER.profile(self.output / 'public', self.output / 'scratch',
+                                [self.selected_binary], tcp_endpoints=['127.0.0.1:43123'])
         self.assertIn('(allow network-outbound (remote tcp "localhost:43123"))', policy)
         self.assertEqual(policy.count('(allow network-outbound'), 1)
         self.assertNotIn('(remote tcp "127.0.0.1:', policy)
@@ -188,8 +189,10 @@ class ProducerIsolationTests(unittest.TestCase):
         self.assertNotIn('remote udp', policy)
         self.assertFalse(result['network_policy']['dns_allowed'])
         self.assertFalse(result['network_policy']['provider_identity_verified'])
-        self.assertEqual(result['network_policy']['relay_os_scope'],
-                         'ipv4_ipv6_localhost_at_selected_port')
+        self.assertEqual(HELPER.network_policy('127.0.0.1:43123')['relay_os_scope'],
+                         'local_host_interfaces_at_selected_port')
+        self.assertEqual(result['network_policy']['relay_egress'],
+                         'blocked_scope_wider_than_loopback')
         self.assertEqual(result['network_policy']['provider_egress'],
                          'blocked_fixed_public_ip_unsupported')
         self.assertFalse(result['native_acceptance_ready'])
@@ -199,6 +202,27 @@ class ProducerIsolationTests(unittest.TestCase):
         self.assertFalse(fixed['descriptor_present'])
         self.assertFalse(fixed['descriptor_binding_checked'])
         self.assertFalse((self.output / 'public/session-relay.json').exists())
+
+    def test_relay_request_fails_before_binary_read_or_publication(self):
+        with mock.patch.object(HELPER, 'binary') as binary_read:
+            with self.assertRaisesRegex(HELPER.Rejected, 'blocked_scope_wider_than_loopback'):
+                self.prepare(relay_endpoint='127.0.0.1:43123')
+            self.assertFalse(binary_read.called)
+        self.assertFalse(self.output.exists())
+
+    def test_endpoint_rejection_preserves_existing_output_without_binary_reads(self):
+        self.prepare()
+        before = (self.output / 'manifest.json').read_bytes()
+        for arguments, code in [({'relay_endpoint': '127.0.0.1:43123'},
+                                 'blocked_scope_wider_than_loopback'),
+                                ({'provider_endpoints': ['8.8.8.8:443']},
+                                 'provider_egress_fixed_ip_unsupported')]:
+            with mock.patch.object(HELPER, 'binary') as binary_read:
+                with self.assertRaisesRegex(HELPER.Rejected, code):
+                    self.prepare(**arguments)
+                self.assertFalse(binary_read.called)
+            self.assertTrue(before == (self.output / 'manifest.json').read_bytes())
+        self.assertTrue(HELPER.verify(self.output)['native_acceptance_ready'] is False)
 
     def test_valid_public_provider_request_fails_before_binary_read_or_publication(self):
         with mock.patch.object(HELPER, 'binary') as binary_read:
@@ -245,7 +269,7 @@ class ProducerIsolationTests(unittest.TestCase):
             self.assertFalse(self.output.exists())
 
     def test_network_claim_tampering_and_rehashed_broad_policy_are_rejected(self):
-        self.prepare(relay_endpoint='127.0.0.1:43123')
+        self.prepare()
         path = self.output / 'manifest.json'
         saved = json.loads(path.read_text())
         changed = json.loads(path.read_text())
