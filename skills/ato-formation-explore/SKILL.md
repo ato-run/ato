@@ -16,6 +16,8 @@ CandidateProducerとして、検査済みSourceから固定Contract Kを満た�
 
 開始前に、Producer環境からowner入力・Ato認証・Runtime ticket・private grantを読めないことを所有者に確認する。ファイルの0600だけを隔離の証拠にしない。値が誤って渡された場合は転記せず停止し、所在と露出経路だけを報告する。
 
+所有者による隔離準備とOSの負例検証は[producer-isolation.md](references/producer-isolation.md)を参照する。そのfixtureだけで実製品のtool inventory、認証の分離、native Skill発見、実探索の受入を完了扱いにしない。
+
 ## 探索ループ
 
 1. 保存済み状態を確認する。未ACK結果、実行中attempt、UNKNOWN、保存済み応答があれば[recovery.md](references/recovery.md)に従って先に照合する。
