@@ -2,9 +2,7 @@
 """Prepare a public Skill package and measure a macOS OS fixture, never an agent."""
 
 import argparse
-import ctypes
 import hashlib
-import ipaddress
 import json
 import os
 from pathlib import Path
@@ -19,17 +17,9 @@ import sys
 
 SKILL = Path(__file__).resolve().parents[1]
 MCP_TOOLS = ["status", "next", "submit", "cancel"]
-CANARIES = ["source", "owner-credential", "owner-connection", "private-grant", "runtime-ticket",
+CANARIES = ["source", "owner-credential", "private-grant", "runtime-ticket",
             "state-db", "old-measurements", "credential-store-file"]
 MACH_AUTH = ["com.apple.secd", "com.apple.SecurityServer"]
-OS_CHECKS = ["public_skill_read", "public_skill_write_denied",
-             "private_eight_classes_read_denied", "private_eight_classes_write_denied",
-             "scratch_write", "symlink_escape_denied", "fork_inherits_denial",
-             "source_direct_launch_denied", "shell_exec_denied", "security_exec_denied",
-             "curl_exec_denied", "docker_unix_socket_denied", "relay_tcp_allowed",
-             "second_loopback_tcp_allowed", "relay_wrong_port_denied", "relay_ipv6_same_port_allowed",
-             "second_loopback_wrong_port_denied", "second_ipv6_same_port_allowed", "owner_unix_socket_denied",
-             "non_loopback_live_tcp_denied", "udp_denied", "extra_descriptors_absent"]
 MACHO = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
          b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
          b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"}
@@ -83,40 +73,6 @@ def version_tuple(value):
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
         reject("exact_version_required")
     return tuple(map(int, value.split(".")))
-
-
-def tcp_endpoint(value):
-    """Numeric IPv4 only: no DNS, wildcard, port range, URL, or SBPL injection."""
-    if not isinstance(value, str) or len(value) > 32 or not re.fullmatch(r"[0-9.]+:[0-9]+", value):
-        reject("numeric_tcp_endpoint_required")
-    address, port = value.rsplit(":", 1)
-    try:
-        ip = ipaddress.IPv4Address(address)
-    except ipaddress.AddressValueError:
-        reject("numeric_tcp_endpoint_required")
-    number = int(port)
-    if not 1 <= number <= 65535 or str(ip) != address or str(number) != port:
-        reject("numeric_tcp_endpoint_required")
-    return str(ip), number
-
-
-def network_policy(relay_endpoint=None, provider_endpoints=()):
-    providers = list(provider_endpoints)
-    if len(providers) > 4 or len(set(providers)) != len(providers):
-        reject("provider_endpoint_bounds")
-    if relay_endpoint is not None and tcp_endpoint(relay_endpoint)[0] != "127.0.0.1":
-        reject("relay_loopback_required")
-    for endpoint in providers:
-        address, port = tcp_endpoint(endpoint)
-        ip = ipaddress.IPv4Address(address)
-        if not ip.is_global or ip.is_multicast or ip.is_reserved or port != 443:
-            reject("provider_public_ipv4_tls_port_required")
-    return {"relay_endpoint": relay_endpoint, "provider_endpoints": sorted(providers),
-            "dns_allowed": False, "unix_sockets_allowed": False,
-            "provider_identity_verified": False,
-            "relay_os_scope": "local_host_interfaces_at_selected_port" if relay_endpoint else "none",
-            "relay_egress": "blocked_scope_wider_than_loopback",
-            "provider_egress": "blocked_fixed_public_ip_unsupported"}
 
 
 def snapshot(source):
@@ -176,7 +132,7 @@ def public_layout(root):
     return result
 
 
-def profile(public, scratch, executables, auth_ipc=False, tcp_endpoints=()):
+def profile(public, scratch, executables, auth_ipc=False, relay_socket=None):
     """A dedicated Producer policy. Existing Capsule policies stay untouched."""
     read_paths = [safe_path(public), *[safe_path(p) for p in executables]]
     ancestors = {p for path in [*read_paths, safe_path(scratch)]
@@ -185,7 +141,10 @@ def profile(public, scratch, executables, auth_ipc=False, tcp_endpoints=()):
              "(allow signal (target self))", "(allow sysctl-read)",
              # libSystem ignition requires opening the root directory. A
              # literal grants no access to child paths (same as lib/sandbox).
-             "(allow file-read* (literal \"/\"))"]
+             "(allow file-read* (literal \"/\"))",
+             "(allow file-read-metadata (literal \"/etc\") (literal \"/private/etc\"))",
+             "(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))",
+             "(allow mach-lookup (global-name \"com.apple.system.notification_center\"))"]
     lines.extend(f"(allow file-read-metadata (literal {quoted(p)}))"
                  for p in sorted(ancestors))
     lines.extend(f"(allow process-exec (literal {quoted(p)}))" for p in executables)
@@ -193,44 +152,38 @@ def profile(public, scratch, executables, auth_ipc=False, tcp_endpoints=()):
     lines.extend(f"(allow file-read* (literal {quoted(p)}))" for p in executables)
     lines.append(f"(allow file-read* file-write* (subpath {quoted(scratch)}))")
     lines.extend(["(allow file-read* (subpath \"/System/Library\") (subpath \"/usr/lib\")",
+                  "  (literal \"/usr/share/icu/icudt76l.dat\")",
                   "  (subpath \"/private/var/db/dyld\") (literal \"/dev/null\")",
                   "  (literal \"/dev/random\") (literal \"/dev/urandom\") (subpath \"/dev/fd\"))",
                   "(allow file-write* (literal \"/dev/null\") (subpath \"/dev/fd\"))"])
     if auth_ipc:
         lines.extend(f"(allow mach-lookup (global-name {json.dumps(name)}))"
                      for name in MACH_AUTH)
-    if len(tcp_endpoints) > 5 or len(set(tcp_endpoints)) != len(tcp_endpoints):
-        reject("profile_endpoint_bounds")
-    for endpoint in sorted(tcp_endpoints):
-        address, port = tcp_endpoint(endpoint)
-        if address != "127.0.0.1":
-            reject("macos_fixed_tcp_address_unsupported")
-        # This macOS DSL accepts only localhost or wildcard host specifiers.
-        # Measured localhost includes non-loopback host interfaces at this port.
-        # This rule is usable only in the controlled C fixture, not Native prepare.
-        lines.append(f'(allow network-outbound (remote tcp "localhost:{port}"))')
-    # No unrestricted networking, inbound, DNS, UDP, Unix socket, arbitrary exec,
-    # HOME/keychain file, or /tmp rule. Endpoint ACLs do not validate TLS identity.
+    if relay_socket is not None:
+        selected = quoted(relay_socket)
+        lines.extend([f"(allow file-read-metadata (literal {selected}))",
+                      f"(allow network-outbound (remote unix-socket (literal {selected})))"])
+    # No arbitrary exec/network, HOME/keychain file, or /tmp rule.
     return "\n".join(lines) + "\n"
 
 
 def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
-            codex_version, claude_binary, claude_version, source=SKILL,
-            relay_endpoint=None, provider_endpoints=()):
+            codex_version, claude_binary, claude_version, source=SKILL, relay_socket=None,
+            codex_code_mode_host=None):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,95}", measurement_id):
         reject("measurement_id_required")
     if not re.fullmatch(r"[a-f0-9]{40}", execution_pin):
         reject("exact_execution_pin_required")
     codex_supported = version_tuple(codex_version) >= (0, 99, 0)
     version_tuple(claude_version)
-    network = network_policy(relay_endpoint, provider_endpoints)
-    if network["provider_endpoints"]:
-        reject("provider_egress_fixed_ip_unsupported")
-    if network["relay_endpoint"]:
-        reject("blocked_scope_wider_than_loopback")
-    endpoints = ([network["relay_endpoint"]] if network["relay_endpoint"] else []) + network["provider_endpoints"]
     selected = {"mcp": binary(mcp_binary), "codex": binary(codex_binary),
                 "claude-code": binary(claude_binary)}
+    if codex_code_mode_host is not None:
+        selected["codex-code-mode-host"] = binary(codex_code_mode_host)
+    if relay_socket is not None:
+        relay_socket = safe_path(relay_socket)
+        if not stat.S_ISSOCK(relay_socket.stat().st_mode) or len(str(relay_socket).encode()) > 100:
+            reject("fixed_unix_relay_socket_required")
     files = snapshot(source)
     output = Path(output).absolute()
     if output.exists() or output.is_symlink():
@@ -257,17 +210,15 @@ def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
                                target_is_directory=True)
     (public / "fixed-mcp.json").write_text(json.dumps({
         "server": "formation", "transport": "stdio", "tools": MCP_TOOLS,
-        "binary": selected["mcp"], "connection": "not supplied", "network_policy": network,
-        "arguments": ["--relay", str(public / "session-relay.json")],
-        "descriptor_present": False, "descriptor_binding_checked": False,
+        "binary": selected["mcp"], "connection": "not supplied",
     }, sort_keys=True) + "\n")
     (output / "scratch").mkdir(mode=0o700)
-    for name, item in selected.items():
-        if name == "mcp":
-            continue
-        text = profile(public, output / "scratch",
-                       [Path(item["path"]), Path(selected["mcp"]["path"])], auth_ipc=True,
-                       tcp_endpoints=endpoints)
+    for name in ["codex", "claude-code"]:
+        executables = [Path(selected[name]["path"]), Path(selected["mcp"]["path"])]
+        if name == "codex" and "codex-code-mode-host" in selected:
+            executables.append(Path(selected["codex-code-mode-host"]["path"]))
+        text = profile(public, output / "scratch", executables,
+                       auth_ipc=True, relay_socket=relay_socket)
         (output / f"{name}.prepared.sb").write_text(text)
     records = manifest_files(package)
     package_sha = hashlib.sha256(canonical(records)).hexdigest()
@@ -280,18 +231,15 @@ def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
         "versions": {"codex": codex_version, "claude-code": claude_version},
         "codex_source_feature_floor": "0.99.0", "codex_version_eligible": codex_supported,
         "mcp_tools": MCP_TOOLS, "mcp_connection_supplied": False,
-        "network_policy": network,
-        "os_fixture_protocol": 2,
-        "fixed_mcp_recipe": 2,
         "profiles": {name: digest(output / f"{name}.prepared.sb")
                      for name in ["codex", "claude-code"]},
         "native_acceptance_ready": False,
         "gates": ["approved_plan", "native_skill_discovery", "native_tool_inventory",
                   "native_read_write_exec_negative", "native_auth_ipc_without_tool_access",
-                  "fixed_mcp_descriptor_binding", "native_relay_loopback_scope", "native_provider_egress",
-                  "owner_approved_provider_endpoint_identity", "native_provider_dns_tls"],
+                  "fixed_mcp_connection_broker", "native_provider_egress"],
         "credential_files_allowed": False, "global_config_changed": False,
         "native_agent_or_auth_invoked": False,
+        "relay_socket": str(relay_socket) if relay_socket is not None else None,
     }
     (output / "manifest.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
@@ -323,25 +271,6 @@ def verify(root):
             reject("skill_link_changed")
     expected = {"server": "formation", "transport": "stdio", "tools": MCP_TOOLS,
                 "binary": info["binaries"]["mcp"], "connection": "not supplied"}
-    if "network_policy" in info:
-        network = info["network_policy"]
-        if network_policy(network["relay_endpoint"], network["provider_endpoints"]) != network:
-            reject("network_policy_changed")
-        if network["provider_endpoints"]:
-            reject("provider_egress_fixed_ip_unsupported")
-        if network["relay_endpoint"]:
-            reject("blocked_scope_wider_than_loopback")
-        endpoints = ([network["relay_endpoint"]] if network["relay_endpoint"] else []) + network["provider_endpoints"]
-        for name in ["codex", "claude-code"]:
-            generated = profile(root / "public", root / "scratch",
-                                [Path(info["binaries"][name]["path"]), Path(info["binaries"]["mcp"]["path"])],
-                                auth_ipc=True, tcp_endpoints=endpoints)
-            if (root / f"{name}.prepared.sb").read_text() != generated:
-                reject("profile_policy_mismatch")
-        expected["network_policy"] = network
-    if info.get("fixed_mcp_recipe") == 2:
-        expected.update({"arguments": ["--relay", str(root / "public/session-relay.json")],
-                         "descriptor_present": False, "descriptor_binding_checked": False})
     if json.loads((root / "public/fixed-mcp.json").read_text()) != expected:
         reject("fixed_mcp_changed")
     return info
@@ -352,8 +281,6 @@ def probe(root):
         reject("native_macos_required")
     root = safe_path(root)
     info = verify(root)
-    if info.get("os_fixture_protocol") != 2:
-        reject("new_fixture_package_required")
     if (root / "probe").exists() or (root / "os-fixture.json").exists():
         reject("fresh_probe_required")
     work = root / "probe"
@@ -381,118 +308,53 @@ def probe(root):
                               capture_output=True, timeout=60)
     if compiled.returncode != 0:
         reject("fixture_compile_failed")
-    text = profile(root / "public", root / "scratch", [runner], auth_ipc=True)
+    text = profile(root / "public", root / "scratch", [runner], auth_ipc=True,
+                   relay_socket=info.get("relay_socket"))
     policy = work / "fixture.sb"
     policy.write_text(text)
-    sockets = []
-    unix_paths = []
-    def tcp(address, port=0, family=socket.AF_INET):
-        endpoint = socket.socket(family, socket.SOCK_STREAM)
-        sockets.append(endpoint)
-        if family == socket.AF_INET6:
-            endpoint.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-        endpoint.bind((address, port))
-        endpoint.listen()
-        return endpoint.getsockname()[1]
-    def local_non_loopback_ipv4():
-        # Fixture-only local interface metadata: no DNS or provider discovery.
-        # Do not publish names/addresses. No interface configuration is changed.
-        class IfAddrs(ctypes.Structure):
-            pass
-        IfAddrs._fields_ = [("next", ctypes.POINTER(IfAddrs)), ("name", ctypes.c_char_p),
-                           ("flags", ctypes.c_uint), ("address", ctypes.c_void_p),
-                           ("netmask", ctypes.c_void_p), ("destination", ctypes.c_void_p),
-                           ("data", ctypes.c_void_p)]
-        library = ctypes.CDLL(None)
-        head = ctypes.POINTER(IfAddrs)()
-        library.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(IfAddrs))]
-        library.freeifaddrs.argtypes = [ctypes.POINTER(IfAddrs)]
-        if library.getifaddrs(ctypes.byref(head)) != 0:
-            reject("live_remote_fixture_unavailable")
-        try:
-            entry = head
-            while entry:
-                item = entry.contents
-                if item.address and item.flags & 1:
-                    raw = ctypes.string_at(item.address, 16)
-                    if raw[1] == socket.AF_INET:
-                        address = socket.inet_ntoa(raw[4:8])
-                        ip = ipaddress.IPv4Address(address)
-                        if not ip.is_loopback and not ip.is_unspecified and not ip.is_link_local:
-                            return address
-                entry = item.next
-        finally:
-            library.freeifaddrs(head)
-        reject("live_remote_fixture_unavailable")
+    endpoint = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    endpoint.bind(("127.0.0.1", 0))
+    endpoint.listen()
+    docker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # Relative socket paths avoid macOS's short Unix socket path limit.
+    docker_path = root / "scratch/docker.sock"
     try:
-        relay_port = tcp("127.0.0.1")
-        provider_port = tcp("127.0.0.1")
-        wrong_port = tcp("127.0.0.1")
-        wrong_provider_port = tcp("127.0.0.1")
-        tcp("::1", relay_port, family=socket.AF_INET6)
-        tcp("::1", provider_port, family=socket.AF_INET6)
-        remote_address = local_non_loopback_ipv4()
-        tcp(remote_address, relay_port)
-        with socket.create_connection((remote_address, relay_port), timeout=1):
-            pass
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sockets.append(udp)
-        udp.bind(("127.0.0.1", relay_port))
-        fixture_endpoints = [f"127.0.0.1:{relay_port}", f"127.0.0.1:{provider_port}"]
-        text = profile(root / "public", root / "scratch", [runner], auth_ipc=True,
-                       tcp_endpoints=fixture_endpoints)
-        policy.write_text(text)
-        # Relative paths avoid macOS's short Unix socket path limit. Each denied
-        # destination is actually listening; ECONNREFUSED/ENOENT is not proof.
         previous_directory = Path.cwd()
         try:
             os.chdir(root)
-            for name in ["docker.sock", "owner-control.sock"]:
-                endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                sockets.append(endpoint)
-                path = "scratch/" + name
-                endpoint.bind(path)
-                endpoint.listen()
-                unix_paths.append(root / path)
+            docker.bind("scratch/docker.sock")
         finally:
             os.chdir(previous_directory)
+        docker.listen()
         completed = subprocess.run(["/usr/bin/sandbox-exec", "-f", str(policy), str(runner),
                                     str(root / "public/skill/SKILL.md"), str(private),
                                     str(root / "scratch"), str(escape), "../../scratch/docker.sock",
-                                    str(relay_port), str(provider_port), str(wrong_port),
-                                    str(wrong_provider_port), "../../scratch/owner-control.sock", remote_address],
-                                   env=clean_env, close_fds=True,
+                                    str(endpoint.getsockname()[1])] +
+                                   ([info["relay_socket"]] if info.get("relay_socket") else []), env=clean_env,
                                    cwd=root / "public/project", capture_output=True, timeout=30)
     finally:
-        for endpoint in sockets:
-            endpoint.close()
+        endpoint.close()
+        docker.close()
         escape.unlink()
-        for path in unix_paths:
-            if path.exists():
-                path.unlink()
+        if docker_path.exists():
+            docker_path.unlink()
     if any(value in completed.stdout or value in completed.stderr for value in values):
         reject("fixture_canary_exposure")
-    def failure(code, checks=None):
+    if completed.returncode != 0 or len(completed.stdout) > 8192:
         failure = {"schema": "ato.formation-producer-isolation-os-fixture-failure/1",
                    "measurement_id": info["measurement_id"], "execution_pin": info["execution_pin"],
                    "public_package_sha256": info["public_package_sha256"],
-                   "code": code, "fixture_returncode": completed.returncode,
+                   "code": "kernel_fixture_failed", "fixture_returncode": completed.returncode,
                    "stdout_bytes": len(completed.stdout), "stderr_bytes": len(completed.stderr),
                    "native_agent_or_auth_invoked": False, "native_acceptance_ready": False}
-        if checks is not None:
-            failure["checks"] = {name: checks.get(name) is True for name in OS_CHECKS}
         (root / "os-fixture-failure.json").write_text(json.dumps(failure, indent=2) + "\n")
-        reject(code)
-    if completed.returncode != 0 or len(completed.stdout) > 8192:
-        failure("kernel_fixture_failed")
+        reject("kernel_fixture_failed")
     try:
         checks = json.loads(completed.stdout)
     except (ValueError, UnicodeError):
-        failure("fixture_result_invalid")
-    if not isinstance(checks, dict) or set(checks) != set(OS_CHECKS):
-        failure("fixture_result_invalid")
-    if any(value is not True for value in checks.values()):
-        failure("kernel_boundary_not_enforced", checks)
+        reject("fixture_result_invalid")
+    if not isinstance(checks, dict) or not checks or any(value is not True for value in checks.values()):
+        reject("kernel_boundary_not_enforced")
     for name, value in zip(CANARIES, values):
         if (private / name).read_bytes() != value:
             reject("private_fixture_changed")
@@ -504,16 +366,6 @@ def probe(root):
         "environment": {"platform": platform.platform(), "machine": platform.machine()},
         "runner_sha256": digest(runner), "profile_sha256": digest(policy),
         "checks": checks, "fixture_canary_output_exposure": False,
-        "fixture_tcp_endpoints": fixture_endpoints,
-        "configured_native_policy": info.get("network_policy"),
-        "provider_egress_measured": False,
-        "public_provider_reached": False,
-        "relay_descriptor_or_owner_connection_read": False,
-        "inherited_extra_descriptors": False,
-        "relay_localhost_scope": "local_host_interfaces_same_port",
-        "non_loopback_live_target": True,
-        "non_loopback_target_outside_sandbox_reachable": True,
-        "host_interface_configuration_changed": False,
         "captured_output_sha256": hashlib.sha256(completed.stdout + completed.stderr).hexdigest(),
         "captured_output_bytes": len(completed.stdout) + len(completed.stderr),
         "auth_IPC_rules_prepared": MACH_AUTH, "native_auth_IPC_invoked": False,
@@ -537,9 +389,8 @@ def main():
         preparation.add_argument(f"--{name}-binary", type=Path, required=True)
     preparation.add_argument("--codex-version", required=True)
     preparation.add_argument("--claude-version", required=True)
-    preparation.add_argument("--relay-endpoint", help="Explicit 127.0.0.1:PORT request; fails closed because macOS localhost scope also includes non-loopback host interfaces")
-    preparation.add_argument("--provider-endpoint", action="append", default=[],
-                             help="Explicit public IPv4:443 request; this macOS profile fails closed because exact public IP filtering is unsupported")
+    preparation.add_argument("--relay-socket", type=Path)
+    preparation.add_argument("--codex-code-mode-host", type=Path)
     for name in ["verify", "probe"]:
         command = commands.add_parser(name)
         command.add_argument("--package", type=Path, required=True)
@@ -549,7 +400,8 @@ def main():
             result = prepare(args.output, args.measurement_id, args.execution_pin,
                              args.mcp_binary, args.codex_binary, args.codex_version,
                              args.claude_binary, args.claude_version,
-                             relay_endpoint=args.relay_endpoint, provider_endpoints=args.provider_endpoint)
+                             relay_socket=args.relay_socket,
+                             codex_code_mode_host=args.codex_code_mode_host)
         elif args.operation == "probe":
             result = probe(args.package)
         else:
