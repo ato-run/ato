@@ -23,6 +23,8 @@ cancel後も保存済み状態を照合する。`cleanup: not_confirmed`をclean
 
 両操作は`ato.formation-session-view/1`を返す。`search_id`、`configuration_ref`、`deadline_ms`、`exchanges_used`/`exchanges_remaining`、`connected`、`waiting_reason`、`next_operation`を確認する。`internal_LLM_calls`/`token_usage`/`cost`は取得不能なら`unknown`。
 
+`exchanges_used`は保存済み入力を数え、未回答の現在exchangeも含む。`exchanges_remaining: 0`は新しいexchangeを追加できないという意味であり、`next_operation: submit`かつ`input`がある現在exchangeには応答できる。最後に割り当て済みの入力を枠切れと誤認して放棄せず、Bridgeの次の操作と期限に従う。
+
 `progress`はSearch状態、`pause_reason`/`termination_reason`、ContractRef、Search budget、attempt一覧、`unresolved_attempts`、approval/deployed/cleanup状態を示す。`exchange`がある場合はその`exchange_id`/`input_sha256`/`response_saved`を使う。保存済み応答を処理中、deadline、UNKNOWN、`needs_input`では`input: null`となるため、以前の入力への新しい応答を作らない。
 
 Bridge切断後は接続ファイルのextensionを`status.json`へ置き換えた公開viewがCLIのfallbackになる。`connected: false`の保存済みviewを現在のRuntime状態として扱わず、最終既知状態として報告する。接続ファイルの直接表示やowner journalの読取へ切り替えない。
