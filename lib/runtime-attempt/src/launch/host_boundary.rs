@@ -137,6 +137,7 @@ pub fn landlock_policy(context: &ResolvedRuntimeLaunchContext, scratch: &Path) -
             .iter()
             .map(|input| input.path.clone()),
     );
+    read_write.extend(context.output_dir().map(Path::to_path_buf));
     let (read_write, _) = filter_sensitive_paths(&read_write);
     let (read_only, _) = filter_sensitive_paths(&read_only);
     SandboxPolicy::new()
@@ -167,6 +168,10 @@ pub fn prepare_ownership(
         if attachment.access() == StateAccessV1::ReadWrite {
             chown_tree(attachment.working_copy_for_mount(), boundary)?;
         }
+    }
+    if let Some(dir) = context.output_dir() {
+        std::fs::create_dir_all(dir).context("failed to create the output directory")?;
+        chown_tree(dir, boundary)?;
     }
     Ok(())
 }
