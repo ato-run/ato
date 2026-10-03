@@ -1464,7 +1464,7 @@ impl ReasoningProducer {
         {
             return Err(ReasoningCallBudgetExhausted.into());
         }
-        Ok(u32::try_from(input_count).context("reasoning exchange count overflow")?)
+        u32::try_from(input_count).context("reasoning exchange count overflow")
     }
     /// Each successful observation reads a fresh snapshot. Only its completion
     /// is cached; failed reads retain their original retry allowance on restart.
