@@ -262,6 +262,7 @@ mod tests {
         let ceiling = ExecutionRequirements {
             network: vec![],
             authority: required_isolated_authority(&d),
+            host: None,
         };
         assert!(admit_isolated_authority(&d, &ceiling).is_none());
         d.steps[0].network = StepNetwork::ScopedDependencies;

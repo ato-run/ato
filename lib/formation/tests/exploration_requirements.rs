@@ -42,11 +42,13 @@ fn authority_ceiling_is_exact_and_phase_scoped() {
     let ceiling = ExecutionRequirements {
         network: vec![endpoint(ExecutionPhase::Dependencies, "pypi.org")],
         authority: vec![],
+        host: None,
     };
     assert!(ceiling.within(&ceiling).is_ok());
     let runtime = ExecutionRequirements {
         network: vec![endpoint(ExecutionPhase::Runtime, "pypi.org")],
         authority: vec![],
+        host: None,
     };
     assert_eq!(
         runtime.within(&ceiling).unwrap_err().0,
@@ -96,6 +98,7 @@ fn unsafe_or_ambiguous_endpoint_forms_are_not_requirements() {
         let requirements = ExecutionRequirements {
             network: vec![endpoint(ExecutionPhase::Build, host)],
             authority: vec![],
+            host: None,
         };
         assert!(requirements.validate().is_err(), "{host}");
     }
