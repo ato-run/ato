@@ -1090,6 +1090,36 @@ mod autonomous_tests {
         Ok(())
     }
     #[test]
+    fn six_saved_exchanges_refuse_a_new_round_without_a_provider_call_on_restart() -> Result<()> {
+        std::fs::create_dir_all(".tmp")?;
+        let root = tempfile::tempdir_in(".tmp")?;
+        let config = ReasoningProviderConfig::Session(SessionConfig {
+            provider: "codex_session".into(),
+            model: "codex-session".into(),
+            prompt_version: deepseek::PROMPT_VERSION_V13.into(),
+        });
+        let plan = budget::BudgetPlan {
+            max_calls: 6, input_token_cap: 49152, output_token_cap: 2048,
+            input_price: 300000, output_price: 1200000, ceiling_usd_micros: 103224,
+        };
+        let producer = ReasoningProducer::new(config.clone(), plan.clone(), root.path().into(), None)?;
+        for exchange in 1..=6 {
+            let path = root.path().join(format!("r001_s{exchange:03}.input.json"));
+            assert_eq!(producer.check_exchange_budget(&path)?, exchange - 1);
+            std::fs::write(path, b"saved input")?;
+        }
+        // Saved input recovery remains possible; creating another exchange does not.
+        assert_eq!(producer.check_exchange_budget(&root.path().join("r001_s006.input.json"))?, 6);
+        let next = root.path().join("r002_s001.input.json");
+        assert!(producer.check_exchange_budget(&next).unwrap_err().is::<ReasoningCallBudgetExhausted>());
+        drop(producer);
+        let restored = ReasoningProducer::new(config, plan, root.path().into(), None)?;
+        assert!(restored.check_exchange_budget(&next).unwrap_err().is::<ReasoningCallBudgetExhausted>());
+        assert!(!next.exists());
+        assert!(!root.path().join("r002_s001.dispatch.json").exists());
+        Ok(())
+    }
+    #[test]
     fn operation_retries_are_initial_plus_three_and_survive_restart() -> Result<()> {
         std::fs::create_dir_all(".tmp")?;
         let root = tempfile::tempdir_in(".tmp")?;
@@ -1377,6 +1407,16 @@ impl std::fmt::Display for ReasoningProviderFailure {
 }
 impl std::error::Error for ReasoningProviderFailure {}
 
+/// An owner-local limit reached before a provider dispatch. It is not a call.
+#[derive(Debug)]
+pub(super) struct ReasoningCallBudgetExhausted;
+impl std::fmt::Display for ReasoningCallBudgetExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("reasoning call budget exhausted before dispatch")
+    }
+}
+impl std::error::Error for ReasoningCallBudgetExhausted {}
+
 pub(super) struct RoundAnswer {
     pub output: ProducerOutput,
     pub provider_call: Option<ProviderCall>,
@@ -1407,6 +1447,25 @@ fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl ReasoningProducer {
+    fn check_exchange_budget(&self, input_path: &Path) -> Result<u32> {
+        let input_count = std::fs::read_dir(&self.directory)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .iter()
+            .filter(|name| name.to_string_lossy().ends_with(".input.json"))
+            .count();
+        let provider_calls = self.api.as_ref()
+            .map(|api| api.accounting_snapshot())
+            .transpose()?
+            .map_or(0, |snapshot| snapshot.cells.len());
+        if !input_path.exists()
+            && (input_count >= self.budget.max_calls as usize
+                || provider_calls >= self.budget.max_calls as usize)
+        {
+            return Err(ReasoningCallBudgetExhausted.into());
+        }
+        u32::try_from(input_count).context("reasoning exchange count overflow")
+    }
     /// Each successful observation reads a fresh snapshot. Only its completion
     /// is cached; failed reads retain their original retry allowance on restart.
     pub fn coordinator_observation(
@@ -1925,14 +1984,7 @@ impl ReasoningProducer {
             let call_id = format!("{}_r{round}_s{step}", request.search_id);
             let input_path = self.directory.join(format!("{name}.input.json"));
             let record_path = self.directory.join(format!("{name}.record.json"));
-            let input_count = std::fs::read_dir(&self.directory)?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".input.json"))
-                .count();
-            ensure!(
-                input_path.exists() || input_count < self.budget.max_calls as usize,
-                "reasoning call budget exhausted"
-            );
+            let input_count = self.check_exchange_budget(&input_path)?;
             request.remaining_budget.timeout_ms = request
                 .remaining_budget
                 .timeout_ms
@@ -2016,7 +2068,7 @@ impl ReasoningProducer {
                         .as_ref()
                         .map(|a| a.accounting_snapshot())
                         .transpose()?
-                        .map_or(input_count as u32, |s| s.cells.len() as u32),
+                        .map_or(input_count, |s| s.cells.len() as u32),
                 ),
                 inspections_remaining: policy
                     .max_inspections

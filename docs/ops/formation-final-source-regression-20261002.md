@@ -9,7 +9,40 @@ three required WASMs. Receipt authority remains `0fd912f6754541a3cbfe33cd6f0f573
 The subsequent head `5f3bd350` changes the acceptance ACK observer only; it
 reads completed attempt IDs from root-owned delivery records without publishing
 tickets or weakening permissions. Earlier `c0eec529` contains evidence/docs only.
-No application or Runtime code changed after this execution pin.
+The SVGOMG, OCI, changedetection.io and input controls below retain these
+execution pins. The later pre-dispatch budget correction uses Ato
+`da7c452c1dcd6011399d2e12c7cb47e653e40ccd` / API
+`9b483d4a7df9aa2370636bd1b60c2fbcda98320b`; it does not relabel those earlier
+measurements. Ato `252d07a0` removes a redundant `Ok(...?)` only, after freezing
+the new binaries. [Budget control evidence](evidence/formation-pre-dispatch-budget-control-20261003.json)
+records the new execution pin and receipt-authority hash.
+
+## v0 scope and remaining gates
+
+| Area | Implemented / measured scope | Remaining or outside v0 |
+| --- | --- | --- |
+| Search control | Shared persisted round/budget/deadline state, custom retry transport, bounded phases and backoff, typed terminal distinctions; new pre-dispatch budget control and original-clock input controls | Actual provider usage/fees for the Codex session are unavailable; independent paid API acceptance awaits valid credential input |
+| Routes | Static Web, one Node/Python process and one OCI service; typed common proposals; bound capability checks and unchanged-K Runtime receipt | Compose/multiple services, undeclared monorepo/multi-repo traversal and automatic source/Dockerfile edits are outside v0 |
+| Dependencies | Source-owned Python requirements, isolated sdist wheel building, pinned wheel artifacts/offline installation; explicit npm lifecycle/native rebuild plans with bound toolchains and limits | No application-specific setup commands in presets; unrestricted build/runtime networking is not admitted |
+| Private input | Encrypted store, scoped metadata/assignment/grants and dedicated input surfaces; measured matched/outside/expired/revoked/ambiguous inputs, temporary cleanup and embedding controls | Final-pin PWA input/permission-change resume is unmeasured; fixed nonsecret owner email in the measurement controller limits the orchestration privacy claim |
+| Function/state | SVG UI; changedetection watch create/edit/pause across restart; Kutt native dependencies, migration, owner/API operations and committed state across stop/new Run | These retain separate functional pins/artifacts; automatic production Source state provisioning and external credential authentication remain unverified |
+| Admission | Success submitted as assessment pending, with no conversion to normal Run permission | Deployment, feature flags, remote migrations, production enablement and 100-app rerun are separate, unperformed work |
+
+The historical unique OSS count remains **Codex 3 / API 0**: SVGOMG,
+changedetection.io and Kutt. The OCI representative is a controlled single
+service fixture and adds no unique OSS app. SVGOMG and Kutt are repair PASS;
+changedetection.io passed its first executing build after a preserved
+preexecution infrastructure failure; OCI passed its first execution after a
+same-round schema correction. Failed/interrupted Searches and UNKNOWN remain
+separate records, rather than being removed from the denominator. New 100-app
+in-scope success rate and overall reach are not claimed before remeasurement.
+
+Code after the prior `3bb28192` measurement adds only the pre-dispatch budget
+boundary and its strict API completion/migration/authority wiring. New Kutt and
+budget controls ran at `da7c452c` / `9b483d4a`; later Ato `252d07a0` fixes a
+redundant clippy expression, and subsequent Ato commits add evidence/docs only.
+Earlier SVG/OCI/Python/input/function/state results keep their exact old pins.
+Local/CI/fixture acceptance is not reported as staging or production validation.
 
 ## SVGOMG
 
@@ -136,7 +169,61 @@ dispatch fixture; automatic production Source state provisioning remains pending
 
 ## Remaining acceptance and accounting
 
-The final-pin Kutt Source regression stopped without PASS. [Preserved failure](evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. A common terminal-classification fix and fresh Source acceptance remain pending.
+The separately preregistered [Kutt Source regression](evidence/formation-kutt-source-final-20261003.json)
+(SHA-256 `475852aebde08c8f486d152a0b9d0695f3763d958ac0099e406937f57b64c875`)
+completed at Ato `da7c452c` / API `9b483d4a`. It began with zero known D,
+inspected eight files through root declarations and explicit imports, and used
+three rounds / seven Codex exchanges in 769.653 seconds. Initial native audit
+refused missing locked `msgpackr-extract`; round 2 added it to the same generic
+offline rebuild alongside `better-sqlite3`. Source-owned migration ran inside
+the contained Runtime. A Source-backed GET guard observed root 302, then the
+typed owner operation used variable references and observed POST 201. Temporary
+JWT binding remained a private Runtime grant. D `ffcbe50c…` produced a fresh,
+fully satisfied receipt for unchanged K `2940ae2d…`. The third round proposed
+no additional execution after observing this success. Submission remains
+`k_reached_awaiting_assessment`, with no normal Run permission or deployment.
+
+Both attempts were durably ACKed under fence 1; claim, Source acquisition and
+result transport policies all retained `max_retries = 3`. Candidate stop was
+confirmed, metadata mismatches empty, byte/attempt reservations zero and both
+registered owner values revoked with encrypted-value count zero. Original
+Search deadline `2026-10-03T05:06:04.881Z` was unchanged. Structured network,
+execution facts and source/dependency/build/launch/verification/cleanup timings
+are retained in the acknowledged Runtime result records. The ready retained
+artifact has 67,475,730 verified bytes and 181,518,590 expanded bytes; these
+are distinct from Source input expansion and Search stored-byte usage. No new
+BuildRecord upload is claimed for this Search (`build_record_ref = null`).
+Functional/persistence evidence retains its separate earlier pin and artifact.
+
+Producer frames and public measurement records contain no owner value body;
+the password scan covered 882 public files. This statement is scoped to those
+records: inspecting the controller source exposed its fixed nonsecret local
+verification email to orchestration tool output. It was not an external account
+or secret, but whole-orchestration value non-disclosure is not claimed. A future,
+unexecuted controller template generates that email privately. The measured
+controller, original Searches, limits and evidence were not changed or rerun.
+
+The Kutt Source regression at the earlier pin stopped without PASS. [Preserved failure](evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. The common terminal correction is implemented in Ato #1476 / API #727. A separately preregistered new Search uses eight Codex exchanges; its original three-round, 10-minute round / 30-minute Search and retry limits remain fixed.
+
+[Actual pre-dispatch budget control](evidence/formation-pre-dispatch-budget-control-20261003.json)
+(SHA-256 `3be6a33a946e4f0e3ffa47c8d508967b9b1d2bb1f6180ec0fa2a7b5ced320055`)
+consumes six deliberately invalid repeated inspections in a negative fixture.
+It ends as `budget_exhausted` in 2.212 seconds, creates no seventh input,
+provider-call row or Runtime attempt, and leaves all reservations zero.
+The legacy round status remains `provider_error` with authenticated
+`call_budget_exhausted` pre-dispatch evidence; the shared Rust Search authority
+owns the terminal classification. No actual Requester restart is claimed;
+saved-exchange restart/recovery is covered by the Worker unit test. Three
+receiver startup failures and the final observer's pathname/JSON error remain
+preserved. The valid result was collected from saved records without rerunning.
+
+[CI comparison](evidence/formation-budget-terminal-ci-comparison-20261003.json)
+records the new Ubuntu clippy warning and its correction, Ubuntu CI PASS at
+`88ee365c`, a passing local full
+CLI clippy check, and the same 13 Activity/CORS failure names on merged API main
+and the new API head (155/168 PASS each). Local Node 25.6.0 differs from CI Node
+22; Linux WebSocket handshake and the macOS worker-start failure remain
+unreproduced CI limitations. These failures are not billing failures or green CI.
 
  [The interrupted prior exchange](evidence/formation-kutt-unanswered-round-20261003.json)
 (SHA-256 `af14132136eb99ff85201731ce197a6330f8773b6fa6a038876874f641df2bfd`)
@@ -182,7 +269,8 @@ ACKed and encrypted values removed. The permitted artifact is excluded from
 the public evidence scan. Permission-change resume and PWA UI are not measured
 by this pair; earlier UI records keep their own pins.
 
-SVGOMG, OCI and changedetection.io final-pin Source regressions are complete;
+SVGOMG, OCI, changedetection.io and Kutt Source regressions are complete at the
+explicit individual execution pins above;
 changedetection.io functional/state verification is also complete within the
 explicit private acceptance boundary above.
 Current-grant Kutt native/migration/function/state/restart evidence is
@@ -201,3 +289,35 @@ $0.017204 with actual usage unknown. A valid key for the same authorized account
 is still required for independent API acceptance. Old WBO UNKNOWN and old
 results are preserved; no 100-app remeasurement, deployment, remote migration,
 feature flag or ordinary Run permission has been performed.
+
+[Independent API preparation](evidence/formation-independent-api-preparation-20261003.json)
+retains four unexecuted plans at Ato `da7c452c` / API `9b483d4a`, with the same
+rooted Source/K as each Codex arm and no successful D seed. SVGOMG retains its
+explicit custom retry 1 control; the other arms use default retry 3. Call caps
+match the corresponding Codex arms (6/6/6/8), while the aggregate historical
+cap remains 41 and the small allocation 24; these are not four separate new
+24-call grants. The original five journals and prior HTTP401 journal were read
+through the product preflight: 18 slots, estimated $0.082825, unsettled zero.
+Duplicate archived exports are excluded. Every prepared plan is blocked before
+Search creation until a valid same-account private credential is supplied.
+The known old remote credential file retains its September 22 timestamp and
+was not read or retried. Credentials are never placed in plans or evidence.
+
+Current [official pricing](https://api-docs.deepseek.com/quick_start/pricing/)
+was checked on October 3: the retained reservation uses the Flash peak ceiling
+($0.30/M input cache-miss, $1.20/M output); off-peak rates are half. This retains
+the authorized worst-case bound of $0.395692 for 23 remaining calls. Token-based
+fee estimates are not asserted to be invoice charges. Before another run,
+credential and current-price checks must still be confirmed against that run's
+frozen plan.
+
+After preserving the Kutt result, free disk fell below the unchanged 20 GiB
+preflight floor. Only 853 inactive, single-link compiler `.rmeta` files in this
+task's target were removed (631,881,065 logical bytes). Frozen 3bb/da7 binary
+hashes remained unchanged and free space became 22,058,913,792 bytes. The full
+owned cleanup manifest is preserved remotely as
+`post-kutt-owned-compiler-cache-cleanup.json`, SHA-256
+`0b3187d8f9c1a4ee81b9352024c753f57db36ef203ef6053cfeabee185d5ad05`.
+No Source, measurement, Runtime, retained artifact or other checkout was removed.
+Both owned acceptance Coordinator ports were closed; the three prior shared
+Runtime PIDs were left running.
