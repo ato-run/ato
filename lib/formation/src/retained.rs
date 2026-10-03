@@ -76,6 +76,110 @@ fn valid_ref(value: &str) -> bool {
     })
 }
 impl RetainedCandidateV1 {
+    /// Project an already-built, single process into the existing Source
+    /// registry. This does not authorize execution, allocate state or accept a
+    /// historical receipt as a fresh Run. Unbound private operations cannot be
+    /// silently dropped by the ordinary process launcher.
+    pub fn process_registration(&self) -> Result<serde_json::Value, RetainedError> {
+        self.validate()?;
+        if !matches!(self.shape, RetainedShape::ProcessWorkspace { .. })
+            || self.derivation.source_oci.is_some()
+            || !self.derivation.variable_bindings.is_empty()
+            || !self.derivation.runtime_port_operations.is_empty()
+        {
+            return Err(RetainedError("registration_requires_scoped_runtime"));
+        }
+        let [slot] = self.derivation.state.as_slice() else {
+            return Err(RetainedError("registration_requires_one_state_slot"));
+        };
+        if slot.protocol != crate::authoring::STATE_FILESYSTEM_PROTOCOL
+            || slot.access != crate::authoring::StateAccess::ReadWrite
+            || slot.id.len() > 64
+            || !slot
+                .id
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_lowercase)
+            || !slot
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            || !crate::proposal::isolated_state_mount(&slot.mount)
+        {
+            return Err(RetainedError("registration_state_unsupported"));
+        }
+        let RetainedShape::ProcessWorkspace { binding } = &self.shape else {
+            return Err(RetainedError("registration_shape"));
+        };
+        let serve = self
+            .derivation
+            .steps
+            .last()
+            .filter(|s| s.op == "serve" && s.network.is_denied())
+            .ok_or(RetainedError("registration_serving_policy"))?;
+        if serve.argv.is_empty() || serve.argv.iter().any(|a| a.contains('\0')) {
+            return Err(RetainedError("registration_argv"));
+        }
+        let mut env = crate::process_binding::environment(
+            binding.python_environment,
+            &binding.toolchains,
+            binding
+                .package_manager
+                .as_ref()
+                .map(|m| (m.name.as_str(), m.version.as_str())),
+            "/app",
+        );
+        env.extend(serve.env.clone());
+        if binding.python_environment {
+            env.extend(crate::process_binding::environment(
+                true,
+                &binding.toolchains,
+                None,
+                "/app",
+            ));
+        }
+        let ports: Vec<_> = self
+            .derivation
+            .ports
+            .iter()
+            .filter(|p| p.from == serve.id)
+            .collect();
+        let [port] = ports.as_slice() else {
+            return Err(RetainedError("registration_requires_one_http_port"));
+        };
+        if port.protocol != crate::authoring::HTTP_PROTOCOL
+            || port.guest_port.is_none()
+            || self
+                .derivation
+                .requirements
+                .network
+                .iter()
+                .any(|n| n.phase == crate::requirements::ExecutionPhase::Runtime)
+        {
+            return Err(RetainedError("registration_runtime_unsupported"));
+        }
+        let path = self
+            .base_contract
+            .requirements
+            .iter()
+            .find(|r| {
+                r.verifier == crate::authoring::HTTP_CONTRACT_VERIFIER
+                    && r.port.as_deref() == Some(port.id.as_str())
+            })
+            .and_then(|r| r.path.as_deref())
+            .ok_or(RetainedError("registration_readiness_missing"))?;
+        Ok(serde_json::json!({
+            "workspace_materialization_ref": self.artifact.content_ref,
+            "workspace_guest_root": "/app",
+            "argv": serve.argv,
+            "cwd_relative": crate::process_binding::workspace_relative_cwd(&serve.cwd).map_err(|_| RetainedError("registration_cwd"))?,
+            "public_env": env,
+            "runtime_requirements": binding.toolchains.iter().map(|(name,version)| serde_json::json!({"name":name,"version":version,"resolution":"authored"})).collect::<Vec<_>>(),
+            "exported_ports": [{"name":"http","protocol":"http","guest_port":port.guest_port}],
+            "readiness": [{"kind":"http","port_name":"http","path":path}],
+            "state_slots": [{"state_key":slot.id,"mount_target":slot.mount,"access":"read_write","protocol":slot.protocol}]
+        }))
+    }
     /// Validate provenance internally. The caller must also match the request's
     /// frozen K/D; a self-consistent different descriptor is not authorized.
     pub fn validate(&self) -> Result<(), RetainedError> {
