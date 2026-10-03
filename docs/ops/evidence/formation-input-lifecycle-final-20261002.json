@@ -1,0 +1,193 @@
+{
+  "schema": "ato.formation-final-protected-input-lifecycle-controls/1",
+  "execution_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "scope": "Actual isolated Coordinator/Runtime fixed Source input controls; not autonomous OSS/provider acceptance",
+  "controller_sha256": "4d16a162f56395f6d639ec3faf6e6647bf5427c6078a0dbe2785f749b2ca13bd",
+  "controls": [
+    {
+      "schema": "ato.formation-protected-input-lifecycle-control/1",
+      "case": "expired",
+      "requester_reason": "expired",
+      "candidate_count": 0,
+      "Search_id": "search_9998079ba7e8ab5ea954d142004dcc78",
+      "original_created_at": "2026-10-02T09:06:37.735Z",
+      "original_deadline_at": "2026-10-02T09:07:07.735Z",
+      "clock_and_attempt_usage_unchanged": true,
+      "post_deadline_input_status": 409,
+      "post_deadline_error": {
+        "error": "search_input_closed",
+        "required": []
+      },
+      "Requester_resumed": false,
+      "execution_started": false,
+      "encrypted_values_before_cleanup": 1,
+      "encrypted_values_after_cleanup": 0,
+      "public_value_occurrences": 0,
+      "public_files_checked": 42,
+      "result_ACK_attempt_ids": [
+        "01M3XXV60XCQK2DFA37D77VWTP"
+      ],
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:06:37.735Z",
+        "deadline_at": "2026-10-02T09:07:07.735Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5120,
+          "reserved": 0,
+          "remaining": 1073736704
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1589,
+          "reserved": 0,
+          "remaining": 2147482059
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "paid_API_calls": 0,
+      "actual_provider_calls": null,
+      "new_unique_OSS_apps": 0,
+      "ordinary_Run_permission": false,
+      "raw_proof_sha256": "489125249d5ce1f930653dbafdceb30a1ba859e5d0eb5ead4a5e49f713477e6c"
+    },
+    {
+      "schema": "ato.formation-protected-input-lifecycle-control/1",
+      "case": "revoked",
+      "requester_reason": "revoked",
+      "candidate_count": 0,
+      "Search_id": "search_2d3c955240b5a353bc2176e3949d12d4",
+      "original_created_at": "2026-10-02T09:07:32.599Z",
+      "original_deadline_at": "2026-10-02T09:08:02.599Z",
+      "clock_and_attempt_usage_unchanged": true,
+      "post_deadline_input_status": 409,
+      "post_deadline_error": {
+        "error": "search_input_closed",
+        "required": []
+      },
+      "Requester_resumed": false,
+      "execution_started": false,
+      "encrypted_values_before_cleanup": 0,
+      "encrypted_values_after_cleanup": 0,
+      "public_value_occurrences": 0,
+      "public_files_checked": 45,
+      "result_ACK_attempt_ids": [
+        "01M3XXWVKCMRBK3MQAGAMQ3KNZ"
+      ],
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:07:32.599Z",
+        "deadline_at": "2026-10-02T09:08:02.599Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5120,
+          "reserved": 0,
+          "remaining": 1073736704
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1589,
+          "reserved": 0,
+          "remaining": 2147482059
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "paid_API_calls": 0,
+      "actual_provider_calls": null,
+      "new_unique_OSS_apps": 0,
+      "ordinary_Run_permission": false,
+      "raw_proof_sha256": "71a5b6bfe165715f7de91d5385a62e3887fda714e05e76b40c03d70e32fd9d21"
+    },
+    {
+      "schema": "ato.formation-protected-input-lifecycle-control/1",
+      "case": "ambiguous",
+      "requester_reason": "ambiguous_scope",
+      "candidate_count": 2,
+      "Search_id": "search_bc39d48ec58334384245e2581f97b8e4",
+      "original_created_at": "2026-10-02T09:08:27.708Z",
+      "original_deadline_at": "2026-10-02T09:08:57.708Z",
+      "clock_and_attempt_usage_unchanged": true,
+      "post_deadline_input_status": 409,
+      "post_deadline_error": {
+        "error": "search_input_closed",
+        "required": []
+      },
+      "Requester_resumed": false,
+      "execution_started": false,
+      "encrypted_values_before_cleanup": 2,
+      "encrypted_values_after_cleanup": 0,
+      "public_value_occurrences": 0,
+      "public_files_checked": 42,
+      "result_ACK_attempt_ids": [
+        "01M3XXYHHH7K139SSM8JKGF83K"
+      ],
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:08:27.708Z",
+        "deadline_at": "2026-10-02T09:08:57.708Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5120,
+          "reserved": 0,
+          "remaining": 1073736704
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1589,
+          "reserved": 0,
+          "remaining": 2147482059
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "paid_API_calls": 0,
+      "actual_provider_calls": null,
+      "new_unique_OSS_apps": 0,
+      "ordinary_Run_permission": false,
+      "raw_proof_sha256": "9f0422996e10a88d4f59217e5057021dae521b8cdb9f7792dc53c3c412b20b4f"
+    }
+  ],
+  "paid_API_calls": 0,
+  "actual_provider_calls": null,
+  "new_unique_OSS_apps": 0,
+  "ordinary_Run_permission": false,
+  "deployment": false,
+  "remote_migration": false,
+  "old_WBO_UNKNOWN_reexecuted": false
+}

@@ -1,0 +1,1025 @@
+{
+  "schema": "ato.formation-final-source-regression-proof/1",
+  "application": "SVGOMG",
+  "code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "receipt_authority_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+  "Source": {
+    "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+    "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c"
+  },
+  "K": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+  "D": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+  "source_context_seeded_from_prior_D": false,
+  "search_id": "search_690a9cdc20fbff89b13abcc21bd83b5d",
+  "satisfy_id": "01M3XSXYFSSDJKK4SHE50Z6WEH",
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-02T07:58:14.985Z",
+    "deadline_at": "2026-10-02T08:28:14.985Z",
+    "attempts": {
+      "max": 4,
+      "used": 3,
+      "reserved": 0,
+      "remaining": 1
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 7557120,
+      "reserved": 0,
+      "remaining": 1066184704
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 7288575,
+      "reserved": 0,
+      "remaining": 2140195073
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 798720,
+      "reserved": 0,
+      "remaining": 1072943104
+    }
+  },
+  "summary": {
+    "index": 57,
+    "name": "SVGOMG",
+    "provider": "codex_session",
+    "known_D": false,
+    "typed_K_pass": true,
+    "rounds_consumed": 3,
+    "reasoning_accounting": {
+      "API_calls": 0,
+      "actual_provider_calls": null,
+      "call_count": 4,
+      "calls": [
+        {
+          "call_id": "search_690a9cdc20fbff89b13abcc21bd83b5d_r1_s1",
+          "input_file": "r001_s001.input.json",
+          "input_sha256": "sha256:cef342d3073cb20d3249bd22253d51486d8f944af0117de1f54c278dba8851f1",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 138457,
+          "output_file": "r001_s001.record.json",
+          "output_sha256": "sha256:e086d41e374cb236eb932ef9098781c578e8ad74d78d25adcf0972a29b8743e1",
+          "provider_call": null,
+          "reasoning_ms": 138434,
+          "validation_ms": 22
+        },
+        {
+          "call_id": "search_690a9cdc20fbff89b13abcc21bd83b5d_r2_s1",
+          "input_file": "r002_s001.input.json",
+          "input_sha256": "sha256:5edf34e85fbbb01151b341fcc8edcfb2fffd1c3bb9ec0564b9b4f2dbc451c742",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 140457,
+          "output_file": "r002_s001.record.json",
+          "output_sha256": "sha256:f255ff977366d0f5175eb511fe7f464719bf2afccc32f99be14b2092164c45bc",
+          "provider_call": null,
+          "reasoning_ms": 140435,
+          "validation_ms": 21
+        },
+        {
+          "call_id": "search_690a9cdc20fbff89b13abcc21bd83b5d_r3_s1",
+          "input_file": "r003_s001.input.json",
+          "input_sha256": "sha256:667f70e123dbfd00f8bcec56e8fca82671b35f1473fc6eaaf01d900de4ab7741",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 170567,
+          "output_file": "r003_s001.record.json",
+          "output_sha256": "sha256:cd3335d5c2113f51c87cd4080d6678e4bddb9a9e9c3741ee3c4ed70bb418c1f5",
+          "provider_call": null,
+          "reasoning_ms": 170562,
+          "validation_ms": 4
+        },
+        {
+          "call_id": "search_690a9cdc20fbff89b13abcc21bd83b5d_r3_s2",
+          "input_file": "r003_s002.input.json",
+          "input_sha256": "sha256:f86d43ae3b281e82dab998ecac7958ec165c80db8c3456bc5ddbd353c4b9756d",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 380893,
+          "output_file": "r003_s002.record.json",
+          "output_sha256": "sha256:c89e49df4ae7419239c0055b79fea2e0a7e9c2f11ba8f538c3f8bd20c7a5a769",
+          "provider_call": null,
+          "reasoning_ms": 380864,
+          "validation_ms": 28
+        }
+      ],
+      "configuration_ref": "sha256:aefd26e024548e6cf63f9cf5f60045729fd0e4e2d4eac54f50fef4ca4d77f822",
+      "provider": "codex_session",
+      "provider_transport": null,
+      "schema": "ato.formation-reasoning-accounting/1",
+      "session_cost": "not_exposed",
+      "session_token_usage": "not_exposed; no fabricated usage"
+    },
+    "terminal_origin": "requester_verified",
+    "coordinator_status": "satisfied",
+    "automatic_retry": false,
+    "input_requirements": [],
+    "search_budget": null,
+    "result": "cells/057/requester.stdout.log",
+    "result_sha256": "7b2ccff7c7b3b68d5120832fbbe385385f0496f99f115c874db662d3bfa5bf04",
+    "exit_code": 0,
+    "elapsed_seconds": 886.972,
+    "functional_acceptance": "not_measured",
+    "deployed": false
+  },
+  "attempts": [
+    {
+      "attempt_id": "01M3XT26NATD1W182C10JXS7M6",
+      "derivation_ref": "sha256:cea220a62e6fc19ae69275e10b745487b8390904f522ff138603efec0284843c",
+      "status": "inconclusive",
+      "failure": {
+        "code": "authority_denied",
+        "stage": "admission",
+        "message": "runtime Bind requirement missing for ato.http@1 app.http"
+      },
+      "formation_attempt": {
+        "attempt_id": "01M3XT26NATD1W182C10JXS7M6",
+        "candidate": "authored",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation_ref": "sha256:cea220a62e6fc19ae69275e10b745487b8390904f522ff138603efec0284843c",
+        "failure": {
+          "code": "authority_denied",
+          "message": "runtime Bind requirement missing for ato.http@1 app.http",
+          "stage": "admission"
+        },
+        "outcomes": {
+          "cleanup": {
+            "reason": "nothing ran",
+            "state": "not_applicable"
+          },
+          "publication": {
+            "reason": "authority_denied",
+            "state": "not_attempted"
+          },
+          "runtime_verification": {
+            "reason": "authority_denied",
+            "state": "not_attempted"
+          },
+          "seal": {
+            "reason": "authority_denied",
+            "state": "not_attempted"
+          }
+        },
+        "runtime_id": "local",
+        "status": "filtered"
+      },
+      "exploration_evidence": [
+        {
+          "kind": "exploration_network_evidence",
+          "reports": [
+            {
+              "phase": "dependencies",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "registry.npmjs.org"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 0
+              }
+            },
+            {
+              "phase": "build",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 0
+              }
+            },
+            {
+              "phase": "runtime",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 0
+              }
+            }
+          ]
+        },
+        {
+          "facts": [],
+          "kind": "exploration_execution_facts"
+        },
+        {
+          "kind": "exploration_authority_evidence",
+          "refused": [
+            {
+              "operation": "bind",
+              "phase": "runtime",
+              "protocol": "ato.http@1",
+              "resource": "app.http"
+            }
+          ]
+        },
+        {
+          "kind": "exploration_phase_timings",
+          "phases": [
+            {
+              "phase": "source",
+              "started_at_ms": 1790928035120,
+              "elapsed_ms": 96
+            },
+            {
+              "phase": "source",
+              "started_at_ms": 1790928035216,
+              "elapsed_ms": 524
+            },
+            {
+              "phase": "cleanup",
+              "started_at_ms": 1790928035770,
+              "elapsed_ms": 0
+            }
+          ]
+        }
+      ],
+      "metadata_mismatch": [],
+      "resource_charged": {
+        "transfer_bytes": 2519040,
+        "expanded_bytes": 2429525,
+        "stored_bytes": 0
+      },
+      "claimed_at": "2026-10-02T08:00:35.080Z",
+      "finished_at": "2026-10-02T08:00:35.804Z"
+    },
+    {
+      "attempt_id": "01M3XT6JJTHTJ5M7XFAHX59RMD",
+      "derivation_ref": "sha256:6d2a0bd5ee4d3820d71c0a4a75a2ae621cc658d5b5fbec920dfc42afbf1c9ded",
+      "status": "fail",
+      "failure": {
+        "code": "npm_lifecycle_plan_required",
+        "stage": "build",
+        "message": "{\"packages\":[\"es5-ext\"],\"root_lifecycle\":[]}"
+      },
+      "formation_attempt": {
+        "attempt_id": "01M3XT6JJTHTJ5M7XFAHX59RMD",
+        "candidate": "authored",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation_ref": "sha256:6d2a0bd5ee4d3820d71c0a4a75a2ae621cc658d5b5fbec920dfc42afbf1c9ded",
+        "failure": {
+          "code": "npm_lifecycle_plan_required",
+          "message": "{\"packages\":[\"es5-ext\"],\"root_lifecycle\":[]}",
+          "stage": "build"
+        },
+        "outcomes": {
+          "cleanup": {
+            "reason": "no candidate was realized",
+            "state": "not_applicable"
+          },
+          "publication": {
+            "reason": "npm_lifecycle_plan_required",
+            "state": "not_attempted"
+          },
+          "runtime_verification": {
+            "reason": "npm_lifecycle_plan_required",
+            "state": "not_attempted"
+          },
+          "seal": {
+            "reason": "npm_lifecycle_plan_required",
+            "state": "not_attempted"
+          }
+        },
+        "runtime_id": "local",
+        "status": "failed"
+      },
+      "exploration_evidence": [
+        {
+          "kind": "exploration_network_evidence",
+          "reports": [
+            {
+              "phase": "dependencies",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "registry.npmjs.org"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [
+                  {
+                    "count": 15,
+                    "port": 443,
+                    "stage": "connect",
+                    "target": "registry.npmjs.org"
+                  }
+                ],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 37499113
+              }
+            },
+            {
+              "phase": "build",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 37499113
+              }
+            },
+            {
+              "phase": "runtime",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 37499113
+              }
+            }
+          ]
+        },
+        {
+          "facts": [
+            {
+              "exit_code": 0,
+              "log_tail": "[check-toolchain] v22.14.0 \n",
+              "signal": null,
+              "stage": "build",
+              "step": "check-toolchain"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[native-1] {\"schema\":\"ato.npm-native-plan/1\",\"operation\":\"initialize\"} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-1"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[dependencies-2] \nadded 962 packages in 11s \nnpm warn deprecated urix@0.1.0: Please see https://github.com/lydell/urix \nnpm warn deprecated source-map-url@0.4.1: See https://github.com/lydell/source-map-url \nnpm warn deprecated resolve-url@0.2.1: https://github.com/lydell/resolve-url \nnpm warn deprecated chokidar@2.1.8: Chokidar 2 does not receive security updates since 2019. Upgrade to chokidar 3 with 15x fewer dependencies \nnpm warn deprecated source-map-resolve@0.5.3: See https://github.com/lydell/source-map-resolve \n",
+              "signal": null,
+              "stage": "build",
+              "step": "dependencies-2"
+            },
+            {
+              "exit_code": 1,
+              "log_tail": "[native-3] ATO_FORMATION_FAILURE {\"code\":\"npm_lifecycle_plan_required\",\"message\":\"{\\\"packages\\\":[\\\"es5-ext\\\"],\\\"root_lifecycle\\\":[]}\"} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-3"
+            }
+          ],
+          "kind": "exploration_execution_facts"
+        },
+        {
+          "kind": "exploration_phase_timings",
+          "phases": [
+            {
+              "phase": "source",
+              "started_at_ms": 1790928178616,
+              "elapsed_ms": 115
+            },
+            {
+              "phase": "source",
+              "started_at_ms": 1790928178731,
+              "elapsed_ms": 525
+            },
+            {
+              "phase": "source",
+              "started_at_ms": 1790928179264,
+              "elapsed_ms": 8
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928179273,
+              "elapsed_ms": 40
+            },
+            {
+              "phase": "dependencies",
+              "started_at_ms": 1790928179313,
+              "elapsed_ms": 18
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928179331,
+              "elapsed_ms": 242
+            },
+            {
+              "phase": "dependencies",
+              "started_at_ms": 1790928179574,
+              "elapsed_ms": 11596
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928191170,
+              "elapsed_ms": 336
+            },
+            {
+              "phase": "cleanup",
+              "started_at_ms": 1790928191537,
+              "elapsed_ms": 1011
+            }
+          ]
+        }
+      ],
+      "metadata_mismatch": [],
+      "resource_charged": {
+        "transfer_bytes": 2519040,
+        "expanded_bytes": 2429525,
+        "stored_bytes": 0
+      },
+      "claimed_at": "2026-10-02T08:02:58.575Z",
+      "finished_at": "2026-10-02T08:03:12.593Z"
+    },
+    {
+      "attempt_id": "01M3XTQXJT79WMT21WTSJY2BV0",
+      "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+      "status": "pass",
+      "failure": null,
+      "formation_attempt": {
+        "attempt_id": "01M3XTQXJT79WMT21WTSJY2BV0",
+        "candidate": "authored",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+        "outcomes": {
+          "cleanup": {
+            "state": "succeeded"
+          },
+          "publication": {
+            "state": "succeeded"
+          },
+          "runtime_verification": {
+            "state": "succeeded"
+          },
+          "seal": {
+            "state": "succeeded"
+          }
+        },
+        "realization": {
+          "build_network": "n/a",
+          "candidate_network": "loopback only",
+          "containment": "none; serves the produced bundle's files, runs nothing",
+          "destroyed": true,
+          "endpoints": {
+            "app.http": "loopback static server"
+          },
+          "executor": "runtime-static-loopback",
+          "workspace": "the produced static web bundle, read-only"
+        },
+        "receipt": {
+          "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+          "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+          "execution": {
+            "attempt_id": "01M3XTQXJT79WMT21WTSJY2BV0",
+            "endpoint": "http://127.0.0.1:41249/",
+            "platform": "linux/aarch64",
+            "realization": "static_web",
+            "request_id": "01M3XSXYFSSDJKK4SHE50Z6WEH"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:189d8ea09123aefea62af9acd955bf3147858e5e1eb76bede398cf2b7c3d31bf",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "runtime_id": "local",
+        "status": "verified",
+        "verification": {
+          "verdicts": [
+            {
+              "id": "root",
+              "outcome": {
+                "result": "satisfied"
+              }
+            },
+            {
+              "id": "source-identity",
+              "outcome": {
+                "result": "satisfied"
+              }
+            }
+          ]
+        }
+      },
+      "exploration_evidence": [
+        {
+          "kind": "exploration_network_evidence",
+          "reports": [
+            {
+              "phase": "dependencies",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "registry.npmjs.org"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [
+                  {
+                    "count": 15,
+                    "port": 443,
+                    "stage": "connect",
+                    "target": "registry.npmjs.org"
+                  }
+                ],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 37498762
+              }
+            },
+            {
+              "phase": "build",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 37498762
+              }
+            },
+            {
+              "phase": "runtime",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 37498762
+              }
+            }
+          ]
+        },
+        {
+          "facts": [
+            {
+              "exit_code": 0,
+              "log_tail": "[dependencies-2] \nadded 962 packages in 11s \nnpm warn deprecated urix@0.1.0: Please see https://github.com/lydell/urix \nnpm warn deprecated source-map-url@0.4.1: See https://github.com/lydell/source-map-url \nnpm warn deprecated resolve-url@0.2.1: https://github.com/lydell/resolve-url \nnpm warn deprecated chokidar@2.1.8: Chokidar 2 does not receive security updates since 2019. Upgrade to chokidar 3 with 15x fewer dependencies \nnpm warn deprecated source-map-resolve@0.5.3: See https://github.com/lydell/source-map-resolve \n",
+              "signal": null,
+              "stage": "build",
+              "step": "dependencies-2"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[native-3] \n> es5-ext@0.10.62 postinstall \n> node -e \"try{require('./_postinstall')}catch(e){}\" || exit 0 \n\nrebuilt dependencies successfully \n{\"schema\":\"ato.npm-native-evidence/1\",\"operation\":\"rebuild\",\"dependency_packages\":1,\"root_lifecycle\":[]} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-3"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[native-4] {\"schema\":\"ato.npm-native-evidence/1\",\"operation\":\"audit\",\"dependency_packages\":1,\"root_lifecycle\":[]} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-4"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[build-5] \n> svgomg@1.17.0 build \n> gulp clean-build \n\n[08:12:42] Using gulpfile ~/gulpfile.js \n[08:12:42] Starting 'clean-build'... \n[08:12:42] Starting 'clean'... \n[08:12:42] Finished 'clean' after 2.15 ms \n[08:12:42] Starting 'copy'... \n[08:12:42] Starting 'css'... \n[08:12:42] Starting 'bound js'... \n[08:12:42] Starting 'bound js'... \n[08:12:42] Starting 'bound js'... \n[08:12:42] Starting 'bound js'... \n[08:12:42] Starting 'bound js'... \n[08:12:43] Finished 'css' after 525 ms \n[08:12:43] Starting 'html'... \n[08:12:43] Finished 'html' after 9.19 ms \n[08:12:46] Finished 'copy' after 4 s \n[08:12:46] Finished 'bound js' after 4 s \n[08:12:46] Finished 'bound js' after 4 s \n[08:12:48] Finished 'bound js' after 5.46 s \n[08:12:48] Finished 'bound js' after 5.73 s \n[08:12:53] Finished 'bound js' after 10 s \n[08:12:53] Finished 'clean-build' after 10 s \n(node:16) [DEP0180] DeprecationWarning: fs.Stats constructor is deprecated. \n(Use `node --trace-deprecation ...` to show where the warning was created) \n",
+              "signal": null,
+              "stage": "build",
+              "step": "build-5"
+            }
+          ],
+          "kind": "exploration_execution_facts"
+        },
+        {
+          "kind": "exploration_phase_timings",
+          "phases": [
+            {
+              "phase": "source",
+              "started_at_ms": 1790928747408,
+              "elapsed_ms": 898
+            },
+            {
+              "phase": "source",
+              "started_at_ms": 1790928748307,
+              "elapsed_ms": 528
+            },
+            {
+              "phase": "source",
+              "started_at_ms": 1790928748842,
+              "elapsed_ms": 7
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928748850,
+              "elapsed_ms": 38
+            },
+            {
+              "phase": "dependencies",
+              "started_at_ms": 1790928748888,
+              "elapsed_ms": 16
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928748905,
+              "elapsed_ms": 173
+            },
+            {
+              "phase": "dependencies",
+              "started_at_ms": 1790928749078,
+              "elapsed_ms": 10840
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928759919,
+              "elapsed_ms": 1292
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928761212,
+              "elapsed_ms": 321
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928761533,
+              "elapsed_ms": 11653
+            },
+            {
+              "phase": "build",
+              "started_at_ms": 1790928773187,
+              "elapsed_ms": 89
+            },
+            {
+              "phase": "launch",
+              "started_at_ms": 1790928773276,
+              "elapsed_ms": 0
+            },
+            {
+              "phase": "verification",
+              "started_at_ms": 1790928773276,
+              "elapsed_ms": 3
+            },
+            {
+              "phase": "cleanup",
+              "started_at_ms": 1790928773280,
+              "elapsed_ms": 0
+            },
+            {
+              "phase": "cleanup",
+              "started_at_ms": 1790928775813,
+              "elapsed_ms": 867
+            }
+          ]
+        }
+      ],
+      "metadata_mismatch": [],
+      "resource_charged": {
+        "transfer_bytes": 2519040,
+        "expanded_bytes": 2429525,
+        "stored_bytes": 798720
+      },
+      "claimed_at": "2026-10-02T08:12:27.365Z",
+      "finished_at": "2026-10-02T08:12:57.111Z"
+    }
+  ],
+  "fresh_receipt": {
+    "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+    "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+    "execution": {
+      "attempt_id": "01M3XTQXJT79WMT21WTSJY2BV0",
+      "endpoint": "http://127.0.0.1:41249/",
+      "platform": "linux/aarch64",
+      "realization": "static_web",
+      "request_id": "01M3XSXYFSSDJKK4SHE50Z6WEH"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:189d8ea09123aefea62af9acd955bf3147858e5e1eb76bede398cf2b7c3d31bf",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+          "input": "workspace"
+        },
+        "id": "source-identity",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "binary_hashes": {
+    "ato": {
+      "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/ato",
+      "sha256": "bad2737892da0d76fa17eef1ab0a017b8d2a368ce8baea75d753d3e1048e6b9b"
+    },
+    "worker": {
+      "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/ato-formation-worker",
+      "sha256": "5986f96105e407579c305931bce8e7b23f6b4e86c6c6c46b6c4559cb8a53b59a"
+    },
+    "preflight": {
+      "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/preflight",
+      "sha256": "b4f352809188e6d28a5884a884ed74537cf229e31b029eed9125b477222ee388"
+    }
+  },
+  "plan_sha256": "f8c636cc6b9002c2c2e4022748e8942b5225a833ba55d0028173b952292a0731",
+  "ACK": {
+    "schema": "ato.formation-readonly-ACK-observation/1",
+    "acknowledged_attempt_ids": [
+      "01M3XT26NATD1W182C10JXS7M6",
+      "01M3XT6JJTHTJ5M7XFAHX59RMD",
+      "01M3XTQXJT79WMT21WTSJY2BV0"
+    ],
+    "all_reported_attempts_closed": true,
+    "observed_after_pilot_exit": true,
+    "new_execution_or_requester_resume": false,
+    "root_delivery_permissions_preserved": true
+  },
+  "pilot_observer_exit_code": 1,
+  "pilot_observer_failure": "PermissionError reading root-owned delivery directory; final saved ACKs confirmed read-only with no Runtime or requester restart",
+  "observer_fix_sha256": "a43e42089365fa01e197072edacd86eb0341e5b50ddd475478b11b3db95dc0b8",
+  "source_runtime_reexecuted_to_repair_observer": false,
+  "functional_UI": {
+    "common_Runtime_code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+    "measurement": "separate retained functional acceptance; no Source Search resume",
+    "browser": {
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "deployed": false,
+      "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+      "endpoint": "http://127.0.0.1:43251/",
+      "measurement": "separate functional acceptance",
+      "normal_run_authorized": false,
+      "retained_ref": "sha256:5218c2dc105ab06d7e51ec529faa587f1bd11c3a1ace6e9a7f1b1579a3e7d784",
+      "schema": "ato.formation-functional-observation/1",
+      "functional_pass": true,
+      "typed_K_changed": false,
+      "browser_version": "149.0.7827.0",
+      "steps": [
+        "paste SVG",
+        "optimize and download smaller SVG",
+        "enable Multipass",
+        "reset options"
+      ],
+      "input_bytes": 186,
+      "output_bytes": 131,
+      "optimized_sha256": "52f327a702f41100beb79bc9b4ed27cc832a809e39a9d0754ccf13a14a161e99",
+      "blocked_external_requests": [
+        "https://www.google-analytics.com/analytics.js"
+      ],
+      "page_errors": [
+        "Failed to read the 'serviceWorker' property from 'Navigator': Service worker is disabled because the context is sandboxed and lacks the 'allow-same-origin' flag.",
+        "Cannot read properties of undefined (reading 'addEventListener')",
+        "Failed to read the 'serviceWorker' property from 'Navigator': Service worker is disabled because the context is sandboxed and lacks the 'allow-same-origin' flag."
+      ],
+      "requests": [
+        {
+          "url": "http://127.0.0.1:43251/",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/all.css",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/__ato/instance-state-bridge-v1.js",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/__ato/browser-runner-bridge-v0.1.2.js",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/fonts/code-latin.woff2",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/js/page.js",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/imgs/icon.png",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/js/svgo-worker.js",
+          "status": 200
+        },
+        {
+          "url": "http://127.0.0.1:43251/js/gzip-worker.js",
+          "status": 200
+        }
+      ],
+      "cleanup_exit_code": 0
+    },
+    "fresh_attempt": {
+      "candidate": "separate-functional-acceptance",
+      "attempt_id": "fresh-retained-functional-attempt",
+      "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "runtime_id": "local-acceptance",
+      "status": "verified",
+      "verification": {
+        "verdicts": [
+          {
+            "id": "root",
+            "outcome": {
+              "result": "satisfied"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": {
+              "result": "satisfied"
+            }
+          }
+        ]
+      },
+      "realization": {
+        "executor": "runtime-static-loopback",
+        "containment": "none; serves the produced bundle's files, runs nothing",
+        "workspace": "the produced static web bundle, read-only",
+        "build_network": "n/a",
+        "candidate_network": "loopback only",
+        "endpoints": {
+          "app.http": "loopback static server"
+        },
+        "destroyed": false
+      },
+      "receipt": {
+        "schema": "ato.contract-verification-receipt/1",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+        "target": {
+          "kind": "formation-runtime"
+        },
+        "execution": {
+          "realization": "static_web",
+          "platform": "linux/aarch64",
+          "endpoint": "http://127.0.0.1:43251/",
+          "attempt_id": "fresh-retained-functional-attempt",
+          "request_id": "explicit-functional-acceptance"
+        },
+        "observations": [
+          {
+            "id": "root",
+            "outcome": "satisfied",
+            "evidence": {
+              "method": "GET",
+              "path": "/",
+              "status": 200,
+              "body_sha256": "sha256:189d8ea09123aefea62af9acd955bf3147858e5e1eb76bede398cf2b7c3d31bf"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": "satisfied",
+            "evidence": {
+              "input": "workspace",
+              "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c"
+            }
+          }
+        ],
+        "fully_satisfied": true
+      },
+      "outcomes": {
+        "seal": {
+          "state": "succeeded"
+        },
+        "runtime_verification": {
+          "state": "succeeded"
+        },
+        "cleanup": {
+          "state": "not_attempted",
+          "reason": "handed_off"
+        },
+        "publication": {
+          "state": "not_applicable",
+          "reason": "running an existing published bundle"
+        }
+      }
+    },
+    "helper_sha256": "3d8320253f1166132b8b8271776f3875c0f0105e8fc7c374b9355be286c4ebad",
+    "helper_source_sha256": "e5f7f1e09fa0e608d25d60290d4efde97a5efec96d96c631c87ee6c3f8f1252b",
+    "helper_lock_sha256": "46d78eb8f5276def04649156c1a4c6e9f6e162bc345608c589f247c62e11f1f6",
+    "preregistration": {
+      "owner_storage_read": true,
+      "retained_ref": "sha256:5218c2dc105ab06d7e51ec529faa587f1bd11c3a1ace6e9a7f1b1579a3e7d784",
+      "artifact_ref": "sha256:3ad87f8642e1cec3278722a1372cf09b77ffc4b03cd60ab5ef95a49c6c8fe656",
+      "bytes": 798720,
+      "K": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "D": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+      "source_creation_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+      "API_creation_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+      "functional_Runtime_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+      "ordinary_Run_permission": false,
+      "API_seed": false
+    },
+    "preserved_browser_fixture_failures": [
+      {
+        "version": 1,
+        "reason": "missing TMPDIR",
+        "fresh_same_K_PASS": true,
+        "confirmed_cleanup_exit_code": 0,
+        "public_proof_sha256": "ce31ec3c254969a366b67ca7214063340c5732e503045541fa3498b8ba650689"
+      },
+      {
+        "version": 2,
+        "reason": "Chromium Unix socket path too long",
+        "fresh_same_K_PASS": true,
+        "confirmed_cleanup_exit_code": 0,
+        "public_proof_sha256": "066fc8acc450debb945a00e59b9f71f6b46ca477a0723fa55f2138f7127bbb1f"
+      }
+    ]
+  },
+  "paid_API_calls": 0,
+  "actual_Codex_provider_calls": null,
+  "new_unique_OSS_app_successes": 0,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "deployment_remote_migration_ordinary_Run_permission": false
+}
