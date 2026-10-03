@@ -159,11 +159,34 @@ def auth_host_profile(public, home, native, mcp, selected_socket, auth_file=None
     return "\n".join(lines) + "\n"
 
 
+class NativeFrames:
+    """Read pipe frames without buffered readline/select deadlocks."""
+    def __init__(self, stream):
+        self.descriptor = stream.fileno()
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.descriptor, selectors.EVENT_READ)
+        self.pending = b""
+
+    def receive(self, end):
+        while time.time() < end:
+            if b"\n" in self.pending:
+                line, self.pending = self.pending.split(b"\n", 1)
+                return json.loads(line)
+            if not self.selector.select(min(1, max(0, end - time.time()))):
+                continue
+            chunk = os.read(self.descriptor, 65536)
+            if not chunk:
+                return None
+            self.pending += chunk
+            if len(self.pending.split(b"\n", 1)[0]) > 4 * 1024 * 1024:
+                raise ISOLATION.Rejected("native_frame_bounds")
+        return None
+
+
 class AppServer:
     def __init__(self, process, events):
         self.process, self.events = process, events
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(process.stdout, selectors.EVENT_READ)
+        self.frames = NativeFrames(process.stdout)
         self.sequence = 0
         self.methods = {}
         self.mcp_status = {}
@@ -180,16 +203,9 @@ class AppServer:
 
     def receive(self, predicate, end):
         while time.time() < end:
-            if not self.selector.select(min(1, end - time.time())):
-                if self.process.poll() is not None:
-                    break
-                continue
-            line = self.process.stdout.readline()
-            if not line:
+            packet = self.frames.receive(end)
+            if packet is None:
                 break
-            if len(line) > 4 * 1024 * 1024:
-                raise ISOLATION.Rejected("native_frame_bounds")
-            packet = json.loads(line)
             if packet.get("method") == "mcpServer/startupStatus/updated":
                 state = packet.get("params", {})
                 self.mcp_status[state.get("name")] = state.get("status")
@@ -429,7 +445,7 @@ def run(args):
             command += ["-p", "--input-format", "stream-json"]
             process = launch(command, "claude", environment, True)
             events = (owner / "native-events.jsonl").open("x"); handles.append(events)
-            selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
+            frames = NativeFrames(process.stdout)
             previous_exchange = None
             turns = 0
             end = deadline / 1000
@@ -449,14 +465,9 @@ def run(args):
                     turn_end = min(end, current["exchange_deadline_ms"] / 1000)
                     completed = False
                     while time.time() < turn_end:
-                        if not selector.select(min(1, turn_end - time.time())):
-                            if process.poll() is not None:
-                                break
-                            continue
-                        line = process.stdout.readline()
-                        if not line or len(line) > 4 * 1024 * 1024:
+                        event = frames.receive(turn_end)
+                        if event is None:
                             break
-                        event = json.loads(line)
                         events.write(json.dumps(event) + "\n"); events.flush()
                         if event.get("type") == "system" and event.get("subtype") == "init":
                             tools = event.get("tools", [])

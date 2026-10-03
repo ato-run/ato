@@ -1,6 +1,7 @@
 """Native launch admission boundaries; no provider inference or Source run."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -95,6 +96,16 @@ class NativeAdmissionTests(unittest.TestCase):
             self.assertIsNone(narrowed[0]["apply_patch_tool_type"])
             self.assertEqual(narrowed[0]["shell_type"], "disabled")
             self.assertEqual(narrowed[0]["experimental_supported_tools"], [])
+
+    def test_coalesced_native_frames_complete_without_another_pipe_write(self):
+        reader, writer = os.pipe()
+        with os.fdopen(reader, "rb") as stream:
+            frames = NATIVE.NativeFrames(stream)
+            os.write(writer, b'{"method":"item/completed"}\n{"method":"turn/completed"}\n')
+            end = time.time() + .5
+            self.assertEqual(frames.receive(end)["method"], "item/completed")
+            self.assertEqual(frames.receive(end)["method"], "turn/completed")
+        os.close(writer)
 
 
 if __name__ == "__main__":
