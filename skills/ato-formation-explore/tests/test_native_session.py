@@ -75,6 +75,7 @@ class NativeAdmissionTests(unittest.TestCase):
     def test_saved_response_waits_but_disconnect_or_input_pause_stops(self):
         view = dict(self.view, next_operation="owner_reconcile", exchange={"response_saved": True})
         self.assertEqual(NATIVE.next_action(view), "wait")
+        self.assertEqual(NATIVE.next_action(dict(view, next_operation="submit")), "wait")
         self.assertEqual(NATIVE.next_action(dict(view, connected=False)), "stop")
         self.assertEqual(NATIVE.next_action(dict(view, progress={
             "status": "running", "pause_reason": "needs_input"})), "stop")
