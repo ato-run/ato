@@ -70,7 +70,7 @@ impl VerificationStateSession {
             anyhow::bail!("verification_state_shape");
         };
         ensure!(
-            attachment.state_key == slot.id
+            attachment.state_key == ato_formation::retained::state_service_key(&slot.id)?
                 && attachment.mount_target == slot.mount
                 && attachment.access == StateAccessV1::ReadWrite
                 && attachment.writer_fence.is_some_and(|f| f > 0),

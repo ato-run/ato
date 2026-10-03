@@ -276,6 +276,10 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
+    ValidateFunctionalObservations {
+        acceptance: ato_formation::functional_acceptance::FunctionalAcceptanceV1,
+        observations: Vec<ato_formation::port_operations::PortOperationObservation>,
+    },
     ProjectRetainedRegistration {
         state: Box<ato_formation::search::SearchStateV1>,
         submission: Box<ato_formation::exploration::ExplorationSubmission>,
@@ -343,6 +347,15 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         let request: SearchRequest =
             serde_json::from_slice(bytes).map_err(|_| "search_input_invalid".to_owned())?;
         match request {
+            SearchRequest::ValidateFunctionalObservations {
+                acceptance,
+                observations,
+            } => {
+                acceptance
+                    .validate_observations(&observations)
+                    .map_err(str::to_owned)?;
+                Ok(serde_json::json!({"status":"functional_observations_accepted"}))
+            }
             SearchRequest::ProjectRetainedRegistration {
                 state,
                 submission,
