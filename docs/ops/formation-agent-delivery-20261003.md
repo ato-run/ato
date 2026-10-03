@@ -75,6 +75,11 @@ APIのCI依存を含む `e3b6aad2` もNode22.23.3/frozen lockfileでtypecheck PA
 application/schema/dependency bytesは直前の `57991090` と同じ。既存214件を
 後続mergeで再実行したとは扱わない。
 
+CI依存を含むSession `f8fe576f` とstate `574a556a` も、native Ubuntu/macOS/Windows
+の全CLI jobがPASS。API `e3b6aad2` はtypecheck/Instance/browser PASS、既存13失敗は
+保存済みexact base/headと同じ名前だった。[依存を含む記録](formation-post-ci-dependency-20261003.md)
+に各pinとlog hashを保存し、後続doc/統合Sourceへの付け替えは行わない。
+
 ## 実探索前のgateと新規計画
 
 新しい計画はSkill PRの `docs/ops/formation-agent-session-acceptance-plan-20261003.json`。
