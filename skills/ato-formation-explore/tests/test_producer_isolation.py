@@ -145,6 +145,8 @@ class ProducerIsolationTests(unittest.TestCase):
         self.prepare()
         policy = (self.output / "claude-code.prepared.sb").read_text()
         self.assertIn("(deny default)", policy)
+        self.assertIn('(allow file-read* (literal "/"))', policy)
+        self.assertNotIn('(subpath "/")', policy)
         self.assertNotIn("(allow process-exec)", policy)
         self.assertNotIn("network-outbound", policy)
         self.assertNotIn("unix-socket", policy)

@@ -24,7 +24,7 @@ python3 scripts/producer-isolation-preflight.py probe \
 
 ## profileと測定範囲
 
-既存の`lib/sandbox/src/macos.rs`とCapsule用profileは変更しない。専用profileは`deny default`を基準に、公開treeの読取、専用scratchの読書き、system libraryの読取、選定したNative binaryと固定MCP binaryへのliteral `process-exec`だけを許可する。shell/security/curl、任意binary、Sourceの直接起動、network/Unix socket、homeやKeychain fileへの包括許可は持たない。Sourceやowner directoryをmount/allow-listへ追加しない。
+既存の`lib/sandbox/src/macos.rs`とCapsule用profileは変更しない。専用profileは`deny default`を基準に、公開treeの読取、専用scratchの読書き、system libraryの読取、選定したNative binaryと固定MCP binaryへのliteral `process-exec`だけを許可する。libSystemの起動に必要なroot directoryのliteral読取は既存sandboxと同じであり、root配下の包括読取は許可しない。shell/security/curl、任意binary、Sourceの直接起動、network/Unix socket、homeやKeychain fileへの包括許可は持たない。Sourceやowner directoryをmount/allow-listへ追加しない。
 
 Native認証用に`com.apple.secd`と`com.apple.SecurityServer`のMach lookupを準備する。Keychainの実値を読み出すfixtureは実行せず、global login/設定も変更しない。Codexでは機能下限0.99.0以上と、計画専用のOS credential storeが必要。`cli_auth_credentials_store = "keyring"`はfile fallbackを避ける設定であり、既存global entryのコピーや新loginはhelperの仕事ではない。0600 credential fileを公開する代替もない。Claude Code 2.1.288のlocal helpとCodexの[対応下限](installation.md)は、実tool inventoryの測定と区別する。
 
