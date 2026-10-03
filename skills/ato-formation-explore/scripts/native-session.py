@@ -286,6 +286,8 @@ def run(args):
         raise ISOLATION.Rejected("native_version_mismatch")
     connection = Path(args.connection).resolve(strict=True)
     binding = json.loads(connection.read_text())  # Owner process only; never copied publicly.
+    if binding.get("agent", {}).get("model") is not None and binding["agent"]["model"] != args.model:
+        raise ISOLATION.Rejected("session_model_binding_mismatch")
     view = status(mcp, connection)
     deadline = admission(view, binding, args.agent, args.version)
     output = Path(args.output).absolute()
