@@ -20,6 +20,10 @@ use crate::spec::{AttemptSpec, CandidateShape};
 /// The route stays unverified; it is not a failure of the route.
 pub const COMPATIBLE_RUNTIME_UNAVAILABLE: &str = "compatible_runtime_unavailable";
 
+/// The route consumes a Model Set and this runtime has no data plane to
+/// deliver it from. Running it without its weights is never an option.
+pub const MODEL_SET_UNAVAILABLE: &str = "model_set_unavailable";
+
 /// Effect classes a Runtime executes without a confirmed authorization: an
 /// attempt of one of these can fail and be retried without anything leaking
 /// out of it.
@@ -90,6 +94,17 @@ pub fn admit(
         return refused(
             COMPATIBLE_RUNTIME_UNAVAILABLE,
             "D states a host condition this runtime does not admit against",
+        );
+    }
+    if spec
+        .derivation
+        .inputs
+        .iter()
+        .any(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+    {
+        return refused(
+            MODEL_SET_UNAVAILABLE,
+            "D consumes a Model Set and this runtime has no data plane to deliver it",
         );
     }
     match authorization {
@@ -268,6 +283,42 @@ mod tests {
             check(EffectClass::Pure, other).as_deref(),
             Some("authorization_mismatch")
         );
+    }
+
+    #[test]
+    fn a_route_consuming_a_model_set_is_refused_where_nothing_can_deliver_it() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let mut derivation = derivation(EffectClass::Pure);
+        derivation
+            .inputs
+            .push(ato_formation::authoring::BoundInput {
+                id: "models".to_owned(),
+                protocol: ato_formation::model_set::MODEL_SET_PROTOCOL.to_owned(),
+                content_ref: format!("sha256:{}", "a".repeat(64)),
+            });
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+        };
+        for authorization in [
+            EffectAuthorization::Unattended,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+        ] {
+            assert_eq!(
+                admit(&spec, authorization, None).map(|f| f.code).as_deref(),
+                Some(MODEL_SET_UNAVAILABLE)
+            );
+        }
     }
 
     #[test]
