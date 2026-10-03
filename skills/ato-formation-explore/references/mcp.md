@@ -15,7 +15,7 @@ ato-formation-session-mcp --connection /absolute/path/to/session-connection.json
 | `submit` | `exchange_id`, `input_sha256`, `output_json` | 共通Rust validatorが受理した応答の保存状態 |
 | `cancel` | `{}` | 既存取消経路の公開状態。cleanup確認を代行しない |
 
-`submit.output_json`は16 KiB以下のJSON文字列。MCP envelopeを含む入力frameは256 KiB以下。未知tool、追加のtool引数、過大frame、接続binding変更は拒否する。拒否出力には受信内容・ファイルpath・capability・parse error詳細を含めない。proposal schemaや予算判定をMCPに再実装せず、CLIと同じSessionへ提出する。
+`submit.output_json`は16 KiB以下のJSON文字列。このFormation facadeではMCP envelopeを含む入力frameを256 KiB以下とする。既存Activity MCPのmemo/Interaction入力へこの上限を適用しない。未知tool、追加のtool引数、過大frame、接続binding変更は拒否する。拒否出力には受信内容・ファイルpath・capability・parse error詳細を含めない。proposal schemaや予算判定をMCPに再実装せず、CLIと同じSessionへ提出する。
 
 Codexの選定versionで次の設定fieldに対応していることを確認して、計画専用の設定へ登録する。[0.99.0の公式設定型](https://github.com/openai/codex/blob/rust-v0.99.0/codex-rs/core/src/config/types.rs)にもこのstdio設定とtool allowlistがある。global設定を更新しない。
 
