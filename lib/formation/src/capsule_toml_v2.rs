@@ -14,6 +14,7 @@ use crate::authoring::{
     ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL,
     TCP_EGRESS_PROTOCOL, WORKSPACE_PROTOCOL,
 };
+use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::requirements::HostRequirement;
 
 pub const CAPSULE_SCHEMA_V2: &str = "ato.capsule/2";
@@ -45,6 +46,18 @@ pub struct PortableAuthoringDraftV2 {
     pub observations: Vec<PortableHttpObservationDraftV2>,
     pub derivations: Vec<PortableDerivationDraftV2>,
     pub effects: EffectClass,
+    /// `ato.model-set@1` inputs every route consumes (at most one in v0).
+    pub model_sets: Vec<PortableModelSetInputDraftV2>,
+}
+
+/// A Model Set input as authored: the manifest file carried with the source
+/// and the digest the author pinned. The bundle builder reads the file and
+/// refuses it unless its canonical digest is exactly `content_ref`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableModelSetInputDraftV2 {
+    pub id: String,
+    pub manifest_path: String,
+    pub content_ref: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +189,9 @@ struct Input {
     protocol: String,
     #[serde(default = "default_workspace_path")]
     path: String,
+    /// Required for, and only for, `ato.model-set@1`: the pinned digest.
+    #[serde(default, rename = "ref")]
+    content_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,18 +347,59 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             ));
         }
     };
-    if document.input.len() != 1 {
+    let (workspace_inputs, other_inputs): (Vec<_>, Vec<_>) = document
+        .input
+        .iter()
+        .partition(|input| input.protocol == WORKSPACE_PROTOCOL);
+    if workspace_inputs.len() != 1 {
         return Err(invalid(
             "input",
             "portable v0 requires exactly one workspace input",
         ));
     }
-    let input = &document.input[0];
+    let input = workspace_inputs[0];
     validate_id("input.id", &input.id)?;
-    if input.id != "workspace" || input.protocol != WORKSPACE_PROTOCOL || input.path != "." {
+    if input.id != "workspace" || input.path != "." || input.content_ref.is_some() {
         return Err(invalid(
             "input",
             format!("must declare id=workspace, use={WORKSPACE_PROTOCOL:?}, path=\".\""),
+        ));
+    }
+    let mut model_sets = Vec::new();
+    for input in other_inputs {
+        validate_id("input.id", &input.id)?;
+        if input.protocol != MODEL_SET_PROTOCOL {
+            return Err(invalid(
+                "input.use",
+                format!(
+                    "{:?} is unsupported; use {WORKSPACE_PROTOCOL:?} or {MODEL_SET_PROTOCOL:?}",
+                    input.protocol
+                ),
+            ));
+        }
+        let Some(content_ref) = input.content_ref.clone().filter(|r| is_sha256_ref(r)) else {
+            return Err(invalid(
+                "input.ref",
+                "a Model Set input pins its manifest digest as sha256:<64 lowercase hex>",
+            ));
+        };
+        if input.path == "." {
+            return Err(invalid(
+                "input.path",
+                "a Model Set input names its manifest file, not the source root",
+            ));
+        }
+        validate_relative(&input.path, "input.path")?;
+        model_sets.push(PortableModelSetInputDraftV2 {
+            id: input.id.clone(),
+            manifest_path: input.path.clone(),
+            content_ref,
+        });
+    }
+    if model_sets.len() > 1 {
+        return Err(invalid(
+            "input",
+            "portable v0 supports at most one Model Set input",
         ));
     }
     if document.state.len() > 1 {
@@ -518,6 +575,7 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
         observations,
         derivations,
         effects,
+        model_sets,
     })
 }
 
@@ -845,6 +903,35 @@ default = "pure"
         assert_eq!(draft.derivations.len(), 2);
         assert_eq!(draft.derivations[0].label, "python-a");
         assert_eq!(draft.derivations[1].env["ROUTE"], "b");
+    }
+
+    #[test]
+    fn a_model_set_input_is_pinned_by_digest_and_names_its_manifest() {
+        let base = include_str!("../../../samples/portable-model-set-probe/capsule.toml");
+        let draft = parse_capsule_toml_v2(base).unwrap();
+        assert_eq!(draft.model_sets.len(), 1);
+        assert_eq!(draft.model_sets[0].id, "models");
+        assert_eq!(
+            draft.model_sets[0].manifest_path,
+            "models/probe.model-set.json"
+        );
+        let pinned = draft.model_sets[0].content_ref.clone();
+        for (what, text) in [
+            ("no ref", base.replace(&format!("ref = \"{pinned}\"\n"), "")),
+            ("bad ref", base.replace(&pinned, "sha256:ABC")),
+            ("source root", base.replace("path = \"models/probe.model-set.json\"", "path = \".\"")),
+            ("escapes", base.replace("models/probe.model-set.json", "../x.json")),
+            ("unknown protocol", base.replace("ato.model-set@1", "ato.model-set@2")),
+            (
+                "two model sets",
+                base.replace(
+                    "[contract]",
+                    &format!("[[input]]\nid = \"more\"\nuse = \"ato.model-set@1\"\npath = \"m.json\"\nref = \"{pinned}\"\n\n[contract]"),
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
+        }
     }
 
     #[test]

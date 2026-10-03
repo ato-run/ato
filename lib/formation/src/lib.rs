@@ -42,6 +42,7 @@ pub mod exploration;
 pub mod failure;
 #[cfg(feature = "planning")]
 pub mod intent;
+pub mod model_set;
 #[cfg(feature = "planning")]
 pub mod preset;
 #[cfg(feature = "planning")]
