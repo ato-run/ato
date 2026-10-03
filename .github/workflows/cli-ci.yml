@@ -29,6 +29,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - if: runner.os == 'Windows'
+        name: Windows durable attempt journal
+        run: cargo test -p ato-runtime-attempt --lib journal::tests -- --test-threads=1
       - if: runner.os != 'Windows'
         run: cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects
       - if: runner.os == 'Windows'

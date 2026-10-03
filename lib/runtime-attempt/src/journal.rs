@@ -408,8 +408,9 @@ fn read_records(dir: &Path) -> Result<Vec<AttemptRecord>> {
     Ok(records)
 }
 
-/// Write, sync, rename, sync the directory: after this returns the record is
-/// what a restarted process reads.
+/// Sync the new record, then durably publish it: a Unix rename and directory
+/// sync, or a same-directory Windows write-through move. Publication failure
+/// is never treated as a durable start.
 fn write_durably(path: &Path, record: &AttemptRecord) -> Result<()> {
     let dir = path.parent().context("record has no directory")?;
     let temporary = dir.join(format!(
@@ -428,11 +429,57 @@ fn write_durably(path: &Path, record: &AttemptRecord) -> Result<()> {
         file.write_all(&serde_json::to_vec_pretty(record)?)?;
         file.sync_all().context("cannot sync the attempt record")?;
     }
-    std::fs::rename(&temporary, path)
+    publish_durably(&temporary, path)
+}
+
+#[cfg(not(windows))]
+fn publish_durably(temporary: &Path, path: &Path) -> Result<()> {
+    std::fs::rename(temporary, path)
         .with_context(|| format!("cannot move the attempt record into {}", path.display()))?;
+    let dir = path.parent().context("record has no directory")?;
     File::open(dir)
         .and_then(|directory| directory.sync_all())
-        .context("cannot sync the attempt record directory")?;
+        .context("cannot sync the attempt record directory")
+}
+
+#[cfg(windows)]
+fn publish_durably(temporary: &Path, path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    // COPY_ALLOWED and DELAY_UNTIL_REBOOT are deliberately absent: the synced
+    // temporary and destination must be replaced now on the same filesystem.
+    ensure!(
+        temporary.parent() == path.parent(),
+        "record move crosses directories"
+    );
+    let wide_path = |value: &Path| -> Result<Vec<u16>> {
+        let mut wide: Vec<u16> = value.as_os_str().encode_wide().collect();
+        ensure!(!wide.contains(&0), "record path contains a null character");
+        wide.push(0);
+        Ok(wide)
+    };
+    let temporary = wide_path(temporary)?;
+    let destination = wide_path(path)?;
+    // SAFETY: both owned UTF-16 buffers are null-terminated, contain no inner
+    // null, and remain alive throughout this synchronous Win32 call.
+    let moved = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "cannot durably move the attempt record into {}",
+                path.display()
+            )
+        });
+    }
     Ok(())
 }
 
@@ -454,6 +501,9 @@ fn lock(path: &Path) -> Result<File> {
                 .with_context(|| format!("cannot lock {}", path.display()));
         }
     }
+    #[cfg(windows)]
+    file.lock()
+        .with_context(|| format!("cannot lock {}", path.display()))?;
     Ok(file)
 }
 
@@ -521,6 +571,35 @@ mod tests {
     }
 
     #[test]
+    fn every_published_transition_can_be_reopened_with_its_exact_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("journal-検証");
+        let journal = AttemptJournal::new(&root);
+        let mut permit = journal.reserve("req", "a1").unwrap();
+        let reopened = AttemptJournal::new(&root);
+        let reservation = reopened.records("req").unwrap();
+        assert_eq!(reservation.len(), 1);
+        assert_eq!(reservation[0].state, AttemptState::NotStarted);
+        assert!(reservation[0].identity.is_none());
+
+        let started = permit.start_record(identity()).unwrap();
+        let reopened = AttemptJournal::new(&root);
+        let records = reopened.records("req").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, AttemptState::Started);
+        assert_eq!(records[0].identity, Some(identity()));
+        assert!(records[0].outcome.is_none());
+
+        started.finish("verified").unwrap();
+        let reopened = AttemptJournal::new(&root);
+        let records = reopened.records("req").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, AttemptState::Finished);
+        assert_eq!(records[0].identity, Some(identity()));
+        assert_eq!(records[0].outcome.as_deref(), Some("verified"));
+    }
+
+    #[test]
     fn an_unwritable_journal_starts_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let blocked = dir.path().join("file");
@@ -563,6 +642,51 @@ mod tests {
         assert!(matches!(error, BeginRefusal::NotDurable { .. }));
         assert_eq!(error.record_state(), AttemptRecordState::HistoryUnavailable);
         drop(permit);
+        assert_eq!(
+            journal.records("req").unwrap()[0].state,
+            AttemptState::NotStarted
+        );
+    }
+
+    #[test]
+    fn the_request_lock_is_held_until_the_delivery_permit_is_dropped() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = AttemptJournal::new(dir.path());
+        let permit = journal.reserve("req", "a1").unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (reserved_tx, reserved_rx) = mpsc::channel();
+        let other = journal.clone();
+        let sibling = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            let second = other.reserve("req", "a2");
+            reserved_tx.send(second.is_ok()).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let blocked = reserved_rx.recv_timeout(Duration::from_millis(100));
+        drop(permit);
+        assert!(matches!(blocked, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert!(reserved_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        sibling.join().unwrap();
+        assert_eq!(journal.records("req").unwrap().len(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_readonly_destination_refuses_a_start_and_preserves_the_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = AttemptJournal::new(dir.path());
+        let mut permit = journal.reserve("req", "a1").unwrap();
+        let original_permissions = std::fs::metadata(&permit.path).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&permit.path, readonly).unwrap();
+        let result = permit.start_record(identity());
+        std::fs::set_permissions(&permit.path, original_permissions).unwrap();
+
+        assert!(matches!(result, Err(BeginRefusal::NotDurable { .. })));
         assert_eq!(
             journal.records("req").unwrap()[0].state,
             AttemptState::NotStarted
