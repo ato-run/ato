@@ -23,6 +23,10 @@ API #730の取消契約もSession停止に必要。状態側はAto #1481のRust 
 API #731（base #730）→ PWA入力経路。API #729はbrowser fixtureの検証依存である。
 これらはレビュー/受入順であり、マージ・配備の許可を意味しない。
 
+最終レビューstackはAto #1478 → #1479 → #1480と、#1478 → #1481。
+APIは#729 → #730 → #731。親をlocal mergeで包含し、各PRのbaseも親branchへ
+合わせた。旧測定commitを保持し、CI差分を別単位の新機能差分へ混ぜない。
+
 API mainは `9e0031900836090612b94e775e26f980a68f32d7`。
 今回の追加migrationは0317（取消）、0318（Source/state登録）、0319（機能受入）。
 remote適用は0。適用履歴は配備時の別preflightで確認する必要がある。
@@ -55,10 +59,21 @@ PR内の同じ変更は `384457c9`。macOS journal 7件とWindows GNU strict cli
 Windows nativeの新8件・portable全体はCIで確認する。元macOS失敗の原因確定や
 任意storageの電源断耐久性の証明として扱わない。
 
+修正後の[run](https://github.com/ato-run/ato/actions/runs/37113580365)、pin
+`384457c9`はUbuntu/macOS/WindowsすべてPASS。Windows journal 8件、
+Portable Application 15件、CLI all-target strict clippyがPASSした。
+[別native記録](formation-windows-attempt-journal-native-20261003.md)に実行pin・
+step・log hashを保存し、修正前の失敗は残した。Session/状態への後続mergeに
+このCI成功pinを付け替えない。
+
 API CI #729の `dfd6ec10` は
 [run](https://github.com/ato-run/ato-api/actions/runs/37106840393)の
 instance-state-syncとChromium/WebKitの関連browser stepがPASS。
 Activity/CORSは既存13失敗が残る。CI全面成功とは扱わない。
+
+APIのCI依存を含む `e3b6aad2` もNode22.23.3/frozen lockfileでtypecheck PASS。
+application/schema/dependency bytesは直前の `57991090` と同じ。既存214件を
+後続mergeで再実行したとは扱わない。
 
 ## 実探索前のgateと新規計画
 
@@ -100,5 +115,5 @@ owned Runtime/Instance、容量、別のRun許可が必要。欠けたartifact�
 Source/K/Dを書き換えたり手動mountしたりしない。PWA入力/許可変更後の実resumeも未測定。
 
 独立API検証は有効credentialが届いた後に残枠を再preflightする別経路。この実装をAPI成功に
-加算しない。マージ・配備・remote migration・feature flag変更・通常Run許可・100件再測定は
+加算しない。PRのマージ・配備・remote migration・feature flag変更・通常Run許可・100件再測定は
 今回行っていない。
