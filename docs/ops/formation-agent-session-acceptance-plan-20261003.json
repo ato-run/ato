@@ -1,0 +1,112 @@
+{
+  "schema": "ato.formation-agent-session-acceptance-plan/1",
+  "measurement_id": "formation-agent-session-20261003-a1",
+  "status": "proposed_not_authorized_or_executed",
+  "purpose": "Actual explicit Skill invocation by Codex and Claude Code, same frozen Source/K and no seeded D. Session acceptance is not independent API success.",
+  "cells": [
+    {
+      "id": "codex-svg",
+      "agent": "codex",
+      "source_archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "known_derivations": [],
+      "maximum_exchanges": 6,
+      "maximum_D_rounds": 3,
+      "maximum_inspections": 4,
+      "maximum_Runtime_attempts": 2,
+      "maximum_retries_per_operation": 1,
+      "search_deadline_seconds": 1800,
+      "round_timeout_ms": 600000
+    },
+    {
+      "id": "codex-kutt",
+      "agent": "codex",
+      "source_archive_sha256": "6fd86408c5ec917506aa0b081e72532dfaf78542855c1b9e1d984c1b6d2f52ae",
+      "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "known_derivations": [],
+      "maximum_exchanges": 8,
+      "maximum_D_rounds": 3,
+      "maximum_inspections": 4,
+      "maximum_Runtime_attempts": 2,
+      "maximum_retries_per_operation": 3,
+      "search_deadline_seconds": 1800,
+      "round_timeout_ms": 600000
+    },
+    {
+      "id": "claude_code-svg",
+      "agent": "claude_code",
+      "source_archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "known_derivations": [],
+      "maximum_exchanges": 6,
+      "maximum_D_rounds": 3,
+      "maximum_inspections": 4,
+      "maximum_Runtime_attempts": 2,
+      "maximum_retries_per_operation": 1,
+      "search_deadline_seconds": 1800,
+      "round_timeout_ms": 600000
+    },
+    {
+      "id": "claude_code-kutt",
+      "agent": "claude_code",
+      "source_archive_sha256": "6fd86408c5ec917506aa0b081e72532dfaf78542855c1b9e1d984c1b6d2f52ae",
+      "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "known_derivations": [],
+      "maximum_exchanges": 8,
+      "maximum_D_rounds": 3,
+      "maximum_inspections": 4,
+      "maximum_Runtime_attempts": 2,
+      "maximum_retries_per_operation": 3,
+      "search_deadline_seconds": 1800,
+      "round_timeout_ms": 600000
+    }
+  ],
+  "aggregate_ceiling": {
+    "searches": 4,
+    "exchanges": 28,
+    "D_rounds": 12,
+    "inspections": 16,
+    "Runtime_attempts": 8,
+    "sequential_elapsed_seconds": 7200,
+    "Ato_direct_LLM_API_calls": 0,
+    "internal_agent_LLM_calls": "unknown",
+    "agent_cost": "unknown"
+  },
+  "runtime": {
+    "constraint": "exact local in a fresh isolated Linux acceptance Coordinator",
+    "fallback": false,
+    "capabilities": "pin and preflight Node/npm/native builders from the common catalog; reject unavailable authority",
+    "external_site_or_external_credential_authentication": false
+  },
+  "preflight_gates": [
+    "freeze clean Ato/API commits and built binary/WASM hashes before Search creation",
+    "verify immutable source archives and recompute K by Rust authority; no saved D/artifact/history enters Producer",
+    "verify native explicit Skill discovery on both installed agent versions, not just file loading; compatible installation is a separate visible change",
+    "new isolated producer context receives only Skill, scoped bridge connection and bounded common input",
+    "enforce and test OS/tool isolation: owner credentials/private grants/Runtime tickets/Source filesystem/DB are inaccessible; 0600 alone is insufficient",
+    "generate any Kutt owner input in private controller; scan Producer input, tool output, errors and public evidence for generated values",
+    "check disk/runtime availability; retain original per-Search deadlines and limits during every reconnect"
+  ],
+  "installed_versions_inventory": {
+    "codex": "0.46.0 native Skill unsupported; isolated acceptance tools version >=0.99.0 must be selected and native discovery/invocation measured",
+    "claude_code": "2.1.288; native Skill invocation not yet measured",
+    "observed_model_information": "unknown until obtainable from actual session"
+  },
+  "required_evidence": [
+    "inspection -> typed proposal -> contained Runtime -> fresh same-K Rust receipt for both agents",
+    "at least one actual failed D and evidence-based repair per agent; if no failure occurs report repair as unmeasured rather than force an artificial successful conclusion",
+    "lost response after save, lost completion ACK, duplicate/stale/concurrent submission: no repeated inference/execution or budget reset",
+    "deadline/call ceiling/needs_input/authority denial/no progress/UNKNOWN stop behavior",
+    "Runtime ACK/confirmed stop/reservations and input cleanup are observed privately and only metadata is published"
+  ],
+  "excluded": [
+    "independent paid API allocation or ledger changes",
+    "deployment",
+    "remote migration",
+    "feature flags",
+    "normal Run authorization",
+    "100-app remeasurement",
+    "old terminal Search reset/old UNKNOWN rerun"
+  ],
+  "functional_state_acceptance": "Separate proposed permission after retained-artifact registration support; not granted by this plan or exploration PASS."
+}
