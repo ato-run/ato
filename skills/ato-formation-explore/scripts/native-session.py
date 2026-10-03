@@ -85,7 +85,7 @@ def sdk_reported_usage(path, agent):
                     report["last_observed_message_tokens"] = metrics(partial[-1], (
                         "input_tokens", "output_tokens", "cache_creation_input_tokens",
                         "cache_read_input_tokens"))
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         report["coverage"] = "SDK counters unavailable"
     return report
 
