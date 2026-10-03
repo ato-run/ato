@@ -471,7 +471,7 @@ impl ReasoningProducer {
         self.session_cancelled.store(true, Ordering::Relaxed);
         Ok(())
     }
-    fn exchange_deadline(
+    pub(super) fn exchange_deadline(
         &self,
         name: &str,
         bytes: &[u8],
@@ -491,6 +491,81 @@ impl ReasoningProducer {
                 .as_u64()
                 .context("Session deadline missing")?,
         ))
+    }
+    /// Reconcile only an already-published, input-bound response after its
+    /// immutable window closes. No new input, source inspection or execution.
+    pub(in crate::runtime_network::proposal) fn reconcile_expired_session_response(
+        &self,
+        search_id: &str,
+        deadline_ms: u64,
+        now: u64,
+    ) -> Result<bool> {
+        if !self.config.is_session() {
+            return Ok(false);
+        }
+        let _guard = self
+            .session_reconciliation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Session reconciliation unavailable"))?;
+        let inputs = self.session_inputs(search_id)?;
+        // Validate any existing receipt before treating repeated reconciliation
+        // as a no-op. In particular, a changed response cannot replace it.
+        self.records()?;
+        let pending: Vec<_> = inputs
+            .iter()
+            .filter(|(name, _, _)| !self.directory.join(format!("{name}.record.json")).exists())
+            .collect();
+        if pending.len() > 1 {
+            return Ok(false); // An ambiguous journal must remain blocked.
+        }
+        let Some((name, bytes, input)) = pending.first() else {
+            return Ok(false);
+        };
+        if !self
+            .directory
+            .join(format!("{name}.response.json"))
+            .exists()
+        {
+            return Ok(false);
+        }
+        ensure!(
+            inputs.last().is_some_and(|(last, _, _)| last == name),
+            "stale Session response"
+        );
+        let exchange_deadline = self
+            .exchange_deadline(name, bytes, input)?
+            .context("Session window unavailable")?;
+        if now < deadline_ms.min(exchange_deadline) {
+            return Ok(false);
+        }
+        let raw = self.saved_session_response(name, bytes, input, true)?;
+        let record = StepRecord {
+            schema: "ato.formation-reasoning-step/1".into(),
+            configuration_ref: self.configuration_ref.clone(),
+            input_sha256: digest(bytes),
+            output_sha256: digest(&raw),
+            raw_output_base64: BASE64.encode(&raw),
+            provider_call: None,
+            failure: None,
+            elapsed_ms: 0,
+            reasoning_ms: 0,
+            inspection_ms: 0,
+            validation_ms: 0,
+            inspected: vec![],
+            inspection_error: None,
+            validation_error: None,
+            inspected_bytes: 0,
+            session_closed_response: Some(SessionClosedResponse {
+                exchange_deadline_ms: exchange_deadline,
+                admission_deadline_ms: deadline_ms.min(exchange_deadline),
+                observed_at_ms: now,
+            }),
+        };
+        save(
+            &self.directory.join(format!("{name}.record.json")),
+            &serde_jcs::to_vec(&record)?,
+        )?;
+        Ok(true)
     }
     fn session_inputs(&self, search_id: &str) -> Result<Vec<(String, Vec<u8>, ReasoningInput)>> {
         let mut paths = std::fs::read_dir(&self.directory)?
@@ -541,6 +616,7 @@ impl ReasoningProducer {
         } else {
             None
         };
+        self.reconcile_expired_session_response(search_id, deadline_ms, now)?;
         let records = self.records()?;
         let completed_inspections = records
             .iter()
@@ -558,10 +634,18 @@ impl ReasoningProducer {
             "search_elapsed_ms":elapsed,
             "exchanges_used":inputs.len(),"exchanges_remaining":self.budget.max_calls.saturating_sub(inputs.len() as u32),
             "inspection_exchanges_completed":completed_inspections,"inspection_elapsed_ms":inspection_ms,
+            "responses_reconciled_after_deadline":records.iter().filter(|(_, _, r)|r.session_closed_response.is_some()).count(),
             "source_identity":inputs.first().map(|(_, _, i)| &i.source_identity),
             "internal_LLM_calls":"unknown","token_usage":"unknown","cost":"unknown",
             "progress":progress,"connected":true,"input":null,"exchange":null});
-        if pending.len() > 1 {
+        if inputs.last().is_some_and(|(name, _, _)| {
+            records.iter().any(|(record_name, _, record)| {
+                record_name == name && record.session_closed_response.is_some()
+            })
+        }) {
+            view["waiting_reason"] = json!("closed_response_reconciled");
+            view["next_operation"] = json!("owner_reconcile_or_assess");
+        } else if pending.len() > 1 {
             view["waiting_reason"] = json!("unresolved_exchanges");
             view["next_operation"] = json!("owner_reconcile");
         } else if now >= deadline_ms
@@ -769,6 +853,252 @@ mod tests {
     }
     fn output() -> Box<serde_json::value::RawValue> {
         serde_json::value::to_raw_value(&json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"unsupported","reason":"insufficient_source"}]})).unwrap()
+    }
+    #[test]
+    fn saved_response_crossing_poll_deadline_is_receipted_without_admission() -> Result<()> {
+        let (_root, producer, input_digest) = fixture()?;
+        let bytes = bounded_read(&producer.directory.join("r001_s001.input.json"), 64 * 1024)?;
+        let input: ReasoningInput = serde_json::from_slice(&bytes)?;
+        let mut times = [998_u64, 1001].into_iter();
+        let error = producer
+            .wait_session_response(
+                "r001_s001",
+                &bytes,
+                &input,
+                1000,
+                || times.next().context("unexpected poll"),
+                || {
+                    producer
+                        .submit_session_response(
+                            "search_test",
+                            "search_test_r1_s1",
+                            &input_digest,
+                            &output(),
+                            ResponseWindow {
+                                deadline_ms: 1000,
+                                now_ms: 999,
+                                accepting: true,
+                            },
+                        )
+                        .unwrap();
+                },
+            )
+            .err()
+            .context("expired response must not become a RoundAnswer")?;
+        assert!(error.is::<ReasoningSessionDeadline>());
+        let records = producer.records()?;
+        assert_eq!(records.len(), 1);
+        let record = &records[0].2;
+        assert_eq!(record.input_sha256, input_digest);
+        assert_eq!(record.output_sha256, digest(output().get().as_bytes()));
+        assert_eq!(
+            record
+                .session_closed_response
+                .as_ref()
+                .unwrap()
+                .observed_at_ms,
+            1001
+        );
+        assert!(record.provider_call.is_none());
+        assert!(record.inspected.is_empty());
+        assert_eq!(record.inspected_bytes, 0);
+        assert!(!producer.directory.join("r001_s002.input.json").exists());
+        assert_eq!(producer.accounting()?["API_calls"], 0);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_saved_response_reconciles_on_reconnect_once_with_same_exchange_budget() -> Result<()>
+    {
+        let (root, producer, input_digest) = fixture()?;
+        producer.submit_session_response(
+            "search_test",
+            "search_test_r1_s1",
+            &input_digest,
+            &output(),
+            ResponseWindow {
+                deadline_ms: 2000,
+                now_ms: 999,
+                accepting: true,
+            },
+        )?;
+        drop(producer);
+        let restored =
+            ReasoningProducer::new(config(None), plan(), root.path().join("reasoning"), None)?;
+        let progress = json!({"status":"running","unresolved_attempts":0});
+        let view = restored.session_view("search_test", 2000, 1001, &progress, true)?;
+        assert_eq!(view["waiting_reason"], "closed_response_reconciled");
+        assert!(view["input"].is_null());
+        assert_eq!(view["exchanges_used"], 1);
+        assert_eq!(view["exchanges_remaining"], 5);
+        assert_eq!(view["responses_reconciled_after_deadline"], 1);
+        let path = restored.directory.join("r001_s001.record.json");
+        let first_receipt = bounded_read(&path, 32 * 1024)?;
+        restored.session_view("search_test", 2000, 1500, &progress, false)?;
+        assert_eq!(bounded_read(&path, 32 * 1024)?, first_receipt);
+        // A lost submit ACK still accepts only exactly the already-saved response.
+        restored.submit_session_response(
+            "search_test",
+            "search_test_r1_s1",
+            &input_digest,
+            &output(),
+            ResponseWindow {
+                deadline_ms: 2000,
+                now_ms: 1500,
+                accepting: false,
+            },
+        )?;
+        let conflicting =
+            serde_json::value::to_raw_value(&json!({"schema":"ato.formation-proposal/1",
+            "proposals":[{"kind":"unsupported","reason":"no_progress"}]}))?;
+        assert!(
+            restored
+                .submit_session_response(
+                    "search_test",
+                    "search_test_r1_s1",
+                    &input_digest,
+                    &conflicting,
+                    ResponseWindow {
+                        deadline_ms: 2000,
+                        now_ms: 1500,
+                        accepting: false
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(bounded_read(&path, 32 * 1024)?, first_receipt);
+        assert!(!restored.directory.join("r001_s002.input.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn expired_input_without_response_creates_no_evidence_or_exchange() -> Result<()> {
+        let (_root, producer, _) = fixture()?;
+        let before = std::fs::read_dir(&producer.directory)?.count();
+        assert!(!producer.reconcile_expired_session_response("search_test", 1000, 1001)?);
+        let bytes = bounded_read(&producer.directory.join("r001_s001.input.json"), 64 * 1024)?;
+        let input: ReasoningInput = serde_json::from_slice(&bytes)?;
+        let error = producer
+            .wait_session_response(
+                "r001_s001",
+                &bytes,
+                &input,
+                1000,
+                || Ok(1001),
+                || panic!("expired wait must not sleep"),
+            )
+            .err()
+            .context("deadline must stop wait")?;
+        assert!(error.is::<ReasoningSessionDeadline>());
+        assert_eq!(std::fs::read_dir(&producer.directory)?.count(), before);
+        assert!(producer.records()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_closed_reconciliation_is_once_and_detects_later_response_changes() -> Result<()> {
+        let (_root, producer, input_digest) = fixture()?;
+        producer.submit_session_response(
+            "search_test",
+            "search_test_r1_s1",
+            &input_digest,
+            &output(),
+            ResponseWindow {
+                deadline_ms: 1000,
+                now_ms: 999,
+                accepting: true,
+            },
+        )?;
+        let left = producer.clone();
+        let right = producer.clone();
+        let first = std::thread::spawn(move || {
+            left.reconcile_expired_session_response("search_test", 1000, 1001)
+        });
+        let second = std::thread::spawn(move || {
+            right.reconcile_expired_session_response("search_test", 1000, 1002)
+        });
+        assert_eq!(
+            usize::from(first.join().unwrap()?) + usize::from(second.join().unwrap()?),
+            1
+        );
+        let record_path = producer.directory.join("r001_s001.record.json");
+        let recorded = bounded_read(&record_path, 32 * 1024)?;
+        let response_path = producer.directory.join("r001_s001.response.json");
+        let mut changed: Value = serde_json::from_slice(&bounded_read(&response_path, 20 * 1024)?)?;
+        changed["output"]["proposals"][0]["reason"] = json!("no_progress");
+        std::fs::write(response_path, serde_jcs::to_vec(&changed)?)?;
+        assert!(
+            producer
+                .reconcile_expired_session_response("search_test", 1000, 1003)
+                .is_err()
+        );
+        assert_eq!(bounded_read(&record_path, 32 * 1024)?, recorded);
+        Ok(())
+    }
+
+    #[test]
+    fn closed_reconciliation_rejects_stale_tampered_and_windowless_evidence() -> Result<()> {
+        for mutation in [
+            "digest",
+            "exchange",
+            "window",
+            "duplicate",
+            "multiple_pending",
+        ] {
+            let (_root, producer, input_digest) = fixture()?;
+            producer.submit_session_response(
+                "search_test",
+                "search_test_r1_s1",
+                &input_digest,
+                &output(),
+                ResponseWindow {
+                    deadline_ms: 1000,
+                    now_ms: 999,
+                    accepting: true,
+                },
+            )?;
+            let response_path = producer.directory.join("r001_s001.response.json");
+            match mutation {
+                "window" => std::fs::remove_file(producer.directory.join("r001_s001.window.json"))?,
+                "multiple_pending" => {
+                    let mut input: Value = serde_json::from_slice(&bounded_read(
+                        &producer.directory.join("r001_s001.input.json"),
+                        64 * 1024,
+                    )?)?;
+                    input["call_id"] = json!("search_test_r1_s2");
+                    save(
+                        &producer.directory.join("r001_s002.input.json"),
+                        &serde_jcs::to_vec(&input)?,
+                    )?;
+                }
+                "duplicate" => std::fs::write(
+                    &response_path,
+                    format!(
+                        r#"{{"schema":"{}","input_sha256":"{}","exchange_id":"search_test_r1_s1","output":{{"schema":"ato.formation-proposal/1","proposals":[{{"kind":"unsupported","reason":"no_progress","reason":"insufficient_source"}}]}}}}"#,
+                        SESSION_RESPONSE_SCHEMA, input_digest
+                    ),
+                )?,
+                _ => {
+                    let mut response: Value =
+                        serde_json::from_slice(&bounded_read(&response_path, 20 * 1024)?)?;
+                    response[if mutation == "digest" {
+                        "input_sha256"
+                    } else {
+                        "exchange_id"
+                    }] = json!("stale");
+                    std::fs::write(&response_path, serde_jcs::to_vec(&response)?)?;
+                }
+            }
+            let result = producer.reconcile_expired_session_response("search_test", 1000, 1001);
+            if mutation == "multiple_pending" {
+                assert!(!result?, "ambiguous pending exchanges must remain blocked");
+            } else {
+                assert!(result.is_err(), "{mutation} must be rejected");
+            }
+            assert!(!producer.directory.join("r001_s001.record.json").exists());
+            assert!(!producer.directory.join("r001_s002.record.json").exists());
+        }
+        Ok(())
     }
     #[test]
     fn elapsed_time_uses_only_the_original_bound_start_checkpoint() -> Result<()> {
