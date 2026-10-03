@@ -41,3 +41,19 @@ Release planはMCP binary追加後のMSI定義が古いためFAILし、installer
 Linuxのfree spaceが20 GiB未満だったため、対象作業の再生成可能な`target/debug/incremental`だけを削除した。実行中cargo/rustcなし、同UID・canonical pathを確認した。34,863 file / 6,101,113,484 bytesのcacheを対象とし、freeは18,638,991,360から24,191,029,248 bytesへ増えた。Source、固定binary、artifact、state、receipt、journalは保持した。Sourceを実行する直前にもdiskを再確認する。
 
 PWA入力/権限変更後resume、新Kutt artifactの機能・保存・新Run復元、独立API4計画は未実行。旧WBO UNKNOWN、過去の測定pin/receipt/台帳は保持した。配備、remote migration、shared flag変更、100件再測定、課金付き自動調達はこのfollow-upで実施していない。
+
+## 実Source受入と独立API — 2026-10-04続報
+
+後続helperは待機中attemptと保存済み応答を先に照合し、新しい入力がない間はNative推論を始めない。Native SDKのpipeでは複数frameを同じreadで受けた場合も全frameを処理する。現在のSkill/launcher検証は35件PASS、Owner専用のtool出力漏出検査は2件PASSである。
+
+実Codex 0.160.0 / gpt-6.1-solから共通Skillを明示呼び出した新規SVGOMG Searchは、既知Dなしの初回lifecycle失敗後にDを修復し、3 exchange・2 D round・2 Runtime attemptで同じ固定Kのfresh PASSに到達した。2 attemptともRuntimeのaccepted ACK保存とdelivery終了を確認し、PASS候補の停止とcleanup、Search予約ゼロを確認した。状態は k_reached_awaiting_assessment であり、通常Run許可は与えていない。[保存証拠](evidence/formation-native-codex-source-20261004.json)。Nativeの内部call/token/費用は不明のままである。
+
+この成功に先行した3つのCodex SearchはRuntimeのsocket長または隔離内から読めない固定binaryのため終端した。1件では応答保存後のNative client切断から、同じSearch・元deadline・消費枠を保って次のexchangeへ再接続した。保存済みr1の再推論・再実行は行っていない。infraの解消ではOwner領域の権限を緩めず、検証済みbinaryの同一bytesをRuntime管理領域へ固定した。
+
+実Claude Code 2.1.288は4つのMCP toolと共通Skillを読み込み、実model claude-opus-5-5 で接続したが、既存accountのquotaで推論開始前に拒否された。このSearchはOwnerが実行前に取消し、停止・input cleanupを確認した。quota解除後の同一Source/K・初期情報・上限の別Searchは未実行であり、Claude Code Source対応の受入完了とは報告しない。
+
+Session 8bd2525 のnative Windows/MSVCを含む3OS CIはPASS。[具体的なWindows環境・test結果](evidence/formation-native-platform-ci-20261004.json)を補った。以前のLinux WebSocket/macOS worker起動失敗のexact base原因再現は引き続き未確認であり、今回のgreenから過去の原因解消を推定しない。
+
+ユーザー指定のrotation credentialはDeepSeekのbalance APIで利用可能を確認し、値はメモリ内だけで取り扱った。既存18 call・小規模残り23 call・未精算予約ゼロを照合した後、独立SVGOMG API Searchを実行した。成功Dをseedにせず、3 call・2 round・2 attemptで権限不足とlifecycle未宣言の証拠を残して枠切れとなった。これはCodexの成功とは別の失敗であり、同じ終端Searchの枠やdeadlineを復活させない。全体21/41 call、小規模4/24 call、推定消費$0.097718、残予算$0.467188、未精算予約ゼロである。推定は予約用peak価格に基づき、providerの実請求明細ではない。
+
+PWA入力・権限変更後resume、新Kutt artifactの機能・保存・新Run復元は別gateとして検証中である。共有環境への配備、remote migration、shared flag変更、100件再測定、旧WBO UNKNOWN再実行、課金付き自動調達は実施していない。
