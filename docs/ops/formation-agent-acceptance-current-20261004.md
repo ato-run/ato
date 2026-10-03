@@ -4,7 +4,9 @@ Session共通化 #1479 → 共通Skill #1480 → この受入記録の順でレ�
 
 実Codex 0.160.0 / gpt-6.1-solは、新しい文脈・既知DなしのSVGOMG Sourceでnpm lifecycle失敗を修復し、固定Kのfresh PASSへ到達した。3 exchange、2 D round、2 attempt。Runtimeの保存済みACKは両attemptでaccepted/closed、予約は0。成功は `k_reached_awaiting_assessment`。内部LLM call・token・費用はunknownであり、Atoからの直接推論API callが0でも推論費用0とは扱わない。
 
-実Claude Code 2.1.288 / claude-opus-5-5は独立Searchと実Skill起動まで確認したが、利用枠超過で推論が停止した。旧Searchはowner取消済み。復帰後の新規Search検証は未実施。Codex成功Dや詳細報告を新文脈へ渡さない。過去の固定応答fixtureを実ClaudeのSource成功に数えない。ネイティブ受入の残項目があるためDoneとはしない。
+実Claude Code 2.1.288 / claude-opus-5-5も、同じSource/K・初期情報・上限の別Search、新しい文脈、Codex成功Dや詳細報告なしでSVGOMGを成立させた。初回npm lifecycle失敗→同じround内のnative toolchain validation修正→fresh PASS。3 exchange、2 D round、2 Runtime attempt。保存後の同一再送を受理、異内容・古いdigest・未知exchangeを拒否し、実Native clientを切断した後、同じSearchへ新しいNative文脈で接続した。保存済みr1を再推論・再実行せず、元deadlineと残attempt1を維持した。両Runtime ACK accepted/closed、全予約0、変数要求/assignment/metadata/encrypted値0。成功は危険性評価待ちのまま。[Claude実Source証拠](evidence/formation-native-claude-source-20261004.json)。以前のquota Searchは取消済みで再開していない。
+
+今回のunique app成功はCodex 1、Claude Code 1、独立API 0。両Nativeは初回PASS 0、失敗後修正PASS 1で、同じSVGOMGなので合算unique appは1。Kutt機能fixtureを加算しない。Claudeの全SDK tool出力/Native stderrで、private生成email、Coordinator credential、RAMだけで照合したNative provider credentialのcanary漏出0。内部LLM call/token/費用はunknown。Claude測定launcher blobはSkill最終headと同一。Codex測定後との差は設定model bindingのguardと文書で、成功pinを後続headへ付け替えない。実Nativeの枠切れ・入力待ちなど、残る停止ケースの受入はSource成功と分け、未確認を完了と扱わない。
 
 現在のNative入口へ終了済みCodex/Claude Searchを渡す負例は、両方とも新しいNative文脈・推論・Runtime実行の作成前に停止した。全保存済みJSON/journalのSHAは不変、Search/exchange/attempt追加は0。これは実Native entryのadmission検証で、実LLMによるneeds_input/UNKNOWN停止とは分ける。[終了済みSearchの入口証拠](evidence/formation-native-terminal-entry-20261004.json)。
 
