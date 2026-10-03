@@ -1,6 +1,8 @@
 # Sessionの操作と型付き契約
 
-Producerは次のCLIだけでBridgeに接続する。`CONNECTION`は所有者から提供された接続ファイルのパス。内容を表示しない。
+Producerは所有者が設定した固定Formation MCPの4操作でBridgeに接続できる。`status`・`next`・`cancel`の引数は空object、`submit`の引数は`exchange_id`・`input_sha256`・`output_json`だけ。`output_json`は型付きbatchのJSON文字列であり、応答の重複fieldを消さず共通Rust validatorへ渡す。native MCP tool名にserverのprefixが付く場合はそのFormation serverの操作を使う。任意のpath、URL、Search ID、owner credentialを引数へ追加しない。配置と隔離条件は[mcp.md](mcp.md)を読む。
+
+限定CLIを提供された環境では次の実コマンドを使う。`CONNECTION`は所有者から提供された接続ファイルのパス。内容を表示しない。
 
 ```sh
 ato form-session --connection "$CONNECTION" status
@@ -23,13 +25,15 @@ cancel後も保存済み状態を照合する。`cleanup: not_confirmed`をclean
 
 両操作は`ato.formation-session-view/1`を返す。`search_id`、`configuration_ref`、Searchの`deadline_ms`、`exchanges_used`/`exchanges_remaining`、`connected`、`waiting_reason`、`next_operation`を確認する。現在exchangeの`exchange_deadline_ms`がある場合は、Search deadlineより早いこの期限にも従う。再接続でも保存済みのexchange期限を延長しない。`internal_LLM_calls`/`token_usage`/`cost`は取得不能なら`unknown`。
 
+`search_elapsed_ms`はSearch/config/元deadlineへ結び付いた開始時刻から計算する。旧checkpointに開始時刻の証拠がない場合は`null`であり、exchange数や再接続時刻から補わない。inspection完了数・所要時間も`inspection_exchanges_completed`/`inspection_elapsed_ms`を使い、Runtime attemptやD roundと別に報告する。
+
 `exchanges_used`は保存済み入力を数え、未回答の現在exchangeも含む。`exchanges_remaining: 0`は新しいexchangeを追加できないという意味であり、`next_operation: submit`かつ`input`がある現在exchangeには応答できる。最後に割り当て済みの入力を枠切れと誤認して放棄せず、Bridgeの次の操作と期限に従う。
 
 `progress`はSearch状態、`pause_reason`/`termination_reason`、ContractRef、Search budget、attempt一覧、`unresolved_attempts`、approval/deployed/cleanup状態を示す。`exchange`がある場合はその`exchange_id`/`input_sha256`/`response_saved`を使う。保存済み応答を処理中、deadline、UNKNOWN、`needs_input`では`input: null`となるため、以前の入力への新しい応答を作らない。
 
 Ownerが終了結果を照合すると、`progress`には実行pin、消費round、receiptのContractRef/DerivationRef/attempt ID/digest/`fully_satisfied`などの公開summaryが追加される。これはreceipt本文や観測bodyをProducerへ公開するものではない。ACKはそのsummaryだけで確認できないため、`unknown`を完了済みに読み替えずOwnerの証拠と照合する。
 
-Bridge切断後は接続ファイルのextensionを`status.json`へ置き換えた公開viewがCLIのfallbackになる。`connected: false`の保存済みviewを現在のRuntime状態として扱わず、最終既知状態として報告する。接続ファイルの直接表示やowner journalの読取へ切り替えない。
+Bridge切断後は接続ファイルのextensionを`status.json`へ置き換えた公開viewがCLI/MCPのfallbackになる。`connected: false`の保存済みviewを現在のRuntime状態として扱わず、最終既知状態として報告する。接続ファイルの直接表示やowner journalの読取へ切り替えない。Ownerが同じSearch/configuration/agent/capabilityのBridgeを再起動した場合、MCPは同じ固定ファイルからloopback addressだけを更新する。semantic bindingが変わった場合は拒否されるため、別Searchへ自動接続しない。
 
 ## 共通入力
 
