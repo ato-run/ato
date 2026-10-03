@@ -431,19 +431,23 @@ fn resolve_step_cwd(workspace_root: &Path, step: &BuildStepV1) -> Result<Option<
 /// How much of each stream a step keeps while it runs: its tail, for the
 /// diagnostic (itself bounded to `MAX_DIAGNOSTIC_BYTES`) and the typed failure
 /// marker a shipped step prints last. The rest is read and dropped.
+#[cfg(unix)]
 const STREAM_TAIL_BYTES: usize = 256 * 1024;
 
 /// After the step's own process exits, how long its output pipes may stay
 /// open (a descendant holding them) before the rest of its process group is
 /// stopped. Only a descendant pays this; a step whose pipes close with it
 /// returns at once.
+#[cfg(unix)]
 const PIPE_CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 /// The last `STREAM_TAIL_BYTES` of a stream.
+#[cfg(unix)]
 struct Tail {
     bytes: Vec<u8>,
 }
 
+#[cfg(unix)]
 impl Tail {
     fn new() -> Self {
         Self { bytes: Vec::new() }
@@ -894,7 +898,7 @@ pub fn guest_workspace_root() -> &'static str {
     GUEST_WORKSPACE_ROOT
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_step_with_facts(
     step: &BuildStepV1,
     argv: &[String],
