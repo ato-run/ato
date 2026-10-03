@@ -262,3 +262,35 @@ $0.017204 with actual usage unknown. A valid key for the same authorized account
 is still required for independent API acceptance. Old WBO UNKNOWN and old
 results are preserved; no 100-app remeasurement, deployment, remote migration,
 feature flag or ordinary Run permission has been performed.
+
+[Independent API preparation](evidence/formation-independent-api-preparation-20261003.json)
+retains four unexecuted plans at Ato `da7c452c` / API `9b483d4a`, with the same
+rooted Source/K as each Codex arm and no successful D seed. SVGOMG retains its
+explicit custom retry 1 control; the other arms use default retry 3. Call caps
+match the corresponding Codex arms (6/6/6/8), while the aggregate historical
+cap remains 41 and the small allocation 24; these are not four separate new
+24-call grants. The original five journals and prior HTTP401 journal were read
+through the product preflight: 18 slots, estimated $0.082825, unsettled zero.
+Duplicate archived exports are excluded. Every prepared plan is blocked before
+Search creation until a valid same-account private credential is supplied.
+The known old remote credential file retains its September 22 timestamp and
+was not read or retried. Credentials are never placed in plans or evidence.
+
+Current [official pricing](https://api-docs.deepseek.com/quick_start/pricing/)
+was checked on October 3: the retained reservation uses the Flash peak ceiling
+($0.30/M input cache-miss, $1.20/M output); off-peak rates are half. This retains
+the authorized worst-case bound of $0.395692 for 23 remaining calls. Token-based
+fee estimates are not asserted to be invoice charges. Before another run,
+credential and current-price checks must still be confirmed against that run's
+frozen plan.
+
+After preserving the Kutt result, free disk fell below the unchanged 20 GiB
+preflight floor. Only 853 inactive, single-link compiler `.rmeta` files in this
+task's target were removed (631,881,065 logical bytes). Frozen 3bb/da7 binary
+hashes remained unchanged and free space became 22,058,913,792 bytes. The full
+owned cleanup manifest is preserved remotely as
+`post-kutt-owned-compiler-cache-cleanup.json`, SHA-256
+`0b3187d8f9c1a4ee81b9352024c753f57db36ef203ef6053cfeabee185d5ad05`.
+No Source, measurement, Runtime, retained artifact or other checkout was removed.
+Both owned acceptance Coordinator ports were closed; the three prior shared
+Runtime PIDs were left running.
