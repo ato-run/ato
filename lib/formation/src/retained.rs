@@ -10,6 +10,24 @@ use std::collections::BTreeMap;
 pub const RETAINED_SCHEMA: &str = "ato.retained-candidate/1";
 pub const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 
+/// Physical namespace key for one Source-declared logical slot. This is Adapter
+/// materialization metadata, never a rewritten D/Source/Capsule identity.
+pub fn state_service_key(id: &str) -> Result<String, RetainedError> {
+    if !crate::proposal::isolated_state_id(id) {
+        return Err(RetainedError("registration_state_unsupported"));
+    }
+    if !id.starts_with("slot_")
+        && id.as_bytes()[0].is_ascii_lowercase()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Ok(id.into());
+    }
+    let digest = format!("{:x}", Sha256::digest(id.as_bytes()));
+    Ok(format!("slot_{}", &digest[..59]))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedArtifact {
@@ -103,16 +121,7 @@ impl RetainedCandidateV1 {
         };
         if slot.protocol != crate::authoring::STATE_FILESYSTEM_PROTOCOL
             || slot.access != crate::authoring::StateAccess::ReadWrite
-            || slot.id.len() > 64
-            || !slot
-                .id
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_lowercase)
-            || !slot
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            || !crate::proposal::isolated_state_id(&slot.id)
             || !crate::proposal::isolated_state_mount(&slot.mount)
         {
             return Err(RetainedError("registration_state_unsupported"));
@@ -186,7 +195,7 @@ impl RetainedCandidateV1 {
             "runtime_requirements": binding.toolchains.iter().map(|(name,version)| serde_json::json!({"name":name,"version":version,"resolution":"authored"})).collect::<Vec<_>>(),
             "exported_ports": [{"name":"http","protocol":"http","guest_port":port.guest_port}],
             "readiness": [{"kind":"http","port_name":"http","path":path}],
-            "state_slots": [{"state_key":slot.id,"mount_target":slot.mount,"access":"read_write","protocol":slot.protocol}]
+            "state_slots": [{"state_key":state_service_key(&slot.id)?,"mount_target":slot.mount,"access":"read_write","protocol":slot.protocol}]
         }))
     }
     /// Validate provenance internally. The caller must also match the request's

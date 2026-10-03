@@ -3548,6 +3548,7 @@ mod deadline_tests {
                 facts[ato_formation::port_operations::RUNTIME_CAPABILITY],
                 expected
             );
+            assert_eq!(facts[FUNCTIONAL_VERIFICATION_CAPABILITY], expected);
         }
     }
 

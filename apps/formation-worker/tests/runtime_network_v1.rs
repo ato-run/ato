@@ -146,6 +146,7 @@ fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
     std::io::Read::read_to_end(&mut submission.source_file().unwrap(), &mut archive).unwrap();
     (
         AttemptTicket {
+            verification_state: None,
             exploration: None,
             build_record_retention: None,
             attempt_id: "att_test".to_owned(),

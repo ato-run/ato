@@ -65,18 +65,44 @@ cannot replay an accepted HTTP action. This path does not create a normal Run
 VerifiedRoute. The same registration/Instance is reused for a separately approved
 next Run; it receives the StateService head revision and a new fence.
 
-The initial functional action contract permits at most four GET/POST operations
-with fixed relative paths, declared private JSON bindings and status assertions.
-The explicit ceiling must authorize each HTTP operation. Additional private
-binding metadata cannot replace D's bindings or permit artifact embedding; K and
-D are not rewritten. Cookie/session authentication, response-id binding, method
-extensions and body assertions are not represented by this initial contract.
-Consequently it is not yet sufficient evidence for Kutt link create/edit or
-changedetection watch create/edit/stop. Those product gates remain open and need
-an approved concrete action plan plus the corresponding common HTTP Adapter
-contract. Synthetic state/receipt fixtures are not real application acceptance.
+The functional action contract permits at most four typed HTTP operations under
+an explicit ceiling. Additional private binding metadata cannot replace D's
+bindings or permit artifact embedding; K and D remain unchanged. The common
+HTTP Adapter extension defines cookie/session authentication, scalar response
+capture, bounded HTML leaf/key selection and boolean body/header comparisons
+in [FORMATION_FUNCTIONAL_HTTP_BINDINGS.md](FORMATION_FUNCTIONAL_HTTP_BINDINGS.md).
+The exploration GET/POST catalog remains unchanged and rejects these advanced
+fields outside a separately approved functional plan.
+
+The shared Rust authority compares safe observations with the saved functional
+plan: exact request template, logical Port/index, guard, accepted status, and
+matched response check metadata in Adapter order. Missing, extra or mismatched
+observations cannot support PASS. Captured values are not evidence fields. These
+synthetic checks do not prove Kutt/changedetection functionality; their actual
+same-artifact create/edit/stop/restart gates require approved execution.
 
 No remote migration, deployment, flag enablement or ordinary Run permission is
 part of this implementation. Actual functional execution requires the separately
 presented Source/artifact/K/D, Runtime, fresh input scope, operation/attempt limits
 and deadline to be approved before starting.
+
+## Logical slot and StateService namespace
+
+Source declares logical IDs such as `app.data`; StateService requires a lowercase
+physical key. The Rust projection retains compatible lowercase underscore IDs
+and maps other valid isolated IDs to `slot_` plus 59 hexadecimal SHA-256 digits.
+The prefix is reserved: an authored ID already beginning `slot_` is hashed too,
+preventing an authored physical-looking ID from aliasing a mapped logical ID.
+This key binds the one declared mount to its existing writer namespace. Source,
+K, D and retained descriptor bytes stay unchanged. Ticket admission recomputes
+this mapping from the exact D instead of accepting a caller-supplied mount/key.
+
+## Read-only retained preflight
+
+The owner-only retained-content endpoint checks the owned creation assignment,
+its Source closure, the exact Rust-validated descriptor and transport digest.
+It hashes a first bounded R2 stream and opens the same ETag for transfer; changes
+or missing content fail closed. This creates no Run, grant, attempt or budget
+charge. Raw content remains owner preflight data and is never projected into
+Producer, Session public progress or reasoning input. Availability on a local
+final pin does not imply the endpoint is deployed on historical API pins.

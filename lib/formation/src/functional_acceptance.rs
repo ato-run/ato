@@ -50,3 +50,102 @@ impl FunctionalAcceptanceV1 {
         Ok(variables)
     }
 }
+
+impl FunctionalAcceptanceV1 {
+    /// Compare safe Adapter observations with this saved plan. No response body,
+    /// cookie, captured value or physical endpoint belongs in the evidence.
+    pub fn validate_observations(
+        &self,
+        observations: &[crate::port_operations::PortOperationObservation],
+    ) -> Result<(), &'static str> {
+        use crate::port_operations::{
+            Method, Observation, PortOperationObservation, RequestTemplate,
+        };
+        if self.schema != "ato.functional-http-acceptance/1"
+            || self.operations.len() > 4
+            || observations.len() > 48
+        {
+            return Err("functional_observations_bounds");
+        }
+        fn take<'a>(
+            items: &'a [PortOperationObservation],
+            cursor: &mut usize,
+            index: usize,
+            port: &str,
+            guard: bool,
+        ) -> Result<&'a Observation, &'static str> {
+            let item = items
+                .get(*cursor)
+                .ok_or("functional_observations_missing")?;
+            if item.operation_index != index || item.port != port || item.guard != guard {
+                return Err("functional_observations_scope");
+            }
+            *cursor += 1;
+            Ok(&item.observation)
+        }
+        let mut cursor = 0;
+        for (index, operation) in self.operations.iter().enumerate() {
+            operation.validate()?;
+            if let Some(guard) = &operation.when {
+                let expected = RequestTemplate {
+                    method: Method::Get,
+                    path: guard.path.clone(),
+                    ..Default::default()
+                };
+                if take(observations, &mut cursor, index, &operation.port, true)?
+                    != &(Observation::RequestTemplate { template: expected })
+                {
+                    return Err("functional_observations_request");
+                }
+                let Observation::ResponseStatus { status } =
+                    take(observations, &mut cursor, index, &operation.port, true)?
+                else {
+                    return Err("functional_observations_status");
+                };
+                if !guard.statuses.contains(status) {
+                    continue;
+                }
+            }
+            if take(observations, &mut cursor, index, &operation.port, false)?
+                != &(Observation::RequestTemplate {
+                    template: operation.request.clone(),
+                })
+            {
+                return Err("functional_observations_request");
+            }
+            let Observation::ResponseStatus { status } =
+                take(observations, &mut cursor, index, &operation.port, false)?
+            else {
+                return Err("functional_observations_status");
+            };
+            if !operation.accepted_statuses.contains(status) {
+                return Err("functional_observations_status");
+            }
+            // The Adapter checks response headers before reading JSON bytes.
+            for check in operation
+                .response_checks
+                .iter()
+                .filter(|c| c.header_name.is_some())
+                .chain(
+                    operation
+                        .response_checks
+                        .iter()
+                        .filter(|c| c.header_name.is_none()),
+                )
+            {
+                if take(observations, &mut cursor, index, &operation.port, false)?
+                    != &(Observation::ResponseCheck {
+                        check: check.clone(),
+                        matched: true,
+                    })
+                {
+                    return Err("functional_observations_check");
+                }
+            }
+        }
+        if cursor != observations.len() {
+            return Err("functional_observations_extra");
+        }
+        Ok(())
+    }
+}
