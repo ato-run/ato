@@ -819,9 +819,10 @@ fn remove_scratch(path: &Path) -> Result<()> {
         .with_context(|| format!("cannot remove realization scratch {}", path.display()))
 }
 
-fn make_writable(path: &Path) {
+fn make_writable(_path: &Path) {
     #[cfg(unix)]
     {
+        let path = _path;
         use std::os::unix::fs::PermissionsExt as _;
         if let Ok(metadata) = std::fs::symlink_metadata(path) {
             if metadata.is_symlink() {

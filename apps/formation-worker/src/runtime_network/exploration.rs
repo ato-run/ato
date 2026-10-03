@@ -3,15 +3,16 @@
 use super::{ExplorationSandbox, ExplorationTicket};
 use anyhow::{Result, ensure};
 use ato_formation::requirements::{ExecutionPhase, ExecutionRequirements};
-use netd::egress::{
-    gate::{EgressAllowance, EgressGate},
-    policy::TransferBudget,
-};
+use netd::egress::gate::EgressGate;
+#[cfg(unix)]
+use netd::egress::{gate::EgressAllowance, policy::TransferBudget};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
 };
+
+#[cfg(unix)]
+use std::sync::Arc;
 
 pub(super) struct ScopedGates {
     #[cfg(unix)]

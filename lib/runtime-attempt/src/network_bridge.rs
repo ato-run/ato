@@ -1,7 +1,9 @@
 //! A namespace-local proxy reaches one owner-bound Unix socket. The namespace
 //! has no external interface. The socket's host peer forwards ONLY to netd's
 //! fixed policy gate; it never interprets a workload destination itself.
-use anyhow::{Context, Result, ensure};
+#[cfg(unix)]
+use anyhow::ensure;
+use anyhow::{Context, Result};
 
 pub const GUEST_SOCKET: &str = "/.ato/egress.sock";
 pub const PROXY_PORT: u16 = 32189;
