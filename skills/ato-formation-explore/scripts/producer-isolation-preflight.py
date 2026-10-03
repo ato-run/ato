@@ -2,6 +2,7 @@
 """Prepare a public Skill package and measure a macOS OS fixture, never an agent."""
 
 import argparse
+import ctypes
 import hashlib
 import ipaddress
 import json
@@ -26,9 +27,9 @@ OS_CHECKS = ["public_skill_read", "public_skill_write_denied",
              "scratch_write", "symlink_escape_denied", "fork_inherits_denial",
              "source_direct_launch_denied", "shell_exec_denied", "security_exec_denied",
              "curl_exec_denied", "docker_unix_socket_denied", "relay_tcp_allowed",
-             "provider_fixture_tcp_allowed", "relay_wrong_port_denied", "relay_wrong_address_denied",
-             "provider_wrong_port_denied", "provider_wrong_address_denied", "owner_unix_socket_denied",
-             "ipv4_secondary_denied", "udp_denied", "extra_descriptors_absent"]
+             "second_loopback_tcp_allowed", "relay_wrong_port_denied", "relay_ipv6_same_port_allowed",
+             "second_loopback_wrong_port_denied", "second_ipv6_same_port_allowed", "owner_unix_socket_denied",
+             "non_loopback_live_tcp_denied", "udp_denied", "extra_descriptors_absent"]
 MACHO = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
          b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
          b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"}
@@ -112,7 +113,9 @@ def network_policy(relay_endpoint=None, provider_endpoints=()):
             reject("provider_public_ipv4_tls_port_required")
     return {"relay_endpoint": relay_endpoint, "provider_endpoints": sorted(providers),
             "dns_allowed": False, "unix_sockets_allowed": False,
-            "provider_identity_verified": False}
+            "provider_identity_verified": False,
+            "relay_os_scope": "ipv4_ipv6_localhost_at_selected_port" if relay_endpoint else "none",
+            "provider_egress": "blocked_fixed_public_ip_unsupported"}
 
 
 def snapshot(source):
@@ -198,8 +201,12 @@ def profile(public, scratch, executables, auth_ipc=False, tcp_endpoints=()):
     if len(tcp_endpoints) > 5 or len(set(tcp_endpoints)) != len(tcp_endpoints):
         reject("profile_endpoint_bounds")
     for endpoint in sorted(tcp_endpoints):
-        tcp_endpoint(endpoint)
-        lines.append(f"(allow network-outbound (remote tcp {json.dumps(endpoint)}))")
+        address, port = tcp_endpoint(endpoint)
+        if address != "127.0.0.1":
+            reject("macos_fixed_tcp_address_unsupported")
+        # This macOS DSL accepts only localhost or wildcard host specifiers.
+        # localhost covers IPv4 + IPv6 at this one port; never use wildcard.
+        lines.append(f'(allow network-outbound (remote tcp "localhost:{port}"))')
     # No unrestricted networking, inbound, DNS, UDP, Unix socket, arbitrary exec,
     # HOME/keychain file, or /tmp rule. Endpoint ACLs do not validate TLS identity.
     return "\n".join(lines) + "\n"
@@ -215,6 +222,8 @@ def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
     codex_supported = version_tuple(codex_version) >= (0, 99, 0)
     version_tuple(claude_version)
     network = network_policy(relay_endpoint, provider_endpoints)
+    if network["provider_endpoints"]:
+        reject("provider_egress_fixed_ip_unsupported")
     endpoints = ([network["relay_endpoint"]] if network["relay_endpoint"] else []) + network["provider_endpoints"]
     selected = {"mcp": binary(mcp_binary), "codex": binary(codex_binary),
                 "claude-code": binary(claude_binary)}
@@ -377,6 +386,36 @@ def probe(root):
         endpoint.bind((address, port))
         endpoint.listen()
         return endpoint.getsockname()[1]
+    def local_non_loopback_ipv4():
+        # Fixture-only local interface metadata: no DNS or provider discovery.
+        # Do not publish names/addresses. No interface configuration is changed.
+        class IfAddrs(ctypes.Structure):
+            pass
+        IfAddrs._fields_ = [("next", ctypes.POINTER(IfAddrs)), ("name", ctypes.c_char_p),
+                           ("flags", ctypes.c_uint), ("address", ctypes.c_void_p),
+                           ("netmask", ctypes.c_void_p), ("destination", ctypes.c_void_p),
+                           ("data", ctypes.c_void_p)]
+        library = ctypes.CDLL(None)
+        head = ctypes.POINTER(IfAddrs)()
+        library.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(IfAddrs))]
+        library.freeifaddrs.argtypes = [ctypes.POINTER(IfAddrs)]
+        if library.getifaddrs(ctypes.byref(head)) != 0:
+            reject("live_remote_fixture_unavailable")
+        try:
+            entry = head
+            while entry:
+                item = entry.contents
+                if item.address and item.flags & 1:
+                    raw = ctypes.string_at(item.address, 16)
+                    if raw[1] == socket.AF_INET:
+                        address = socket.inet_ntoa(raw[4:8])
+                        ip = ipaddress.IPv4Address(address)
+                        if not ip.is_loopback and not ip.is_unspecified and not ip.is_link_local:
+                            return address
+                entry = item.next
+        finally:
+            library.freeifaddrs(head)
+        reject("live_remote_fixture_unavailable")
     try:
         relay_port = tcp("127.0.0.1")
         provider_port = tcp("127.0.0.1")
@@ -384,6 +423,10 @@ def probe(root):
         wrong_provider_port = tcp("127.0.0.1")
         tcp("::1", relay_port, family=socket.AF_INET6)
         tcp("::1", provider_port, family=socket.AF_INET6)
+        remote_address = local_non_loopback_ipv4()
+        tcp(remote_address, relay_port)
+        with socket.create_connection((remote_address, relay_port), timeout=1):
+            pass
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sockets.append(udp)
         udp.bind(("127.0.0.1", relay_port))
@@ -409,7 +452,7 @@ def probe(root):
                                     str(root / "public/skill/SKILL.md"), str(private),
                                     str(root / "scratch"), str(escape), "../../scratch/docker.sock",
                                     str(relay_port), str(provider_port), str(wrong_port),
-                                    str(wrong_provider_port), "../../scratch/owner-control.sock"],
+                                    str(wrong_provider_port), "../../scratch/owner-control.sock", remote_address],
                                    env=clean_env, close_fds=True,
                                    cwd=root / "public/project", capture_output=True, timeout=30)
     finally:
@@ -455,13 +498,14 @@ def probe(root):
         "checks": checks, "fixture_canary_output_exposure": False,
         "fixture_tcp_endpoints": fixture_endpoints,
         "configured_native_policy": info.get("network_policy"),
-        "provider_fixture_is_loopback_substitute": True,
+        "provider_egress_measured": False,
         "public_provider_reached": False,
         "relay_descriptor_or_owner_connection_read": False,
         "inherited_extra_descriptors": False,
-        "wrong_address_live_targets": "same_allowed_ports_on_v6_only_loopback",
-        "secondary_ipv4_listener_available": False,
-        "secondary_ipv4_denial_requires_eperm_eacces": True,
+        "relay_localhost_scope": "IPv4_and_IPv6_same_port",
+        "non_loopback_live_target": True,
+        "non_loopback_target_outside_sandbox_reachable": True,
+        "host_interface_configuration_changed": False,
         "captured_output_sha256": hashlib.sha256(completed.stdout + completed.stderr).hexdigest(),
         "captured_output_bytes": len(completed.stdout) + len(completed.stderr),
         "auth_IPC_rules_prepared": MACH_AUTH, "native_auth_IPC_invoked": False,
@@ -485,9 +529,9 @@ def main():
         preparation.add_argument(f"--{name}-binary", type=Path, required=True)
     preparation.add_argument("--codex-version", required=True)
     preparation.add_argument("--claude-version", required=True)
-    preparation.add_argument("--relay-endpoint", help="Owner-selected numeric 127.0.0.1:PORT; no descriptor is read")
+    preparation.add_argument("--relay-endpoint", help="Owner-selected 127.0.0.1:PORT; OS scope is IPv4 and IPv6 localhost at that port; no descriptor is read")
     preparation.add_argument("--provider-endpoint", action="append", default=[],
-                             help="Owner-approved public numeric IPv4:443, at most four; no DNS or automatic lookup")
+                             help="Explicit public IPv4:443 request; this macOS profile fails closed because exact public IP filtering is unsupported")
     for name in ["verify", "probe"]:
         command = commands.add_parser(name)
         command.add_argument("--package", type=Path, required=True)
