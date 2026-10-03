@@ -55,6 +55,30 @@ class NativeAdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, "binding_mismatch"):
                 NATIVE.admission(view, self.binding, agent, version)
 
+    def test_known_pending_runtime_waits_without_inference(self):
+        for attempt_status in ("pending", "claimed"):
+            view = dict(self.view, next_operation="owner_reconcile", progress={
+                "status": "running", "unresolved_attempts": 1,
+                "attempts": [{"status": attempt_status}]})
+            self.assertEqual(NATIVE.next_action(view), "wait")
+            with self.assertRaises(NATIVE.ISOLATION.Rejected):
+                NATIVE.admission(view, self.binding, "codex", "0.160.0")
+
+    def test_unknown_or_unaccounted_attempt_stops_even_with_active_runtime(self):
+        for attempts, count in (([{"status": "unknown"}], 1),
+                                 ([{"status": "claimed"}], 2),
+                                 ([{"status": "claimed"}, {"status": "unknown"}], 2)):
+            view = dict(self.view, next_operation="owner_reconcile", progress={
+                "status": "running", "unresolved_attempts": count, "attempts": attempts})
+            self.assertEqual(NATIVE.next_action(view), "stop")
+
+    def test_saved_response_waits_but_disconnect_or_input_pause_stops(self):
+        view = dict(self.view, next_operation="owner_reconcile", exchange={"response_saved": True})
+        self.assertEqual(NATIVE.next_action(view), "wait")
+        self.assertEqual(NATIVE.next_action(dict(view, connected=False)), "stop")
+        self.assertEqual(NATIVE.next_action(dict(view, progress={
+            "status": "running", "pause_reason": "needs_input"})), "stop")
+
     def test_model_catalog_removes_host_tools_without_changing_model_prompt(self):
         temporary = SKILL.parents[1] / ".tmp"
         temporary.mkdir(exist_ok=True)
