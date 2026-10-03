@@ -309,7 +309,8 @@ fn replace_public_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 pub fn read_connection(path: &Path) -> Result<Connection> {
-    let connection: Connection = serde_json::from_slice(&bounded_read(path, 4096)?)?;
+    let connection: Connection = serde_json::from_slice(&bounded_read(path, 4096)?)
+        .map_err(|_| anyhow::anyhow!("invalid Session connection"))?;
     ensure!(
         connection.schema == CONNECTION_SCHEMA
             && connection.address.ip().is_loopback()
@@ -951,6 +952,13 @@ mod tests {
         let next = request(&path, Command::Next)?;
         assert!(next["input"].is_object());
         assert!(!serde_json::to_string(&next)?.contains(private));
+        let mut malformed = serde_json::to_value(read_connection(&path)?)?;
+        malformed["agent"] = json!({"kind":private,"version":"fixture"});
+        let malformed_path = root.path().join("malformed.json");
+        replace_public_file(&malformed_path, &serde_jcs::to_vec(&malformed)?)?;
+        assert!(
+            !format!("{:#}", read_connection(&malformed_path).err().unwrap()).contains(private)
+        );
         let mut wrong = read_connection(&path)?;
         wrong.access_token = BASE64.encode([8; 32]);
         let forged = root.path().join("forged.json");
