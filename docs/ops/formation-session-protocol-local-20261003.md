@@ -40,3 +40,42 @@ API取消入口はDraft ato-api #730、CI portability/formatterはAto #1478、�
 `needs_input`の公開viewは、共通Rust validatorで検査した変数名・型・resource・operation・phase・secret/embedding/temporaryフラグだけを返す。purpose、account、endpoint、tenant、service、obtain/error、grant候補は掲載しない。不正な要件も掲載しない。入力待ち中は推論入力と応答提出を閉じ、消費済みexchangeを維持する。
 
 Session専用テスト10件PASS。非公開値のcanaryと不正要件を含む新しい入力待ちテストを追加した。Worker all-target strict clippyも同じ変更bytesでPASS。実製品、PWA、Runtimeの受入は引き続き未測定。
+
+## 期限後の保存済み応答照合（別測定）
+
+測定ID `formation-session-protocol-local-20261003-03`。応答保存のACK直後に
+deadlineを跨ぐと、Ownerが未照合応答を残したまま終わる境界を検査した。
+実装pin `69b50256cd6dee7b71b19147fcef425055879d3e` のSourceでSession専用
+15件とWorker all-target strict clippyがPASS。
+
+原子的に保存済みの応答をdigest/exchange/windowへ照合し、期限後の受領証拠だけを
+一度記録する。`session_closed_response`は元のexchange deadline、admission deadline、
+観測時刻を保存する。新しい入力、inspection、Dの実行、予算補充を許可しない。
+公開viewは `closed_response_reconciled` とOwner照合の次操作を返す。
+Requesterはこの経路をtimeoutへ分類し、provider infrastructure failureへ分類しない。
+window欠損・応答の改変・古い応答・競合・繰返し照合は拒否または冪等として検査した。
+旧recordは新fieldを省略し、旧bytes/digestの意味を維持する。
+
+## Session公開入力の限定投影（別測定）
+
+測定ID `formation-session-protocol-local-20261003-04`。実装pin
+`d6fe62331959adfbb6c21637921ed0d7e5a2c345` のSourceでSession専用18件と
+Worker all-target strict clippyがPASS。API-validなowner metadataにprivate canaryを
+含め、owner保存bytes/digestを維持したまま、両agentへ同じ限定投影を返すことを確認した。
+
+変数は完全なmetadata envelopeと共通Rust要件validator、Source closure、Search scopeを
+検査してtyped slot・reuse・期限・取消だけを公開する。purpose/service/endpoint/account/
+tenantやapplication/scopeの列挙は公開しない。Runtime情報もtyped operation catalogから
+決まるfact keyと値を許可し、任意prefix・host path・自由記述healthを公開しない。
+不正・未知・scope不一致のmetadataは省略する。
+
+viewの `input_projection_schema = ato.formation-session-public-input/1` と
+`input_sha256_scope = owner_saved_input` は、公開投影と元の保存入力を区別する。
+Producerは返されたdigestをechoし、公開投影の再hashで置き換えない。
+Owner保存入力と独立API transportの既存契約は変更しない。このfixtureは全API経路や
+実Native製品を通したprivate値の完全非露出を証明しない。
+
+外部Producer relayの測定は別の
+[記録](formation-session-producer-relay-20261003.md)とIDを持つ。上の01〜04へ
+relayの結果や実Runtime成功を付け替えない。旧報告の固定非secret email露出の制約も
+修正していない。
