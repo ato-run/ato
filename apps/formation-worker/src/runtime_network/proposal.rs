@@ -1048,6 +1048,14 @@ impl Submission {
                     && round["raw_output_digest"].is_null(),
                 "missing raw output"
             );
+            if !round["pre_dispatch_error"].is_null() {
+                anyhow::ensure!(
+                    round["pre_dispatch_error"] == "call_budget_exhausted"
+                        && round["status"] == "provider_error"
+                        && call.is_none(),
+                    "pre-dispatch failure mismatch"
+                );
+            }
             vec![]
         };
         anyhow::ensure!(
@@ -1076,6 +1084,11 @@ impl Submission {
                             .collect::<Vec<_>>()
                     ),
             "durable candidate scope mismatch"
+        );
+        anyhow::ensure!(
+            record.diagnostics.iter().any(|d| d == "reasoning_call_budget_exhausted")
+                == (round["pre_dispatch_error"] == "call_budget_exhausted"),
+            "durable pre-dispatch diagnosis mismatch"
         );
         let recipes: BTreeMap<_, _> = registry
             .generated()
@@ -1422,6 +1435,9 @@ fn serve_proposal_inner(
                 }
                 Err(error) => {
                     completion["outcome"] = json!("provider_error");
+                    if error.is::<reasoning::ReasoningCallBudgetExhausted>() {
+                        completion["pre_dispatch_error"] = json!("call_budget_exhausted");
+                    }
                     if let Some(failure) =
                         error.downcast_ref::<reasoning::ReasoningProviderFailure>()
                     {
