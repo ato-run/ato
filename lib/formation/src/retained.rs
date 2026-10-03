@@ -81,11 +81,20 @@ impl RetainedCandidateV1 {
     /// historical receipt as a fresh Run. Unbound private operations cannot be
     /// silently dropped by the ordinary process launcher.
     pub fn process_registration(&self) -> Result<serde_json::Value, RetainedError> {
+        self.registration(false)
+    }
+    /// A retained verifier executes the entire canonical D, including scoped
+    /// private initialization; the registry must prevent ordinary process launch.
+    pub fn verification_registration(&self) -> Result<serde_json::Value, RetainedError> {
+        self.registration(true)
+    }
+    fn registration(&self, scoped_verification: bool) -> Result<serde_json::Value, RetainedError> {
         self.validate()?;
         if !matches!(self.shape, RetainedShape::ProcessWorkspace { .. })
             || self.derivation.source_oci.is_some()
-            || !self.derivation.variable_bindings.is_empty()
-            || !self.derivation.runtime_port_operations.is_empty()
+            || (!scoped_verification
+                && (!self.derivation.variable_bindings.is_empty()
+                    || !self.derivation.runtime_port_operations.is_empty()))
         {
             return Err(RetainedError("registration_requires_scoped_runtime"));
         }

@@ -20,6 +20,7 @@
 //! established. The coordinator decides fallback from that attestation.
 
 mod exploration;
+mod verification_state;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -361,6 +362,10 @@ pub struct AttemptTicket {
     pub network: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exploration: Option<ExplorationTicket>,
+    /// Coordinator-issued state scope for separately authorized verification.
+    /// Historical tickets omit it; retained objects never grant it themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_state: Option<verification_state::VerificationStateTicket>,
     /// This attempt's caps. A ticket without them is not one this Runtime
     /// runs: it would have nothing to hold the attempt to.
     pub resource_budget: TicketResourceBudget,
@@ -1630,6 +1635,9 @@ impl Client {
             .exploration
             .as_ref()
             .and_then(|e| e.deadline_ms)
+            .into_iter()
+            .chain(ticket.verification_state.as_ref().map(|s| s.deadline_ms))
+            .min()
             .context("binding_wait_requires_deadline")?;
         let control = ato_runtime_attempt::control::ExecutionControl::new(deadline);
         let retries = ticket.exploration.as_ref().map_or(3, |e| e.max_retries);
@@ -2229,6 +2237,9 @@ fn execute_ticket_with_publication(
         .exploration
         .as_ref()
         .and_then(|e| e.deadline_ms)
+        .into_iter()
+        .chain(ticket.verification_state.as_ref().map(|s| s.deadline_ms))
+        .min()
         .map(ato_runtime_attempt::control::ExecutionControl::new);
     let mut report = execute_ticket_inner(config, ticket, source, publisher, control.as_ref());
     if let Some(control) = control
@@ -2996,18 +3007,37 @@ fn execute_retained_ticket(
     attested.effects = Some(effects_name(planned.derivation.effects));
     attested.requirements = requirements;
     attested.provisions = provisions;
-    let resolved_variables = if planned.derivation.variable_bindings.is_empty() {
+    let functional_plan = ticket
+        .verification_state
+        .as_ref()
+        .and_then(|g| g.acceptance.as_ref());
+    let variable_requirements = match functional_plan
+        .map(|plan| {
+            plan.validate(
+                &planned.derivation,
+                &ticket.verification_state.as_ref().unwrap().ceiling,
+            )
+        })
+        .transpose()
+    {
+        Ok(variables) => variables.unwrap_or_else(|| planned.derivation.variable_bindings.clone()),
+        Err(_) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "functional_acceptance_invalid",
+                "approved functional plan is invalid",
+            );
+        }
+    };
+    let resolved_variables = if variable_requirements.is_empty() {
         vec![]
     } else {
         match context
             .publisher
             .context("variable_resolver_unavailable")
             .and_then(|client| {
-                client.resolve_variables(
-                    ticket,
-                    &planned.derivation.variable_bindings,
-                    &config.out_dir,
-                )
+                client.resolve_variables(ticket, &variable_requirements, &config.out_dir)
             }) {
             Ok(variables) => variables,
             Err(error) => {
@@ -3024,9 +3054,26 @@ fn execute_retained_ticket(
             }
         }
     };
-    let scoped = match ticket
-        .exploration
+    if ticket.exploration.is_some() && ticket.verification_state.is_some() {
+        return refused(
+            ticket,
+            attested.clone(),
+            "verification_scope_conflict",
+            "conflicting execution grants",
+        );
+    }
+    let functional_grant = ticket
+        .verification_state
         .as_ref()
+        .map(|g| ExplorationTicket {
+            deadline_ms: Some(g.deadline_ms),
+            max_retries: 0,
+            search_id: g.search_id.clone(),
+            ceiling: g.ceiling.clone(),
+            network_transfer_bytes: 0,
+        });
+    let scope_grant = ticket.exploration.as_ref().or(functional_grant.as_ref());
+    let scoped = match scope_grant
         .map(|grant| {
             exploration::ScopedGates::start(
                 grant,
@@ -3054,6 +3101,45 @@ fn execute_retained_ticket(
             );
         }
     };
+    let mut state_session = match ticket
+        .verification_state
+        .as_ref()
+        .map(|grant| {
+            verification_state::VerificationStateSession::prepare(
+                grant,
+                &descriptor,
+                ticket,
+                context
+                    .publisher
+                    .context("verification_state_transport_unavailable")?,
+                attempt_root,
+                control,
+            )
+        })
+        .transpose()
+    {
+        Ok(state) => state,
+        Err(_) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "verification_state_preflight_failed",
+                "assigned state could not be prepared",
+            );
+        }
+    };
+    let entries = state_session
+        .as_ref()
+        .map(|state| state.entries(&descriptor));
+    let state_bindings = state_session
+        .as_ref()
+        .zip(entries.as_ref())
+        .map(
+            |(state, entries)| ato_runtime_attempt::state_bindings::VerificationStateBindings {
+                context: &state.spec.context,
+                attachments: entries,
+            },
+        );
     let browser = ticket
         .browser_contract
         .as_ref()
@@ -3066,7 +3152,16 @@ fn execute_retained_ticket(
             budget: Default::default(),
         });
     let spec = planned.attempt_spec();
-    let outcome = run_reserved_attempt(
+    if let Some(state) = &state_session {
+        state.mark_started();
+    }
+    let (permit, deferred) = if ticket.verification_state.is_some() {
+        let (p, d) = verification_state::DeferredFinish::wrap(permit);
+        (p, Some(d))
+    } else {
+        (permit, None)
+    };
+    let mut outcome = run_reserved_attempt(
         &AttemptRequest {
             request_id: &ticket.satisfy_id,
             attempt_id: &ticket.attempt_id,
@@ -3075,18 +3170,29 @@ fn execute_retained_ticket(
             contract_ref: &ticket.contract_ref,
             runtime_id: &ticket.runtime_id,
             profile: &ticket_runtime_profile(scoped.is_some(), context.publisher),
-            authorization: ticket
-                .exploration
-                .as_ref()
-                .map(|g| EffectAuthorization::Exploration {
+            authorization: if let Some(g) = &ticket.verification_state {
+                EffectAuthorization::FunctionalVerification {
                     derivation_ref: &ticket.derivation_ref,
                     grant: &g.ceiling,
-                })
-                .unwrap_or(EffectAuthorization::Unattended),
+                }
+            } else {
+                ticket
+                    .exploration
+                    .as_ref()
+                    .map(|g| EffectAuthorization::Exploration {
+                        derivation_ref: &ticket.derivation_ref,
+                        grant: &g.ceiling,
+                    })
+                    .unwrap_or(EffectAuthorization::Unattended)
+            },
             network: NetworkPolicy::Denied,
             browser: browser.as_ref(),
             attempt_root,
-            continuation: Continuation::Stop,
+            continuation: if functional_plan.is_some_and(|p| !p.operations.is_empty()) {
+                Continuation::HandOff
+            } else {
+                Continuation::Stop
+            },
             receipt: ReceiptContext::formation(),
             interrupt: None,
             control,
@@ -3098,28 +3204,76 @@ fn execute_retained_ticket(
             expected_derivation_ref: &ticket.derivation_ref,
             expanded_limit: ticket.resource_budget.expanded_bytes,
             shim: &config.shim,
-            exploration: ticket
-                .exploration
-                .as_ref()
-                .zip(scoped.as_ref())
-                .map(
-                    |(g, s)| ato_runtime_attempt::retained::RetainedExploration {
-                        ceiling: &g.ceiling,
-                        runtime_gate: &s.sockets
-                            [&ato_formation::requirements::ExecutionPhase::Runtime],
-                        variables: &resolved_variables,
-                        state: None,
-                    },
-                ),
+            exploration: scope_grant.zip(scoped.as_ref()).map(|(g, s)| {
+                ato_runtime_attempt::retained::RetainedExploration {
+                    ceiling: &g.ceiling,
+                    runtime_gate: &s.sockets[&ato_formation::requirements::ExecutionPhase::Runtime],
+                    variables: &resolved_variables,
+                    state: state_bindings.as_ref(),
+                }
+            }),
         },
         Ok(permit),
     );
+    let mut action_evidence = Vec::new();
+    if let Some(live) = outcome.live.take() {
+        let actions = ato_runtime_attempt::port_operations::execute_acceptance(
+            &planned.derivation,
+            functional_plan.expect("explicit action handoff"),
+            &ticket.verification_state.as_ref().unwrap().ceiling,
+            live.endpoints(),
+            &resolved_variables,
+            control.expect("frozen functional deadline"),
+            &mut action_evidence,
+        );
+        let stopped = live.stop();
+        outcome.stop = Some(ato_runtime_attempt::realize::StopClass::of(&stopped));
+        outcome.attempt.outcomes.cleanup = if stopped.is_ok() {
+            ato_formation::request::Outcome::succeeded()
+        } else {
+            ato_formation::request::Outcome::failed("candidate_stop_unconfirmed")
+        };
+        if actions.is_err() || stopped.is_err() {
+            outcome.attempt.status = AttemptStatus::Failed;
+            outcome.attempt.failure = Some(ato_formation::request::AttemptFailure { code:if actions.is_err() {"functional_actions_failed"} else {"candidate_stop_unconfirmed"}.into(),stage:"verification".into(),message:"functional actions or confirmed stop did not complete; actions are not replayed".into() });
+        }
+    }
     attested.execution_started = outcome.execution_started();
     attested.candidate_stop = outcome.stop.as_ref().map(CandidateStopAttestation::of);
     attested.attempt_record = outcome.attempt_record;
-    let attempt = outcome.attempt;
+    let mut attempt = outcome.attempt;
+    let state_outcome = if let Some(state) = state_session.as_mut() {
+        match state.finish(
+            attested.execution_started,
+            attested.candidate_stop.as_ref(),
+            &ticket.attempt_id,
+        ) {
+            Ok(outcome) => Some(outcome),
+            Err(_) => {
+                attempt.status = AttemptStatus::Failed;
+                attempt.failure = Some(ato_formation::request::AttemptFailure {
+                    code: "verification_state_commit_failed".into(),
+                    stage: "cleanup".into(),
+                    message: "workload stop and state settlement were not both confirmed".into(),
+                });
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(deferred) = deferred {
+        attested.attempt_record = deferred.finish(
+            if attempt.status == AttemptStatus::Verified {
+                "verified"
+            } else {
+                "functional_failed"
+            },
+            attested.attempt_record.clone(),
+        );
+    }
     let pass = attempt.status == AttemptStatus::Verified;
-    attempt_report(
+    let mut report = attempt_report(
         ticket,
         &attempt,
         attested,
@@ -3129,7 +3283,14 @@ fn execute_retained_ticket(
             expanded_bytes: descriptor.artifact.expanded_bytes,
             stored_bytes: 0,
         },
-    )
+    );
+    if let Some(state_outcome) = state_outcome {
+        report.verifier_receipts.push(state_outcome);
+    }
+    if !action_evidence.is_empty() {
+        report.verifier_receipts.push(serde_json::json!({"kind":"functional_http_observations","observations":action_evidence}));
+    }
+    report
 }
 
 impl Client {
