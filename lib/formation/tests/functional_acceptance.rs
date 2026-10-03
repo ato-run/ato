@@ -68,3 +68,66 @@ fn private_value_fields_undeclared_authority_bad_phase_and_binding_replacement_f
     value["operations"][0]["request"]["json_values"] = serde_json::json!({"input":"forbidden"});
     assert!(serde_json::from_value::<FunctionalAcceptanceV1>(value).is_err());
 }
+
+#[test]
+fn logical_state_ids_are_rebound_as_physical_keys_without_aliasing() {
+    use ato_formation::retained::state_service_key;
+    assert_eq!(state_service_key("app_data").unwrap(), "app_data");
+    let key = state_service_key("app.data").unwrap();
+    assert_eq!(key.len(), 64);
+    assert!(key.starts_with("slot_"));
+    assert_ne!(key, state_service_key("app-data").unwrap());
+    assert_ne!(key, state_service_key(&key).unwrap());
+    assert!(state_service_key("../host").is_err());
+}
+
+#[test]
+fn saved_functional_observations_require_exact_scope_status_and_checks() {
+    use ato_formation::port_operations::{Observation, PortOperationObservation, ResponseCheck};
+    let (_, mut plan, _) = fixture();
+    let check = ResponseCheck {
+        json_pointer: "/input".into(),
+        header_name: None,
+        binding: "FUNCTIONAL_INPUT".into(),
+        scalar: None,
+    };
+    plan.operations[0].response_checks.push(check.clone());
+    let observation = |value| PortOperationObservation {
+        operation_index: 0,
+        port: "app.http".into(),
+        guard: false,
+        observation: value,
+    };
+    let evidence = vec![
+        observation(Observation::RequestTemplate {
+            template: plan.operations[0].request.clone(),
+        }),
+        observation(Observation::ResponseStatus { status: 201 }),
+        observation(Observation::ResponseCheck {
+            check,
+            matched: true,
+        }),
+    ];
+    assert!(plan.validate_observations(&evidence).is_ok());
+    for mutation in 0..6 {
+        let mut broken = evidence.clone();
+        match mutation {
+            0 => {
+                broken.pop();
+            }
+            1 => broken[0].port = "other".into(),
+            2 => broken[0].guard = true,
+            3 => broken[1].observation = Observation::ResponseStatus { status: 500 },
+            4 => {
+                if let Observation::ResponseCheck { matched, .. } = &mut broken[2].observation {
+                    *matched = false;
+                }
+            }
+            _ => broken.push(broken[2].clone()),
+        };
+        assert!(
+            plan.validate_observations(&broken).is_err(),
+            "mutation {mutation}"
+        );
+    }
+}
