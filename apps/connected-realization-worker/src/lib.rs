@@ -1403,12 +1403,15 @@ impl ConnectedWorker {
             &self.config.slot_id,
         )
         .ok();
-        match runtime_launch::recovery::recover_slot(
+        match runtime_launch::recovery::recover_slot_on(
             &journal,
             scanner.as_ref(),
             &self.api,
             ato_adapter_oci::StopBudget::DEFAULT,
             &self.config.work_root.join("leases"),
+            // A host-boundary Runner has no container engine and never
+            // advertises the OCI ABI.
+            self.config.isolation != IsolationMode::HostBoundary,
         ) {
             Ok(result) => {
                 for report in &result.reports {
