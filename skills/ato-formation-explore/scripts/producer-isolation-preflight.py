@@ -114,7 +114,8 @@ def network_policy(relay_endpoint=None, provider_endpoints=()):
     return {"relay_endpoint": relay_endpoint, "provider_endpoints": sorted(providers),
             "dns_allowed": False, "unix_sockets_allowed": False,
             "provider_identity_verified": False,
-            "relay_os_scope": "ipv4_ipv6_localhost_at_selected_port" if relay_endpoint else "none",
+            "relay_os_scope": "local_host_interfaces_at_selected_port" if relay_endpoint else "none",
+            "relay_egress": "blocked_scope_wider_than_loopback",
             "provider_egress": "blocked_fixed_public_ip_unsupported"}
 
 
@@ -205,7 +206,8 @@ def profile(public, scratch, executables, auth_ipc=False, tcp_endpoints=()):
         if address != "127.0.0.1":
             reject("macos_fixed_tcp_address_unsupported")
         # This macOS DSL accepts only localhost or wildcard host specifiers.
-        # localhost covers IPv4 + IPv6 at this one port; never use wildcard.
+        # Measured localhost includes non-loopback host interfaces at this port.
+        # This rule is usable only in the controlled C fixture, not Native prepare.
         lines.append(f'(allow network-outbound (remote tcp "localhost:{port}"))')
     # No unrestricted networking, inbound, DNS, UDP, Unix socket, arbitrary exec,
     # HOME/keychain file, or /tmp rule. Endpoint ACLs do not validate TLS identity.
@@ -224,6 +226,8 @@ def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
     network = network_policy(relay_endpoint, provider_endpoints)
     if network["provider_endpoints"]:
         reject("provider_egress_fixed_ip_unsupported")
+    if network["relay_endpoint"]:
+        reject("blocked_scope_wider_than_loopback")
     endpoints = ([network["relay_endpoint"]] if network["relay_endpoint"] else []) + network["provider_endpoints"]
     selected = {"mcp": binary(mcp_binary), "codex": binary(codex_binary),
                 "claude-code": binary(claude_binary)}
@@ -284,7 +288,7 @@ def prepare(output, measurement_id, execution_pin, mcp_binary, codex_binary,
         "native_acceptance_ready": False,
         "gates": ["approved_plan", "native_skill_discovery", "native_tool_inventory",
                   "native_read_write_exec_negative", "native_auth_ipc_without_tool_access",
-                  "fixed_mcp_descriptor_binding", "native_provider_egress",
+                  "fixed_mcp_descriptor_binding", "native_relay_loopback_scope", "native_provider_egress",
                   "owner_approved_provider_endpoint_identity", "native_provider_dns_tls"],
         "credential_files_allowed": False, "global_config_changed": False,
         "native_agent_or_auth_invoked": False,
@@ -323,6 +327,10 @@ def verify(root):
         network = info["network_policy"]
         if network_policy(network["relay_endpoint"], network["provider_endpoints"]) != network:
             reject("network_policy_changed")
+        if network["provider_endpoints"]:
+            reject("provider_egress_fixed_ip_unsupported")
+        if network["relay_endpoint"]:
+            reject("blocked_scope_wider_than_loopback")
         endpoints = ([network["relay_endpoint"]] if network["relay_endpoint"] else []) + network["provider_endpoints"]
         for name in ["codex", "claude-code"]:
             generated = profile(root / "public", root / "scratch",
@@ -502,7 +510,7 @@ def probe(root):
         "public_provider_reached": False,
         "relay_descriptor_or_owner_connection_read": False,
         "inherited_extra_descriptors": False,
-        "relay_localhost_scope": "IPv4_and_IPv6_same_port",
+        "relay_localhost_scope": "local_host_interfaces_same_port",
         "non_loopback_live_target": True,
         "non_loopback_target_outside_sandbox_reachable": True,
         "host_interface_configuration_changed": False,
@@ -529,7 +537,7 @@ def main():
         preparation.add_argument(f"--{name}-binary", type=Path, required=True)
     preparation.add_argument("--codex-version", required=True)
     preparation.add_argument("--claude-version", required=True)
-    preparation.add_argument("--relay-endpoint", help="Owner-selected 127.0.0.1:PORT; OS scope is IPv4 and IPv6 localhost at that port; no descriptor is read")
+    preparation.add_argument("--relay-endpoint", help="Explicit 127.0.0.1:PORT request; fails closed because macOS localhost scope also includes non-loopback host interfaces")
     preparation.add_argument("--provider-endpoint", action="append", default=[],
                              help="Explicit public IPv4:443 request; this macOS profile fails closed because exact public IP filtering is unsupported")
     for name in ["verify", "probe"]:

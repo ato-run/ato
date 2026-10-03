@@ -2,13 +2,17 @@
 
 Status: draft, prepared macOS profile only. Existing Capsule sandbox policies,
 Session protocol, authorization, budgets and Runtime authority stay unchanged.
-This prepares a localhost port ACL; it is not Native agent acceptance.
+Native profiles remain network-denied; this is not Native agent acceptance.
 
-The Owner may optionally pass `--relay-endpoint 127.0.0.1:PORT` to the public
-isolation preflight `prepare` operation. Addresses/ports must be canonical literals.
+The Owner may pass `--relay-endpoint 127.0.0.1:PORT` as an explicit request to the
+public isolation preflight `prepare` operation. Addresses/ports must be canonical literals.
 Default is no networking. Hostnames, URLs, wildcards, ranges, zero/overflow ports,
 IPv6, private/link-local/multicast/reserved provider IPs and duplicate entries
-fail closed before creating output. `--provider-endpoint PUBLIC_NUMERIC_IPV4:443`
+fail closed before creating output. The valid relay request also fails with
+`blocked_scope_wider_than_loopback` before binary reads or publication:
+measured `localhost:PORT` permits the same host's non-loopback interfaces as well
+as IPv4 and IPv6 loopback. This wider scope does not satisfy the required
+loopback-only OS boundary. `--provider-endpoint PUBLIC_NUMERIC_IPV4:443`
 validates an explicit request but rejects with
 `provider_egress_fixed_ip_unsupported` before binary reads or output publication:
 the measured macOS remote TCP grammar cannot express an exact public IPv4 ACL.
@@ -16,9 +20,9 @@ No wildcard, unrestricted network grant or provider proxy replaces this gate.
 No DNS lookup, automatic endpoint refresh or fallback is performed. Provider
 identity remains unverified and provider egress remains blocked/unconfigured.
 
-The generated Seatbelt profile uses supported `remote tcp "localhost:PORT"`
-over its deny-default policy, explicitly covering both IPv4 and IPv6 loopback at
-that port. It never emits a numeric-IP SBPL as usable. It adds no blanket network-outbound/inbound,
+The controlled C fixture uses supported `remote tcp "localhost:PORT"` over its
+deny-default policy. Native prepared profiles have no network rule. The helper
+never emits a numeric-IP SBPL as usable. It adds no blanket network-outbound/inbound,
 system-socket, DNS, UDP or Unix-socket rule. Existing public/scratch paths and
 fixed executable literals are unchanged. Verification regenerates the profile
 from its frozen metadata as well as checking hashes, so rehashing a broader
@@ -48,9 +52,11 @@ remain tested. New probe packages declare `os_fixture_protocol = 2`; old records
 and packages are not reinterpreted. Output is a fixed boolean inventory, never
 canary values, raw captures or parser/subprocess error bodies.
 
-Failed measurements 03 (unavailable loopback alias) and 04 (numeric-IP grammar
-rejected before the C main) remain preserved with their original code/package
-pins. A new measurement records the corrected supported grammar independently.
+Failed measurements 03 (unavailable loopback alias), 04 (numeric-IP grammar
+rejected before the C main), and 05 (localhost scope permits live non-loopback
+local interface) remain preserved with their original code/package pins. A
+bounded diagnostic confirms the 05 connection actually succeeded, rather than
+merely receiving a different error. No network boundary is accepted as complete.
 
 This profile cannot grant exact public provider IP egress. A future solution
 must also validate TLS SNI, certificates and distinct origins sharing a CDN IP.
