@@ -39,6 +39,12 @@ Portable Application 15件、MCP mode/Activity各1件、strict clippy・format�
 元共有targetのコンパイル失敗も[別記録](formation-native-integration-cache-20261003.md)
 に残し、専用targetの成功へ書き換えていない。
 
+Windows修正を追加した別の統合Source `b0408d46` もCLI49/Worker100/journal7、
+strict clippy/format/MCP buildがPASS。新MCP artifactは6,092,472 bytes、SHA256
+`3a56748bdc3ce8189b7f9bb81ec43f3e11f5aa38df493137ef7dc755e1aa9582`。
+[追加統合記録](formation-agent-integration-windows-fix-local-20261003.md)は別測定02であり、
+旧MCP/Portable Application/Runtime HTTP測定を新pinへ付け替えない。
+
 分離した状態Rust実装pinは `c8761b01`、authority WASMは2,511,227 bytes、SHA-256
 `33ce99ba10a381944177ea93d89ad3596da05f750114ee7d73c89fffccc9a861`。
 API関連fixtureは変更時点で214件PASS、後続のsame-assignment resume追加assertionは
