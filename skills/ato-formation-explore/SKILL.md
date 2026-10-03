@@ -12,7 +12,7 @@ CandidateProducerとして、検査済みSourceから固定Contract Kを満た�
 
 ユーザーが指定したSourceまたは未終了Search、固定K、承認済みのexchange・round・inspection・Runtime attempt・deadline上限、利用可能Runtimeを確認する。不足は所有者へ確認し、K・上限・権限を補わない。既存Searchへの再接続では元のplanと消費枠を使う。
 
-所有者が起動したSession Bridgeの接続ファイルだけを受け取る。接続ファイルはそのBridge用の限定capabilityであり、公開ログや最終報告に内容を掲載しない。接続方法と実コマンドは[protocol.md](references/protocol.md)、配置と明示呼び出しは[installation.md](references/installation.md)を読む。
+所有者が起動したSession Bridgeの固定MCP接続、または限定CLI接続だけを使う。MCPがある場合はFormationの`status`・`next`・`submit`・`cancel`を使い、shellで接続ファイルを読まない。CLI接続ファイルはそのBridge用の限定capabilityであり、公開ログや最終報告に内容を掲載しない。接続方法と実コマンドは[protocol.md](references/protocol.md)、配置と明示呼び出しは[installation.md](references/installation.md)を読む。
 
 開始前に、Producer環境からowner入力・Ato認証・Runtime ticket・private grantを読めないことを所有者に確認する。ファイルの0600だけを隔離の証拠にしない。値が誤って渡された場合は転記せず停止し、所在と露出経路だけを報告する。
 
