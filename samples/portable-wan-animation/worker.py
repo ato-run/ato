@@ -51,7 +51,7 @@ try:
     validation = asyncio.run(execution.validate_prompt(prompt_id, prompt, None))
     if not validation[0]:
         raise RuntimeError("Pinned workflow validation failed: " + json.dumps(validation[1:]))
-    publish(phase="ready", python=sys.version.split()[0], frames=81, workflow_sha256=digest(WORKSPACE / "workflow.json"))
+    publish(phase="ready", python=sys.version.split()[0], frame_load_cap=81, workflow_sha256=digest(WORKSPACE / "workflow.json"))
     while not (SCRATCH / "generate.request").exists():
         time.sleep(0.5)
     started = time.monotonic()
@@ -89,11 +89,14 @@ try:
     import av
     with av.open(str(OUTPUT / "animation.mp4")) as container:
         decoded = list(container.decode(video=0))
-        media = {"decoded_frames": len(decoded), "width": decoded[0].width, "height": decoded[0].height}
-    if media["decoded_frames"] != 81:
-        raise RuntimeError(f"Expected 81 decoded frames, got {media['decoded_frames']}")
+        media = {"decoded_frames": len(decoded), "width": decoded[0].width, "height": decoded[0].height,
+                 "frame_rate": str(container.streams.video[0].average_rate)}
+    # 81 is the loader's cap, not a promise that the source has 81 frames
+    # after resampling. Phase 0's official Animation MP4 decodes to 56 frames.
+    if not 0 < media["decoded_frames"] <= 81:
+        raise RuntimeError(f"Decoded frame count outside the fixed loader cap: {media['decoded_frames']}")
     evidence = {"generation": "succeeded", "generation_seconds": round(time.monotonic() - started, 3),
-                "prompt_id": prompt_id, "mode": "Animation", "frames": 81, "media": media,
+                "prompt_id": prompt_id, "mode": "Animation", "frame_load_cap": 81, "media": media,
                 "output_bytes": (OUTPUT / "animation.mp4").stat().st_size,
                 "output_sha256": digest(OUTPUT / "animation.mp4"),
                 "workflow_sha256": digest(WORKSPACE / "workflow.json"),
