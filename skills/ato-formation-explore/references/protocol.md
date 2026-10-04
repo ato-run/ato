@@ -1,6 +1,6 @@
 # Sessionの操作と型付き契約
 
-Producerは所有者が設定した固定Formation MCPの4操作でBridgeに接続できる。`status`・`next`・`cancel`の引数は空object、`submit`の引数は`exchange_id`・`input_sha256`・`output_json`だけ。`output_json`は型付きbatchのJSON文字列であり、応答の重複fieldを消さず共通Rust validatorへ渡す。native MCP tool名にserverのprefixが付く場合はそのFormation serverの操作を使う。任意のpath、URL、Search ID、owner credentialを引数へ追加しない。配置と隔離条件は[mcp.md](mcp.md)を読む。
+Producerは所有者が設定した固定Formation MCPの3操作でBridgeに接続できる。`status`・`next`の引数は空object、`submit`の引数は`exchange_id`・`input_sha256`・`output_json`だけ。`cancel`はMCPで拒否される。`output_json`は型付きbatchのJSON文字列であり、応答の重複fieldを消さず共通Rust validatorへ渡す。native MCP tool名にserverのprefixが付く場合はそのFormation serverの操作を使う。任意のpath、URL、Search ID、owner credentialを引数へ追加しない。配置と隔離条件は[mcp.md](mcp.md)を読む。
 
 限定CLIを提供された環境では次の実コマンドを使う。`CONNECTION`は所有者から提供された接続ファイルのパス。内容を表示しない。
 
@@ -19,7 +19,7 @@ submitのstdinへProducer自身が作った応答JSONを渡す。人にJSONの�
 ato form-session --connection "$CONNECTION" cancel
 ```
 
-cancel後も保存済み状態を照合する。`cleanup: not_confirmed`をcleanup済みへ読み替えない。
+上記CLI操作はowner専用で、AgentにCLI／shellの権限を追加しない。公開connection descriptorとprivate capabilityは別componentであり、owner CLIは保存済み公開viewだけを出力する。cancel後も保存済み状態を照合する。`cleanup: not_confirmed`をcleanup済みへ読み替えない。
 
 ## Status/nextのview
 

@@ -24,7 +24,15 @@ SPEC = importlib.util.spec_from_file_location(
     "producer_isolation", SKILL / "scripts/producer-isolation-preflight.py")
 ISOLATION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ISOLATION)
-TOOLS = ["status", "next", "submit", "cancel"]
+TOOLS = ["status", "next", "submit"]
+RECONCILE_TOOLS = ["status", "next"]
+RECONCILE_PROMPT = (
+    "Use the explicitly invoked ato-formation-explore Skill to inspect the saved "
+    "status and next operation for this same unresolved Search. Call status and next. "
+    "Do not request an inspection, propose D, submit any response or infer that UNKNOWN "
+    "means failure. Report the saved attempt identity and the owner reconciliation "
+    "requirement. Never change Source, K, budget, deadline or permissions."
+)
 PROMPT = ("Use the explicitly invoked ato-formation-explore Skill for the one "
           "already authorized Search bound to the Formation MCP server. Call status "
           "first and reconcile saved responses and unresolved attempts. Get the "
@@ -128,13 +136,26 @@ def next_action(view):
     return "stop" if view.get("next_operation", "").startswith("owner_") else "wait"
 
 
-def admission(view, binding, agent, version):
+def admission(view, binding, agent, version, reconcile_only=False):
     expected = "claude_code" if agent == "claude-code" else agent
     if (not binding.get("agent") or binding["agent"].get("kind") != expected
             or binding["agent"].get("version") != version
             or view.get("search_id") != binding.get("search_id")
             or view.get("configuration_ref") != binding.get("configuration_ref")):
         raise ISOLATION.Rejected("session_agent_binding_mismatch")
+    if reconcile_only:
+        progress = view.get("progress", {})
+        deadline = view.get("deadline_ms")
+        if (view.get("connected") is not True
+                or progress.get("status") not in ("pending", "running")
+                or type(progress.get("unresolved_attempts")) is not int
+                or progress["unresolved_attempts"] <= 0
+                or not any(a.get("status") == "unknown" for a in progress.get("attempts", []))
+                or view.get("next_operation") != "owner_reconcile"):
+            raise ISOLATION.Rejected("unknown_reconciliation_only")
+        if type(deadline) is not int or deadline <= time.time() * 1000:
+            raise ISOLATION.Rejected("deadline_exceeded")
+        return deadline
     if view.get("connected") is not True or view.get("next_operation") != "submit":
         raise ISOLATION.Rejected("owner_reconciliation_required")
     if (view.get("progress", {}).get("status") not in ("pending", "running")
@@ -177,7 +198,8 @@ def narrowed_catalog(path, model):
     return {"models": [model_info]}
 
 
-def auth_host_profile(public, home, native, mcp, selected_socket, auth_file=None):
+def auth_host_profile(public, home, native, mcp, selected_socket, auth_file=None,
+                      relay_capability=None):
     profile = ISOLATION.profile(public, home, [native, mcp],
                                 auth_ipc=True, relay_socket=selected_socket)
     lines = [profile,
@@ -205,6 +227,12 @@ def auth_host_profile(public, home, native, mcp, selected_socket, auth_file=None
         lines.append('(allow file-read* (literal ' + json.dumps(str(auth_file)) + '))')
         lines.extend('(allow file-read-metadata (literal ' + json.dumps(str(p)) + '))'
                      for p in auth_file.parents)
+    if relay_capability:
+        # The authenticated MCP client reads this literal private component.
+        # Code Mode/model tools retain their separate deny-default profile.
+        lines.append('(allow file-read* (literal ' + json.dumps(str(relay_capability)) + '))')
+        lines.extend('(allow file-read-metadata (literal ' + json.dumps(str(p)) + '))'
+                     for p in relay_capability.parents)
     return "\n".join(lines) + "\n"
 
 
@@ -281,14 +309,15 @@ class AppServer:
         return reply["result"]
 
 
-def codex_commands(native, public, descriptor, mcp):
+def codex_commands(native, public, descriptor, mcp, relay_capability, tools=TOOLS):
     settings = {"cli_auth_credentials_store": "file",
                 "model_catalog_json": str(public / "model-catalog.json"),
                 "approval_policy": "never", "web_search": "disabled",
                 "agents.enabled": False,
                 "features.code_mode_host": {"enabled": True, "disable_in_process_fallback": True},
-                "mcp_servers.formation": {"command": str(mcp), "args": ["--relay", str(descriptor)],
-                    "enabled_tools": TOOLS, "omit_tools_from": ["code_mode", "deferred"]}}
+                "mcp_servers.formation": {"command": str(mcp), "args": ["--relay", str(descriptor),
+                    "--capability-file", str(relay_capability)],
+                    "enabled_tools": tools, "omit_tools_from": ["code_mode", "deferred"]}}
     for feature in ("shell_tool", "unified_exec", "multi_agent", "multi_agent_v2",
                     "apps", "view_image", "goals", "skill_mcp_dependency_install"):
         settings["features." + feature] = False
@@ -338,7 +367,9 @@ def run(args):
     if binding.get("agent", {}).get("model") is not None and binding["agent"]["model"] != args.model:
         raise ISOLATION.Rejected("session_model_binding_mismatch")
     view = status(mcp, connection)
-    deadline = admission(view, binding, args.agent, args.version)
+    deadline = admission(view, binding, args.agent, args.version, args.reconcile_only)
+    tools = RECONCILE_TOOLS if args.reconcile_only else TOOLS
+    prompt = RECONCILE_PROMPT if args.reconcile_only else PROMPT
     output = Path(args.output).absolute()
     if output.exists() or output.is_symlink() or ".tmp" not in output.parts:
         raise ISOLATION.Rejected("fresh_workspace_tmp_required")
@@ -352,6 +383,7 @@ def run(args):
         raise ISOLATION.Rejected("fresh_short_socket_required")
     selected.parent.resolve(strict=True)
     descriptor = public / "relay.json"
+    relay_capability = owner / "relay.capability"
     processes = []
     handles = []
     socket_identity = None
@@ -361,6 +393,7 @@ def run(args):
               "binaries": pins, "Ato_direct_LLM_calls": 0,
               "internal_LLM_calls": "unknown", "token_usage": "unknown", "cost": "unknown",
               "ordinary_Run_authorized": False, "Search_cancelled_by_launcher": False}
+    result["reconcile_only"] = args.reconcile_only
 
     def launch(command, label, environment=None, stdin=False):
         log = (owner / (label + ".stderr")).open("xb"); handles.append(log)
@@ -372,7 +405,8 @@ def run(args):
 
     try:
         broker = launch([str(mcp), "--connection", str(connection), "--publish-relay",
-                         str(descriptor), "--relay-socket", str(selected)], "broker")
+                         str(descriptor), "--publish-capability-file", str(relay_capability),
+                         "--relay-socket", str(selected)], "broker")
         end = min(time.time() + 10, deadline / 1000)
         while not descriptor.exists() and broker.poll() is None and time.time() < end:
             time.sleep(.02)
@@ -411,12 +445,13 @@ def run(args):
                     if time.time() >= ready_end:
                         raise ISOLATION.Rejected("isolated_code_mode_unavailable")
                     time.sleep(.02)
-            host_profile = auth_host_profile(public, home, native, mcp, selected, auth)
+            host_profile = auth_host_profile(public, home, native, mcp, selected, auth,
+                                             relay_capability)
             host_profile += '(allow network-outbound (remote tcp "localhost:' + str(port) + '"))\n'
             host_file = owner / "auth-host.sb"; host_file.write_text(host_profile)
             environment["CODEX_HOME"] = str(home)
             command = ["/usr/bin/sandbox-exec", "-f", str(host_file)]
-            command += codex_commands(native, public, descriptor, mcp)
+            command += codex_commands(native, public, descriptor, mcp, relay_capability, tools)
             command += ["app-server", "--stdio", "--code-mode-host", "http://127.0.0.1:" + str(port)]
             process = launch(command, "codex", environment, True)
             events = (owner / "native-events.jsonl").open("x"); handles.append(events)
@@ -443,21 +478,23 @@ def run(args):
                 current = status(mcp, connection)
                 result["saved_status"] = current
                 action = next_action(current)
-                if action == "submit":
-                    admission(current, binding, args.agent, args.version)
+                if action == "submit" or (args.reconcile_only and turns == 0):
+                    admission(current, binding, args.agent, args.version, args.reconcile_only)
                     exchange = current["exchange"]
                     if exchange == previous_exchange:
                         raise ISOLATION.Rejected("exchange_not_saved_owner_reconciliation_required")
-                    inputs = [{"type": "text", "text": PROMPT}]
+                    inputs = [{"type": "text", "text": prompt}]
                     if turns == 0:
                         inputs.insert(0, {"type": "skill", "name": "ato-formation-explore",
                                           "path": str(public / "skill/SKILL.md")})
-                    turn_end = min(end, current["exchange_deadline_ms"] / 1000)
+                    turn_end = end if args.reconcile_only else min(end, current["exchange_deadline_ms"] / 1000)
                     client.request("turn/start", {"threadId": thread, "input": inputs}, turn_end)
                     client.receive(lambda event: event.get("method") == "turn/completed", turn_end)
                     previous_exchange = exchange
                     turns += 1
                     result["native_turns_completed"] = turns
+                    if args.reconcile_only:
+                        break
                 elif action == "stop":
                     break
                 else:
@@ -467,8 +504,9 @@ def run(args):
             if args.version != "2.1.288":
                 raise ISOLATION.Rejected("measured_claude_configuration_required")
             # The native auth host uses an existing same-account credential,
-            # while the model has four fixed MCP tools and no file/shell tool.
-            host_profile = auth_host_profile(public, home, native, mcp, selected)
+            # while the model has fixed MCP tools and no file/shell tool.
+            host_profile = auth_host_profile(public, home, native, mcp, selected,
+                                             relay_capability=relay_capability)
             host_file = owner / "auth-host.sb"; host_file.write_text(host_profile)
             environment.update(CLAUDE_CONFIG_DIR=str(home), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
                 CLAUDE_CODE_SUBPROCESS_ENV_SCRUB="1", CLAUDE_CODE_TMPDIR=str(home),
@@ -480,15 +518,16 @@ def run(args):
                 raise ISOLATION.Rejected("native_account_unavailable")
             result["native_account_available"] = True
             write(public / "claude-mcp.json", {"mcpServers": {"formation": {
-                "command": str(mcp), "args": ["--relay", str(descriptor)]}}})
+                "command": str(mcp), "args": ["--relay", str(descriptor),
+                    "--capability-file", str(relay_capability)]}}})
             write(public / "claude-settings.json", {"disableAllHooks": True,
                 "enabledPlugins": {}, "permissions": {
-                    "allow": ["mcp__formation__" + name for name in TOOLS],
+                    "allow": ["mcp__formation__" + name for name in tools],
                     "deny": ["Bash", "Read", "Write", "Edit", "Agent", "WebFetch", "WebSearch"]}})
             command = prefix + ["--strict-mcp-config", "--mcp-config", str(public / "claude-mcp.json"),
                 "--settings", str(public / "claude-settings.json"), "--setting-sources", "project",
                 "--add-dir", str(public / "skill"), "--tools", "", "--allowedTools",
-                ",".join("mcp__formation__" + name for name in TOOLS), "--permission-mode", "dontAsk",
+                ",".join("mcp__formation__" + name for name in tools), "--permission-mode", "dontAsk",
                 "--permission-prompts", "none", "--no-session-persistence", "--no-chrome",
                 "--output-format", "stream-json", "--verbose"]
             if args.model:
@@ -504,16 +543,16 @@ def run(args):
                 current = status(mcp, connection)
                 result["saved_status"] = current
                 action = next_action(current)
-                if action == "submit":
-                    admission(current, binding, args.agent, args.version)
+                if action == "submit" or (args.reconcile_only and turns == 0):
+                    admission(current, binding, args.agent, args.version, args.reconcile_only)
                     exchange = current["exchange"]
                     if exchange == previous_exchange:
                         raise ISOLATION.Rejected("exchange_not_saved_owner_reconciliation_required")
-                    message = ("/ato-formation-explore " if turns == 0 else "") + PROMPT
+                    message = ("/ato-formation-explore " if turns == 0 else "") + prompt
                     process.stdin.write((json.dumps({"type": "user", "message": {
                         "role": "user", "content": message}}) + "\n").encode())
                     process.stdin.flush()
-                    turn_end = min(end, current["exchange_deadline_ms"] / 1000)
+                    turn_end = end if args.reconcile_only else min(end, current["exchange_deadline_ms"] / 1000)
                     completed = False
                     while time.time() < turn_end:
                         event = frames.receive(turn_end)
@@ -521,8 +560,9 @@ def run(args):
                             break
                         events.write(json.dumps(event) + "\n"); events.flush()
                         if event.get("type") == "system" and event.get("subtype") == "init":
-                            tools = event.get("tools", [])
-                            if sorted(tools) != sorted("mcp__formation__" + name for name in TOOLS):
+                            observed_tools = event.get("tools", [])
+                            if sorted(observed_tools) != sorted("mcp__formation__" + name for name in
+                                                       (RECONCILE_TOOLS if args.reconcile_only else TOOLS)):
                                 raise ISOLATION.Rejected("native_tool_inventory_changed")
                             result["observed_model"] = event.get("model")
                         if event.get("type") == "result":
@@ -535,6 +575,8 @@ def run(args):
                     previous_exchange = exchange
                     turns += 1
                     result["native_turns_completed"] = turns
+                    if args.reconcile_only:
+                        break
                 elif action == "stop":
                     break
                 else:
@@ -569,6 +611,8 @@ def main():
         parser.add_argument("--" + name, required=True)
     for name in ("auth-file", "model-catalog", "code-mode-host", "model"):
         parser.add_argument("--" + name)
+    parser.add_argument("--reconcile-only", action="store_true",
+                        help="Fresh native context with status/next only for a saved UNKNOWN; never reopens inference")
     try:
         print(json.dumps(run(parser.parse_args())))
     except (ISOLATION.Rejected, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:

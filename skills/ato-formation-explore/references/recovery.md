@@ -1,5 +1,7 @@
 # 再接続・競合・終了の復旧
 
+ownerは保存済みUNKNOWNに対して、Native launcherの`--reconcile-only`を選べる。新しいNative文脈へ公開するのは`status / next`だけで、同じSearchの保存状態を報告して停止する。新しいD・inspection・実行を開始せず、元のSearch deadlineを超えたNative推論も開始しない。期限後のACK・result照合・cleanupはownerの既存経路で継続する。
+
 再接続時は`status`で保存済み応答、未ACK結果、実行中attempt、終端理由を確認し、その後`next`を取得する。結果の不明を新たな推論やRuntime attemptの理由にしない。どの段階でも元のdeadlineと消費枠を維持する。
 
 | 保存済み状態 | Producerの操作 |
@@ -15,6 +17,6 @@
 | 予算/deadline/権限/利用上限/応答停止 | 適切な停止理由を残す。枠の補充や推論APIfallbackは行わない。 |
 | 終端Search | 再開・resetしない。新計画は別測定IDで事前承認を受ける。 |
 
-明示的な取消依頼には[protocol.md](protocol.md)の`cancel`を使う。取消要求はCoordinatorへの送信前に保存され、応答が消失しても新しい推論応答を禁止する。取消要求後の状態が不明ならOwnerへ照合を引き継ぎ、再接続で取消要求を忘れない。終了・取消はRequester/Coordinatorの既存経路で行い、candidate停止、結果ACK、未精算予約、input cleanupを保存済み証拠で照合する。Producer接続の切断だけをSearch取消と扱わない。`cleanup: not_confirmed`や所有者側の停止未完了は、その状態で引き継ぐ。
+Agentは進めない理由をtyped declineで表し、取消を自ら実行しない。明示的な取消依頼はOwnerへ引き継ぎ、Ownerが[protocol.md](protocol.md)のCLI `cancel`を使う。取消要求はCoordinatorへの送信前に保存され、応答が消失しても新しい推論応答を禁止する。取消要求後の状態が不明ならOwnerへ照合を引き継ぎ、再接続で取消要求を忘れない。終了・取消はRequester/Coordinatorの既存経路で行い、candidate停止、結果ACK、未精算予約、input cleanupを保存済み証拠で照合する。Producer接続の切断だけをSearch取消と扱わない。`cleanup: not_confirmed`や所有者側の停止未完了は、その状態で引き継ぐ。
 
 引き継ぎにはSearch ID、固定Source/K、最後のexchange ID/input SHA-256、現在の待機・停止理由、未ACK/実行中/UNKNOWNの有無、元の期限と残枠を含める。接続capabilityやprivate値を貼り付けない。

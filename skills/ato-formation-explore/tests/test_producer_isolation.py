@@ -48,7 +48,7 @@ class ProducerIsolationTests(unittest.TestCase):
         self.assertFalse(result["native_acceptance_ready"])
         self.assertFalse(result["codex_version_eligible"])
         self.assertFalse(result["native_agent_or_auth_invoked"])
-        self.assertEqual(result["mcp_tools"], ["status", "next", "submit", "cancel"])
+        self.assertEqual(result["mcp_tools"], ["status", "next", "submit"])
         for entry in [".agents", ".claude"]:
             link = self.output / "public/project" / entry / "skills/ato-formation-explore"
             self.assertEqual(link.resolve(), self.output / "public/skill")
