@@ -1601,6 +1601,41 @@ impl Client {
         )?
         .context("formation_input_empty")
     }
+    /// Owner-session evidence metadata. Never accepts Runtime credentials as
+    /// functional permission; the API authenticates the same owning account.
+    pub fn source_result(&self, search_id: &str) -> Result<Value> {
+        Self::validate_owner_search_id(search_id)?;
+        self.send(
+            self.http
+                .get(self.url(&format!("/exploration/{search_id}/source-result"))),
+        )?
+        .context("source_result_empty")
+    }
+
+    /// Reuse the existing immutable functional plan and registration service.
+    /// Replaying identical request IDs returns the original Run and deadline.
+    pub fn prepare_retained_verification(&self, search_id: &str, plan: &Value) -> Result<Value> {
+        Self::validate_owner_search_id(search_id)?;
+        self.send(
+            self.http
+                .post(self.url(&format!("/exploration/{search_id}/retained-verification")))
+                .json(plan),
+        )?
+        .context("functional_verification_empty")
+    }
+
+    fn validate_owner_search_id(search_id: &str) -> Result<()> {
+        ensure!(
+            !search_id.is_empty()
+                && search_id.len() <= 256
+                && search_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "invalid search id"
+        );
+        Ok(())
+    }
+
     pub fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>> {
         let reply: Value = self
             .send(self.http.get(self.url("/runtimes")))?
