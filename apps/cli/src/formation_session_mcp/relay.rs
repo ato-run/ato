@@ -641,7 +641,7 @@ mod tests {
                 .iter()
                 .map(|tool| tool["name"].as_str().unwrap())
                 .collect::<Vec<_>>()
-                == ["status", "next", "submit", "cancel"]
+                == ["status", "next", "submit"]
         );
         for secret in [&owner_token, &owner_path, &broker.descriptor.capability] {
             assert!(!output.contains(secret));
@@ -660,7 +660,7 @@ mod tests {
         let path = root.path().join("producer.json");
         let broker = Broker::start(server, &path, None)?;
         let canary = random_hex()?;
-        for name in ["status", "next", "cancel"] {
+        for name in ["status", "next"] {
             for field in [
                 "source",
                 "path",
@@ -723,7 +723,10 @@ mod tests {
         );
         assert!(std::fs::read(response_path)? == saved);
         let canceled = rpc(&second, call("cancel", json!({})))?;
-        assert!(canceled["result"]["structuredContent"]["progress"]["cleanup"] == "not_confirmed");
+        assert!(canceled["result"]["isError"] == true);
+        assert!(canceled["result"]["structuredContent"]["error"]["code"] == "unknown_tool");
+        let status = rpc(&second, call("status", json!({})))?;
+        assert!(status["result"]["structuredContent"]["progress"]["status"] == "pending");
         Ok(())
     }
 
@@ -752,7 +755,7 @@ mod tests {
         let path = root.path().join("producer.json");
         let broker = Broker::start(server, &path, None)?;
         let request =
-            serde_json::to_value(wire_request(&broker.descriptor, call("cancel", json!({})))?)?;
+            serde_json::to_value(wire_request(&broker.descriptor, call("next", json!({})))?)?;
         for field in ["proof", "nonce", "schema", "extra"] {
             let mut changed = request.clone();
             changed[field] = json!(random_hex()?);
