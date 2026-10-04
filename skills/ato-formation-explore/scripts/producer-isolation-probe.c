@@ -85,7 +85,7 @@ static bool allowed_unix(const char *path) {
 
 int main(int argc, char **argv) {
   if (argc != 7 && argc != 8) return 2;
-  const char *names[] = {"source", "owner-credential", "private-grant", "runtime-ticket",
+  const char *names[] = {"source", "owner-credential", "session-capability", "private-grant", "runtime-ticket",
                          "state-db", "old-measurements", "credential-store-file"};
   char path[4096];
   bool private_read = true, private_write = true;

@@ -38,7 +38,7 @@ Claude Codeでは`--agent claude-code --version 2.1.288 --binary "$CLAUDE_BINARY
 
 CodexはNative認証ホストとCode Modeを別プロセス・別OS profileにする。ホストは既存Native認証だけを読む。Code Modeには認証ファイル、Owner接続、Source filesystemを公開しない。model catalogからshell・file patch・追加toolを外し、固定MCP以外の実行入口を持たせない。
 
-Claude CodeはOwner adapterが既存同一accountのKeychain credentialをRAMで読み、隔離したNative認証ホストへ渡す。ファイルやargvへ保存しない。[公式OAuth環境変数とsubprocess scrub](https://code.claude.com/docs/en/env-vars)を使い、MCP子プロセスにはcredentialを継承させない。公開するのは固定MCPの4 toolだけで、built-in tool・hook・plugin・追加MCPを無効にする。Native自身の一時出力もworkspace内に固定する。これらの設定はownerのAto credentialやRuntime ticketの共有を許可しない。
+Claude CodeはOwner adapterが既存同一accountのKeychain credentialをRAMで読み、隔離したNative認証ホストへ渡す。ファイルやargvへ保存しない。[公式OAuth環境変数とsubprocess scrub](https://code.claude.com/docs/en/env-vars)を使い、MCP子プロセスにはcredentialを継承させない。公開するのは固定MCPの3 tool（status/next/submit）だけで、built-in tool・hook・plugin・追加MCPを無効にする。Native自身の一時出力もworkspace内に固定する。これらの設定はownerのAto credentialやRuntime ticketの共有を許可しない。
 
 各turnは1つのexchangeを処理する。保存後はOwner側で状態を待ち、新しい未応答exchangeが成立したときだけ同じNative文脈で次のturnを始める。入力待ち・UNKNOWN・終端・期限で止まり、launch終了をSearch取消やRuntime cleanupの証拠にしない。`owner/launch-result.json`とNative eventsはOwner証跡であり、公開報告には保存済み結果を検査して必要な項目だけ移す。
 
@@ -48,7 +48,7 @@ Launcherの終了出力は、SDKから取得できたtoken/cached-token counter�
 
 2026-10-03のglobal製品inventoryは`codex-cli 0.46.0`、`Claude Code 2.1.288`。Installerによる両配置先からの同一Skill/補助ファイル参照、冪等再配置、既存Skill拒否はローカルで確認した。2026-10-04にはglobalのCodexを置き換えず、公式releaseの`Codex 0.160.0`と対応するCode Mode hostを受入専用に固定した。
 
-実Codexの`skills/list`で共通packageを検出し、両製品のcontrolled provider fixtureで共通本文の明示展開とFormationの4 toolを確認した。Codexでは`additional_tools`とCode Mode内部のtoolも確認する。これらはNative loader/tool構成の証拠であり、実provider推論、対象Sourceの独立探索、fresh receiptの受入結果ではない。新規Searchによる小規模受入はユーザーから実施指示を受けており、[環境gate](mcp.md)を満たしたセルから進める。過去の未実行計画の記録は変更しない。
+実Codexの`skills/list`で共通packageを検出し、両製品のcontrolled provider fixtureで共通本文の明示展開と当時のFormationの4 toolを確認した。現在の契約はcancelをownerへ戻した3 toolであり、新pinのinventory受入を別途記録する。Codexでは`additional_tools`とCode Mode内部のtoolも確認する。これらはNative loader/tool構成の証拠であり、実provider推論、対象Sourceの独立探索、fresh receiptの受入結果ではない。新規Searchによる小規模受入はユーザーから実施指示を受けており、[環境gate](mcp.md)を満たしたセルから進める。過去の未実行計画の記録は変更しない。
 
 ローカルCodex 0.46.0のhelp・同梱README・binaryにはSkill機能の証拠がなく、[同versionの公式Source](https://github.com/openai/codex/tree/rust-v0.46.0/codex-rs)にもSkill loaderがないため、このnative Skill経路には対応しない。本文を通常promptへ手動添付する方式を、native Skill受入の代用にしない。
 
