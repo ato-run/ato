@@ -151,7 +151,7 @@ def admission(view, binding, agent, version, reconcile_only=False):
                 or type(progress.get("unresolved_attempts")) is not int
                 or progress["unresolved_attempts"] <= 0
                 or not any(a.get("status") == "unknown" for a in progress.get("attempts", []))
-                or view.get("next_operation") != "owner_reconcile"):
+                or view.get("next_operation") not in ("owner_reconcile", "owner_reconcile_or_assess")):
             raise ISOLATION.Rejected("unknown_reconciliation_only")
         if type(deadline) is not int or deadline <= time.time() * 1000:
             raise ISOLATION.Rejected("deadline_exceeded")
