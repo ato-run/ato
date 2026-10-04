@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub const CONNECTION_SCHEMA: &str = "ato.formation-session-connection/1";
+pub const CONNECTION_SCHEMA: &str = "ato.formation-session-connection/2";
 pub const VIEW_SCHEMA: &str = "ato.formation-session-view/1";
 pub const INPUT_PROJECTION_SCHEMA: &str = "ato.formation-session-public-input/1";
 const FRAME_CAP: usize = 96 * 1024;
@@ -243,10 +243,36 @@ fn public_reasoning_input(input: &ReasoningInput) -> Result<Value> {
 pub struct Connection {
     pub schema: String,
     pub address: SocketAddr,
-    pub access_token: String,
     pub search_id: String,
     pub configuration_ref: String,
     pub agent: Option<SessionAgent>,
+}
+
+/// Private transport authorization is deliberately neither Debug nor Serialize.
+/// A public descriptor alone cannot authorize a Session operation.
+#[derive(Clone)]
+pub struct AuthorizedConnection {
+    pub connection: Connection,
+    capability: [u8; 32],
+}
+
+impl std::ops::Deref for AuthorizedConnection {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl AuthorizedConnection {
+    pub fn same_authorization(&self, other: &Self) -> bool {
+        self.search_id == other.search_id
+            && self.configuration_ref == other.configuration_ref
+            && self.agent == other.agent
+            && same_token(
+                &BASE64.encode(self.capability),
+                &BASE64.encode(other.capability),
+            )
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -269,8 +295,8 @@ struct Request {
     command: Command,
 }
 
-/// Only the trusted requester creates/reconnects this server. The capability in
-/// `connection_file` grants these four operations for one frozen Search only.
+/// Only the trusted requester creates/reconnects this server. The public
+/// descriptor and private capability are separate; only the owner CLI cancels.
 #[derive(Clone, Copy)]
 pub struct ResponseWindow {
     pub deadline_ms: u64,
@@ -279,7 +305,7 @@ pub struct ResponseWindow {
 }
 
 pub struct Bridge {
-    connection: Connection,
+    connection: AuthorizedConnection,
     connection_file: PathBuf,
     stop: Arc<AtomicBool>,
     progress: Arc<Mutex<Value>>,
@@ -307,24 +333,30 @@ impl Bridge {
         let mut connection = Connection {
             schema: CONNECTION_SCHEMA.into(),
             address: "127.0.0.1:0".parse()?,
-            access_token: BASE64.encode(entropy),
             search_id: search_id.into(),
             configuration_ref: producer.configuration_ref.clone(),
             agent,
         };
-        if connection_file.exists() {
-            let saved = read_connection(connection_file)?;
+        let capability = if connection_file.exists() {
+            let saved = read_authorized_connection(connection_file)?;
             ensure!(
                 saved.search_id == connection.search_id
                     && saved.configuration_ref == connection.configuration_ref
                     && saved.agent == connection.agent,
                 "session connection binding changed"
             );
-            connection.access_token = saved.access_token;
-        }
+            saved.capability
+        } else {
+            publish_capability(connection_file, &connection, entropy)?;
+            entropy
+        };
         let listener = TcpListener::bind(connection.address)?;
         listener.set_nonblocking(true)?;
         connection.address = listener.local_addr()?;
+        let connection = AuthorizedConnection {
+            connection,
+            capability,
+        };
         let progress = Arc::new(Mutex::new(json!({"status":"connecting"})));
         let stop = Arc::new(AtomicBool::new(false));
         if producer.session_cancelled.load(Ordering::Relaxed) {
@@ -349,8 +381,10 @@ impl Bridge {
                             let request: Request = serde_json::from_slice(&raw)?;
                             // Do not echo parser errors or attacker-controlled request bytes.
                             ensure!(
-                                same_token(&request.access_token, &identity.access_token)
-                                    && request.search_id == identity.search_id
+                                same_token(
+                                    &request.access_token,
+                                    &BASE64.encode(identity.capability)
+                                ) && request.search_id == identity.search_id
                                     && request.configuration_ref == identity.configuration_ref,
                                 "session authentication rejected"
                             );
@@ -434,7 +468,10 @@ impl Bridge {
             deadline_ms,
             thread: Some(thread),
         };
-        replace_public_file(connection_file, &serde_jcs::to_vec(&bridge.connection)?)?;
+        replace_public_file(
+            connection_file,
+            &serde_jcs::to_vec(&bridge.connection.connection)?,
+        )?;
         Ok(bridge)
     }
     pub fn update(&self, status: &Value) -> Result<()> {
@@ -545,15 +582,79 @@ fn validate_connection(connection: &Connection) -> Result<()> {
     ensure!(
         connection.schema == CONNECTION_SCHEMA
             && connection.address.ip().is_loopback()
-            && connection.address.port() != 0
-            && connection.access_token.len() == 44,
+            && connection.address.port() != 0,
         "invalid Session connection"
     );
     Ok(())
 }
-/// Token-free CLI configuration: only this scoped capability reaches the agent.
+fn capability_binding(connection: &Connection) -> Result<Vec<u8>> {
+    Ok(Sha256::digest(serde_jcs::to_vec(&json!([
+        CONNECTION_SCHEMA,
+        connection.search_id,
+        connection.configuration_ref,
+        connection.agent
+    ]))?)
+    .to_vec())
+}
+
+fn publish_capability(path: &Path, connection: &Connection, capability: [u8; 32]) -> Result<()> {
+    let private = path.with_extension("capability");
+    let parent = private.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(&capability_binding(connection)?)?;
+    staged.write_all(&capability)?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist_noclobber(&private)
+        .map_err(|_| anyhow::anyhow!("Session capability publication rejected"))?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Owner/MCP startup only. Native model tools never receive this path or bytes;
+/// the owner launcher must keep the file outside its model OS profile.
+pub fn read_authorized_connection(path: &Path) -> Result<AuthorizedConnection> {
+    let connection = read_connection(path)?;
+    let private = path.with_extension("capability");
+    let meta = std::fs::symlink_metadata(&private)?;
+    ensure!(
+        meta.is_file() && !meta.file_type().is_symlink() && meta.len() == 64,
+        "Session private capability rejected"
+    );
+    let file = std::fs::File::open(&private)?;
+    let actual = file.metadata()?;
+    ensure!(
+        actual.is_file() && actual.len() == 64,
+        "Session private capability rejected"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(
+            meta.dev() == actual.dev() && meta.ino() == actual.ino(),
+            "Session private capability changed"
+        );
+    }
+    let mut bytes = Vec::new();
+    file.take(65).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() == 64 && bytes[..32] == capability_binding(&connection)?,
+        "Session private capability binding rejected"
+    );
+    let capability = bytes[32..]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Session capability rejected"))?;
+    Ok(AuthorizedConnection {
+        connection,
+        capability,
+    })
+}
+
+/// The owner CLI loads private authorization separately and prints public views only.
 pub fn request(connection_file: &Path, command: Command) -> Result<Value> {
-    let connection = read_connection(connection_file)?;
+    let connection = read_authorized_connection(connection_file)?;
     request_bound(
         &connection,
         &connection_file.with_extension("status.json"),
@@ -563,7 +664,7 @@ pub fn request(connection_file: &Path, command: Command) -> Result<Value> {
 /// Fixed-scope tool facades reuse this transport without rereading or replacing
 /// their accepted Search/configuration/capability binding.
 pub fn request_bound(
-    connection: &Connection,
+    connection: &AuthorizedConnection,
     status_file: &Path,
     command: Command,
 ) -> Result<Value> {
@@ -592,7 +693,7 @@ pub fn request_bound(
     // Preserve RawValue bytes (including duplicate fields for strict rejection).
     // JCS's Value conversion would erase this boundary before validation.
     let bytes = serde_json::to_vec(&Request {
-        access_token: connection.access_token.clone(),
+        access_token: BASE64.encode(connection.capability),
         search_id: connection.search_id.clone(),
         configuration_ref: connection.configuration_ref.clone(),
         command,
@@ -1772,6 +1873,22 @@ mod tests {
         let next = request(&path, Command::Next)?;
         assert!(next["input"].is_object());
         assert!(!serde_json::to_string(&next)?.contains(private));
+        let public_descriptor = std::fs::read_to_string(&path)?;
+        assert!(!public_descriptor.contains("access_token"));
+        assert!(!public_descriptor.contains("capability"));
+        assert!(!public_descriptor.contains(&BASE64.encode([7; 32])));
+        let descriptor_only = root.path().join("descriptor-only.json");
+        std::fs::write(&descriptor_only, &public_descriptor)?;
+        assert!(request(&descriptor_only, Command::Status).is_err());
+        let wrong_scope = root.path().join("wrong-scope.json");
+        let mut changed: Value = serde_json::from_str(&public_descriptor)?;
+        changed["search_id"] = json!("search_other");
+        std::fs::write(&wrong_scope, serde_json::to_vec(&changed)?)?;
+        std::fs::copy(
+            path.with_extension("capability"),
+            wrong_scope.with_extension("capability"),
+        )?;
+        assert!(read_authorized_connection(&wrong_scope).is_err());
         let mut malformed = serde_json::to_value(read_connection(&path)?)?;
         malformed["agent"] = json!({"kind":private,"version":"fixture"});
         let malformed_path = root.path().join("malformed.json");
@@ -1779,10 +1896,10 @@ mod tests {
         assert!(
             !format!("{:#}", read_connection(&malformed_path).err().unwrap()).contains(private)
         );
-        let mut wrong = read_connection(&path)?;
-        wrong.access_token = BASE64.encode([8; 32]);
+        let wrong = read_connection(&path)?;
         let forged = root.path().join("forged.json");
         replace_public_file(&forged, &serde_jcs::to_vec(&wrong)?)?;
+        publish_capability(&forged, &wrong, [8; 32])?;
         assert!(request(&forged, Command::Status).is_err());
         request(
             &path,
