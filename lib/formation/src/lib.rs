@@ -70,3 +70,5 @@ pub mod proposal;
 pub mod source_oci_plan;
 
 pub mod functional_acceptance;
+
+pub mod source_result;
