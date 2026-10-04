@@ -1971,7 +1971,10 @@ impl ConnectedWorker {
             Ok(secrets) => secrets,
             Err(error) => return not_started(Err(error)),
         };
-        match self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut()) {
+        match poll_runtime_launch_control(
+            || self.control_stop_requested(&lease.id),
+            || self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut()),
+        ) {
             Ok(true) => {
                 let execution_id = match spec.canonical_digest() {
                     Ok(digest) => digest,
@@ -2028,9 +2031,15 @@ impl ConnectedWorker {
             &self.config.work_root,
             lease_root,
             || {
-                if self
-                    .refresh_execution_authorization(&lease.id, execution_authorization.as_mut())?
-                {
+                if poll_runtime_launch_control(
+                    || self.control_stop_requested(&lease.id),
+                    || {
+                        self.refresh_execution_authorization(
+                            &lease.id,
+                            execution_authorization.as_mut(),
+                        )
+                    },
+                )? {
                     anyhow::bail!("the Run was stopped during data delivery");
                 }
                 Ok(())
