@@ -7,8 +7,14 @@ acceptance remain separate gates. It grants no Search or Runtime authorization.
 ## Ownership and modes
 
 `ato-formation-session-mcp --connection PATH` keeps the existing direct stdio
-mode. Only an owner process outside the Native sandbox may read this private
-Session connection, which contains its existing Session capability.
+mode. Only an owner process outside the Native sandbox may read the private authorization component beside this public Session
+connection. The strict `ato.formation-session-connection/2` JSON contains only
+schema, address, search_id, configuration_ref and agent. Its sibling `.capability`
+is a non-serializable binary component bound to that immutable scope; address may
+change on reconnection. It is not an owner credential or Runtime ticket. Public
+status/export/diagnostics never serialize this component. Descriptor inspection
+alone cannot authenticate. Existing v1 records are preserved; this server refuses
+v1 rather than silently importing a token-bearing descriptor.
 
 `ato-formation-session-mcp --connection PATH --publish-relay NEW_PATH`
 serves an external loopback broker for that already scoped Session. The optional
@@ -32,24 +38,40 @@ owned by the original Session/Coordinator/Rust authority.
 
 ## Producer descriptor
 
-The strict `ato.formation-session-relay/1` descriptor has only:
+The strict `ato.formation-session-relay/2` public descriptor contains only schema,
+loopback address and immutable binding (Search, configuration, agent, expiry).
+The Unix v2 descriptor uses a socket instead of address. Neither descriptor
+contains a token, private component path, owner connection path, Ato credential,
+private input, Runtime ticket, grant, Source path or successful Derivation.
 
-- `schema`, a loopback `address` with a nonzero port, and `capability` containing
-  32 random bytes encoded as 64 lowercase hex characters;
-- `binding.search_id`, `binding.configuration_ref`, optional agent metadata, and
-  immutable `binding.expires_at_ms`.
+`--publish-capability-file PRIVATE_PATH` selects the private authorization output;
+`--capability-file PRIVATE_PATH` selects it for the fixed stdio relay process.
+The owner launcher places it outside the public package. If omitted, the owner
+CLI uses the descriptor's `.capability` sibling. This default is publication
+hygiene, **not** a model isolation boundary. Native/model tools may not read that
+file or discover its path through MCP tools. Only the authentication host/fixed
+MCP transport may read it; Codex Code Mode retains a separate deny-default OS
+profile, and Claude exposes no built-in file/process tools.
 
-It contains no Ato auth, owner connection path/capability, private input value,
-Runtime ticket, grant, Source path, DB path or successful Derivation. It is a
-limited Producer capability and must not be printed or included in public logs.
-On Unix publication uses a mode-0600 temporary file in the destination directory,
-file sync, atomic `persist_noclobber`, and directory sync. This permission is not
-a secrecy claim against a model running as the same UID: the whole-process OS
-boundary must expose only the Producer descriptor and deny the owner file.
+The private relay component is a bounded binary file: SHA-256 of the serialized
+public descriptor followed by a random 64-character lowercase-hex key. It is
+loaded into a non-Debug transport object and skipped during serialization.
+Copying it to another descriptor cannot authorize that scope. Missing, malformed,
+symlinked or mismatched authorization fails closed before forwarding. Private
+components use mode-0600 atomic no-clobber publication, file/directory sync and
+regular-file/inode checks. These checks do not prove isolation against the same
+UID: actual OS negative reads are required. This implementation does not claim
+memory-only authorization or FD delivery. Startup/status errors are redacted;
+owner inspection commands return the public view, never raw authorization.
+
+Public and private publication never overwrites existing files. If an interrupted
+publication leaves only a private component, the owner retains it and explicitly
+chooses a fresh publication path after reconciliation; the launcher does not
+replace or print it. Old descriptors and measurement evidence remain unchanged.
 
 Publication fails if the destination already exists, including a symlink. A
 client reads a bounded regular descriptor once, rejecting symlinks, unknown
-fields, external addresses, invalid capabilities and oversized data. On Unix it
+fields, external addresses, private capability fields and oversized data. On Unix it
 compares device/inode before reading to reject replacement races. It never reloads
 another descriptor or connects to a replacement address. Owner reconnection
 requires explicit fresh publication after saved-status reconciliation; stale
@@ -61,9 +83,9 @@ descriptors are retained as evidence. Broker shutdown does not cancel a Search.
 
 On Unix, an owner may select `--relay-socket /absolute/path/to/fresh.sock`
 alongside `--connection` and `--publish-relay`. The same `--relay` client
-recognizes the strict `ato.formation-session-unix-relay/1` descriptor, which
-replaces `address` with `socket` and retains the same capability and binding.
-The TCP descriptor and its wire bytes stay unchanged. This adds a physical
+recognizes the strict `ato.formation-session-unix-relay/2` descriptor, which
+replaces `address` with `socket` and retains the same public binding. Authorization remains separate.
+Authenticated request/reply wire framing stays unchanged. This adds a physical
 transport to the existing three model tools, not another CandidateProducer engine.
 
 The socket path must be absolute, canonical through its parent, free of control

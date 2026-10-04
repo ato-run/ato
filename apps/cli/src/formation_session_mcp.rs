@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use ato_formation_worker::runtime_network::proposal::reasoning::session::{
-    self, Command, Connection,
+    self, AuthorizedConnection, Command,
 };
 use serde::Deserialize;
 use serde_json::{Value, json, value::RawValue};
@@ -24,7 +24,7 @@ const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
 pub struct FormationSessionMcpServer {
     connection_file: PathBuf,
-    binding: Connection,
+    binding: AuthorizedConnection,
 }
 
 #[derive(Deserialize)]
@@ -58,7 +58,7 @@ enum ToolFailure {
 impl FormationSessionMcpServer {
     pub fn connect(connection_file: &Path) -> Result<Self> {
         let connection_file = std::fs::canonicalize(connection_file)?;
-        let binding = session::read_connection(&connection_file)?;
+        let binding = session::read_authorized_connection(&connection_file)?;
         Ok(Self {
             connection_file,
             binding,
@@ -101,13 +101,9 @@ impl FormationSessionMcpServer {
         // The owner may restart the same bridge on a different loopback port.
         // Refresh only transport address; the capability and every semantic
         // binding must remain exactly those accepted at process startup.
-        let connection = session::read_connection(&self.connection_file)
+        let connection = session::read_authorized_connection(&self.connection_file)
             .map_err(|_| ToolFailure::SessionRejected)?;
-        if connection.search_id != self.binding.search_id
-            || connection.configuration_ref != self.binding.configuration_ref
-            || connection.agent != self.binding.agent
-            || connection.access_token != self.binding.access_token
-        {
+        if !connection.same_authorization(&self.binding) {
             return Err(ToolFailure::SessionRejected);
         }
         session::request_bound(
@@ -309,7 +305,10 @@ mod tests {
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         }
         let output = serde_json::to_string(&(init, inventory))?;
-        assert!(!output.contains(&server.binding.access_token));
+        assert!(!output.contains(&base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [9; 32]
+        )));
         assert!(!output.contains(&server.connection_file.to_string_lossy().to_string()));
         assert!(!output.contains("ATO_API_TOKEN"));
         Ok(())
@@ -426,7 +425,7 @@ mod tests {
     fn changed_connection_scope_is_rejected_without_error_contents() -> Result<()> {
         let (_root, _bridge, mut server, _digest) = fixture()?;
         for field in ["search_id", "configuration_ref", "access_token", "agent"] {
-            let mut changed = serde_json::to_value(&server.binding)?;
+            let mut changed = serde_json::to_value(&server.binding.connection)?;
             changed[field] = match field {
                 "access_token" => json!("x".repeat(44)),
                 "agent" => json!({"kind":"claude_code","version":"private-foreign-agent"}),
@@ -436,7 +435,10 @@ mod tests {
             let reply = server.handle(&call("status", json!({}))).unwrap();
             assert_eq!(reply["result"]["isError"], true, "{field}");
             assert!(!reply.to_string().contains("private-foreign"));
-            assert!(!reply.to_string().contains(&server.binding.access_token));
+            assert!(!reply.to_string().contains(&base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                [9; 32]
+            )));
         }
         // Parsing failure must not include an invalid file's contents either.
         std::fs::write(&server.connection_file, b"private-invalid-connection")?;
@@ -471,9 +473,9 @@ mod tests {
         bridge.update(&json!({"status":"pending","attempts":[]}))?;
         let after = server.handle(&call("next", json!({}))).unwrap();
         assert_eq!(after["result"]["isError"], false);
-        let connection = session::read_connection(&server.connection_file)?;
+        let connection = session::read_authorized_connection(&server.connection_file)?;
         assert_ne!(connection.address.port(), port);
-        assert_eq!(connection.access_token, server.binding.access_token);
+        assert!(connection.same_authorization(&server.binding));
         for key in [
             "search_id",
             "configuration_ref",
@@ -496,7 +498,7 @@ mod tests {
     #[test]
     fn stdio_handshake_and_public_views_do_not_leak_scoped_capability() -> Result<()> {
         let (_root, _bridge, server, _digest) = fixture()?;
-        let token = server.binding.access_token.clone();
+        let token = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9; 32]);
         let path = server.connection_file.to_string_lossy().to_string();
         let requests = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),

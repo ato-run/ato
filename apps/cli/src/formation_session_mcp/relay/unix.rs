@@ -10,13 +10,14 @@ use std::{
 
 use super::*;
 
-pub(super) const DESCRIPTOR_SCHEMA: &str = "ato.formation-session-unix-relay/1";
+pub(super) const DESCRIPTOR_SCHEMA: &str = "ato.formation-session-unix-relay/2";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UnixDescriptor {
     schema: String,
     socket: PathBuf,
+    #[serde(skip)]
     capability: String,
     binding: Binding,
 }
@@ -134,9 +135,26 @@ struct UnixBroker {
 }
 
 impl UnixBroker {
+    #[cfg(test)]
     fn start(
+        server: FormationSessionMcpServer,
+        descriptor_file: &Path,
+        socket_file: &Path,
+        expiry: Option<u64>,
+    ) -> Result<Self> {
+        Self::start_with_capability(
+            server,
+            descriptor_file,
+            &descriptor_file.with_extension("capability"),
+            socket_file,
+            expiry,
+        )
+    }
+
+    fn start_with_capability(
         mut server: FormationSessionMcpServer,
         descriptor_file: &Path,
+        capability_file: &Path,
         socket_file: &Path,
         expiry: Option<u64>,
     ) -> Result<Self> {
@@ -183,6 +201,7 @@ impl UnixBroker {
             },
         };
         validate(&descriptor)?;
+        publish_capability(capability_file, &descriptor, &descriptor.capability)?;
         publish(descriptor_file, &descriptor)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
@@ -237,9 +256,30 @@ pub fn serve_owner(
     socket: &Path,
     expiry: Option<u64>,
 ) -> Result<()> {
-    let broker = UnixBroker::start(
+    serve_owner_with_capability(
+        connection,
+        descriptor,
+        &descriptor.with_extension("capability"),
+        socket,
+        expiry,
+    )
+}
+
+pub fn serve_owner_with_capability(
+    connection: &Path,
+    descriptor: &Path,
+    capability: &Path,
+    socket: &Path,
+    expiry: Option<u64>,
+) -> Result<()> {
+    ensure!(
+        descriptor != capability,
+        "private capability destination rejected"
+    );
+    let broker = UnixBroker::start_with_capability(
         FormationSessionMcpServer::connect(connection)?,
         descriptor,
+        capability,
         socket,
         expiry,
     )?;
@@ -253,8 +293,14 @@ pub fn serve_owner(
     Ok(())
 }
 
-pub(super) fn run_stdio(bytes: &[u8], input: impl BufRead, output: impl Write) -> Result<()> {
-    let descriptor: UnixDescriptor = serde_json::from_slice(bytes)?;
+pub(super) fn run_stdio(
+    bytes: &[u8],
+    capability_file: &Path,
+    input: impl BufRead,
+    output: impl Write,
+) -> Result<()> {
+    let mut descriptor: UnixDescriptor = serde_json::from_slice(bytes)?;
+    descriptor.capability = read_capability(capability_file, &descriptor)?;
     validate(&descriptor)?;
     crate::mcp_stdio::run_stdio(input, output, Some(MAX_REQUEST_BYTES), |request| {
         forward(&descriptor, request).unwrap_or_else(|_| {
@@ -385,7 +431,9 @@ mod tests {
         let socket_root = socket_root()?;
         let socket = socket_root.path().join("relay.sock");
         let broker = UnixBroker::start(server, &path, &socket, None)?;
-        let descriptor: UnixDescriptor = serde_json::from_slice(&read_descriptor_bytes(&path)?)?;
+        let mut descriptor: UnixDescriptor =
+            serde_json::from_slice(&read_descriptor_bytes(&path)?)?;
+        descriptor.capability = read_capability(&path.with_extension("capability"), &descriptor)?;
         let before = forward(&descriptor, &call("next", json!({})))
             .context("unix next before response")?
             .unwrap();
@@ -457,7 +505,8 @@ mod tests {
     fn unix_drop_preserves_replaced_socket_and_private_material_never_reaches_stdio() -> Result<()>
     {
         let (root, _bridge, server, _) = fixture()?;
-        let owner_token = server.binding.access_token.clone();
+        let owner_token =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9; 32]);
         let owner_path = server.connection_file.to_string_lossy().to_string();
         let path = root.path().join("producer.json");
         let socket_root = socket_root()?;

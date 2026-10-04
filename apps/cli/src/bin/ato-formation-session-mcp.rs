@@ -20,6 +20,24 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     relay: Option<PathBuf>,
 
+    /// Owner-selected private relay authorization, outside the model region.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "relay",
+        conflicts_with = "connection"
+    )]
+    capability_file: Option<PathBuf>,
+
+    /// Publish private relay authorization separately from its public descriptor.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "publish_relay",
+        conflicts_with = "relay"
+    )]
+    publish_capability_file: Option<PathBuf>,
+
     /// Publish a fresh scoped descriptor and serve as the external owner broker.
     #[arg(
         long,
@@ -73,11 +91,15 @@ fn run(args: Args) -> Result<()> {
     let stdout = std::io::stdout();
     match (args.connection, args.relay, args.publish_relay) {
         (Some(connection), None, Some(descriptor)) => {
+            let capability = args
+                .publish_capability_file
+                .unwrap_or_else(|| descriptor.with_extension("capability"));
             if let Some(socket) = args.relay_socket {
                 #[cfg(unix)]
-                return relay::serve_owner_unix(
+                return relay::serve_owner_unix_with_capability(
                     &connection,
                     &descriptor,
+                    &capability,
                     &socket,
                     args.relay_expiry_ms,
                 );
@@ -87,14 +109,27 @@ fn run(args: Args) -> Result<()> {
                     anyhow::bail!("Unix relay unavailable");
                 }
             }
-            relay::serve_owner(&connection, &descriptor, args.relay_expiry_ms)
+            relay::serve_owner_with_capability(
+                &connection,
+                &descriptor,
+                &capability,
+                args.relay_expiry_ms,
+            )
         }
         (Some(connection), None, None) => {
             let server = FormationSessionMcpServer::connect(&connection)?;
             run_stdio(server, stdin.lock(), stdout.lock())
         }
         (None, Some(descriptor), None) => {
-            relay::run_relay_stdio(&descriptor, stdin.lock(), stdout.lock())
+            let capability = args
+                .capability_file
+                .unwrap_or_else(|| descriptor.with_extension("capability"));
+            relay::run_relay_stdio_with_capability(
+                &descriptor,
+                &capability,
+                stdin.lock(),
+                stdout.lock(),
+            )
         }
         _ => anyhow::bail!("invalid MCP mode"),
     }
@@ -113,6 +148,27 @@ mod tests {
             vec!["mcp", "--relay", "producer", "--relay-expiry-ms", "1"],
             vec!["mcp", "--connection", "owner", "--relay-socket", "socket"],
             vec!["mcp", "--relay", "producer", "--relay-socket", "socket"],
+            vec![
+                "mcp",
+                "--connection",
+                "owner",
+                "--capability-file",
+                "private",
+            ],
+            vec![
+                "mcp",
+                "--relay",
+                "producer",
+                "--publish-capability-file",
+                "private",
+            ],
+            vec![
+                "mcp",
+                "--connection",
+                "owner",
+                "--publish-capability-file",
+                "private",
+            ],
         ]
         .into_iter()
         .enumerate()
@@ -125,6 +181,16 @@ mod tests {
         for arguments in [
             vec!["mcp", "--connection", "owner"],
             vec!["mcp", "--relay", "producer"],
+            vec!["mcp", "--relay", "producer", "--capability-file", "private"],
+            vec![
+                "mcp",
+                "--connection",
+                "owner",
+                "--publish-relay",
+                "new",
+                "--publish-capability-file",
+                "private",
+            ],
             vec!["mcp", "--connection", "owner", "--publish-relay", "new"],
             vec![
                 "mcp",
