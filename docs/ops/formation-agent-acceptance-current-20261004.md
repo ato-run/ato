@@ -37,3 +37,15 @@ Owner調査では、終了済みCodex Source Searchの接続descriptorを広く�
 実測API pin `7fae389b` は、base `353c06fe` の最小Worker起動で再現したschema循環importを修正している。registration/projection validatorを副作用のない共通leafへ移し、同じNode 22.14・entryでheadの起動を確認した。schema・Source closure guardは変更していない。typecheckと既存retained関連2testはPASS。API #731の同じ修正は `a27397ee`。修正前の起動失敗と、canonical D登録前の既知Dによる未実行失敗は保全し、後者は同じattemptの保存済みadmission refusalで精算・writer解放した。再推論・再実行や旧Source Searchの再開はしていない。
 
 独立APIの残計画は、鍵の提供後も実行前条件を満たしていない。readonly CLI snapshotで旧18 cellのjournal不変と新SVG 3 cell、合計21/41・未精算0を再確認した。準備済みOCI/Python/Kuttの6/6/8上限は残20を共有するが、計画は旧18 cellと異なるbinary pinのまま。remote diskの20 GiB下限を除く余裕は663,830,528 byteで、宣言されたexpanded 2 GiB + stored 1 GiBを確保できない。OCI builderも未bind。追加callやSearchを開始せず、元計画・予算・旧証拠を保持した。[API実行前照合](evidence/formation-independent-api-readiness-20261004.json)。自分の検証用Coordinator/Runtime/supervisorとSSH forwardは終了し、全7 attemptのaccepted結果とclosed journalを保持した。共有serviceや配備・migrationは変更していない。
+
+## Session権限・開始境界の追補
+
+Session head `d7c926f5` はmodel MCPをstatus/next/submitの3ツールへ限定し、cancelをowner CLIだけに残した。public Session/relay descriptor v2からaccess tokenとprivate pathを除外し、scope固定private capabilityを別途検証する。status/diagnostic/exportへsecret componentをserializeしない。trusted MCP transport clientはprivate capabilityを読むが、モデル用ツール・Code Mode OS profileにはその領域を渡さない。FD/RAMのみのtransportではなく、0600単独を隔離の証明とはしない。
+
+最新headのUbuntu/macOS/Windows CLI CIはPASS。直前`8677a3cd`のmacOSのRPC status単体失敗は未再現で保全した。次headはredacted error-code assertion追加のみで、原因を修正したとは主張しない。過去のLinux WebSocket/macOS worker原因やexact base/head比較の未解明事項も残る。[現在pinとCI](evidence/formation-session-hardening-20261004.json)。
+
+Skill `45926a27` は3ツール・private capabilityのmodel隔離に追随し、実UNKNOWNのnext_operationを含むreconcile-onlyをstatus/nextだけで扱う。41test PASS。新しいmacOS OS fixtureでは、同じUIDに実在するSession capabilityを含む8種類のcanaryファイルのread/write、symlink、fork、直接exec、任意networkを拒否した。Source/Search/inference/Runtime開始は0で、実Native受入とは別。[OS fixture](evidence/formation-session-private-capability-os-20261004.json)。以前のprobeのcheck名に残った「seven」は旧ラベルで、その記録を遡及変更しない。
+
+owner `native-session-owner.py` がauditをSearch作成とNative launch境界へ接続した。13test PASS。旧campaignのdigest固定floorを使って実owner startを呼ぶと、13/12 roundと残attempt/Search枠でsubprocess前に拒否し、新Search/Native/attemptは0。取消・未回答・予約・古いsnapshotの消費保持、write-ahead予約と排他lock、不足証拠のfail closedを実装した。[開始拒否](evidence/formation-native-start-refusal-20261004.json)、[owner開始手順](formation-native-start-admission-20261004.md)。
+
+実Nativeでworkload開始後のcompletion/ACK切断→UNKNOWN→新Native文脈で同Search復旧はまだ未実施。追加枠を確認中で、旧13/12超過・未実行・API台帳を保持している。今回の修正を完全受入のDoneへ読み替えず、#1485はDraftを維持する。通常Source anchor→自動機能Instance/Stateの実装・fixtureは#1481/API #731側へ分離し、Kutt製品経路の実受入は未完了。
