@@ -5,6 +5,7 @@
 mod desktop_control;
 mod formation_exploration;
 mod formation_input;
+mod formation_verify;
 mod object_transport;
 mod portable_attempt;
 mod portable_dependency;
@@ -125,6 +126,8 @@ enum Commands {
     Form(Box<FormArgs>),
     /// Inspect or supply scoped input to an existing Formation Search.
     FormInput(formation_input::InputArgs),
+    /// Explicitly authorize a retained Source result for functional verification.
+    FormVerify(formation_verify::VerifyArgs),
     /// Take part in the Runtime Network: advertise this host's execution
     /// environments and run the Formation attempts addressed to it.
     #[command(subcommand)]
@@ -600,6 +603,7 @@ pub fn run() -> Result<()> {
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
         Commands::FormInput(args) => formation_input::run(args),
+        Commands::FormVerify(args) => formation_verify::run(args),
         Commands::RuntimeNetwork(RuntimeNetworkCommand::Serve(args)) => runtime_network_serve(args),
         Commands::Worker {
             project,
