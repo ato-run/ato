@@ -18,4 +18,4 @@ planの必須fieldは `request_id`、`registration_request_id`、新しい `sear
 
 検証はCLIの承認必須、Source/target固定、再送、同じHTTP Client経由のGET→POSTとsecret component非出力を確認した。APIでは通常Source anchor、NULL capsule_revision_idの登録、別namespace、既存writer/commit/restore/UNKNOWN/input経路、owner認証と普通のruntime_launch拒否をfixtureで確認した。migrationの既存Instance/state保持も確認した。
 
-実Kuttでの新規Source探索からRun A作成・stop/commit・Run B復元/削除までの製品経路受入は未実施。旧private dispatch fixtureの成功をこのgateへ読み替えない。#1481 / API #731はDraftを維持する。独立API残3計画・100件測定・配備・remote migrationは実施していない。
+2026-10-05追補: 保存済みsuccessful Kutt Source Searchから、実full product API/RuntimeでSource Result → 自動functional Instance → Run A作成・stop/commit → Run B復元/削除をPASSした。[製品経路受入](formation-kutt-source-result-product-20261005.md)。旧private dispatch fixtureを読み替えず、新しいNative探索も消費していない。UNKNOWN supplementalは#1485の別Draft gate。独立API残3計画・100件測定・配備・remote migrationは実施していない。
