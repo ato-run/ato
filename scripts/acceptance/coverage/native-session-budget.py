@@ -12,22 +12,34 @@ def consumption(view):
     elapsed = view.get("search_elapsed_ms")
     if type(elapsed) is not int or elapsed < 0:
         raise ValueError("incomplete_budget_evidence")
+    attempts = progress.get("search_budget", {}).get("attempts", {})
+    if any(type(attempts.get(k)) is not int or attempts[k] < 0 for k in ("used", "reserved")):
+        raise ValueError("incomplete_budget_evidence")
     values = {
         "D_rounds": progress.get("rounds_consumed"),
         "exchanges": view.get("exchanges_used"),
-        "Runtime_attempts": sum(progress.get("search_budget", {}).get("attempts", {}).get(k, -1)
-                                for k in ("used", "reserved")),
+        "Runtime_attempts": sum(attempts[k] for k in ("used", "reserved")),
         "inspections": view.get("inspection_exchanges_completed"),
         "sequential_elapsed_seconds": (elapsed + 999) // 1000,
     }
     if (not isinstance(view.get("search_id"), str)
             or not isinstance(view.get("configuration_ref"), str)
+            or not view["search_id"] or not view["configuration_ref"]
+            or type(view.get("deadline_ms")) is not int or view["deadline_ms"] <= 0
             or any(type(v) is not int or v < 0 for v in values.values())):
         raise ValueError("incomplete_budget_evidence")
     return values
 
 def audit(plan, views, unregistered_identifiers=0, requested=None):
     requested = requested or {}
+    ceilings = plan["aggregate_ceiling"]
+    keys = (*FIELDS, "searches")
+    if (type(unregistered_identifiers) is not int or unregistered_identifiers < 0
+            or not isinstance(requested, dict) or any(k not in keys for k in requested)
+            or any(type(v) is not int or v < 0 for v in requested.values())
+            or any(type(ceilings.get(k)) is not int or ceilings[k] < 0 for k in keys)
+            or not isinstance(plan.get("measurement_id"), str) or not plan["measurement_id"]):
+        raise ValueError("budget_arguments_invalid")
     by_search = {}
     for view in views:
         sid = view["search_id"]
