@@ -38,5 +38,18 @@ class BudgetAuditTests(unittest.TestCase):
         self.assertFalse(report["admitted"])
         self.assertEqual(report["totals"]["Runtime_attempts"], 2)
         self.assertEqual(set(report["exceeded"]), {"searches", "Runtime_attempts"})
+    def test_partial_attempt_and_deadline_evidence_cannot_look_like_zero(self):
+        for field in ("used", "reserved"):
+            incomplete = view("same", 1, reserved=2)
+            del incomplete["progress"]["search_budget"]["attempts"][field]
+            with self.assertRaisesRegex(ValueError, "incomplete_budget_evidence"):
+                MODULE.audit(PLAN, [incomplete])
+        incomplete = view("same", 1); del incomplete["deadline_ms"]
+        with self.assertRaisesRegex(ValueError, "incomplete_budget_evidence"):
+            MODULE.audit(PLAN, [incomplete])
+    def test_negative_or_unknown_requested_scope_cannot_bypass_ceiling(self):
+        for requested in ({"D_rounds": -1}, {"unknown": 1}, {"D_rounds": True}):
+            with self.assertRaisesRegex(ValueError, "budget_arguments_invalid"):
+                MODULE.audit(PLAN, [view("same", 1)], requested=requested)
 if __name__ == "__main__":
     unittest.main()
