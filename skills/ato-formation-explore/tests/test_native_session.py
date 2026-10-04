@@ -34,6 +34,41 @@ class NativeAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, "deadline_exceeded"):
             self.admit()
 
+    def test_unknown_reconnect_is_read_only_and_keeps_original_search_deadline(self):
+        view = dict(self.view, next_operation="owner_reconcile", exchange_deadline_ms=1,
+                    progress={"status": "running", "unresolved_attempts": 1,
+                              "attempts": [{"status": "unknown"}]})
+        self.assertEqual(NATIVE.admission(view, self.binding, "codex", "0.160.0", True),
+                         self.view["deadline_ms"])
+        self.assertEqual(NATIVE.RECONCILE_TOOLS, ["status", "next"])
+        for change in ({"deadline_ms": 1}, {"connected": False},
+                       {"progress": {"status": "cancelled", "unresolved_attempts": 1,
+                                     "attempts": [{"status": "unknown"}]}},
+                       {"progress": {"status": "running", "unresolved_attempts": 1,
+                                     "attempts": [{"status": "claimed"}]}}):
+            with self.subTest(change=change), self.assertRaises(NATIVE.ISOLATION.Rejected):
+                NATIVE.admission(dict(view, **change), self.binding, "codex", "0.160.0", True)
+        with self.assertRaises(NATIVE.ISOLATION.Rejected):
+            NATIVE.admission(self.view, self.binding, "codex", "0.160.0", True)
+
+    def test_private_transport_authorization_is_not_in_model_profile(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        temporary.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            root = Path(directory)
+            public, home, model = (root / k for k in ("public", "auth-host", "model"))
+            for path in (public, home, model):
+                path.mkdir()
+            native, mcp, private, selected = (root / k for k in ("native", "mcp", "private-capability", "socket"))
+            for path in (native, mcp, private, selected):
+                path.touch()
+            host = NATIVE.auth_host_profile(public, home, native, mcp, selected,
+                                            relay_capability=private)
+            child = NATIVE.ISOLATION.profile(public, model, [native])
+            self.assertIn(str(private), host)
+            self.assertNotIn(str(private), child)
+            self.assertNotIn('subpath "' + str(root) + '"', child)
+
     def test_saved_response_disconnection_and_unknown_do_not_start_inference(self):
         for change in ({"connected": False}, {"exchange": {"response_saved": True}},
                        {"progress": {"status": "running", "unresolved_attempts": 1}},
