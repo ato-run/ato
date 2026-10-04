@@ -8,7 +8,7 @@ use clap::{ArgGroup, Parser, error::ErrorKind};
 #[command(
     name = "ato-formation-session-mcp",
     version,
-    about = "Expose one scoped Formation Session through four fixed MCP tools",
+    about = "Expose one scoped Formation Session through three fixed MCP tools",
     group(ArgGroup::new("mode").required(true).multiple(false).args(["connection", "relay"]))
 )]
 struct Args {

@@ -22,8 +22,10 @@ through the immutable Producer descriptor. It never opens the owner connection.
 These modes are mutually exclusive; publication requires `--connection`.
 
 The broker and relay call the existing `FormationSessionMcpServer.handle` and
-bounded MCP stdio handler. The tool inventory remains `status`, `next`, `submit`,
-`cancel`. Source/path/URL/Search/credential parameters are not added. Existing
+bounded MCP stdio handler. The model tool inventory is `status`, `next`, `submit`.
+`cancel` is rejected by the MCP command dispatcher and remains owner CLI only.
+An Agent uses a typed decline when it cannot proceed.
+Source/path/URL/Search/credential parameters are not added. Existing
 typed `output_json`, input digest, exchange binding, duplicate rejection, saved
 response idempotency, ACK/UNKNOWN reconciliation and cancellation cleanup remain
 owned by the original Session/Coordinator/Rust authority.
@@ -62,7 +64,7 @@ alongside `--connection` and `--publish-relay`. The same `--relay` client
 recognizes the strict `ato.formation-session-unix-relay/1` descriptor, which
 replaces `address` with `socket` and retains the same capability and binding.
 The TCP descriptor and its wire bytes stay unchanged. This adds a physical
-transport to the existing four tools, not another CandidateProducer engine.
+transport to the existing three model tools, not another CandidateProducer engine.
 
 The socket path must be absolute, canonical through its parent, free of control
 characters and at most 100 UTF-8 bytes. The owner never unlinks a conflicting
