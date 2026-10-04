@@ -1,0 +1,26 @@
+{
+  "schema": "ato.formation-source-result-platform-CI-evidence/1",
+  "execution_pin": "3f85adf058ddd3417f0b6f31de6f89d2fd9088d9",
+  "run_id": 37179614270,
+  "url": "https://github.com/ato-run/ato/actions/runs/37179614270",
+  "conclusion": "PASS",
+  "jobs": {
+    "macOS": {
+      "job_id": 111369326592,
+      "result": "PASS"
+    },
+    "Windows": {
+      "job_id": 111369326711,
+      "result": "PASS"
+    },
+    "Ubuntu": {
+      "job_id": 111369326714,
+      "result": "PASS"
+    }
+  },
+  "authority_WASM_source_pin": "662a59d29515641f3ca643b15499abcd4c5adcb7",
+  "local_CLI_tests": 30,
+  "real_Kutt_product_path": "NOT RUN",
+  "ordinary_Run_permission_granted": false,
+  "deployment_or_remote_migration": false
+}

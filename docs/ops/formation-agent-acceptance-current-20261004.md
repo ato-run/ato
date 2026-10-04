@@ -49,3 +49,5 @@ Skill `45926a27` は3ツール・private capabilityのmodel隔離に追随し、
 owner `native-session-owner.py` がauditをSearch作成とNative launch境界へ接続した。13test PASS。旧campaignのdigest固定floorを使って実owner startを呼ぶと、13/12 roundと残attempt/Search枠でsubprocess前に拒否し、新Search/Native/attemptは0。取消・未回答・予約・古いsnapshotの消費保持、write-ahead予約と排他lock、不足証拠のfail closedを実装した。[開始拒否](evidence/formation-native-start-refusal-20261004.json)、[owner開始手順](formation-native-start-admission-20261004.md)。
 
 実Nativeでworkload開始後のcompletion/ACK切断→UNKNOWN→新Native文脈で同Search復旧はまだ未実施。追加枠を確認中で、旧13/12超過・未実行・API台帳を保持している。今回の修正を完全受入のDoneへ読み替えず、#1485はDraftを維持する。通常Source anchor→自動機能Instance/Stateの実装・fixtureは#1481/API #731側へ分離し、Kutt製品経路の実受入は未完了。
+
+別トラックのAto #1481 `3f85adf05` もUbuntu/macOS/Windows CLI CIがすべてPASSになった。[Source Result/owner CLIの3OS](evidence/formation-source-result-ato-platform-CI-20261004.json)。API #731の実装`8d4312bf`はexact base`d3ccb8bb`と同Node22.23.3/runner image/workflow/lockfileでActivity/CORS13失敗名が同じで、instance-state-syncは双方PASS。後続`a4a1d909`は比較証跡だけで製品コードは同じ。API full-serialはSKIPPED。実Kutt製品gateと実Native UNKNOWNは依然未実施で、このCI成功を実受入へ読み替えない。
