@@ -1,0 +1,829 @@
+{
+  "schema": "ato.formation-kutt-source-result-product-acceptance/1",
+  "measurement_id": "formation-kutt-source-result-product-20261005-01",
+  "environment": "isolated full product API Miniflare, original acceptance D1/R2 copy, real Linux aarch64 Runtime; not staging",
+  "pins": {
+    "Runtime": "c5719f69ea2ef009f3f0d677518b843655b3e196",
+    "API": "34b44f842490279fbd10cca940b0768a10f52a2a",
+    "owner_CLI_binary_source": "3f85adf058ddd3417f0b6f31de6f89d2fd9088d9",
+    "owner_CLI_verify_input_unchanged_at_Runtime_pin": true,
+    "Source_Result_WASM_authority": "662a59d29515641f3ca643b15499abcd4c5adcb7",
+    "Runtime_binary_sha256": "a0168154d15d4c2698f0280115531616131cacf0e183390ed223948cc9670aa7",
+    "worker_binary_sha256": "d7f18b37f447696b816a8f8c31441631dddd15f0e09ad3d50d4da40a0cec4b8a",
+    "API_guard_implementation": "c7330bf25033141c043976646605074b2a5b3240"
+  },
+  "source": {
+    "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+    "capability_profile_ref": "sha256:8210471422d9158e158097b41de0b1db2e02f6f8dc5c96f8311fe1ee73bc690d",
+    "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+    "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+    "environment_id": "native",
+    "permission": "functional_verification_required",
+    "retained_ref": "sha256:38fb931522ff9f1feb0f70bd93f45bbf674e93fb2f46af7bf74fc68559e868a6",
+    "runtime_id": "local",
+    "schema": "ato.formation-source-result-view/1",
+    "search_id": "search_8bcf155bb690432792c7a631806cbe4a",
+    "source_closure_ref": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+    "source_result_ref": "sha256:ba4193a23b602d3ea760a177f256ea924603c5747005e3fba8b12bbbcc852deb",
+    "target_triple": "aarch64-unknown-linux-gnu"
+  },
+  "original_PASS": {
+    "source_search_id": "search_8bcf155bb690432792c7a631806cbe4a",
+    "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+    "status": "pass",
+    "result_json_sha256": "138aa74f824a847d71b5d8b6c4295e0ac78175af8d837b041fa88d56fc653b43",
+    "original_DB_preserved": true,
+    "source_instance_created": false,
+    "private_dispatch_namespace_created": false
+  },
+  "original_PASS_final_pin": [
+    {
+      "deadline_at": "2026-10-03T05:06:04.881Z",
+      "attempts_used": 2,
+      "attempts_reserved": 0,
+      "result_sha256": "138aa74f824a847d71b5d8b6c4295e0ac78175af8d837b041fa88d56fc653b43"
+    }
+  ],
+  "source_instance_created": false,
+  "private_dispatch_namespace_created": false,
+  "owner_approval": "ato form-verify --authorize-functional-verification, typed bounded plans, each functional Search max_attempts=1/deadline=900s",
+  "runs": [
+    {
+      "label": "A-final",
+      "saved_metadata": {
+        "ack": "unknown",
+        "compute_instance_id": "cinst_01M44EPENESDAYW1SXSSZJ0F2C",
+        "compute_schema_id": "csch_01M44EPEN0C36FZT7HD842SZC0",
+        "lease_id": "flease_01M44GNPZJESXZ6EB8ZVWVH5CJ",
+        "registration_id": "frreg_01M44EPEN0PXQ4X124WR88RSBD",
+        "run_id": "frun_01M44GNPZH4DQ2GZTKCAVYJMGY",
+        "satisfy_id": "01M44GNQ5KEWKCPZDZ6MT50A9S",
+        "search_id": "functional_ca299f00707ac9973df8e8ec01c2b004",
+        "status": "satisfied"
+      },
+      "attempt_id": "01M44GNQ7S8ST0W6P3ZYFVX9N3",
+      "actual_Runtime_profile": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc",
+      "receipt": {
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+        "execution": {
+          "attempt_id": "01M44GNQ7S8ST0W6P3ZYFVX9N3",
+          "endpoint": "http://127.0.0.1:3000/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M44GNQ5KEWKCPZDZ6MT50A9S"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:78ec720b8f886971540591901954e1cf7b58b593e0d876745ded438178e932ac",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "functional_observations": [
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "json_bindings": {
+                "email": "OWNER_EMAIL",
+                "password": "OWNER_PASSWORD"
+              },
+              "method": "POST",
+              "path": "/api/auth/login"
+            }
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 200
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "cookie_bindings": {
+                "token": "LOGIN_TOKEN"
+              },
+              "cookies": true,
+              "json_bindings": {
+                "customurl": "LINK_ALIAS",
+                "target": "LINK_TARGET"
+              },
+              "method": "POST",
+              "path": "/api/links"
+            }
+          },
+          "operation_index": 1,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 201
+          },
+          "operation_index": 1,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "check": {
+              "binding": "LINK_TARGET",
+              "json_pointer": "/target",
+              "scalar": "string"
+            },
+            "kind": "response_check",
+            "matched": true
+          },
+          "operation_index": 1,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "cookie_bindings": {
+                "token": "LOGIN_TOKEN"
+              },
+              "cookies": true,
+              "json_bindings": {},
+              "method": "GET",
+              "path": "/api/links"
+            }
+          },
+          "operation_index": 2,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 200
+          },
+          "operation_index": 2,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "check": {
+              "binding": "LINK_ID",
+              "json_pointer": "/data/0/id",
+              "scalar": "string"
+            },
+            "kind": "response_check",
+            "matched": true
+          },
+          "operation_index": 2,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "check": {
+              "binding": "LINK_TARGET",
+              "json_pointer": "/data/0/target",
+              "scalar": "string"
+            },
+            "kind": "response_check",
+            "matched": true
+          },
+          "operation_index": 2,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "header_bindings": {
+                "user-agent": {
+                  "binding": "CLIENT_USER_AGENT",
+                  "encoding": "direct"
+                }
+              },
+              "json_bindings": {},
+              "method": "GET",
+              "path": "/{alias}",
+              "path_bindings": {
+                "alias": "LINK_ALIAS"
+              }
+            }
+          },
+          "operation_index": 3,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 302
+          },
+          "operation_index": 3,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "check": {
+              "binding": "LINK_TARGET",
+              "header_name": "location"
+            },
+            "kind": "response_check",
+            "matched": true
+          },
+          "operation_index": 3,
+          "port": "app.http"
+        }
+      ],
+      "state": {
+        "kind": "functional_state_outcome",
+        "run_id": "frun_01M44GNPZH4DQ2GZTKCAVYJMGY",
+        "states": [
+          {
+            "parent_revision_ref": "isrev_01M44GMKFAJQD4BYNGYXWVVMBK",
+            "revision_ref": "isrev_01M44GRDJVRVJDPTABHFFX2BCS",
+            "state_key": "slot_ec7836ae33f97b1513b6228041f675a1cda9a9ee16c66c732de9e3e55fb",
+            "writer_fence": 4
+          }
+        ],
+        "status": "committed"
+      },
+      "Runtime_ACK": {
+        "accepted": true
+      },
+      "delivery_closed": true,
+      "report_sha256": "148be68195050c818b9a49be97df19599e9390067a481108198225d9ec86ec06",
+      "ACK_sha256": "11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878",
+      "search_budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-04T22:31:08.695Z",
+        "deadline_at": "2026-10-04T22:46:08.695Z",
+        "attempts": {
+          "max": 1,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 0
+        },
+        "transfer_bytes": {
+          "max": 134217728,
+          "used": 67475730,
+          "reserved": 0,
+          "remaining": 66741998
+        },
+        "expanded_bytes": {
+          "max": 268435456,
+          "used": 181518590,
+          "reserved": 0,
+          "remaining": 86916866
+        },
+        "stored_bytes": {
+          "max": 67108864,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 67108864
+        }
+      },
+      "registration_replay_same_ids": true
+    },
+    {
+      "label": "B-final",
+      "saved_metadata": {
+        "ack": "unknown",
+        "compute_instance_id": "cinst_01M44EPENESDAYW1SXSSZJ0F2C",
+        "compute_schema_id": "csch_01M44EPEN0C36FZT7HD842SZC0",
+        "lease_id": "flease_01M44GTX3VMX06RFTTEZ389VJ3",
+        "registration_id": "frreg_01M44EPEN0PXQ4X124WR88RSBD",
+        "run_id": "frun_01M44GTX3V2VK529YJ267CQV4S",
+        "satisfy_id": "01M44GTX831S4MBXFMAS9QWFMK",
+        "search_id": "functional_f7925d56dcc952b92ee1f619aea445f6",
+        "status": "satisfied"
+      },
+      "attempt_id": "01M44GTXA5B4E54S4MCJYBJ4CQ",
+      "actual_Runtime_profile": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc",
+      "receipt": {
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+        "execution": {
+          "attempt_id": "01M44GTXA5B4E54S4MCJYBJ4CQ",
+          "endpoint": "http://127.0.0.1:3000/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M44GTX831S4MBXFMAS9QWFMK"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:78ec720b8f886971540591901954e1cf7b58b593e0d876745ded438178e932ac",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "functional_observations": [
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "json_bindings": {
+                "email": "OWNER_EMAIL",
+                "password": "OWNER_PASSWORD"
+              },
+              "method": "POST",
+              "path": "/api/auth/login"
+            }
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 200
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "cookie_bindings": {
+                "token": "LOGIN_TOKEN"
+              },
+              "cookies": true,
+              "json_bindings": {},
+              "method": "GET",
+              "path": "/api/links"
+            }
+          },
+          "operation_index": 1,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 200
+          },
+          "operation_index": 1,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "check": {
+              "binding": "LINK_TARGET",
+              "json_pointer": "/data/0/target",
+              "scalar": "string"
+            },
+            "kind": "response_check",
+            "matched": true
+          },
+          "operation_index": 1,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "cookie_bindings": {
+                "token": "LOGIN_TOKEN"
+              },
+              "cookies": true,
+              "json_bindings": {},
+              "method": "DELETE",
+              "path": "/api/links/{id}",
+              "path_bindings": {
+                "id": "LINK_ID"
+              }
+            }
+          },
+          "operation_index": 2,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 200
+          },
+          "operation_index": 2,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "cookie_bindings": {
+                "token": "LOGIN_TOKEN"
+              },
+              "cookies": true,
+              "json_bindings": {},
+              "method": "GET",
+              "path": "/api/links"
+            }
+          },
+          "operation_index": 3,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 200
+          },
+          "operation_index": 3,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "check": {
+              "binding": "EMPTY_TOTAL",
+              "json_pointer": "/total",
+              "scalar": "integer"
+            },
+            "kind": "response_check",
+            "matched": true
+          },
+          "operation_index": 3,
+          "port": "app.http"
+        }
+      ],
+      "state": {
+        "kind": "functional_state_outcome",
+        "run_id": "frun_01M44GTX3V2VK529YJ267CQV4S",
+        "states": [
+          {
+            "parent_revision_ref": "isrev_01M44GRDJVRVJDPTABHFFX2BCS",
+            "revision_ref": "isrev_01M44GXEH3AQFWRQD52F0Y116F",
+            "state_key": "slot_ec7836ae33f97b1513b6228041f675a1cda9a9ee16c66c732de9e3e55fb",
+            "writer_fence": 5
+          }
+        ],
+        "status": "committed"
+      },
+      "Runtime_ACK": {
+        "accepted": true
+      },
+      "delivery_closed": true,
+      "report_sha256": "2f69c6a45a6654d39f6fb8e50b0981ac36b058098278398a94a29b6b51c3de45",
+      "ACK_sha256": "11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878",
+      "search_budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-04T22:33:58.786Z",
+        "deadline_at": "2026-10-04T22:48:58.786Z",
+        "attempts": {
+          "max": 1,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 0
+        },
+        "transfer_bytes": {
+          "max": 134217728,
+          "used": 67475730,
+          "reserved": 0,
+          "remaining": 66741998
+        },
+        "expanded_bytes": {
+          "max": 268435456,
+          "used": 181518590,
+          "reserved": 0,
+          "remaining": 86916866
+        },
+        "stored_bytes": {
+          "max": 67108864,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 67108864
+        }
+      },
+      "registration_replay_same_ids": true
+    }
+  ],
+  "final_DB": {
+    "final-state-slots": [
+      {
+        "id": "isslot_01M44EPEW80AFMV6GFM1RVNKQ2",
+        "compute_instance_id": "cinst_01M44EPENESDAYW1SXSSZJ0F2C",
+        "state_key": "slot_ec7836ae33f97b1513b6228041f675a1cda9a9ee16c66c732de9e3e55fb",
+        "writer_epoch": 5,
+        "active_writer_run_id": null,
+        "quarantined_run_id": null,
+        "head_revision_id": "isrev_01M44GXEH3AQFWRQD52F0Y116F"
+      }
+    ],
+    "final-state-history": [
+      {
+        "id": "isrev_01M44G4PWT4N2KVV7VK0790MQK",
+        "parent_revision_id": null,
+        "content_digest": "sha256:85c122f82fdb5ed57c1fa4b7ba51daebbed0a8a05e98dfa7fc7438f94e295166",
+        "byte_size": 108032,
+        "committed_by_run_id": "frun_01M44FYRYH7WDAF6M11VH7NW82",
+        "created_at": "2026-10-04 22:21:51"
+      },
+      {
+        "id": "isrev_01M44GMKFAJQD4BYNGYXWVVMBK",
+        "parent_revision_id": "isrev_01M44G4PWT4N2KVV7VK0790MQK",
+        "content_digest": "sha256:c57101f8adad546e1f5d8ead7c8760574ac92f781c153f0b49c48c5fd12dccdb",
+        "byte_size": 108032,
+        "committed_by_run_id": "frun_01M44GGGF40V40SG061R7JAXW6",
+        "created_at": "2026-10-04 22:30:32"
+      },
+      {
+        "id": "isrev_01M44GRDJVRVJDPTABHFFX2BCS",
+        "parent_revision_id": "isrev_01M44GMKFAJQD4BYNGYXWVVMBK",
+        "content_digest": "sha256:4b158a8946c801d06f8adf4df5a9c520f0f4924ef6836f8c3fba198eea1d75de",
+        "byte_size": 108032,
+        "committed_by_run_id": "frun_01M44GNPZH4DQ2GZTKCAVYJMGY",
+        "created_at": "2026-10-04 22:32:37"
+      },
+      {
+        "id": "isrev_01M44GXEH3AQFWRQD52F0Y116F",
+        "parent_revision_id": "isrev_01M44GRDJVRVJDPTABHFFX2BCS",
+        "content_digest": "sha256:8232aea4026d0f6a85d5bffb7d52d932f3848053cd25b4866eed0978e6848900",
+        "byte_size": 108032,
+        "committed_by_run_id": "frun_01M44GTX3V2VK529YJ267CQV4S",
+        "created_at": "2026-10-04 22:35:22"
+      }
+    ],
+    "final-budget": [
+      {
+        "search_id": "functional_1164223baf13f0fc638ab2ae46f146ea",
+        "created_at": "2026-10-04T21:56:35.774Z",
+        "deadline_at": "2026-10-04T22:11:35.774Z",
+        "attempts_used": 1,
+        "attempts_reserved": 0,
+        "transfer_reserved": 0,
+        "expanded_reserved": 0,
+        "stored_reserved": 0
+      },
+      {
+        "search_id": "functional_747df9639f470be13f35b60339047bd4",
+        "created_at": "2026-10-04T22:18:37.049Z",
+        "deadline_at": "2026-10-04T22:33:37.049Z",
+        "attempts_used": 1,
+        "attempts_reserved": 0,
+        "transfer_reserved": 0,
+        "expanded_reserved": 0,
+        "stored_reserved": 0
+      },
+      {
+        "search_id": "functional_9e698a8f191564a751174c2a484a8ec0",
+        "created_at": "2026-10-04T22:28:18.163Z",
+        "deadline_at": "2026-10-04T22:43:18.163Z",
+        "attempts_used": 1,
+        "attempts_reserved": 0,
+        "transfer_reserved": 0,
+        "expanded_reserved": 0,
+        "stored_reserved": 0
+      },
+      {
+        "search_id": "functional_ca299f00707ac9973df8e8ec01c2b004",
+        "created_at": "2026-10-04T22:31:08.695Z",
+        "deadline_at": "2026-10-04T22:46:08.695Z",
+        "attempts_used": 1,
+        "attempts_reserved": 0,
+        "transfer_reserved": 0,
+        "expanded_reserved": 0,
+        "stored_reserved": 0
+      },
+      {
+        "search_id": "functional_f7925d56dcc952b92ee1f619aea445f6",
+        "created_at": "2026-10-04T22:33:58.786Z",
+        "deadline_at": "2026-10-04T22:48:58.786Z",
+        "attempts_used": 1,
+        "attempts_reserved": 0,
+        "transfer_reserved": 0,
+        "expanded_reserved": 0,
+        "stored_reserved": 0
+      }
+    ],
+    "final-private-input-counts": [
+      {
+        "encrypted_values": 0,
+        "live_metadata": 0
+      }
+    ],
+    "final-public-counts": [
+      {
+        "invites": 0,
+        "forks": 0,
+        "public_instances": 0,
+        "instances": 1
+      }
+    ],
+    "original-pass-final-pin": [
+      {
+        "deadline_at": "2026-10-03T05:06:04.881Z",
+        "attempts_used": 2,
+        "attempts_reserved": 0,
+        "result_sha256": "138aa74f824a847d71b5d8b6c4295e0ac78175af8d837b041fa88d56fc653b43"
+      }
+    ],
+    "original-pass-pin": {
+      "source_search_id": "search_8bcf155bb690432792c7a631806cbe4a",
+      "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+      "status": "pass",
+      "result_json_sha256": "138aa74f824a847d71b5d8b6c4295e0ac78175af8d837b041fa88d56fc653b43",
+      "original_DB_preserved": true,
+      "source_instance_created": false,
+      "private_dispatch_namespace_created": false
+    }
+  },
+  "ordinary_authority_denials": [
+    {
+      "operation": "ordinary_Run",
+      "status": 409,
+      "result": {
+        "error": "source_result_functional_only"
+      }
+    },
+    {
+      "operation": "public_shared_instance",
+      "status": 409,
+      "result": {
+        "error": "source_result_functional_only"
+      }
+    },
+    {
+      "operation": "public_separate_copy",
+      "status": 409,
+      "result": {
+        "error": "source_result_functional_only"
+      }
+    },
+    {
+      "operation": "install_shared_instance",
+      "status": 409,
+      "result": {
+        "error": "source_result_functional_only"
+      }
+    },
+    {
+      "operation": "install_separate_copy",
+      "status": 409,
+      "result": {
+        "error": "source_result_functional_only"
+      }
+    }
+  ],
+  "input_cleanup": {
+    "owner_product_DELETE_used": true,
+    "revocations": 26,
+    "all_204": true,
+    "remaining_live_metadata": 0,
+    "scopes": [
+      "functional_1164223baf13f0fc638ab2ae46f146ea",
+      "functional_747df9639f470be13f35b60339047bd4",
+      "functional_9e698a8f191564a751174c2a484a8ec0",
+      "functional_a00356a4f92dae505159fb25a2f74f79",
+      "functional_ca299f00707ac9973df8e8ec01c2b004",
+      "functional_f7925d56dcc952b92ee1f619aea445f6"
+    ]
+  },
+  "protected_value_scan": {
+    "examined_files": 102,
+    "protected_value_occurrences": {
+      "OWNER_EMAIL": 0,
+      "OWNER_PASSWORD": 0,
+      "LINK_ALIAS": 0
+    },
+    "scope": "saved owner CLI/status output, plans, bounded observation records and diagnostics; not a new Native tool transcript",
+    "fixed_email_used": false
+  },
+  "accounting": {
+    "new_Source_Searches": 0,
+    "new_Native_launches": 0,
+    "new_Native_D_rounds": 0,
+    "new_Native_exchanges": 0,
+    "new_functional_Searches": 5,
+    "functional_Runtime_attempts": 5,
+    "direct_LLM_API_calls": 0,
+    "new_unique_app_Source_successes": {
+      "Codex": 0,
+      "API": 0
+    },
+    "native_internal_cost": "No new Native inference executed; historical internal calls/tokens/cost remain unknown",
+    "paid_API_campaign_budget_reset": false,
+    "unsettled_functional_reservations": 0
+  },
+  "preserved_trials": [
+    {
+      "attempt_id": "01M44EPF3B2B6YPJ7TCXJQ8YVP",
+      "outcome": "inconclusive",
+      "failure": {
+        "code": "exploration_network_budget_exhausted",
+        "message": "exploration_network_budget_exhausted",
+        "stage": "admission"
+      },
+      "execution_started": false,
+      "Runtime_ACK": {
+        "accepted": true
+      },
+      "delivery_closed": true
+    },
+    {
+      "attempt_id": "01M44FYS515ZWQ58HQF0E22SPF",
+      "outcome": "fail",
+      "failure": {
+        "code": "functional_actions_failed",
+        "message": "functional actions or confirmed stop did not complete; actions are not replayed",
+        "stage": "verification"
+      },
+      "execution_started": true,
+      "Runtime_ACK": {
+        "accepted": true
+      },
+      "delivery_closed": true
+    }
+  ],
+  "additional_cleanup_run": {
+    "attempt_id": "01M44GJ1PP1FXM18ANYEWP2J7D",
+    "outcome": "pass",
+    "purpose": "Restore/delete the link created before failed optional redirect check, before final A/B"
+  },
+  "limitations": [
+    "Owner CLI ACK remains unknown; accepted ACK is proven separately by the actual Runtime durable response/closed records.",
+    "Initial prestart network guard failure and later redirect 500 are preserved; final success is after correction, not first-pass acceptance.",
+    "Without User-Agent the optional redirect returned 500; the final typed request explicitly binds a browser User-Agent. Source and D were not rewritten.",
+    "Input cleanup uses explicit owner DELETE through the encrypted-variable product service, not an automatic cleanup claim.",
+    "No new Native tool transcript in this arm; saved owner tool outputs were scanned.",
+    "Separate registration isolation is tested by contract fixtures, not a second real Kutt registration here.",
+    "No PWA browser/staging/deployment/remote cloud migration/ordinary Run/assessment/publication/100-app measurement."
+  ],
+  "old_native_campaign": {
+    "D_rounds_used": 13,
+    "D_rounds_ceiling": 12,
+    "status": "ended_exceeded",
+    "audit_sha256": "91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197"
+  },
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "API_bundle_equality": {
+    "final_code_pin": "34b44f842490279fbd10cca940b0768a10f52a2a",
+    "isolated_execution_bundle_identical_to_final_code": true,
+    "files": {
+      "f96e427060607c89acac387738661e0f37ceb2a9-receipt_authority.wasm": "33e81f2f454ea531a10ec1819414603a551ca4e2726439cc96a4ede7929a027e",
+      "index.js": "d59becc8692dcb6b4f24167d9032d0dec332c308e80e71fe7ffc684aeab4beae",
+      "a53137fb0ae8aa1649a103b7fb379bc97522c937-photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
+      "dd4dd8881e2df4e64203b5c0ae65e1648ab55207-resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70"
+    }
+  },
+  "final_head_difference": "Later evidence commits only; API final source was committed after execution and rebuilt to verify byte-identical index.js and all WASM."
+}
