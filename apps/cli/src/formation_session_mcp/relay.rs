@@ -710,7 +710,12 @@ mod tests {
         assert!(descriptor.capability.is_empty());
         assert!(forward(&descriptor, &call("status", json!({}))).is_err());
         descriptor.capability = read_capability(&capability, &descriptor)?;
-        assert!(rpc(&descriptor, call("status", json!({})))?["result"]["isError"] == false);
+        let status = rpc(&descriptor, call("status", json!({})))?;
+        assert_eq!(
+            status["result"]["isError"], false,
+            "public MCP error code: {}",
+            status["result"]["structuredContent"]["error"]["code"]
+        );
         let mut changed = broker.descriptor.clone();
         changed.binding.search_id = "another-search".into();
         assert!(read_capability(&capability, &changed).is_err());
