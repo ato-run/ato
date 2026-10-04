@@ -280,6 +280,14 @@ enum SearchRequest {
         acceptance: ato_formation::functional_acceptance::FunctionalAcceptanceV1,
         observations: Vec<ato_formation::port_operations::PortOperationObservation>,
     },
+    ProjectSourceResult {
+        state: Box<ato_formation::search::SearchStateV1>,
+        submission: Box<ato_formation::exploration::ExplorationSubmission>,
+        retained_ref: String,
+        descriptor_json: String,
+        capability_profile_ref: String,
+        capability_facts: BTreeMap<String, String>,
+    },
     ProjectRetainedRegistration {
         state: Box<ato_formation::search::SearchStateV1>,
         submission: Box<ato_formation::exploration::ExplorationSubmission>,
@@ -355,6 +363,27 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                     .validate_observations(&observations)
                     .map_err(str::to_owned)?;
                 Ok(serde_json::json!({"status":"functional_observations_accepted"}))
+            }
+            SearchRequest::ProjectSourceResult {
+                state,
+                submission,
+                retained_ref,
+                descriptor_json,
+                capability_profile_ref,
+                capability_facts,
+            } => {
+                let result = ato_formation::source_result::SourceResultV1::project(
+                    &state,
+                    &submission,
+                    &retained_ref,
+                    &descriptor_json,
+                    &capability_profile_ref,
+                    &capability_facts,
+                )
+                .map_err(|e| e.0.to_owned())?;
+                Ok(serde_json::json!({"status":"source_result_ready",
+                    "source_result_ref":result.result_ref().map_err(|e|e.0.to_owned())?,
+                    "source_result_json":String::from_utf8(result.canonical_bytes().map_err(|e|e.0.to_owned())?).map_err(|_|"source_result_encoding_failed")?}))
             }
             SearchRequest::ProjectRetainedRegistration {
                 state,
@@ -1077,6 +1106,62 @@ mod exploration_submission_tests {
         let mut state = r["state"].clone();
         state["attempts"][0]["route_accepted"] = json!(true);
         let mut req = json!({"operation":"project_retained_registration","state":state,"submission":submission,"retained_ref":descriptor.retained_ref().unwrap(),"descriptor_json":String::from_utf8(descriptor.canonical_bytes().unwrap()).unwrap()});
+        let facts: BTreeMap<String, String> = [
+            ("platform.os".into(), "linux".into()),
+            ("platform.arch".into(), "aarch64".into()),
+        ]
+        .into();
+        let mut source_result = req.clone();
+        source_result["operation"] = json!("project_source_result");
+        source_result["state"]["attempts"][0]["retained_ref"] =
+            json!(descriptor.retained_ref().unwrap());
+        source_result["capability_facts"] = serde_json::to_value(&facts).unwrap();
+        source_result["capability_profile_ref"] =
+            json!(content_ref(&serde_jcs::to_vec(&facts).unwrap()));
+        let projected_source = evaluate_search(&serde_json::to_vec(&source_result).unwrap());
+        assert_eq!(
+            projected_source["status"], "source_result_ready",
+            "{projected_source}"
+        );
+        let source_record: ato_formation::source_result::SourceResultV1 =
+            serde_json::from_str(projected_source["source_result_json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            source_record.result_ref().unwrap(),
+            projected_source["source_result_ref"]
+        );
+        assert_eq!(
+            source_record.owner_scope,
+            source_result["state"]["owner_scope"]
+        );
+        assert_eq!(source_record.target_triple, "aarch64-unknown-linux-gnu");
+        for (field, value) in [
+            (
+                "capability_profile_ref",
+                json!(content_ref(b"another-profile")),
+            ),
+            ("retained_ref", json!(content_ref(b"another-artifact"))),
+            ("descriptor_json", json!("{}")),
+            ("extra", json!("owner-cannot-extend-scope")),
+        ] {
+            let mut changed = source_result.clone();
+            changed[field] = value;
+            assert_eq!(
+                evaluate_search(&serde_json::to_vec(&changed).unwrap())["status"],
+                "rejected"
+            );
+        }
+        for field in ["route_accepted", "retained_ref", "status"] {
+            let mut changed = source_result.clone();
+            changed["state"]["attempts"][0][field] = match field {
+                "route_accepted" => json!(false),
+                "retained_ref" => json!(null),
+                _ => json!("unknown"),
+            };
+            assert_eq!(
+                evaluate_search(&serde_json::to_vec(&changed).unwrap())["status"],
+                "rejected"
+            );
+        }
         let mut verification = req.clone();
         verification["operation"] = "project_retained_verification".into();
         verification["ceiling"] =
