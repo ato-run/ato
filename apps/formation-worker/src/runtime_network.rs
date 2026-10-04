@@ -3095,12 +3095,34 @@ fn execute_retained_ticket(
             network_transfer_bytes: 0,
         });
     let scope_grant = ticket.exploration.as_ref().or(functional_grant.as_ref());
+    let functional_requirements = functional_grant
+        .as_ref()
+        .map(|grant| {
+            exploration::ScopedGates::retained_runtime_requirements(
+                &planned.derivation.requirements,
+                &grant.ceiling,
+            )
+        })
+        .transpose();
+    let functional_requirements = match functional_requirements {
+        Ok(requirements) => requirements,
+        Err(_) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "functional_ceiling_exceeded",
+                "retained requirements exceed the approved grant",
+            );
+        }
+    };
     let scoped = match scope_grant
         .map(|grant| {
             exploration::ScopedGates::start(
                 grant,
                 config.exploration.as_ref(),
-                &planned.derivation.requirements,
+                functional_requirements
+                    .as_ref()
+                    .unwrap_or(&planned.derivation.requirements),
                 &attempt_root.join("control"),
             )
         })
