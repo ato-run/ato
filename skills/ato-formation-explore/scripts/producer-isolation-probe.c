@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
   bool tcp_denied = denied_tcp(atoi(argv[6]));
 #define JSON_BOOL(value) ((value) ? "true" : "false")
   printf("{\"public_skill_read\":%s,\"public_skill_write_denied\":%s,"
-         "\"private_seven_classes_read_denied\":%s,\"private_seven_classes_write_denied\":%s,"
+         "\"private_classes_read_denied\":%s,\"private_classes_write_denied\":%s,"
          "\"scratch_write\":%s,\"symlink_escape_denied\":%s,\"fork_inherits_denial\":%s,"
          "\"source_direct_launch_denied\":%s,\"shell_exec_denied\":%s,"
          "\"security_exec_denied\":%s,\"curl_exec_denied\":%s,"
