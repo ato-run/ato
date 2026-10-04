@@ -19,14 +19,14 @@ use ato_formation_worker::runtime_network::proposal::reasoning::SessionAgent;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use super::{FormationSessionMcpServer, MAX_REQUEST_BYTES};
 
 #[cfg(unix)]
 mod unix;
 
-const DESCRIPTOR_SCHEMA: &str = "ato.formation-session-relay/1";
+const DESCRIPTOR_SCHEMA: &str = "ato.formation-session-relay/2";
 const REQUEST_SCHEMA: &str = "ato.formation-session-relay-request/1";
 const DESCRIPTOR_CAP: usize = 8 * 1024;
 const REQUEST_CAP: usize = MAX_REQUEST_BYTES + DESCRIPTOR_CAP;
@@ -49,6 +49,7 @@ struct Binding {
 struct Descriptor {
     schema: String,
     address: SocketAddr,
+    #[serde(skip)]
     capability: String,
     binding: Binding,
 }
@@ -78,9 +79,24 @@ struct Broker {
 }
 
 impl Broker {
+    #[cfg(test)]
     fn start(
+        server: FormationSessionMcpServer,
+        descriptor_file: &Path,
+        expiry: Option<u64>,
+    ) -> Result<Self> {
+        Self::start_with_capability(
+            server,
+            descriptor_file,
+            &descriptor_file.with_extension("capability"),
+            expiry,
+        )
+    }
+
+    fn start_with_capability(
         mut server: FormationSessionMcpServer,
         descriptor_file: &Path,
+        capability_file: &Path,
         expiry: Option<u64>,
     ) -> Result<Self> {
         // Obtain the original deadline from the same saved Session authority.
@@ -118,6 +134,7 @@ impl Broker {
             },
         };
         validate(&descriptor)?;
+        publish_capability(capability_file, &descriptor, &descriptor.capability)?;
         publish(descriptor_file, &descriptor)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
@@ -258,9 +275,28 @@ pub fn serve_owner(
     descriptor_file: &Path,
     expiry: Option<u64>,
 ) -> Result<()> {
-    let broker = Broker::start(
+    serve_owner_with_capability(
+        connection_file,
+        descriptor_file,
+        &descriptor_file.with_extension("capability"),
+        expiry,
+    )
+}
+
+pub fn serve_owner_with_capability(
+    connection_file: &Path,
+    descriptor_file: &Path,
+    capability_file: &Path,
+    expiry: Option<u64>,
+) -> Result<()> {
+    ensure!(
+        descriptor_file != capability_file,
+        "private capability destination rejected"
+    );
+    let broker = Broker::start_with_capability(
         FormationSessionMcpServer::connect(connection_file)?,
         descriptor_file,
+        capability_file,
         expiry,
     )?;
     #[cfg(unix)]
@@ -278,6 +314,8 @@ pub fn serve_owner(
 
 #[cfg(unix)]
 pub use unix::serve_owner as serve_owner_unix;
+#[cfg(unix)]
+pub use unix::serve_owner_with_capability as serve_owner_unix_with_capability;
 
 /// Model-facing stdio process reads only its Producer descriptor. It never
 /// opens the owner's connection or credentials and never retries transport.
@@ -286,12 +324,27 @@ pub fn run_relay_stdio(
     input: impl BufRead,
     output: impl Write,
 ) -> Result<()> {
+    run_relay_stdio_with_capability(
+        descriptor_file,
+        &descriptor_file.with_extension("capability"),
+        input,
+        output,
+    )
+}
+
+pub fn run_relay_stdio_with_capability(
+    descriptor_file: &Path,
+    capability_file: &Path,
+    input: impl BufRead,
+    output: impl Write,
+) -> Result<()> {
     let bytes = read_descriptor_bytes(descriptor_file)?;
     #[cfg(unix)]
     if serde_json::from_slice::<Value>(&bytes)?["schema"] == unix::DESCRIPTOR_SCHEMA {
-        return unix::run_stdio(&bytes, input, output);
+        return unix::run_stdio(&bytes, capability_file, input, output);
     }
-    let descriptor: Descriptor = serde_json::from_slice(&bytes)?;
+    let mut descriptor: Descriptor = serde_json::from_slice(&bytes)?;
+    descriptor.capability = read_capability(capability_file, &descriptor)?;
     validate(&descriptor)?;
     crate::mcp_stdio::run_stdio(input, output, Some(MAX_REQUEST_BYTES), |request| {
         forward(&descriptor, request).unwrap_or_else(|_| {
@@ -380,9 +433,37 @@ fn read_descriptor_bytes(path: &Path) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 fn read_descriptor(path: &Path) -> Result<Descriptor> {
-    let descriptor = serde_json::from_slice(&read_descriptor_bytes(path)?)?;
+    let mut descriptor: Descriptor = serde_json::from_slice(&read_descriptor_bytes(path)?)?;
+    descriptor.capability = read_capability(&path.with_extension("capability"), &descriptor)?;
     validate(&descriptor)?;
     Ok(descriptor)
+}
+
+fn publish_capability(path: &Path, descriptor: &impl Serialize, capability: &str) -> Result<()> {
+    ensure!(valid_hex(capability), "private relay capability rejected");
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(&Sha256::digest(serde_json::to_vec(descriptor)?))?;
+    staged.write_all(capability.as_bytes())?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist_noclobber(path)
+        .map_err(|_| anyhow!("private relay capability publication rejected"))?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn read_capability(path: &Path, descriptor: &impl Serialize) -> Result<String> {
+    let bytes = read_descriptor_bytes(path)?;
+    ensure!(
+        bytes.len() == 96 && bytes[..32] == Sha256::digest(serde_json::to_vec(descriptor)?)[..],
+        "private relay capability binding rejected"
+    );
+    let capability = String::from_utf8(bytes[32..].to_vec())
+        .map_err(|_| anyhow!("private relay capability rejected"))?;
+    ensure!(valid_hex(&capability), "private relay capability rejected");
+    Ok(capability)
 }
 
 fn publish(path: &Path, descriptor: &impl Serialize) -> Result<()> {
@@ -572,7 +653,8 @@ mod tests {
     #[test]
     fn publication_exposes_only_frozen_scope_and_independent_producer_capability() -> Result<()> {
         let (root, _bridge, server, _digest) = fixture()?;
-        let owner_token = server.binding.access_token.clone();
+        let owner_token =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9; 32]);
         let owner_path = server.connection_file.to_string_lossy().to_string();
         let path = root.path().join("producer.json");
         let broker = Broker::start(server, &path, None)?;
@@ -583,6 +665,12 @@ mod tests {
         for private in [&owner_token, &owner_path] {
             assert!(!published.contains(private));
         }
+        assert!(!published.contains(&descriptor.capability));
+        assert!(
+            serde_json::from_str::<Value>(&published)?
+                .get("capability")
+                .is_none()
+        );
         for forbidden in [
             "access_token",
             "connection_file",
@@ -608,9 +696,41 @@ mod tests {
     }
 
     #[test]
+    fn public_descriptor_alone_and_mismatched_private_component_cannot_authorize() -> Result<()> {
+        let (root, _bridge, server, _digest) = fixture()?;
+        let public = root.path().join("public");
+        let private = root.path().join("private");
+        std::fs::create_dir(&public)?;
+        std::fs::create_dir(&private)?;
+        let path = public.join("relay.json");
+        let capability = private.join("relay.capability");
+        let broker = Broker::start_with_capability(server, &path, &capability, None)?;
+        assert!(read_descriptor(&path).is_err());
+        let mut descriptor: Descriptor = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert!(descriptor.capability.is_empty());
+        assert!(forward(&descriptor, &call("status", json!({}))).is_err());
+        descriptor.capability = read_capability(&capability, &descriptor)?;
+        assert!(rpc(&descriptor, call("status", json!({})))?["result"]["isError"] == false);
+        let mut changed = broker.descriptor.clone();
+        changed.binding.search_id = "another-search".into();
+        assert!(read_capability(&capability, &changed).is_err());
+        assert!(!serde_json::to_string(&descriptor)?.contains(&descriptor.capability));
+        #[cfg(unix)]
+        {
+            let link = private.join("linked.capability");
+            std::os::unix::fs::symlink(&capability, &link)?;
+            assert!(read_capability(&link, &descriptor).is_err());
+        }
+        std::fs::write(&capability, vec![0; 95])?;
+        assert!(read_capability(&capability, &descriptor).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn stdio_relay_keeps_fixed_inventory_and_never_prints_transport_material() -> Result<()> {
         let (root, _bridge, server, _digest) = fixture()?;
-        let owner_token = server.binding.access_token.clone();
+        let owner_token =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9; 32]);
         let owner_path = server.connection_file.to_string_lossy().to_string();
         let path = root.path().join("producer.json");
         let broker = Broker::start(server, &path, None)?;
