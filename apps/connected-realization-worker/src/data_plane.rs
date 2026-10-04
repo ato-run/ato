@@ -25,6 +25,8 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod delivery;
+
 pub const CACHE_FORMAT: &str = "ato-model-cache/1";
 const CHUNK_BYTES: u64 = 256 * 1024 * 1024;
 const CHUNK_RETRIES: u32 = 5;
@@ -594,7 +596,7 @@ pub fn deliver(
     run_id: &str,
     work_root: &Path,
     lease_root: &Path,
-    mut keepalive: impl FnMut() -> Result<()>,
+    mut keepalive: impl FnMut() -> Result<()> + Send,
 ) -> Result<Option<Delivered>> {
     let Some(grant) = data.grant()? else {
         return Ok(None);
@@ -613,23 +615,20 @@ pub fn deliver(
     let started = Instant::now();
     let cache = ModelCache::open(work_root)?;
     let mut inputs = Vec::new();
-    let mut objects = Vec::new();
+    let mut manifests = Vec::new();
     for set in &grant.model_sets {
-        let manifest = data.manifest(&set.digest)?;
-        for entry in &manifest.objects {
-            let delivered = cache.ensure(
-                entry,
-                |start, end| Ok(Box::new(data.range(&entry.digest, start, end)?) as Box<dyn Read>),
-                &mut keepalive,
-            )?;
-            eprintln!(
-                "[data-plane] {} {} {} bytes in {} ms",
-                delivered.cache, delivered.digest, delivered.bytes_transferred, delivered.millis
-            );
-            objects.push(delivered);
-        }
+        manifests.push(data.manifest(&set.digest)?);
+    }
+    let entries: Vec<_> = manifests.iter().flat_map(|m| m.objects.iter()).collect();
+    let objects = delivery::ensure_objects(
+        &cache,
+        &entries,
+        |entry, start, end| Ok(Box::new(data.range(&entry.digest, start, end)?) as Box<dyn Read>),
+        &mut keepalive,
+    )?;
+    for (set, manifest) in grant.model_sets.iter().zip(&manifests) {
         let dest = lease_root.join("inputs").join(&set.input_id);
-        cache.materialize(&manifest, &dest)?;
+        cache.materialize(manifest, &dest)?;
         inputs.push(DeliveredInput {
             env_name: env_name(&set.input_id),
             path: dest,
