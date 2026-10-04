@@ -82,7 +82,8 @@ def prepare():
                            PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
         log = (SCRATCH / "software-install.log").open("w")
         venv = SCRATCH / "venv"
-        subprocess.run([sys.executable, "-m", "venv", "--copies", str(venv)], env=environment, stdout=log, stderr=log, check=True)
+        # Standalone Python resolves libpython beside its original executable.
+        subprocess.run([sys.executable, "-m", "venv", "--symlinks", str(venv)], env=environment, stdout=log, stderr=log, check=True)
         python = venv / "bin/python"
         subprocess.run([str(python), "-m", "pip", "install", "--no-index", "--only-binary=:all:",
                         "--require-hashes", "--find-links", str(SOFTWARE / "wheels"),
