@@ -16,8 +16,8 @@ import sys
 
 
 SKILL = Path(__file__).resolve().parents[1]
-MCP_TOOLS = ["status", "next", "submit", "cancel"]
-CANARIES = ["source", "owner-credential", "private-grant", "runtime-ticket",
+MCP_TOOLS = ["status", "next", "submit"]
+CANARIES = ["source", "owner-credential", "session-capability", "private-grant", "runtime-ticket",
             "state-db", "old-measurements", "credential-store-file"]
 MACH_AUTH = ["com.apple.secd", "com.apple.SecurityServer"]
 MACHO = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
