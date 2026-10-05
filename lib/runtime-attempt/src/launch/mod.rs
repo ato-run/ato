@@ -12,3 +12,7 @@ pub mod process_executor;
 pub mod resolved;
 pub mod sandbox;
 pub mod sandbox_exec;
+
+pub mod session;
+pub mod state_artifact;
+pub mod volume;

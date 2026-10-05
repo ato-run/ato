@@ -1,0 +1,67 @@
+{
+  "base": {
+    "source_revision": "d3ccb8bbb6a7720c0b122db28b4933a599eb823d",
+    "run_id": 37113921182,
+    "job_id": 111176927731,
+    "url": "https://github.com/ato-run/ato-api/actions/runs/37113921182/job/111176927731",
+    "Node": [
+      "22.23.3"
+    ],
+    "runner_image": [
+      "Version: 20260901.588"
+    ],
+    "workflow_object": "889ad1bf698ab15eb09df8f5e71d0530295b0aed",
+    "lockfile_object": "86321b9174b05be83ab54a81552bf44cbd1d6f4c",
+    "log_sha256": "2baad9b40a19fbaa8cc294d1595f8d1de2de8e23631ab2f8eea824937ae1b121",
+    "failed_tests": [
+      "src/tests/activities.test.ts > Activity Run placement control plane > binds an executor minted across Activity start to the extended live expiry",
+      "src/tests/activities.test.ts > Activity Run placement control plane > creates one hosted Run and adds the Guest as its second writer",
+      "src/tests/activities.test.ts > Activity Run placement control plane > does not mint an executor when Activity end wins after authorization",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps a committed shared join successful when Room notification fails and recovers the same capability",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps the first graceful-stop deadline across Activity lifecycle retries",
+      "src/tests/activities.test.ts > Activity Run placement control plane > mints a hash-only run-scoped executor session after lease claim",
+      "src/tests/activities.test.ts > Activity Run placement control plane > notifies guests when a multi-slot runner drops exactly one of its runs",
+      "src/tests/activities.test.ts > Activity Run placement control plane > replaces a runner socket only when its runs are re-claimed and suppresses the phantom disconnect",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes Guest leave without ending the Activity",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes a shared executor and requests lease shutdown on End",
+      "src/tests/activities.test.ts > Activity Run placement control plane > routes generic shared input to the Runner without issuing canonical order",
+      "src/tests/activities.test.ts > Activity Run placement control plane > starts shared mode after one Runner Run and both subscriptions are ready",
+      "src/tests/node/cors-headers-audit.test.ts > CORS allowHeaders audit (#246) > every custom x-* header a route reads is preflight-allowed or justified as non-browser"
+    ],
+    "conclusion": "FAIL",
+    "failed_test_count": 13
+  },
+  "head": {
+    "source_revision": "c7330bf25033141c043976646605074b2a5b3240",
+    "run_id": 37239707742,
+    "job_id": 111545772451,
+    "url": "https://github.com/ato-run/ato-api/actions/runs/37239707742/job/111545772451",
+    "Node": [
+      "22.23.3"
+    ],
+    "workflow_object": "889ad1bf698ab15eb09df8f5e71d0530295b0aed",
+    "lockfile_object": "86321b9174b05be83ab54a81552bf44cbd1d6f4c",
+    "failed_tests": [
+      "src/tests/activities.test.ts > Activity Run placement control plane > binds an executor minted across Activity start to the extended live expiry",
+      "src/tests/activities.test.ts > Activity Run placement control plane > creates one hosted Run and adds the Guest as its second writer",
+      "src/tests/activities.test.ts > Activity Run placement control plane > does not mint an executor when Activity end wins after authorization",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps a committed shared join successful when Room notification fails and recovers the same capability",
+      "src/tests/activities.test.ts > Activity Run placement control plane > keeps the first graceful-stop deadline across Activity lifecycle retries",
+      "src/tests/activities.test.ts > Activity Run placement control plane > mints a hash-only run-scoped executor session after lease claim",
+      "src/tests/activities.test.ts > Activity Run placement control plane > notifies guests when a multi-slot runner drops exactly one of its runs",
+      "src/tests/activities.test.ts > Activity Run placement control plane > replaces a runner socket only when its runs are re-claimed and suppresses the phantom disconnect",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes Guest leave without ending the Activity",
+      "src/tests/activities.test.ts > Activity Run placement control plane > revokes a shared executor and requests lease shutdown on End",
+      "src/tests/activities.test.ts > Activity Run placement control plane > routes generic shared input to the Runner without issuing canonical order",
+      "src/tests/activities.test.ts > Activity Run placement control plane > starts shared mode after one Runner Run and both subscriptions are ready",
+      "src/tests/node/cors-headers-audit.test.ts > CORS allowHeaders audit (#246) > every custom x-* header a route reads is preflight-allowed or justified as non-browser"
+    ],
+    "log_sha256": "eeed3cc241a0db6d1fd85ca39ca59283d520e54891b0641ba5693cb7c3cbb801",
+    "conclusion": "FAIL"
+  },
+  "same_failure_names": true,
+  "full_serial": "SKIPPED",
+  "instance_state_sync": "PASS",
+  "local_related_tests": 202,
+  "local_Node": "25.6.0"
+}

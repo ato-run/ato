@@ -21,6 +21,21 @@ pub(super) struct ScopedGates {
     pub sockets: BTreeMap<ExecutionPhase, PathBuf>,
 }
 impl ScopedGates {
+    /// A retained functional Run only resumes the sealed workspace. Its
+    /// dependency/build declarations remain checked against the saved owner
+    /// grant, but those phases do not execute or receive network authority.
+    pub fn retained_runtime_requirements(
+        declared: &ExecutionRequirements,
+        ceiling: &ExecutionRequirements,
+    ) -> Result<ExecutionRequirements> {
+        declared.within(ceiling).map_err(|e| anyhow::anyhow!(e.0))?;
+        let mut runtime = declared.clone();
+        runtime
+            .network
+            .retain(|n| n.phase == ExecutionPhase::Runtime);
+        Ok(runtime)
+    }
+
     pub fn start(
         ticket: &ExplorationTicket,
         configured: Option<&ExplorationSandbox>,
@@ -174,6 +189,55 @@ impl ScopedGates {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn retained_resume_keeps_grant_checks_but_does_not_reopen_build_network() {
+        use ato_formation::requirements::NetworkRequirement;
+        let declared = ExecutionRequirements {
+            network: vec![NetworkRequirement {
+                phase: ExecutionPhase::Dependencies,
+                host: "registry.npmjs.org".into(),
+                port: 443,
+            }],
+            authority: vec![],
+        };
+        assert!(
+            ScopedGates::retained_runtime_requirements(&declared, &Default::default()).is_err()
+        );
+        let runtime = ScopedGates::retained_runtime_requirements(&declared, &declared).unwrap();
+        assert!(runtime.network.is_empty());
+        assert_eq!(declared.network.len(), 1);
+        let mut networked = runtime;
+        networked.network.push(NetworkRequirement {
+            phase: ExecutionPhase::Runtime,
+            host: "registry.npmjs.org".into(),
+            port: 443,
+        });
+        let kept = ScopedGates::retained_runtime_requirements(&networked, &networked).unwrap();
+        assert_eq!(kept.network, networked.network);
+        let ticket = ExplorationTicket {
+            search_id: "functional-retained".into(),
+            ceiling: networked.clone(),
+            network_transfer_bytes: 0,
+            max_retries: 0,
+            deadline_ms: None,
+        };
+        let configured = ExplorationSandbox {
+            ceiling: networked,
+            max_network_transfer_bytes_per_attempt: 0,
+            source_oci: None,
+        };
+        let denied = ScopedGates::start(
+            &ticket,
+            Some(&configured),
+            &kept,
+            Path::new(".tmp/unreached-gate"),
+        );
+        assert_eq!(
+            denied.err().unwrap().to_string(),
+            "exploration_network_budget_exhausted"
+        );
+    }
 
     #[test]
     fn actual_gate_refusal_is_reported_only_for_its_phase_without_external_dns() {

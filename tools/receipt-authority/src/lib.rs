@@ -276,6 +276,33 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
+    ValidateFunctionalObservations {
+        acceptance: ato_formation::functional_acceptance::FunctionalAcceptanceV1,
+        observations: Vec<ato_formation::port_operations::PortOperationObservation>,
+    },
+    ProjectSourceResult {
+        state: Box<ato_formation::search::SearchStateV1>,
+        submission: Box<ato_formation::exploration::ExplorationSubmission>,
+        retained_ref: String,
+        descriptor_json: String,
+        capability_profile_ref: String,
+        capability_facts: BTreeMap<String, String>,
+    },
+    ProjectRetainedRegistration {
+        state: Box<ato_formation::search::SearchStateV1>,
+        submission: Box<ato_formation::exploration::ExplorationSubmission>,
+        retained_ref: String,
+        descriptor_json: String,
+    },
+    ProjectRetainedVerification {
+        state: Box<ato_formation::search::SearchStateV1>,
+        submission: Box<ato_formation::exploration::ExplorationSubmission>,
+        retained_ref: String,
+        descriptor_json: String,
+        ceiling: ato_formation::requirements::ExecutionRequirements,
+        #[serde(default)]
+        acceptance: Option<ato_formation::functional_acceptance::FunctionalAcceptanceV1>,
+    },
     AssembleExplorationSubmission {
         state: Box<ato_formation::search::SearchStateV1>,
         capsule_toml: String,
@@ -328,6 +355,130 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         let request: SearchRequest =
             serde_json::from_slice(bytes).map_err(|_| "search_input_invalid".to_owned())?;
         match request {
+            SearchRequest::ValidateFunctionalObservations {
+                acceptance,
+                observations,
+            } => {
+                acceptance
+                    .validate_observations(&observations)
+                    .map_err(str::to_owned)?;
+                Ok(serde_json::json!({"status":"functional_observations_accepted"}))
+            }
+            SearchRequest::ProjectSourceResult {
+                state,
+                submission,
+                retained_ref,
+                descriptor_json,
+                capability_profile_ref,
+                capability_facts,
+            } => {
+                let result = ato_formation::source_result::SourceResultV1::project(
+                    &state,
+                    &submission,
+                    &retained_ref,
+                    &descriptor_json,
+                    &capability_profile_ref,
+                    &capability_facts,
+                )
+                .map_err(|e| e.0.to_owned())?;
+                Ok(serde_json::json!({"status":"source_result_ready",
+                    "source_result_ref":result.result_ref().map_err(|e|e.0.to_owned())?,
+                    "source_result_json":String::from_utf8(result.canonical_bytes().map_err(|e|e.0.to_owned())?).map_err(|_|"source_result_encoding_failed")?}))
+            }
+            SearchRequest::ProjectRetainedRegistration {
+                state,
+                submission,
+                retained_ref,
+                descriptor_json,
+            } => {
+                state
+                    .validate()
+                    .map_err(|_| "registration_search_invalid")?;
+                submission
+                    .validate(&state)
+                    .map_err(|_| "registration_submission_invalid")?;
+                let descriptor = ato_formation::retained::RetainedCandidateV1::parse(
+                    descriptor_json.as_bytes(),
+                    &retained_ref,
+                )
+                .map_err(|_| "registration_descriptor_invalid")?;
+                descriptor
+                    .match_assignment(&state.frozen.contract_ref, &submission.derivation_ref)
+                    .map_err(|_| "registration_assignment_mismatch")?;
+                let source = state
+                    .frozen
+                    .initial_source
+                    .as_ref()
+                    .ok_or("registration_source_required")?;
+                if descriptor.source_closure_ref != source.closure_ref
+                    || descriptor.creation_attempt_id != submission.attempt_id
+                    || descriptor.derivation != submission.derivation
+                    || descriptor.base_contract != submission.contract
+                {
+                    return Err("registration_source_mismatch".into());
+                }
+                let projection = descriptor
+                    .process_registration()
+                    .map_err(|e| e.0.to_owned())?;
+                Ok(
+                    serde_json::json!({"status":"retained_registration_ready","projection":projection}),
+                )
+            }
+            SearchRequest::ProjectRetainedVerification {
+                state,
+                submission,
+                retained_ref,
+                descriptor_json,
+                ceiling,
+                acceptance,
+            } => {
+                state
+                    .validate()
+                    .map_err(|_| "registration_search_invalid")?;
+                submission
+                    .validate(&state)
+                    .map_err(|_| "registration_submission_invalid")?;
+                let descriptor = ato_formation::retained::RetainedCandidateV1::parse(
+                    descriptor_json.as_bytes(),
+                    &retained_ref,
+                )
+                .map_err(|_| "registration_descriptor_invalid")?;
+                descriptor
+                    .match_assignment(&state.frozen.contract_ref, &submission.derivation_ref)
+                    .map_err(|_| "registration_assignment_mismatch")?;
+                let source = state
+                    .frozen
+                    .initial_source
+                    .as_ref()
+                    .ok_or("registration_source_required")?;
+                if descriptor.source_closure_ref != source.closure_ref
+                    || descriptor.creation_attempt_id != submission.attempt_id
+                    || descriptor.derivation != submission.derivation
+                    || descriptor.base_contract != submission.contract
+                {
+                    return Err("registration_source_mismatch".into());
+                }
+                ceiling
+                    .validate()
+                    .map_err(|_| "verification_ceiling_invalid")?;
+                descriptor
+                    .derivation
+                    .requirements
+                    .within(&ceiling)
+                    .map_err(|_| "verification_ceiling_exceeded")?;
+                let variable_requirements = if let Some(plan) = &acceptance {
+                    plan.validate(&descriptor.derivation, &ceiling)
+                        .map_err(|_| "functional_acceptance_invalid")?
+                } else {
+                    descriptor.derivation.variable_bindings.clone()
+                };
+                let projection = descriptor
+                    .verification_registration()
+                    .map_err(|e| e.0.to_owned())?;
+                Ok(
+                    serde_json::json!({"status":"retained_verification_ready","projection":projection,"verification":{"source_closure_ref":descriptor.source_closure_ref,"variable_requirements":variable_requirements}}),
+                )
+            }
             SearchRequest::AssembleExplorationSubmission {
                 mut state,
                 capsule_toml,
@@ -807,6 +958,9 @@ mod exploration_submission_tests {
     use serde_json::json;
     const BASE: &str = include_str!("../../../lib/formation/tests/fixtures/proposal-python.toml");
     fn request() -> Value {
+        request_with_capsule(BASE)
+    }
+    fn request_with_capsule(base: &str) -> Value {
         // Synthetic evidence is only for ABI rejection/selection tests.
         let mut state: SearchStateV1 = serde_json::from_str(include_str!(
             "../../../lib/formation/tests/fixtures/search-state/d1-failed.json"
@@ -814,7 +968,7 @@ mod exploration_submission_tests {
         .unwrap();
         let closure = format!("sha256:{}", "a".repeat(64));
         let (k, d) = bind(
-            &parse_capsule_toml(BASE).unwrap(),
+            &parse_capsule_toml(base).unwrap(),
             &BindingContext {
                 source_closure_ref: &closure,
             },
@@ -874,7 +1028,7 @@ mod exploration_submission_tests {
             serde_json::from_value(json!({"realization":"process","attempt_id":a.attempt_id}))
                 .unwrap(),
         );
-        json!({"operation":"assemble_exploration_submission","state":state,"capsule_toml":BASE,"attempt_id":"attempt-d1","receipt":receipt})
+        json!({"operation":"assemble_exploration_submission","state":state,"capsule_toml":base,"attempt_id":"attempt-d1","receipt":receipt})
     }
     #[test]
     fn same_k_fresh_receipt_submission_has_no_normal_authorization() {
@@ -909,5 +1063,149 @@ mod exploration_submission_tests {
                 "rejected"
             );
         }
+    }
+    #[test]
+    fn retained_registration_keeps_source_k_d_and_logical_http_path() {
+        use ato_formation::retained::*;
+        let base = format!(
+            "{BASE}\n[[state]]\nid = \"app_data\"\nuse = \"ato.state.filesystem@1\"\nmount = \"/data\"\naccess = \"read-write\"\n"
+        );
+        let r = request_with_capsule(&base);
+        let submitted = evaluate_search(&serde_json::to_vec(&r).unwrap());
+        assert_eq!(
+            submitted["status"], "exploration_submission_ready",
+            "{submitted}"
+        );
+        let submission: ato_formation::exploration::ExplorationSubmission =
+            serde_json::from_str(submitted["submission_json"].as_str().unwrap()).unwrap();
+        let descriptor = RetainedCandidateV1 {
+            schema: RETAINED_SCHEMA.into(),
+            shape: RetainedShape::ProcessWorkspace {
+                binding: RetainedProcessBinding {
+                    toolchains: [("python".into(), "3.12.7".into())].into(),
+                    package_manager: None,
+                    python_environment: true,
+                },
+            },
+            artifact: RetainedArtifact {
+                content_ref: content_ref(b"archive"),
+                bytes: 7,
+                expanded_bytes: 30,
+            },
+            materialization_ref: content_ref(b"archive"),
+            source_closure_ref: submission.derivation.inputs[0].content_ref.clone(),
+            derivation_ref: submission.derivation_ref.clone(),
+            base_contract_ref: submission.contract.contract_ref().unwrap(),
+            contract_ref: submission.contract_ref.clone(),
+            derivation: submission.derivation.clone(),
+            base_contract: submission.contract.clone(),
+            browser_contract: None,
+            creation_attempt_id: submission.attempt_id.clone(),
+            validation_profile: "ato.retained-process-workspace/1".into(),
+        };
+        let mut state = r["state"].clone();
+        state["attempts"][0]["route_accepted"] = json!(true);
+        let mut req = json!({"operation":"project_retained_registration","state":state,"submission":submission,"retained_ref":descriptor.retained_ref().unwrap(),"descriptor_json":String::from_utf8(descriptor.canonical_bytes().unwrap()).unwrap()});
+        let facts: BTreeMap<String, String> = [
+            ("platform.os".into(), "linux".into()),
+            ("platform.arch".into(), "aarch64".into()),
+        ]
+        .into();
+        let mut source_result = req.clone();
+        source_result["operation"] = json!("project_source_result");
+        source_result["state"]["attempts"][0]["retained_ref"] =
+            json!(descriptor.retained_ref().unwrap());
+        source_result["capability_facts"] = serde_json::to_value(&facts).unwrap();
+        source_result["capability_profile_ref"] =
+            json!(content_ref(&serde_jcs::to_vec(&facts).unwrap()));
+        let projected_source = evaluate_search(&serde_json::to_vec(&source_result).unwrap());
+        assert_eq!(
+            projected_source["status"], "source_result_ready",
+            "{projected_source}"
+        );
+        let source_record: ato_formation::source_result::SourceResultV1 =
+            serde_json::from_str(projected_source["source_result_json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            source_record.result_ref().unwrap(),
+            projected_source["source_result_ref"]
+        );
+        assert_eq!(
+            source_record.owner_scope,
+            source_result["state"]["owner_scope"]
+        );
+        assert_eq!(source_record.target_triple, "aarch64-unknown-linux-gnu");
+        for (field, value) in [
+            (
+                "capability_profile_ref",
+                json!(content_ref(b"another-profile")),
+            ),
+            ("retained_ref", json!(content_ref(b"another-artifact"))),
+            ("descriptor_json", json!("{}")),
+            ("extra", json!("owner-cannot-extend-scope")),
+        ] {
+            let mut changed = source_result.clone();
+            changed[field] = value;
+            assert_eq!(
+                evaluate_search(&serde_json::to_vec(&changed).unwrap())["status"],
+                "rejected"
+            );
+        }
+        for field in ["route_accepted", "retained_ref", "status"] {
+            let mut changed = source_result.clone();
+            changed["state"]["attempts"][0][field] = match field {
+                "route_accepted" => json!(false),
+                "retained_ref" => json!(null),
+                _ => json!("unknown"),
+            };
+            assert_eq!(
+                evaluate_search(&serde_json::to_vec(&changed).unwrap())["status"],
+                "rejected"
+            );
+        }
+        let mut verification = req.clone();
+        verification["operation"] = "project_retained_verification".into();
+        verification["ceiling"] =
+            serde_json::to_value(&descriptor.derivation.requirements).unwrap();
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&verification).unwrap())["status"],
+            "retained_verification_ready"
+        );
+        verification["ceiling"] = serde_json::json!({"network":[],"authority":[]});
+        if !descriptor.derivation.requirements.is_empty() {
+            assert_eq!(
+                evaluate_search(&serde_json::to_vec(&verification).unwrap())["status"],
+                "rejected"
+            );
+        }
+        let projected = evaluate_search(&serde_json::to_vec(&req).unwrap());
+        assert_eq!(
+            projected["status"], "retained_registration_ready",
+            "{projected}"
+        );
+        assert_eq!(projected["projection"]["readiness"][0]["path"], "/");
+        assert_eq!(
+            projected["projection"]["state_slots"][0]["state_key"],
+            "app_data"
+        );
+        assert_eq!(
+            projected["projection"]["public_env"]["PYTHONPATH"],
+            "/app/.venv/lib/python3.12/site-packages"
+        );
+        req["retained_ref"] = json!(content_ref(b"tampered"));
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&req).unwrap())["status"],
+            "rejected"
+        );
+        req["retained_ref"] = json!(descriptor.retained_ref().unwrap());
+        req["submission"]["attempt_id"] = json!("old-attempt");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&req).unwrap())["status"],
+            "rejected"
+        );
+        req["submission"]["attempt_id"] = json!(descriptor.creation_attempt_id);
+        req["private_value"] = json!("must-never-echo");
+        let rejected = evaluate_search(&serde_json::to_vec(&req).unwrap());
+        assert_eq!(rejected["status"], "rejected");
+        assert!(!rejected.to_string().contains("must-never-echo"));
     }
 }
