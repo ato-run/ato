@@ -254,5 +254,80 @@ class OwnerAdmissionTests(unittest.TestCase):
                 OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: current)
         self.assertNotIn('terminal_retirement', OWNER.read_ledger(self.plan, self.ledger)['entries'][0])
 
+    def infrastructure_terminal(self):
+        current = view(state='unsatisfied')
+        current['exchanges_used'] = 0
+        current['progress']['termination_reason'] = 'infrastructure_failure'
+        return current
+
+    def without_native_completion(self, snapshots=None):
+        self.retirement_fixture(snapshots)
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        del ledger['entries'][0]['native_exit_code']
+        OWNER.publish(self.ledger, ledger)
+
+    def test_pre_exchange_failure_retirement_preserves_allocated_rounds_and_deadline(self):
+        earlier = self.infrastructure_terminal(); earlier['progress']['rounds_consumed'] = 3
+        self.without_native_completion([earlier])
+        report = OWNER.retire_search(self.plan, self.ledger, self.args,
+                                    reader=lambda _: self.infrastructure_terminal())
+        self.assertTrue(report['terminal_Search_retired'])
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        entry = ledger['entries'][0]
+        self.assertNotIn('native_exit_code', entry)
+        self.assertEqual(entry['native_not_required'], 'pre_exchange_infrastructure_terminal')
+        report = OWNER.refresh(self.plan, ledger, Path('ato'))
+        self.assertEqual(report['used']['D_rounds'], 3)
+        self.assertEqual(report['used']['searches'], 1)
+        self.assertEqual(report['used']['Runtime_attempts'], 0)
+        self.assertEqual(entry['snapshots'][0]['deadline_ms'], 123)
+
+    def test_pre_exchange_exception_rejects_progress_input_attempts_and_other_reasons(self):
+        changes = [lambda v: v.update(exchanges_used=1),
+                   lambda v: v.update(inspection_exchanges_completed=1),
+                   lambda v: v.update(input={'exchange_id': 'unanswered'}),
+                   lambda v: v['progress'].update(termination_reason='source_broken'),
+                   lambda v: v['progress'].update(status='unknown'),
+                   lambda v: v['progress'].update(unresolved_attempts=1),
+                   lambda v: v['progress']['search_budget']['attempts'].update(used=1),
+                   lambda v: v['progress']['search_budget']['attempts'].update(reserved=1)]
+        for change in changes:
+            self.without_native_completion()
+            current = self.infrastructure_terminal(); change(current)
+            with self.assertRaises(ValueError):
+                OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: current)
+            self.assertNotIn('terminal_retirement', OWNER.read_ledger(self.plan, self.ledger)['entries'][0])
+
+    def test_pre_exchange_exception_cannot_erase_reserved_attempt_or_unanswered_history(self):
+        for earlier in [view(reserved=1, state='cancelled'), view(state='cancelled')]:
+            self.without_native_completion([earlier])
+            with self.assertRaisesRegex(ValueError, 'Native_completion_required'):
+                OWNER.retire_search(self.plan, self.ledger, self.args,
+                                    reader=lambda _: self.infrastructure_terminal())
+
+    def test_lost_native_launch_has_durable_marker_and_cannot_become_not_started(self):
+        self.without_native_completion()
+        execute = Mock(side_effect=OSError('launcher lost'))
+        args = SimpleNamespace(ato=Path('ato'), connection=self.args.connection,
+                               native_launcher=Path('native-session.py'), native_args=[])
+        real_refresh = OWNER.refresh
+        with patch.object(OWNER, 'refresh', side_effect=lambda p,l,a: real_refresh(p,l,a,reader=lambda _:view())):
+            with self.assertRaises(OSError):
+                OWNER.guarded_native(self.plan, self.ledger, args, execute)
+        entry = OWNER.read_ledger(self.plan, self.ledger)['entries'][0]
+        self.assertIs(type(entry['native_started_at_ms']), int)
+        self.assertNotIn('native_exit_code', entry)
+        with self.assertRaisesRegex(ValueError, 'Native_completion_required'):
+            OWNER.retire_search(self.plan, self.ledger, self.args,
+                                reader=lambda _: self.infrastructure_terminal())
+
+    def test_pre_exchange_retired_evidence_cannot_gain_native_start_marker(self):
+        self.without_native_completion()
+        OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: self.infrastructure_terminal())
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        ledger['entries'][0]['native_started_at_ms'] = 100
+        with self.assertRaisesRegex(ValueError, 'terminal_evidence_changed'):
+            OWNER.refresh(self.plan, ledger, Path('ato'))
+
 if __name__ == '__main__':
     unittest.main()
