@@ -831,10 +831,9 @@
     }
   ],
   "pending": [
-    "shared staging global cleanup before production rollout",
-    "production migration and smoke",
     "new 100 OSS measurement",
-    "independent API producer plans"
+    "independent API producer plans",
+    "final evidence/RFC merge"
   ],
   "historical_campaign_13_over_12_modified": false,
   "historical_WBO_reexecuted": false,
@@ -986,6 +985,12 @@
     "legacy_static_converter_functional": true,
     "legacy_console_known_code_unchanged": true,
     "base_browser_execution_claimed": false,
-    "shared_global_cleanup_pending": true
+    "shared_global_cleanup_pending": false
+  },
+  "subsequent_shared_safe_checkpoint": {
+    "provider_owned_pods_deleted": 2,
+    "live_provisions": 0,
+    "enrollment_and_Runner_credentials_revoked": true,
+    "independent_Compute_PR_completion_claimed": false
   }
 }
