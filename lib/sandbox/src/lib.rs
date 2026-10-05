@@ -252,6 +252,11 @@ pub struct SandboxPolicy {
     pub read_write_paths: Vec<PathBuf>,
     /// Paths allowed for read-only access (system libraries, /usr, etc.)
     pub read_only_paths: Vec<PathBuf>,
+    /// Linux: write/truncate already-existing files without allowing
+    /// creation, removal, rename, or execution. Serialized explicitly so
+    /// operators can inspect these additions to read-only baseline paths.
+    #[serde(default)]
+    pub file_write_paths: Vec<PathBuf>,
     /// Whether to enable network access (default: true for now)
     pub allow_network: bool,
     /// TCP ports the workload may bind when unrestricted network access is
@@ -276,6 +281,7 @@ impl SandboxPolicy {
         Self {
             read_write_paths: Vec::new(),
             read_only_paths: Vec::new(),
+            file_write_paths: Vec::new(),
             allow_network: true,
             allowed_bind_tcp_ports: Vec::new(),
             allowed_connect_tcp_ports: Vec::new(),
@@ -298,6 +304,17 @@ impl SandboxPolicy {
     pub fn allow_read_only<P: Into<PathBuf>>(mut self, paths: impl IntoIterator<Item = P>) -> Self {
         self.read_only_paths
             .extend(paths.into_iter().map(|p| p.into()));
+        self
+    }
+
+    /// Linux-only existing-file writes/truncation. Other platforms refuse this policy
+    /// rather than silently widening it to full read-write access.
+    pub fn allow_file_write<P: Into<PathBuf>>(
+        mut self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Self {
+        self.file_write_paths
+            .extend(paths.into_iter().map(Into::into));
         self
     }
 
@@ -495,6 +512,76 @@ pub fn set_no_new_privs() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Permanently become an unprivileged `uid:gid`, and prove it stuck.
+///
+/// For a host that cannot give a workload its own namespaces: the workload
+/// then runs as a user that owns nothing of the Runner's, so the Runner's
+/// credentials — readable only by the user that holds them — stay out of
+/// reach by ordinary file permissions.
+///
+/// Supplementary groups go first, then the group, then the user; the reverse
+/// order would drop the right to change the group. Afterwards an attempt to
+/// become root again must FAIL, and the ids must read back as requested.
+/// Returning `Ok` without that check would let a launch proceed as root while
+/// reporting it had dropped.
+#[cfg(target_os = "linux")]
+pub fn drop_to_user(uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    if uid == 0 || gid == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "refusing to drop privileges to root",
+        ));
+    }
+    // SAFETY: each call takes scalar arguments (and, for `setgroups`, a null
+    // list of length zero), touches no caller memory, and reports failure
+    // through its return value, which is checked.
+    let dropped = unsafe {
+        libc::setgroups(0, std::ptr::null()) == 0
+            && libc::setgid(gid) == 0
+            && libc::setuid(uid) == 0
+    };
+    if !dropped {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: scalar arguments and results only.
+    let (regained, ruid, euid, rgid, egid) = unsafe {
+        (
+            libc::setuid(0) == 0,
+            libc::getuid(),
+            libc::geteuid(),
+            libc::getgid(),
+            libc::getegid(),
+        )
+    };
+    if regained || ruid != uid || euid != uid || rgid != gid || egid != gid {
+        return Err(Error::other("privileges were not dropped"));
+    }
+    Ok(())
+}
+
+/// There is no equivalent boundary off Linux; refuse rather than pretend.
+#[cfg(not(target_os = "linux"))]
+pub fn drop_to_user(_uid: u32, _gid: u32) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "dropping to a workload user is only implemented on Linux",
+    ))
+}
+
+/// The effective user id of this process, on Linux.
+#[cfg(target_os = "linux")]
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Unknown elsewhere; never reads as root.
+#[cfg(not(target_os = "linux"))]
+pub fn effective_uid() -> u32 {
+    u32::MAX
+}
+
 /// Cap how many processes this user may have, for this process and its children.
 ///
 /// A ceiling the kernel enforces rather than one a supervisor watches for: a
@@ -538,6 +625,14 @@ mod tests {
         assert_eq!(policy.read_write_paths.len(), 1);
         assert_eq!(policy.read_only_paths.len(), 1);
         assert!(policy.allow_network);
+    }
+
+    #[test]
+    fn old_serialized_policies_do_not_gain_existing_file_writes() {
+        let mut old = serde_json::to_value(SandboxPolicy::new()).unwrap();
+        old.as_object_mut().unwrap().remove("file_write_paths");
+        let restored: SandboxPolicy = serde_json::from_value(old).unwrap();
+        assert!(restored.file_write_paths.is_empty());
     }
 
     #[test]
