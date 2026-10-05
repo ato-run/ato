@@ -66,7 +66,9 @@
     60,
     61,
     62,
-    63
+    63,
+    64,
+    65
   ],
   "preregistered_plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
   "Runtime_builder_bound": false,
@@ -6367,10 +6369,248 @@
       },
       "ordinary_Run_authorized": false,
       "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 64,
+      "name": "Wekan",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "212a29d62c9cf2aab09d707e1cafd547a66e57a6",
+      "source_closure_ref": "sha256:631a7637db9f57bd3ee0466ca8a6d36242d933bc9481d02ff00574f2596d4548",
+      "K_ref": "sha256:763475ff8d5b2be8af3a71ca8a8258e121eefc7e5951fc52affb2d5b7cb15fad",
+      "search_id": "search_1d9d726ce6a1fdf7bf011d2c578acaf4",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791238894345,
+      "authority_deadline_ms": 1791239098350,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 233692,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 2246,
+            "cacheReadInputTokens": 74625,
+            "cacheCreationInputTokens": 30698,
+            "thinkingTokens": 255,
+            "costUSD": 0.305469
+          }
+        },
+        "SDK_cost_estimate_usd": 0.305469,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "meteor_application",
+              "detail": "Root package.json declares a Meteor app (meteor.mainModule client/main.js, server/main.js; meteor.modern). server/main.js is a Meteor main module, not a plain Node HTTP entrypoint; it requires the Meteor build tool to bundle.",
+              "source": {
+                "digest": "sha256:e92a18c4a7fee60e8422dc553c3a2a48b86f94dd0771dee2e3f6a8ef21b30e63",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "no_source_owned_start_script",
+              "detail": "package.json scripts contain only test/playwright/postinstall entries (test scripts invoke the meteor CLI); there is no start, build or static output script usable as launch_script or build_scripts.",
+              "source": {
+                "digest": "sha256:e92a18c4a7fee60e8422dc553c3a2a48b86f94dd0771dee2e3f6a8ef21b30e63",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "meteor_toolchain_not_in_catalog",
+              "detail": "Dockerfile builds with METEOR_RELEASE=METEOR@3.6-beta.3 and NODE_VERSION=v26.10.0; the frozen catalog binds only node 22.14.0, python, gcc, make, pkg-config. No Meteor toolchain is bound.",
+              "source": {
+                "digest": "sha256:5ab5e77e74d7cad2093955258f6d4201a791ff19c0128e836d88c3ad93600f31",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            },
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "lowering_capabilities.source_oci.available=false (source_oci_builder_unavailable) and oci_image has no images, so the root Dockerfile route cannot be used."
+            },
+            {
+              "code": "external_service_mongodb",
+              "detail": "WeKan Meteor server additionally requires a MongoDB service (Dockerfile MONGO_* settings), not available as a frozen operation.",
+              "source": {
+                "digest": "sha256:5ab5e77e74d7cad2093955258f6d4201a791ff19c0128e836d88c3ad93600f31",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 65,
+      "name": "Homepage",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "8d39113bbe7bda5b9df206ce5f52665dc3f883af",
+      "source_closure_ref": "sha256:b1f042bf5162ca9ee1aff9eccdda833fb3d17f805ad0823e6db0065a99a7a2a2",
+      "K_ref": "sha256:c6d4e30da6881cbab49a183ef0da514cc343e5d9ba9f5eb19e7664f07720c00a",
+      "search_id": "search_00c903b69b15f64916cd3a01484b6eb5",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791239195566,
+      "authority_deadline_ms": 1791239221937,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 75997,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 226874,
+          "inputTokens": 225713,
+          "cachedInputTokens": 195712,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1161,
+          "reasoningOutputTokens": 21
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "pnpm_dependency_operation_unavailable",
+              "detail": "Source declares preinstall npx only-allow pnpm and supplies pnpm-lock.yaml v9. Frozen dependency operations admit npm_ci/npm_rebuild, not pnpm acquisition or lockfile conversion; no npm lockfile is in the recorded root inventory.",
+              "source": {
+                "digest": "sha256:459821dc48778afb6d869865c9f5400a7ba5ef502cf91b1abf42db9182782c5b",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "python_version_unavailable",
+              "detail": "The documentation project requires Python >=3.13; the frozen Python toolchain is 3.12.7.",
+              "source": {
+                "digest": "sha256:e178cb418ffa55d934f10cc88c00451eb0ba004279d3a94d545078b1f1e5087e",
+                "file_id": "f_50c86b7ed8ac2cf95bd48334"
+              }
+            },
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "The source Dockerfile uses pnpm, but source_oci is unconfigured, unbound and unavailable; no approved OCI image is available.",
+              "source": {
+                "digest": "sha256:a63f7678edd32a4ecced5af74e4d6a371e81f098a37a8eb2e4911766f503d52e",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_dependency_operation"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
     }
   ],
   "category_counts": {
-    "unsupported_capability": 36,
+    "unsupported_capability": 38,
     "withheld_old_UNKNOWN": 1,
     "initial_PASS": 7,
     "no_progress": 12,
@@ -7699,14 +7939,14 @@
     }
   ],
   "consumed": {
-    "new_Searches": 61,
-    "D_rounds": 62,
-    "exchanges": 102,
+    "new_Searches": 63,
+    "D_rounds": 64,
+    "exchanges": 105,
     "Runtime_attempts": 15,
-    "inspections": 33,
-    "elapsed_ms": 6534284
+    "inspections": 34,
+    "elapsed_ms": 6843973
   },
-  "Native_contexts_started": 54,
+  "Native_contexts_started": 56,
   "owner_cleanup_recovery_028": {
     "original_halt_retained": true,
     "halted_after_index": 28,
