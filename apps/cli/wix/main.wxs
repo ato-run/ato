@@ -139,6 +139,14 @@
                         <Component Id='binary2' Guid='*'>
                             <File
                                 Id='exe2'
+                                Name='ato-formation-session-mcp.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\ato-formation-session-mcp.exe'
+                                KeyPath='yes'/>
+                        </Component>
+                        <Component Id='binary3' Guid='*'>
+                            <File
+                                Id='exe3'
                                 Name='ato-object-graph-upload.exe'
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\ato-object-graph-upload.exe'
@@ -168,6 +176,7 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
             <ComponentRef Id='binary2'/>
+            <ComponentRef Id='binary3'/>
 
             <Feature
                 Id='Environment'
