@@ -271,7 +271,17 @@ fn a_replacement_is_all_or_nothing() {
         fs::write(staging.join("app.db"), "A")?;
         Ok(())
     };
-    store.replace_data(&volume, &restore).unwrap();
+    let result = store.replace_data(&volume, &restore);
+    if !cfg!(unix) {
+        let error = result.unwrap_err();
+        assert!(format!("{error}").contains("atomic volume replacement is unavailable"));
+        assert_eq!(
+            fs::read_to_string(volume.data_dir().join("app.db")).unwrap(),
+            "B"
+        );
+        return;
+    }
+    result.unwrap();
     assert_eq!(
         fs::read_to_string(volume.data_dir().join("app.db")).unwrap(),
         "A"

@@ -3961,8 +3961,15 @@ default = "pure"
         )
         .unwrap();
         stream.write_all(&update).unwrap();
+        // An early authorization rejection need not consume the request body.
+        // Read the complete response headers before the peer closes that body.
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).unwrap();
+        while !response.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            response.push(byte[0]);
+            assert!(response.len() <= 8192);
+        }
 
         assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
         assert_eq!(server.local_storage().unwrap().unwrap(), initial);

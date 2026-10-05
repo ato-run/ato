@@ -2275,9 +2275,10 @@ impl ConnectedWorker {
             },
         )?;
         if let Some(network) = network_authorization {
-            let runtime_launch::lease::ActiveWorkload::Oci(
-                ato_runtime_attempt::launch::oci::LaunchedOci::Group(group),
-            ) = &active.launched
+            let runtime_launch::lease::ActiveWorkload::Oci(launched) = &active.launched else {
+                bail!("network authorization was attached to a non-group workload")
+            };
+            let ato_runtime_attempt::launch::oci::LaunchedOci::Group(group) = launched.as_ref()
             else {
                 bail!("network authorization was attached to a non-group workload")
             };
@@ -2330,9 +2331,9 @@ impl ConnectedWorker {
         let mut stop = || -> Result<bool> {
             // A group is one Application: a service that exits while ACTIVE
             // fails the whole Run, which is then stopped by `finish`.
-            if let runtime_launch::lease::ActiveWorkload::Oci(
-                ato_runtime_attempt::launch::oci::LaunchedOci::Group(group),
-            ) = &active.launched
+            if let runtime_launch::lease::ActiveWorkload::Oci(launched) = &active.launched
+                && let ato_runtime_attempt::launch::oci::LaunchedOci::Group(group) =
+                    launched.as_ref()
                 && let Some((name, code)) = group.exited_service()?
             {
                 bail!("OCI service `{name}` exited while the group was active with code {code}");
@@ -5844,6 +5845,8 @@ mod tests {
                     "/usr/bin/google-chrome",
                     "/usr/bin/chromium",
                     "/usr/bin/chromium-browser",
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
                 ]
                 .into_iter()
                 .map(PathBuf::from)
@@ -5890,23 +5893,48 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
   }
 }];
 </script>"#;
+            let mut clients: Vec<JoinHandle<()>> = Vec::new();
             while !stopped.load(Ordering::Acquire) {
+                clients.retain(|client| !client.is_finished());
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0_u8; 1024];
-                        let _ = stream.read(&mut request);
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            PAGE.len(),
-                            PAGE
-                        );
-                        let _ = stream.write_all(response.as_bytes());
+                        // Chrome's speculative idle sockets must not block
+                        // another request or be closed before navigation.
+                        if clients.len() >= 32 {
+                            continue;
+                        }
+                        clients.push(thread::spawn(move || {
+                            // Accepted sockets may inherit the listener's
+                            // nonblocking mode. The bounded HTTP reader below
+                            // requires blocking reads on every host.
+                            stream.set_nonblocking(false).unwrap();
+                            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                            let mut request = Vec::new();
+                            let mut buffer = [0_u8; 1024];
+                            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                                match stream.read(&mut buffer) {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(count) => request.extend_from_slice(&buffer[..count]),
+                                }
+                                if request.len() > 16_384 {
+                                    return;
+                                }
+                            }
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                PAGE.len(), PAGE
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }));
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10))
                     }
-                    Err(_) => return,
+                    Err(_) => break,
                 }
+            }
+            for client in clients {
+                client.join().unwrap();
             }
         });
         (address, stop, thread)
@@ -6165,7 +6193,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 Some(realization_generation.clone()),
             )
             .expect_err("old fixed descriptor must not cross registry replacement");
-        assert!(stale_registry_click.to_string().contains("stale_operation"));
+        assert!(
+            stale_registry_click.to_string().contains("stale_operation"),
+            "expected stale_operation, got: {stale_registry_click:#}"
+        );
         assert_eq!(
             host.evaluate("document.querySelector('#counter').textContent")
                 .unwrap()
@@ -6179,11 +6210,27 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         // the worker's next surface poll, the old descriptor/context must not
         // resolve against that new document -- for WebMCP or fixed Browser
         // input.
+        let ready_path =
+            ato_adapter_browser::runtime_discovery_path(workspace.path(), "hosted.browser")
+                .with_extension("ready");
+        let previous_handshake = fs::metadata(&ready_path).unwrap().modified().unwrap();
         host.evaluate("location.reload(); true").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let replacement = loop {
-            if let Ok(snapshot) = host.webmcp_snapshot()
+            // A new document can expose its snapshot while the old WebSocket
+            // is still closing. Sending then correctly yields an indeterminate
+            // physical outcome; this fixture needs the replacement handshake
+            // before testing the stale-document refusal, without applying input.
+            let reconnected = fs::metadata(&ready_path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|modified| modified != previous_handshake);
+            if reconnected
+                && let Ok(snapshot) = host.webmcp_snapshot()
                 && snapshot.document_token != document_token
+                && snapshot
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name.as_str() == Some("slow_increment"))
             {
                 break snapshot;
             }
@@ -6205,7 +6252,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 Some(realization_generation.clone()),
             )
             .expect_err("old WebMCP descriptor must not resolve in replacement document");
-        assert!(stale_webmcp.to_string().contains("stale_operation"));
+        assert!(
+            stale_webmcp.to_string().contains("stale_operation"),
+            "expected stale_operation, got: {stale_webmcp:#}"
+        );
         let stale_click = ingress
             .accept_with_operation_context(
                 "aop-old-document-click".to_owned(),
@@ -6217,7 +6267,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 Some(realization_generation),
             )
             .expect_err("old fixed Browser descriptor must not target replacement document");
-        assert!(stale_click.to_string().contains("stale_operation"));
+        assert!(
+            stale_click.to_string().contains("stale_operation"),
+            "expected stale_operation, got: {stale_click:#}"
+        );
         assert_eq!(
             host.evaluate("document.querySelector('#counter').textContent")
                 .unwrap()

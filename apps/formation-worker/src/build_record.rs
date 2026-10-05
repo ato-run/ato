@@ -194,12 +194,25 @@ fn collect_paths(root: &Path, directory: &Path, found: &mut BTreeSet<String>) ->
             collect_paths(root, &path, found)?;
         } else {
             ensure!(metadata.is_file(), "build_record_file_invalid");
+            // Manifest paths use '/' on every host. Preserve each filename;
+            // replacing backslashes would alias a literal Unix filename.
             let relative = path
                 .strip_prefix(root)?
-                .to_str()
-                .context("build_record_path_invalid")?;
+                .components()
+                .map(|component| {
+                    component
+                        .as_os_str()
+                        .to_str()
+                        .context("build_record_path_invalid")
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("/");
             ensure!(relative.len() <= 512, "build_record_path_invalid");
-            found.insert(relative.into());
+            ensure!(
+                ato_formation::proposal::source_path(&relative),
+                "build_record_path_invalid"
+            );
+            found.insert(relative);
         }
     }
     Ok(())
@@ -504,6 +517,7 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
     fn fixture() -> (tempfile::TempDir, BoundDerivation) {
+        std::fs::create_dir_all(".tmp").unwrap();
         let workspace = tempfile::tempdir_in(".tmp").unwrap();
         let requirement = content_ref(b"native==1.0.0");
         let plan = json!({"schema":"ato.python-build-plan/1","python_version":"3.12.7",

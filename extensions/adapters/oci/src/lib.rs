@@ -1803,7 +1803,9 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn vm_backed_docker_cannot_admit_an_isolated_http_endpoint() {
-        let error = DockerOciAdapter::new(spec()).err().unwrap();
+        let error = DockerOciAdapter::new_at(spec(), std::env::current_exe().unwrap())
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("native Linux host"));
     }
 
