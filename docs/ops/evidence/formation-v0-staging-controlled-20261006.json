@@ -831,7 +831,7 @@
     }
   ],
   "pending": [
-    "existing application functional/browser regression and final own process cleanup",
+    "shared staging global cleanup before production rollout",
     "production migration and smoke",
     "new 100 OSS measurement",
     "independent API producer plans"
@@ -862,7 +862,15 @@
     },
     "owned_Runtime_manager_stopped": true,
     "owned_workload_directories": 0,
-    "additional_LLM_exploration_after_Source_PASS": false
+    "additional_LLM_exploration_after_Source_PASS": false,
+    "DB_confirmed": [
+      {
+        "encrypted_values": 0,
+        "active_metadata": 0,
+        "active_or_quarantined_writers": 0
+      }
+    ],
+    "temporary_values_encrypted_store_zero": true
   },
   "legacy_browser": {
     "notes_render": false,
@@ -898,6 +906,86 @@
       "page_error_names": [
         "Error"
       ]
+    },
+    "converter_functional": {
+      "schema": "ato.formation-existing-converter-functional-regression/1",
+      "instance_id": "cinst_01M1XNEA68BZBG1CYZAK8HMKT8",
+      "new_Instance_created": false,
+      "external_provider_used": false,
+      "completed": true,
+      "phase": "complete",
+      "converted_archive_bytes": 564,
+      "converted_archive_sha256": "cd7ef68c0ed01e3f97b5419a58d6e8cad8575ccbbc4a0013f39307a0485db4ca",
+      "page_error_categories": [
+        "invalid_window_identity"
+      ]
+    },
+    "bridge_classification": {
+      "schema": "ato.formation-existing-static-bridge-classification/1",
+      "compared_source": [
+        {
+          "path": "src/shared/AtoBrowserBridge.ts",
+          "base": "b9a7f213960bb8bc7fbe0792c1367e10ccf61a4e",
+          "head": "ddb0667619617b564375aff7334f2c3fdaa52799",
+          "base_sha256": "03c73f40e4fe892413e0e55d1211ae2eae355fdaff9a508fa3c991505c06366e",
+          "head_sha256": "03c73f40e4fe892413e0e55d1211ae2eae355fdaff9a508fa3c991505c06366e",
+          "byte_identical": true
+        },
+        {
+          "path": "src/shared/AtoBrowserBridgeBootstrap.ts",
+          "base": "b9a7f213960bb8bc7fbe0792c1367e10ccf61a4e",
+          "head": "ddb0667619617b564375aff7334f2c3fdaa52799",
+          "base_sha256": "8163abd4ba8a8d9dfab90c72ce0fb8748925eded6d43c9f4ec3e31b19a45fdba",
+          "head_sha256": "8163abd4ba8a8d9dfab90c72ce0fb8748925eded6d43c9f4ec3e31b19a45fdba",
+          "byte_identical": true
+        },
+        {
+          "path": "src/components/personal-apps/InstanceAppPage.tsx",
+          "base": "b9a7f213960bb8bc7fbe0792c1367e10ccf61a4e",
+          "head": "ddb0667619617b564375aff7334f2c3fdaa52799",
+          "base_sha256": "dd97c51ad7b6b820fc60e7655db40fcc70b26bb0c55d9602b5c5aeefc76a41f6",
+          "head_sha256": "dd97c51ad7b6b820fc60e7655db40fcc70b26bb0c55d9602b5c5aeefc76a41f6",
+          "byte_identical": true
+        }
+      ],
+      "served_bridge_url": "https://cinst-7cbpgimlyypcheob.stg-app.ato.run/__ato/browser-runner-bridge-v0.1.2.js",
+      "served_bridge_status": 200,
+      "served_bridge_sha256": "202b72a15d7a8882f7054c765925695c94b93dce28e1b19613ab742e15752ac2",
+      "served_bridge_bytes": 34319,
+      "served_bridge_contains_invalid_window_identity": true,
+      "base_browser_execution_performed": false,
+      "functional_converter_report": "legacy-converter-functional-report.json",
+      "functional_ui_pass": true,
+      "console_error": "invalid_window_identity",
+      "classification": "legacy strict peer identity bootstrap present before Formation; functional conversion passed; no clean-console claim",
+      "instance_created_at": "2026-09-07 10:08:24",
+      "source_result_ref": null
     }
+  },
+  "subsequent_shared_stage_deployment_readback": {
+    "API_code": "b3f8db2856d326e2e924a579d489f95de10378a5",
+    "API_active_Worker": "a7d2be23-41a2-44ea-9e65-84251f27a4bb",
+    "PWA_code": "6571f2435ce68fc3108db2fd1ade7e15af6f0f79",
+    "PWA_Worker": "cde0afd5-9a1e-4171-a07a-000cf9fec2c8",
+    "served_asset": {
+      "url": "https://stg-app.ato.run/assets/index-BeST6ptn.js",
+      "status": 200,
+      "sha256": "00bebc13660e8ad26a02d6e690407ba2397c478e5605345533cdadfb91479e41",
+      "bytes": 997767,
+      "expected_sha_matches": true,
+      "staging_api_marker": true
+    },
+    "historical_measurement_pins_reassigned": false,
+    "scope": "Compute overlay update; Source/functional A/B acceptance remains at its original pins"
+  },
+  "staging_functional_gates": {
+    "real_Native_Source_PASS": true,
+    "Source_Result_registration": true,
+    "functional_state_A_commit_B_restore": true,
+    "PWA_revoke_reinput_resume": true,
+    "legacy_static_converter_functional": true,
+    "legacy_console_known_code_unchanged": true,
+    "base_browser_execution_claimed": false,
+    "shared_global_cleanup_pending": true
   }
 }
