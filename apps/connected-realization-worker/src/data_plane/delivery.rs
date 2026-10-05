@@ -102,7 +102,6 @@ pub(super) fn ensure_objects(
     {
         return Err(error);
     }
-    drop(heartbeat);
     let mut ordered = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         let report = if let Some(report) = reports.remove(&index) {
@@ -117,7 +116,9 @@ pub(super) fn ensure_objects(
     Ok(ordered)
 }
 
-#[cfg(test)]
+// Successful hydration requires the POSIX ModelCache boundary. Non-Unix
+// admission is covered by the no-filesystem/no-HTTP rejection tests.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Cursor;
