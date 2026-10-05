@@ -41,6 +41,95 @@ struct Binding {
     configuration_ref: String,
     agent: Option<SessionAgent>,
     expires_at_ms: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    read_only: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+// A reporting capability has its own short lifetime; it never changes the
+// saved Search deadline or authorizes another submission/execution.
+fn relay_expiry(view: &Value, expiry: Option<u64>, read_only: bool, now: u64) -> Result<u64> {
+    let deadline = view["deadline_ms"]
+        .as_u64()
+        .filter(|deadline| *deadline > 0)
+        .ok_or_else(|| anyhow!("Session deadline unavailable"))?;
+    let expires_at_ms = expiry.unwrap_or(deadline);
+    ensure!(now < expires_at_ms, "relay expiry rejected");
+    if read_only {
+        ensure!(
+            expiry.is_some()
+                && expires_at_ms.saturating_sub(now) <= 120_000
+                && matches!(
+                    view["progress"]["status"].as_str(),
+                    Some("pending" | "running" | "unknown")
+                )
+                && view["progress"]["unresolved_attempts"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
+                && view["progress"]["attempts"]
+                    .as_array()
+                    .is_some_and(|attempts| attempts
+                        .iter()
+                        .any(|attempt| attempt["status"] == "unknown"))
+                && view.get("input") == Some(&Value::Null)
+                && view["connected"].as_bool().is_some()
+                && matches!(
+                    view["next_operation"].as_str(),
+                    Some(
+                        "owner_reconcile"
+                            | "owner_reconcile_or_assess"
+                            | "owner_reconnect_or_assess"
+                    )
+                ),
+            "reconciliation relay admission rejected"
+        );
+    } else {
+        ensure!(expires_at_ms <= deadline, "relay expiry rejected");
+    }
+    Ok(expires_at_ms)
+}
+
+fn scoped_handle(
+    server: &mut FormationSessionMcpServer,
+    request: &Value,
+    read_only: bool,
+) -> Option<Value> {
+    if !read_only {
+        return server.handle(request);
+    }
+    let id = request.get("id")?.clone();
+    let method = request["method"].as_str();
+    if method == Some("tools/call")
+        && !matches!(request["params"]["name"].as_str(), Some("status" | "next"))
+    {
+        return Some(crate::mcp_stdio::rpc_error(
+            id,
+            -32601,
+            "reconciliation relay is read-only",
+        ));
+    }
+    let mut response = server.handle(request)?;
+    if method == Some("tools/list") {
+        if let Some(tools) = response["result"]["tools"].as_array_mut() {
+            tools.retain(|tool| matches!(tool["name"].as_str(), Some("status" | "next")));
+        }
+    } else if method == Some("initialize") {
+        response["result"]["instructions"] = json!(
+            "Read status and next to report saved UNKNOWN evidence only. This relay cannot submit, cancel, or start work. Preserve the original Search deadline and consumption; owner authority resolves the attempt."
+        );
+    } else if method == Some("tools/call")
+        && !response["result"]["structuredContent"]["input"].is_null()
+    {
+        return Some(crate::mcp_stdio::rpc_error(
+            id,
+            -32601,
+            "reconciliation relay input rejected",
+        ));
+    }
+    Some(response)
 }
 
 // No Debug: even the limited Producer capability stays out of diagnostics.
@@ -93,11 +182,22 @@ impl Broker {
         )
     }
 
+    #[cfg(test)]
     fn start_with_capability(
+        server: FormationSessionMcpServer,
+        descriptor_file: &Path,
+        capability_file: &Path,
+        expiry: Option<u64>,
+    ) -> Result<Self> {
+        Self::start_with_scope(server, descriptor_file, capability_file, expiry, false)
+    }
+
+    fn start_with_scope(
         mut server: FormationSessionMcpServer,
         descriptor_file: &Path,
         capability_file: &Path,
         expiry: Option<u64>,
+        read_only: bool,
     ) -> Result<Self> {
         // Obtain the original deadline from the same saved Session authority.
         // Publishing/reconnecting a broker never initializes a Search budget.
@@ -112,14 +212,7 @@ impl Broker {
                 && view["configuration_ref"] == server.binding.configuration_ref,
             "Session status rejected"
         );
-        let deadline = view["deadline_ms"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("Session deadline unavailable"))?;
-        let expires_at_ms = expiry.unwrap_or(deadline);
-        ensure!(
-            now_ms()? < expires_at_ms && expires_at_ms <= deadline,
-            "relay expiry rejected"
-        );
+        let expires_at_ms = relay_expiry(view, expiry, read_only, now_ms()?)?;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let descriptor = Descriptor {
@@ -131,6 +224,7 @@ impl Broker {
                 configuration_ref: server.binding.configuration_ref.clone(),
                 agent: server.binding.agent.clone(),
                 expires_at_ms,
+                read_only,
             },
         };
         validate(&descriptor)?;
@@ -200,7 +294,7 @@ fn handle_stream(
             Cursor::new(frame),
             &mut output,
             Some(MAX_REQUEST_BYTES),
-            |request| server.handle(request),
+            |request| scoped_handle(server, request, binding.read_only),
         )?;
         ensure!(output.len() < RESPONSE_CAP, "relay response rejected");
         let response = if output.is_empty() {
@@ -289,15 +383,32 @@ pub fn serve_owner_with_capability(
     capability_file: &Path,
     expiry: Option<u64>,
 ) -> Result<()> {
+    serve_owner_with_scope(
+        connection_file,
+        descriptor_file,
+        capability_file,
+        expiry,
+        false,
+    )
+}
+
+pub fn serve_owner_with_scope(
+    connection_file: &Path,
+    descriptor_file: &Path,
+    capability_file: &Path,
+    expiry: Option<u64>,
+    read_only: bool,
+) -> Result<()> {
     ensure!(
         descriptor_file != capability_file,
         "private capability destination rejected"
     );
-    let broker = Broker::start_with_capability(
+    let broker = Broker::start_with_scope(
         FormationSessionMcpServer::connect(connection_file)?,
         descriptor_file,
         capability_file,
         expiry,
+        read_only,
     )?;
     #[cfg(unix)]
     {
@@ -316,6 +427,8 @@ pub fn serve_owner_with_capability(
 pub use unix::serve_owner as serve_owner_unix;
 #[cfg(unix)]
 pub use unix::serve_owner_with_capability as serve_owner_unix_with_capability;
+#[cfg(unix)]
+pub use unix::serve_owner_with_scope as serve_owner_unix_with_scope;
 
 /// Model-facing stdio process reads only its Producer descriptor. It never
 /// opens the owner's connection or credentials and never retries transport.
@@ -648,6 +761,117 @@ mod tests {
             &mut stream,
             RESPONSE_CAP,
         )?)?)
+    }
+
+    #[test]
+    fn expired_unknown_can_report_but_cannot_submit_or_change_signed_scope() -> Result<()> {
+        let original_deadline = now_ms()?.saturating_sub(1);
+        let (root, bridge, server, digest) =
+            crate::formation_session_mcp::tests::fixture_at(original_deadline)?;
+        bridge.update(
+            &json!({"status":"unknown","unresolved_attempts":1,"rounds_consumed":1,
+            "attempts":[{"attempt_id":"attempt-original","status":"unknown"}],
+            "search_budget":{"attempts":{"max":1,"used":1,"reserved":0}}}),
+        )?;
+        let expiry = now_ms()? + 30_000;
+        let path = root.path().join("reconciliation.json");
+        let broker = Broker::start_with_scope(
+            server,
+            &path,
+            &path.with_extension("capability"),
+            Some(expiry),
+            true,
+        )?;
+        let descriptor = &broker.descriptor;
+        assert!(descriptor.binding.read_only);
+        let inventory = rpc(
+            descriptor,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        )?;
+        let tools = inventory["result"]["tools"]
+            .as_array()
+            .ok_or_else(|| anyhow!("tools missing"))?;
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool["name"].as_str())
+                .collect::<Vec<_>>(),
+            [Some("status"), Some("next")]
+        );
+        let before = rpc(descriptor, call("status", json!({})))?;
+        let next = rpc(descriptor, call("next", json!({})))?;
+        assert!(next["result"]["structuredContent"]["input"].is_null());
+        assert_eq!(
+            next["result"]["structuredContent"]["deadline_ms"],
+            original_deadline
+        );
+        for name in ["submit", "cancel"] {
+            let denied = rpc(
+                descriptor,
+                call(
+                    name,
+                    if name == "submit" {
+                        json!({"exchange_id":"search_test_r1_s1","input_sha256":digest,"output_json":OUTPUT})
+                    } else {
+                        json!({})
+                    },
+                ),
+            )?;
+            assert_eq!(denied["error"]["code"], -32601);
+        }
+        let mut forged = wire_request(descriptor, call("next", json!({})))?;
+        forged.binding.read_only = false;
+        assert!(!raw(descriptor, &serde_json::to_value(forged)?)?.ok);
+        let after = rpc(descriptor, call("status", json!({})))?;
+        for key in [
+            "deadline_ms",
+            "exchanges_used",
+            "exchanges_remaining",
+            "progress",
+        ] {
+            assert_eq!(
+                before["result"]["structuredContent"][key],
+                after["result"]["structuredContent"][key]
+            );
+        }
+        assert!(
+            !root
+                .path()
+                .join("reasoning/r001_s001.response.json")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reporting_expiry_fails_closed_without_saved_unknown_or_bounded_owner_window() -> Result<()> {
+        let view = json!({"deadline_ms":1,"connected":false,"input":null,"next_operation":"owner_reconnect_or_assess",
+            "progress":{"status":"unknown","unresolved_attempts":1,"attempts":[{"status":"unknown"}]}});
+        assert_eq!(relay_expiry(&view, Some(121_000), true, 1_000)?, 121_000);
+        assert!(relay_expiry(&view, Some(121_001), true, 1_000).is_err());
+        assert!(relay_expiry(&view, Some(1_000), true, 1_000).is_err());
+        assert!(relay_expiry(&view, None, true, 1_000).is_err());
+        assert!(relay_expiry(&view, Some(2_000), false, 1_000).is_err());
+        for change in [
+            json!({"status":"unknown","unresolved_attempts":0,"attempts":[{"status":"unknown"}]}),
+            json!({"status":"running","unresolved_attempts":1,"attempts":[{"status":"claimed"}]}),
+            json!({"status":"unsatisfied","unresolved_attempts":1,"attempts":[{"status":"unknown"}]}),
+        ] {
+            let mut changed = view.clone();
+            changed["progress"] = change;
+            assert!(relay_expiry(&changed, Some(2_000), true, 1_000).is_err());
+        }
+        for (field, value) in [
+            ("input", json!({"instructions":"new inference"})),
+            ("connected", Value::Null),
+            ("next_operation", json!("submit")),
+            ("deadline_ms", json!(0)),
+        ] {
+            let mut changed = view.clone();
+            changed[field] = value;
+            assert!(relay_expiry(&changed, Some(2_000), true, 1_000).is_err());
+        }
+        Ok(())
     }
 
     #[test]
