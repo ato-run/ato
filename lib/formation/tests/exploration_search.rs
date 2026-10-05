@@ -972,6 +972,193 @@ fn python_source_requirements_resolve_hash_and_install_offline_without_changing_
 }
 
 #[test]
+fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.insert(
+        "requirements".into(),
+        VerifiedSourceFile {
+            path: "requirements.txt".into(),
+            digest: format!("sha256:{}", "c".repeat(64)),
+        },
+    );
+    auth.toolchains.insert("gcc".into(), "13.3.0".into());
+    let mut p = plan();
+    p["dependencies"] = json!([{"kind":"python_build_requirements","requirements":{"file_id":"requirements","digest":format!("sha256:{}","c".repeat(64))},
+        "build_dependencies":[{"name":"setuptools","version":"75.1.0"},{"name":"wheel","version":"0.44.0"}],
+        "toolchains":[{"name":"gcc","version":"13.3.0"}],"network":"denied"}]);
+    let result = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &result[0] else {
+        panic!("{result:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let steps = &d.compiled().derivation.steps;
+    assert_eq!(steps.len(), 10);
+    let build = steps
+        .iter()
+        .find(|s| s.argv.get(3).is_some_and(|a| a == "build"))
+        .unwrap();
+    assert!(build.network.is_denied());
+    assert!(
+        steps[7].argv.contains(&"--no-index".into())
+            && steps[7].argv.contains(&"--require-hashes".into())
+    );
+    assert!(
+        d.candidate()
+            .requirements
+            .iter()
+            .any(|r| r.fact == "toolchain.gcc.13.3.0")
+    );
+    p["dependencies"][0]["toolchains"][0]["version"] = json!("14.1.0");
+    assert!(matches!(
+        &compile(&s, p.clone())[0],
+        ProposalOutcome::Rejected(ProposalError("native_toolchain_unavailable"))
+    ));
+    p["dependencies"][0]["toolchains"] = json!([]);
+    p["dependencies"][0]["build_dependencies"][0]["version"] = json!("latest");
+    // Python versions use PEP 440 rather than semver, but must remain exact.
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("python_build_dependencies_invalid"))
+    ));
+}
+
+#[test]
+fn source_owned_startup_script_keeps_k_and_cannot_select_an_unbound_manifest() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.insert(
+        "manifest".into(),
+        VerifiedSourceFile {
+            path: "package.json".into(),
+            digest: format!("sha256:{}", "c".repeat(64)),
+        },
+    );
+    auth.toolchains.insert("node".into(), "22.14.0".into());
+    auth.toolchains.insert("npm".into(), "10.9.2".into());
+    let mut p = plan();
+    p["runtime"] = json!({"name":"node","version":"22.14.0"});
+    p["entrypoint"] = json!({"file_id":"manifest","digest":format!("sha256:{}","c".repeat(64))});
+    p["launch_script"] = json!("start");
+    p["argv"] = json!(["--port", "8000"]);
+    let outcome = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &outcome[0] else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.contract_ref);
+    let steps = &d.compiled().derivation.steps;
+    let guard = steps
+        .iter()
+        .find(|s| s.id == "check-launch-script")
+        .unwrap();
+    assert!(guard.network.is_denied());
+    assert!(
+        guard
+            .argv
+            .iter()
+            .any(|a| a.contains("source_launch_manifest_changed"))
+    );
+    assert_eq!(
+        steps.last().unwrap().argv,
+        [
+            "/opt/ato/toolchains/node/22.14.0/bin/npm",
+            "run",
+            "start",
+            "--",
+            "--port",
+            "8000"
+        ]
+    );
+    p["entrypoint"] = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_launch_script"))
+    ));
+}
+
+#[test]
+fn npm_acquisition_is_audited_and_rebuild_requires_a_preceding_frozen_lock() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.get_mut("server").unwrap().path = "server.js".into();
+    for (id, path) in [
+        ("manifest", "package.json"),
+        ("lockfile", "package-lock.json"),
+    ] {
+        auth.files.insert(
+            id.into(),
+            VerifiedSourceFile {
+                path: path.into(),
+                digest: format!("sha256:{}", "c".repeat(64)),
+            },
+        );
+    }
+    auth.toolchains.insert("node".into(), "22.14.0".into());
+    auth.toolchains.insert("npm".into(), "10.9.2".into());
+    let reference = |id| json!({"file_id":id,"digest":format!("sha256:{}","c".repeat(64))});
+    let mut p = plan();
+    p["runtime"] = json!({"name":"node","version":"22.14.0"});
+    let ci =
+        json!({"kind":"npm_ci","manifest":reference("manifest"),"lockfile":reference("lockfile")});
+    let rebuild = json!({"kind":"npm_rebuild","manifest":reference("manifest"),"lockfile":reference("lockfile"),
+        "packages":["native-dependency"],"root_lifecycle":[],"toolchains":[],"network":"denied"});
+    p["dependencies"] = json!([ci.clone()]);
+    let result = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &result[0] else {
+        panic!("{result:?}")
+    };
+    assert!(
+        d.compiled()
+            .derivation
+            .steps
+            .iter()
+            .any(|s| s.argv.get(3).is_some_and(|a| a == "audit"))
+    );
+    assert!(
+        d.compiled()
+            .derivation
+            .steps
+            .iter()
+            .any(|s| s.argv.contains(&"--ignore-scripts".into()))
+    );
+    p["dependencies"] = json!([ci.clone(), rebuild.clone()]);
+    let result = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &result[0] else {
+        panic!("{result:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    p["dependencies"] = json!([rebuild, ci]);
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("npm_lifecycle_plan_invalid"))
+    ));
+}
+
+#[test]
 fn bindings_change_d_without_changing_k_and_never_carry_values() {
     let r = serde_json::json!({"name":"JWT_SECRET","kind":"signing_secret","purpose":"Sign local sessions","resource":"session.signing","operation":"execute","phase":"runtime","secret":true,"temporary":true});
     let req: ato_formation::variables::VariableRequirement =
