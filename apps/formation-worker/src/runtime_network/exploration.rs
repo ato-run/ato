@@ -125,10 +125,21 @@ impl ScopedGates {
     pub fn first_refusal(
         &self,
         phase: ExecutionPhase,
-    ) -> Option<ato_formation::requirements::NetworkRequirement> {
-        self.gates
-            .get(&phase)?
-            .report()
+    ) -> Option<ato_formation::failure::FormationFailure> {
+        use ato_formation::failure::{FailureStage, FormationFailure};
+        let gate = self.gates.get(&phase)?;
+        // This authoritative shared counter works even when the bounded
+        // observational refusal channel dropped a decision under load.
+        if gate.exhausted() {
+            return Some(FormationFailure::new(
+                "exploration_network_budget_exhausted",
+                FailureStage::Build,
+                format!(
+                    "phase {phase:?} exhausted the frozen attempt transfer budget; build process group stopped"
+                ),
+            ));
+        }
+        gate.report()
             .refused
             .into_iter()
             .map(|target| ato_formation::requirements::NetworkRequirement {
@@ -144,6 +155,16 @@ impl ScopedGates {
                 }
                 .validate()
                 .is_ok()
+            })
+            .map(|requirement| {
+                FormationFailure::new(
+                    "network_denied",
+                    FailureStage::Build,
+                    format!(
+                        "phase {phase:?} gate refused {}:{}; build process group stopped",
+                        requirement.host, requirement.port
+                    ),
+                )
             })
     }
 }
@@ -189,8 +210,39 @@ mod tests {
             assert!(start.elapsed() < std::time::Duration::from_secs(2));
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        assert_eq!(refused.host, "registry.npmjs.org");
-        assert_eq!(refused.port, 443);
+        assert_eq!(refused.code, "network_denied");
+        assert!(refused.message.contains("registry.npmjs.org:443"));
+        assert!(gates.first_refusal(ExecutionPhase::Build).is_none());
+    }
+
+    #[test]
+    fn shared_transfer_exhaustion_is_distinct_from_an_allowlist_refusal() {
+        let budget = Arc::new(TransferBudget::new(1000));
+        let gate = EgressGate::start_with_budget(
+            "127.0.0.1:0".parse().unwrap(),
+            EgressAllowance {
+                hosts: vec!["registry.npmjs.org".into()],
+                ports: vec![443],
+                max_transfer_bytes: 1000,
+            },
+            budget.clone(),
+        )
+        .unwrap();
+        let gates = ScopedGates {
+            bridges: vec![],
+            sockets: BTreeMap::new(),
+            gates: BTreeMap::from([(ExecutionPhase::Dependencies, gate)]),
+        };
+        assert!(gates.first_refusal(ExecutionPhase::Dependencies).is_none());
+        assert!(!budget.consume(1001));
+        assert!(
+            gates.gates[&ExecutionPhase::Dependencies]
+                .report()
+                .refused
+                .is_empty()
+        );
+        let refusal = gates.first_refusal(ExecutionPhase::Dependencies).unwrap();
+        assert_eq!(refusal.code, "exploration_network_budget_exhausted");
         assert!(gates.first_refusal(ExecutionPhase::Build).is_none());
     }
 }

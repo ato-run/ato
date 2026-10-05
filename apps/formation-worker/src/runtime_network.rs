@@ -2482,21 +2482,10 @@ fn execute_planned_ticket(
         shim: config.shim.clone(),
         network,
         limits: BuildLimits {
-            wall_clock_seconds: ticket
-                .exploration
-                .as_ref()
-                .and_then(|e| e.deadline_ms)
-                .map_or(900, |deadline| {
-                    deadline
-                        .saturating_sub(
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                        )
-                        .saturating_sub(45_000)
-                        / 1000
-                }),
+            wall_clock_seconds: exploration_build_seconds(
+                ticket.exploration.as_ref().and_then(|e| e.deadline_ms),
+                ato_runtime_attempt::control::now_ms(),
+            ),
             ..BuildLimits::default()
         },
     };
@@ -3168,6 +3157,15 @@ fn attempt_report(
     }
 }
 
+/// The coarse build limit must not shorten the frozen execution deadline.
+/// ExecutionControl caps each operation in milliseconds; cleanup remains
+/// possible after expiry and does not need a reservation from this budget.
+fn exploration_build_seconds(deadline_ms: Option<u64>, now_ms: u64) -> u64 {
+    deadline_ms.map_or(900, |deadline| {
+        deadline.saturating_sub(now_ms).div_ceil(1000)
+    })
+}
+
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
@@ -3176,6 +3174,16 @@ mod deadline_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
+    }
+
+    #[test]
+    fn build_uses_remaining_deadline_without_cleanup_reservation_or_rounding_down() {
+        assert_eq!(exploration_build_seconds(None, 100_000), 900);
+        assert_eq!(exploration_build_seconds(Some(144_000), 100_000), 44);
+        assert_eq!(exploration_build_seconds(Some(100_001), 100_000), 1);
+        assert_eq!(exploration_build_seconds(Some(101_001), 100_000), 2);
+        assert_eq!(exploration_build_seconds(Some(100_000), 100_000), 0);
+        assert_eq!(exploration_build_seconds(Some(99_999), 100_000), 0);
     }
 
     #[test]
