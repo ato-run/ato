@@ -76,6 +76,16 @@ class NativeAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, 'wall_clock_exceeded'):
             NATIVE.reporting_window(original, True, 1)
 
+    def test_reconciliation_passes_explicit_authority_scope_and_separate_expiry_to_broker(self):
+        for read_only in (False, True):
+            command = NATIVE.broker_command('mcp', 'owner-connection', 'public-descriptor',
+                                           'private-capability', 'socket', read_only, 12345)
+            self.assertEqual('--reconcile-only' in command, read_only)
+            self.assertEqual('--relay-expiry-ms' in command, read_only)
+            if read_only:
+                self.assertEqual(command[command.index('--relay-expiry-ms') + 1], '12345')
+            self.assertEqual(command[command.index('--publish-capability-file') + 1], 'private-capability')
+
     def test_private_transport_authorization_is_not_in_model_profile(self):
         temporary = SKILL.parents[1] / ".tmp"
         temporary.mkdir(exist_ok=True)

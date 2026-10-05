@@ -208,6 +208,14 @@ def reporting_window(original_deadline, reconcile_only, owner_wall_deadline=None
     return end
 
 
+def broker_command(mcp, connection, descriptor, capability, socket, reconcile_only, reporting_deadline):
+    command = [str(mcp), "--connection", str(connection), "--publish-relay", str(descriptor),
+               "--publish-capability-file", str(capability), "--relay-socket", str(socket)]
+    if reconcile_only:
+        command += ["--reconcile-only", "--relay-expiry-ms", str(reporting_deadline)]
+    return command
+
+
 def public_package(output):
     public = output / "public"
     package = public / "skill"
@@ -447,9 +455,8 @@ def run(args):
         return process
 
     try:
-        broker = launch([str(mcp), "--connection", str(connection), "--publish-relay",
-                         str(descriptor), "--publish-capability-file", str(relay_capability),
-                         "--relay-socket", str(selected)], "broker")
+        broker = launch(broker_command(mcp, connection, descriptor, relay_capability, selected,
+                                       args.reconcile_only, native_deadline), "broker")
         end = min(time.time() + 10, native_deadline / 1000)
         while not descriptor.exists() and broker.poll() is None and time.time() < end:
             time.sleep(.02)
