@@ -15,3 +15,17 @@
 今回の失敗Searchに新規UNKNOWN/attempt/resource reservationはない。active writerとquarantineは0。Native/Bridge、Runtime、Coordinator、proxy、SSH forwardを停止した。temporary owner sessionは通常signout APIのHTTP 200で失効し、remoteのprivate credential copy4件とlocal capability/auth link4件を削除した。SDKは累積tokenを報告したが、内部call数・実請求は不明であり、Ato direct LLM API call 0を推論費用0へ読み替えない。
 
 Kuttの既存successful Search → Source Result → form-verify → State Run A/Bは別受入として#1481/API #731の証拠を維持する。今回の失敗をKutt成功で代替せず、#1485はDraft維持。stack merge、最終integration CI、staging/production、100 OSS、独立API残3計画はUNKNOWN gateの後に進める。
+
+## 追加承認されたmeasurement 02
+
+ユーザーの「承認します。続けて」を受け、同じ上限の別measurement `formation-native-real-unknown-20261005-02`を開始した。開始前のCLIはscratch不足で停止したが、コピー元DBと受入DBのSearch/request/attempt件数がすべて6/6/7で一致し、新Search未作成を確認した。同じ予約を保持し、再生成可能なbuild outputを整理して、予約済み開始処理を継続した。この失敗launchも台帳に保存した。旧13/12、measurement 01、既存Search、期限、消費量は書き換えていない。
+
+修正済みSkill `e03b5b2f5`を実Codex 0.160.0 / gpt-6.1-solから呼び出し、制御Sourceを既知Dなしで探索した。Search `search_36277e87df76feb9bb5e444fa116307a`、attempt `01M45DWSE3GWKKDECQ3P3Q6VNY`で固定Kのfresh PASS、結果保存、ACK、closed、candidate stop、cleanupを確認した。消費はSearch 1 / D round 1 / exchange 1 / Runtime attempt 1 / inspection 0 / 58秒。通常Run許可、functional registration、公開、forkへは昇格していない。[公開証拠](evidence/formation-native-unknown-supplemental-20261005-02.json)。
+
+ただしUNKNOWNゲートは未達である。切断ハーネスの監視はargvにSourceファイル名`server-unknown.js`が現れることを前提としていた。materialized entrypointを検出できず、開始markerがない場合にproxyが結果を通す構造だったため、結果はCoordinatorへ届いた。実測PASSをUNKNOWNへ変更せず、DBや時計を変更して再分類しない。30分silence expiryと新Native文脈でのUNKNOWN照合は今回も未観測である。
+
+この欠陥に対し、owner側の受入専用monitorは固定RuntimeのPID/start ticksと子孫関係、固定Node executableのbytesを照合する。mount namespace内のパスやSourceファイル名には依存せず、env/argvを収集しない。受入専用proxyは最初のresult配送で対象RuntimeのPID/start ticks/argv/binary hashを照合して停止し、元のdispatch/retryを保存する。開始証拠が欠落・identityが不一致でも、明示的owner releaseまでresultを転送しない。開始証拠が欠けた場合は受入成功にしない。これらは測定用fault injectionであり、Coordinatorの30分失効や製品のSearch budgetを変更しない。
+
+Linuxでproxy 4 testとmonitor 7 testがPASSした。開始markerの有無、identity不一致での配送拒否、owner release後の配送、実fixture processへのSIGSTOP/SIGCONT、実Node子プロセスの観測、materialized file ID、namespace内のパス差、PID再利用、無関係/終了済みprocessを確認した。fixtureは新Source Search、Formation Runtime attempt、Native推論を作らず、実UNKNOWN受入とは区別する。新measurement 03の40分計画は準備したが、追加Searchを未承認で作っていない。
+
+measurement 02の最終attempt/resource reservation、active writer、quarantine、temporary variable値、live metadataは0。Native/Bridge、Runtime、Coordinator、proxy、watcher、SSH forwardを停止した。owner sessionは通常signoutのHTTP 200で失効し、remoteのcredential copy4件とlocal capability/auth link4件を削除した。保存されたmodel向けイベントのowner credential/capability値14 encodingの一致は0。SDK累積tokens 69,496（input 68,769、cached input 50,816、output 727）を別記録とし、実call数・請求は不明のまま。旧13/12 auditのhash不変を再確認した。
