@@ -1,0 +1,83 @@
+{
+  "schema": "ato.formation-skill-integration-local/1",
+  "measurement_id": "formation-skill-integration-local-20261003-01",
+  "execution_source_revision": "b7e0d63de553e97ad9ae9acb21963f8123dd227a",
+  "integration_revision_after_docs_rebase": "ac970e778153c3cd13266fa634b0e5e9fa0d0b12",
+  "skill_package_bytes_equal_after_docs_rebase": true,
+  "tracked_source_clean_at_tests": true,
+  "untracked_test_pycache_present": true,
+  "tests": {
+    "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/ato-formation-explore/tests -v",
+    "passed": 33,
+    "failed": 0,
+    "log_path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/review-ato-skill/.tmp/skill-final-tests.log",
+    "log_sha256": "607f985bff348649705a38226e26d0bf857a7d52edac65c868bd075b3218ef04"
+  },
+  "clang_syntax": {
+    "command": "/usr/bin/clang -Wall -Wextra -Werror -fsyntax-only skills/ato-formation-explore/scripts/producer-isolation-probe.c",
+    "exit_code": 0
+  },
+  "local_markdown_references": [
+    {
+      "file": "skills/ato-formation-explore/SKILL.md",
+      "target": "references/protocol.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/SKILL.md",
+      "target": "references/installation.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/SKILL.md",
+      "target": "references/producer-isolation.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/SKILL.md",
+      "target": "references/recovery.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/SKILL.md",
+      "target": "references/acceptance.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/producer-isolation.md",
+      "target": "mcp.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/producer-isolation.md",
+      "target": "installation.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/producer-isolation.md",
+      "target": "protocol.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/producer-isolation.md",
+      "target": "mcp.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/producer-isolation.md",
+      "target": "installation.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/producer-isolation.md",
+      "target": "mcp.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/recovery.md",
+      "target": "protocol.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/installation.md",
+      "target": "mcp.md"
+    },
+    {
+      "file": "skills/ato-formation-explore/references/protocol.md",
+      "target": "mcp.md"
+    }
+  ],
+  "json_validation": true,
+  "native_agent_invocations": 0,
+  "native_acceptance_ready": false,
+  "paid_api_calls": 0,
+  "runtime_acceptance_attempts": 0
+}
