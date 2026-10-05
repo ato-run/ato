@@ -282,7 +282,9 @@
     "strict_clippy_all_targets_all_features": "PASS",
     "real_Native_reconciliation_on_fix": "not_run; approved Search/wall limit consumed",
     "MCP_binary_sha256": "83a1e07b0f1cca5db127e146fa1123f163c8e04866aa39ba8d9f19c41cb06614",
-    "MCP_differs_from_acceptance_pin": true
+    "MCP_differs_from_acceptance_pin": true,
+    "CLI_library_tests_passed": 57,
+    "CI_evidence": "formation-native-unknown-relay-CI-20261005.json"
   },
   "measured_initial_model_isolation": {
     "schema": "ato.formation-producer-isolation-os-fixture/1",
