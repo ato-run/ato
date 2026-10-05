@@ -1971,7 +1971,10 @@ impl ConnectedWorker {
             Ok(secrets) => secrets,
             Err(error) => return not_started(Err(error)),
         };
-        match self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut()) {
+        match poll_runtime_launch_control(
+            || self.control_stop_requested(&lease.id),
+            || self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut()),
+        ) {
             Ok(true) => {
                 let execution_id = match spec.canonical_digest() {
                     Ok(digest) => digest,
@@ -2028,9 +2031,15 @@ impl ConnectedWorker {
             &self.config.work_root,
             lease_root,
             || {
-                if self
-                    .refresh_execution_authorization(&lease.id, execution_authorization.as_mut())?
-                {
+                if poll_runtime_launch_control(
+                    || self.control_stop_requested(&lease.id),
+                    || {
+                        self.refresh_execution_authorization(
+                            &lease.id,
+                            execution_authorization.as_mut(),
+                        )
+                    },
+                )? {
                     anyhow::bail!("the Run was stopped during data delivery");
                 }
                 Ok(())
@@ -2039,25 +2048,30 @@ impl ConnectedWorker {
             Ok(delivered) => delivered,
             Err(error) => return not_started(Err(error.context("data delivery failed"))),
         };
-        let read_only_inputs = match delivered {
-            Some((inputs, report)) => {
+        let (read_only_inputs, output_plan) = match delivered {
+            Some(delivered) => {
                 if self.config.isolation != IsolationMode::HostBoundary {
                     return not_started(Err(anyhow::anyhow!(
-                        "model_set_delivery_unsupported: Model Sets are delivered only on a host-boundary Runner in v0"
+                        "data_plane_unsupported: data-plane Runs are served only by a host-boundary Runner in v0"
                     )));
                 }
-                if let Err(error) = data.report(&report) {
+                if let Err(error) = data.report(&delivered.report) {
                     eprintln!("[data-plane] delivery report not recorded: {error:#}");
                 }
-                inputs
+                let inputs = delivered
+                    .inputs
                     .into_iter()
                     .map(|input| runtime_launch::resolved::ResolvedReadOnlyInput {
                         env_name: input.env_name,
                         path: input.path,
                     })
-                    .collect()
+                    .collect();
+                (
+                    inputs,
+                    delivered.output_dir.map(|dir| (dir, delivered.outputs)),
+                )
             }
-            None => Vec::new(),
+            None => (Vec::new(), None),
         };
         let mut resolved = match runtime_launch::lease::resolve_run(
             spec,
@@ -2071,7 +2085,10 @@ impl ConnectedWorker {
             Ok(resolved) => resolved,
             Err(error) => return not_started(Err(error)),
         };
-        resolved.context = resolved.context.with_read_only_inputs(read_only_inputs);
+        resolved.context = resolved
+            .context
+            .with_read_only_inputs(read_only_inputs)
+            .with_output_dir(output_plan.as_ref().map(|(dir, _)| dir.clone()));
         entry.writer_fences = resolved.prepared.writer_fences();
         entry.phase = runtime_launch::recovery::RunPhase::Launching;
         if let Err(error) = journal.record(entry) {
@@ -2150,6 +2167,20 @@ impl ConnectedWorker {
             })
         );
         let stop_confirmed = stopped.overall.is_confirmed();
+        // Outputs are saved only after the workload is confirmed gone: its
+        // files are final. Generated and saved are reported separately; a save
+        // that fails leaves the generation recorded and the output unsaved.
+        if stop_confirmed && let Some((dir, limits)) = &output_plan {
+            for saved in data_plane::save_outputs(&data, dir, limits) {
+                eprintln!(
+                    "[data-plane] run={} output={} {}{}",
+                    lease.run_id,
+                    saved.output_key,
+                    saved.save_status,
+                    saved.error.map(|e| format!(" ({e})")).unwrap_or_default()
+                );
+            }
+        }
         let result = serving.and_then(|execution_id| {
             let committed = committed?;
             for entry in &committed {
