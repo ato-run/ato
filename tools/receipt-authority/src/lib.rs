@@ -100,6 +100,15 @@ pub enum AuthorityRequest {
         retained_ref: String,
         descriptor_json: String,
     },
+    ValidateBuildRecord {
+        frozen: FrozenContract,
+        capsule_toml: String,
+        source_closure_ref: String,
+        derivation_ref: String,
+        attempt_id: String,
+        record_ref: String,
+        manifest_json: String,
+    },
     AcceptRoute {
         frozen: FrozenContract,
         request_id: String,
@@ -119,6 +128,57 @@ pub enum Decision {
 fn check(request: AuthorityRequest) -> Result<(), ReceiptRejection> {
     match request {
         AuthorityRequest::ValidateContract { frozen } => frozen.validate(),
+        AuthorityRequest::ValidateBuildRecord {
+            frozen,
+            capsule_toml,
+            source_closure_ref,
+            derivation_ref,
+            attempt_id,
+            record_ref,
+            manifest_json,
+        } => {
+            frozen.validate()?;
+            use ato_formation::{
+                authoring::{BindingContext, bind},
+                capsule_toml::parse_capsule_toml,
+            };
+            let invalid = || ReceiptRejection {
+                code: "build_record_derivation",
+                detail: "registered authoring does not match the assignment".into(),
+            };
+            let draft = parse_capsule_toml(&capsule_toml).map_err(|_| invalid())?;
+            let (k, d) = bind(
+                &draft,
+                &BindingContext {
+                    source_closure_ref: &source_closure_ref,
+                },
+            )
+            .map_err(|_| invalid())?;
+            if k != frozen.base_contract
+                || d.derivation_ref().ok().as_ref() != Some(&derivation_ref)
+            {
+                return Err(invalid());
+            }
+            let manifest = ato_formation::build_record::BuildRecordManifest::parse(
+                manifest_json.as_bytes(),
+                &record_ref,
+            )
+            .map_err(|e| ReceiptRejection {
+                code: e.0,
+                detail: "build Record manifest rejected".into(),
+            })?;
+            manifest
+                .match_assignment(
+                    &frozen.effective_contract_ref,
+                    &d,
+                    &source_closure_ref,
+                    &attempt_id,
+                )
+                .map_err(|e| ReceiptRejection {
+                    code: e.0,
+                    detail: "build Record assignment rejected".into(),
+                })
+        }
         AuthorityRequest::ValidateRetained {
             frozen,
             derivation_ref,
