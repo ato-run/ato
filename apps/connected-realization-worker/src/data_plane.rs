@@ -244,6 +244,7 @@ impl LeaseData<'_> {
     /// Download one granted input Asset to `dest/<asset_id>/<filename>`,
     /// verified against the SHA-256 the Coordinator recorded for it.
     pub fn asset(&self, asset_id: &str, dest: &Path) -> Result<PathBuf> {
+        require_cache_platform()?;
         ensure!(
             asset_id.starts_with("ast_")
                 && asset_id
@@ -278,7 +279,7 @@ impl LeaseData<'_> {
             .unwrap_or_else(|| "asset".to_owned());
         let dir = dest.join(asset_id);
         fs::create_dir_all(&dir)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))?;
+        set_mode(&dir, 0o755)?;
         let path = dir.join(filename);
         let partial = path.with_extension("partial");
         {
@@ -291,7 +292,7 @@ impl LeaseData<'_> {
             let _ = fs::remove_file(&partial);
             bail!("input Asset {asset_id} failed verification");
         }
-        fs::set_permissions(&partial, fs::Permissions::from_mode(0o444))?;
+        set_mode(&partial, 0o444)?;
         fs::rename(&partial, &path)?;
         Ok(path)
     }
@@ -614,7 +615,7 @@ pub fn deliver(
     if !grant.input_assets.is_empty() {
         let dest = lease_root.join("inputs").join("assets");
         fs::create_dir_all(&dest)?;
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))?;
+        set_mode(&dest, 0o755)?;
         for asset_id in &grant.input_assets {
             keepalive()?;
             data.asset(asset_id, &dest)?;
