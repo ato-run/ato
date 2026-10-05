@@ -128,7 +128,18 @@ def refresh(plan, ledger, ato, requested=None, reader=None):
             # A crash between durable reservation and process creation is not free.
             raise ValueError("campaign_start_requires_reconciliation")
         connection = Path(entry["connection"])
-        if reader:
+        seal = entry.get("terminal_retirement")
+        if seal is not None:
+            if (seal.get("schema") != "ato.native-terminal-retirement/1"
+                    or len(entry["snapshots"]) != 1
+                    or seal.get("snapshot_sha256") != fingerprint(entry["snapshots"][0])
+                    or seal.get("descriptor_sha256") != fingerprint(json.loads(connection.read_text()))
+                    or type(entry.get("native_exit_code")) is not int):
+                raise ValueError("campaign_terminal_evidence_changed")
+            view = entry["snapshots"][0]
+            if view["progress"]["status"] not in TERMINAL or view.get("input") is not None:
+                raise ValueError("campaign_terminal_evidence_changed")
+        elif reader:
             view = reader(connection)
         else:
             result = subprocess.run([str(ato), "form-session", "--connection", str(connection), "status"],
@@ -155,7 +166,8 @@ def refresh(plan, ledger, ato, requested=None, reader=None):
         snapshot["exchanges_used"] = used["exchanges"]
         snapshot["inspection_exchanges_completed"] = used["inspections"]
         snapshot["search_elapsed_ms"] = used["sequential_elapsed_seconds"] * 1000
-        entry["snapshots"] = [snapshot]
+        if seal is None:
+            entry["snapshots"] = [snapshot]
     ceilings = plan["aggregate_ceiling"]
     if any(k not in KEYS or type(v) is not int or v < 0 for k, v in requested.items()):
         raise ValueError("campaign_scope_invalid")
@@ -220,6 +232,9 @@ def guarded_native(plan, ledger_path, args, execute=subprocess.run):
         entries = [e for e in ledger["entries"] if Path(e["connection"]).resolve() == args.connection.resolve()]
         if len(entries) != 1:
             raise ValueError("registered_Search_required")
+        entry = entries[0]
+        if entry.get("terminal_retirement") is not None:
+            raise ValueError("campaign_Search_retired")
         native_args = args.native_args[1:] if args.native_args[:1] == ["--"] else args.native_args
         if any(a == "--connection" or a.startswith("--connection=") for a in native_args):
             raise ValueError("connection_is_owner_fixed")
@@ -240,7 +255,62 @@ def guarded_native(plan, ledger_path, args, execute=subprocess.run):
         # Serialize Native launches too; reconnect is not a second aggregate slot.
         result = execute([sys.executable, str(args.native_launcher), "--connection", str(args.connection),
                           *native_args], check=False)
+        entry["native_exit_code"] = result.returncode
+        entry["native_finished_at_ms"] = int(time.time() * 1000)
+        publish(ledger_path, ledger)
         return dict(report, Native_exit_code=result.returncode, Search_reset=False)
+
+
+def retire_search(plan, ledger_path, args, reader=None):
+    """Freeze live terminal evidence before its owner closes the Bridge.
+
+    A cached snapshot alone cannot retire a Search. Unresolved attempts or
+    reserved resources fail closed. This never retires a prepared/lost start.
+    """
+    with locked(ledger_path):
+        ledger = read_ledger(plan, ledger_path)
+        entries = [e for e in ledger["entries"]
+                   if Path(e["connection"]).resolve() == args.connection.resolve()]
+        if len(entries) != 1:
+            raise ValueError("registered_Search_required")
+        entry = entries[0]
+        if entry.get("terminal_retirement") is not None:
+            raise ValueError("campaign_Search_retired")
+        if type(entry.get("native_exit_code")) is not int:
+            raise ValueError("campaign_Native_completion_required")
+        # Read the actual live Bridge, not a previous terminal-looking cache.
+        def terminal_reader(connection):
+            if reader:
+                view = reader(connection)
+            else:
+                result = subprocess.run([str(args.ato), "form-session", "--connection",
+                                         str(connection), "status"], capture_output=True,
+                                        check=True, timeout=10)
+                view = json.loads(result.stdout)
+            if connection.resolve() == args.connection.resolve():
+                descriptor = json.loads(connection.read_text())
+                progress = view["progress"]
+                if (progress["status"] not in TERMINAL or "input" not in view or view["input"] is not None
+                        or type(progress.get("unresolved_attempts")) is not int
+                        or progress["unresolved_attempts"] != 0
+                        or any(not isinstance(v, dict) or type(v.get("reserved")) is not int or v["reserved"] != 0
+                               for v in progress["search_budget"].values())
+                        or view["search_id"] != descriptor["search_id"]
+                        or view["configuration_ref"] != descriptor["configuration_ref"]):
+                    raise ValueError("campaign_terminal_reconciliation_required")
+            return view
+        report = refresh(plan, ledger, args.ato, reader=terminal_reader)
+        if not report["admitted"]:
+            publish(ledger_path, ledger)
+            return report
+        entry["terminal_retirement"] = {
+            "schema": "ato.native-terminal-retirement/1",
+            "snapshot_sha256": fingerprint(entry["snapshots"][0]),
+            "descriptor_sha256": fingerprint(json.loads(args.connection.read_text())),
+            "retired_at_ms": int(time.time() * 1000),
+        }
+        publish(ledger_path, ledger)
+        return dict(report, terminal_Search_retired=True, Search_reset=False)
 
 
 def main():
@@ -251,6 +321,8 @@ def main():
     commands = parser.add_subparsers(dest="operation", required=True)
     commands.add_parser("initialize")
     commands.add_parser("audit")
+    retire = commands.add_parser("retire")
+    retire.add_argument("--connection", type=Path, required=True)
     start = commands.add_parser("start")
     for name in ("source", "exploration-config", "token-file", "work-root", "connection"):
         start.add_argument("--" + name, type=Path, required=True)
@@ -277,6 +349,8 @@ def main():
             report = guarded_start(plan, args.ledger, args)
         elif args.operation == "native":
             report = guarded_native(plan, args.ledger, args)
+        elif args.operation == "retire":
+            report = retire_search(plan, args.ledger, args)
         else:
             with locked(args.ledger):
                 ledger = read_ledger(plan, args.ledger)
