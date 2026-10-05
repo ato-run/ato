@@ -214,5 +214,45 @@ class OwnerAdmissionTests(unittest.TestCase):
             OWNER.guarded_native(self.plan, self.ledger, args, execute)
         execute.assert_not_called()
 
+    def test_product_preset_PASS_retires_without_fabricated_Native_completion(self):
+        self.retirement_fixture()
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        del ledger['entries'][0]['native_exit_code']; OWNER.publish(self.ledger, ledger)
+        current = view(rounds=0, state='satisfied')
+        current['progress'].update(contract_ref='sha256:K', receipt={
+            'attempt_id': 'preset-attempt', 'contract_ref': 'sha256:K',
+            'fully_satisfied': True, 'status': 'k_reached_awaiting_assessment'})
+        current['progress']['search_budget']['attempts']['used'] = 1
+        report = OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: current)
+        self.assertTrue(report['terminal_Search_retired'])
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        self.assertNotIn('native_exit_code', ledger['entries'][0])
+        self.assertEqual(ledger['entries'][0]['native_not_required'], 'source_declaration_PASS')
+        unavailable = Mock(side_effect=RuntimeError('Bridge closed'))
+        report = OWNER.refresh(self.plan, ledger, Path('ato'), reader=unavailable)
+        unavailable.assert_not_called()
+        self.assertEqual(report['used']['Runtime_attempts'], 1)
+        self.assertEqual(report['used']['D_rounds'], 0)
+
+    def test_unanswered_exchange_or_nonPASS_cannot_bypass_Native_completion(self):
+        self.retirement_fixture()
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        del ledger['entries'][0]['native_exit_code']; OWNER.publish(self.ledger, ledger)
+        good = view(rounds=0, state='satisfied')
+        good['progress'].update(contract_ref='sha256:K', receipt={
+            'attempt_id': 'preset-attempt', 'contract_ref': 'sha256:K',
+            'fully_satisfied': True, 'status': 'k_reached_awaiting_assessment'})
+        good['progress']['search_budget']['attempts']['used'] = 1
+        invalid = []
+        for key, value in [('fully_satisfied', False), ('contract_ref', 'different')]:
+            v = json.loads(json.dumps(good)); v['progress']['receipt'][key] = value; invalid.append(v)
+        v = json.loads(json.dumps(good)); v['exchanges_used'] = 1; invalid.append(v)
+        v = json.loads(json.dumps(good)); v['progress']['rounds_consumed'] = 1; invalid.append(v)
+        v = json.loads(json.dumps(good)); v['progress']['status'] = 'cancelled'; invalid.append(v)
+        for current in invalid:
+            with self.assertRaisesRegex(ValueError, 'Native_completion_required'):
+                OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: current)
+        self.assertNotIn('terminal_retirement', OWNER.read_ledger(self.plan, self.ledger)['entries'][0])
+
 if __name__ == '__main__':
     unittest.main()
