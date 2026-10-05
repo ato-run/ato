@@ -676,13 +676,37 @@ fn a_started_run_is_owned_until_stopped(capsule: &Path, derivation: Option<&str>
     let instance_id = instance["instance_id"].as_str().unwrap();
 
     let receipt_path = root.path().join("receipt.json");
-    let started = ato_with_home(root.path())
+    let mut started = ato_with_home(root.path())
         .args(["app", "start", instance_id, "--no-open"])
         .arg("--verification-receipt")
         .arg(&receipt_path)
         .output()
         .unwrap();
+    if !started.status.success() {
+        // This test owns the non-secret fixture. Preserve its worker's
+        // diagnostic before TempDir removes it, so the detached parent's
+        // generic early-exit error cannot hide admission versus launch failure.
+        let runs = root.path().join("instances").join(instance_id).join("runs");
+        for run in fs::read_dir(&runs).unwrap().flatten() {
+            if let Ok(log) = fs::read(run.path().join("output.log")) {
+                started
+                    .stderr
+                    .extend_from_slice(b"\nfixture worker output:\n");
+                started.stderr.extend_from_slice(&log);
+            }
+        }
+    }
     if !succeeded_or_rejected_by_runtime_admission(&started, &receipt_path) {
+        let inspected = ato_with_home(root.path())
+            .args(["app", "inspect", instance_id])
+            .output()
+            .unwrap();
+        assert!(inspected.status.success());
+        let inspected: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+        assert!(
+            inspected["active_run"].is_null(),
+            "runtime admission failure must release the Run claim: {inspected}"
+        );
         return;
     }
     let inspected = ato_with_home(root.path())
