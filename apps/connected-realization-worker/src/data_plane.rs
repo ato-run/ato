@@ -272,7 +272,7 @@ impl LeaseData<'_> {
             .headers()
             .get("x-ato-asset-filename")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| percent_decode(v))
+            .and_then(percent_decode)
             .filter(|name| safe_relative(name) && !name.contains('/'))
             .unwrap_or_else(|| "asset".to_owned());
         let dir = dest.join(asset_id);
