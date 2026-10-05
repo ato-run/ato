@@ -140,6 +140,7 @@ impl ScopedGates {
                 ExecutionRequirements {
                     network: vec![requirement.clone()],
                     authority: vec![],
+                    host: None,
                 }
                 .validate()
                 .is_ok()
