@@ -51,7 +51,7 @@ impl SourceOciRecipe {
                 && (64..=4096).contains(&l.pids_limit)
         };
         if self.schema != "ato.source-oci-recipe/1"
-            || self.dockerfile != "Dockerfile"
+            || !crate::proposal::source_file_allowed(&self.dockerfile)
             || !matches!(self.platform.as_str(), "linux/amd64" | "linux/arm64")
             || self.base_images.len() > 8
             || !self.base_images.iter().all(image)

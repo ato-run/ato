@@ -469,6 +469,69 @@ fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
     assert!(c.compiled().derivation.steps[0].argv.is_empty());
     assert!(c.compiled().derivation.source_oci.is_some());
     assert_eq!(c.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .files
+        .get_mut("server")
+        .unwrap()
+        .path = "container/Dockerfile".into();
+    let selected = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(selected) = &selected[0] else {
+        panic!("{selected:?}")
+    };
+    assert_eq!(
+        selected
+            .compiled()
+            .derivation
+            .source_oci
+            .as_ref()
+            .unwrap()
+            .dockerfile,
+        "container/Dockerfile"
+    );
+    assert_eq!(
+        selected.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_ne!(
+        selected.compiled().derivation_ref,
+        c.compiled().derivation_ref
+    );
+    s.frozen.policy.proposal.as_mut().unwrap().execution_plan.as_mut().unwrap().source_oci.as_mut().unwrap().base_images=vec![serde_json::from_value(json!({"reference":"example/service:1","pinned_digest":format!("sha256:{}","e".repeat(64))})).unwrap()];
+    p["oci_image"] = json!(format!("example/service:1@sha256:{}", "e".repeat(64)));
+    let image = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(image) = &image[0] else {
+        panic!("{image:?}")
+    };
+    assert_eq!(
+        image.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert!(image.compiled().derivation.source_oci.is_none());
+    assert_eq!(
+        image.compiled().derivation.runtimes["oci.image"],
+        p["oci_image"].as_str().unwrap()
+    );
+    assert_eq!(
+        image
+            .candidate()
+            .requirements
+            .iter()
+            .map(|r| r.fact.as_str())
+            .collect::<Vec<_>>(),
+        vec!["runtime.oci"]
+    );
+    p["oci_image"] = json!("example/service:latest");
+    assert!(matches!(
+        compile(&s, p.clone())[0],
+        ProposalOutcome::Rejected(_)
+    ));
     p["argv"] = json!(["sh", "-c", "echo arbitrary"]);
     assert!(matches!(compile(&s, p)[0], ProposalOutcome::Rejected(_)));
 }
@@ -972,6 +1035,11 @@ fn validated_declines_have_distinct_terminal_reasons_without_changing_outcome_ro
             json!([]),
         ),
         ("needs_input", Termination::NeedsInput, json!([])),
+        (
+            "runtime_unavailable",
+            Termination::InfrastructureFailure,
+            json!([]),
+        ),
         (
             "source_broken",
             Termination::SourceBroken,
