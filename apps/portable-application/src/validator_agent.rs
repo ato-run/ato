@@ -380,6 +380,23 @@ pub struct PortableRouteReport {
     /// Surface Port and `guest_port` is null.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<PortableServiceReport>,
+    /// The route's canonical `requirements.host`, projected unchanged. The
+    /// Coordinator reads placement from this and never infers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<ato_formation::requirements::HostRequirement>,
+    /// The route's `ato.model-set@1` inputs, projected from the verified
+    /// manifests. The Coordinator reads what a Run must be granted from here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_sets: Vec<PortableModelSetReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableModelSetReport {
+    pub input_id: String,
+    pub content_ref: String,
+    pub object_count: usize,
+    pub total_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -708,6 +725,8 @@ fn validated_routes(
                     env: BTreeMap::new(),
                     port: surface.id.clone(),
                     guest_port: None,
+                    host: route.derivation.requirements.host.clone(),
+                    model_sets: model_set_reports(route),
                     state,
                     services: route
                         .derivation
@@ -773,7 +792,22 @@ fn validated_routes(
                 guest_port: port.guest_port,
                 state,
                 services: Vec::new(),
+                host: route.derivation.requirements.host.clone(),
+                model_sets: model_set_reports(route),
             })
+        })
+        .collect()
+}
+
+fn model_set_reports(route: &ValidatedPortableApplication) -> Vec<PortableModelSetReport> {
+    route
+        .model_sets
+        .iter()
+        .map(|set| PortableModelSetReport {
+            input_id: set.input_id.clone(),
+            content_ref: set.reference.clone(),
+            object_count: set.manifest.objects.len(),
+            total_bytes: set.manifest.total_bytes(),
         })
         .collect()
 }
@@ -1365,6 +1399,51 @@ mod tests {
         assert_eq!(report.state.as_ref().unwrap().mount_target, "/data");
         assert_eq!(report.state.as_ref().unwrap().access, "read_write");
         assert!(!serde_json::to_string(&report).unwrap().contains("/.ato/"));
+        assert!(serde_json::to_value(&report).unwrap().get("host").is_none());
+    }
+
+    #[test]
+    fn route_report_projects_the_verified_model_set() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");
+        let (_, bundle) = crate::build_authored_bundle_v2(&source).unwrap();
+        let routes = crate::validate_all_derivations(&bundle).unwrap();
+        let report = validated_routes(&routes).unwrap().remove(0);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["model_sets"][0]["input_id"], "models");
+        assert_eq!(
+            json["model_sets"][0]["content_ref"],
+            routes[0].model_sets[0].reference
+        );
+        assert_eq!(json["model_sets"][0]["object_count"], 2);
+        assert_eq!(json["model_sets"][0]["total_bytes"], 1_048_596);
+        assert!(json["host"].is_object());
+    }
+
+    #[test]
+    fn route_report_projects_the_canonical_host_condition_unchanged() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation");
+        let (_, bundle) = build_multi_derivation_bundle(&source, "Host report").unwrap();
+        let mut route =
+            validate_bytes_all(&ato_objects::encode_portable_application_bundle(&bundle).unwrap())
+                .unwrap()
+                .1
+                .into_iter()
+                .find(|route| route.realization == PortableRealizationKind::LocalProcess)
+                .unwrap();
+        let host: ato_formation::requirements::HostRequirement =
+            serde_json::from_value(serde_json::json!({
+                "os": "linux", "arch": "x86_64", "min_memory_mib": 30000,
+                "accelerators": [{ "vendor": "nvidia", "count": 1, "min_vram_mib": 16000 }]
+            }))
+            .unwrap();
+        route.derivation.requirements.host = Some(host.clone());
+        let report = validated_routes(&[route]).unwrap().remove(0);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["host"],
+            serde_json::to_value(&host).unwrap()
+        );
     }
 
     #[test]

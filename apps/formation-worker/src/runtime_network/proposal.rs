@@ -1631,6 +1631,7 @@ fn denied_network(attempt: &Value) -> Vec<ato_formation::requirements::NetworkRe
             if (ExecutionRequirements {
                 network: vec![n.clone()],
                 authority: vec![],
+                host: None,
             })
             .validate()
             .is_ok()
@@ -1655,6 +1656,7 @@ fn denied_authority(attempt: &Value) -> Vec<ato_formation::requirements::Authori
             && (ExecutionRequirements {
                 network: vec![],
                 authority: vec![a.clone()],
+                host: None,
             })
             .validate()
             .is_ok()
