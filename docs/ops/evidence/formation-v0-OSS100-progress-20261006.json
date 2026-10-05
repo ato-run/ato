@@ -20,17 +20,30 @@
     14,
     15,
     16,
-    17
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30
   ],
   "preregistered_plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
   "Runtime_builder_bound": false,
   "historical_13_12_and_WBO_unchanged": true,
-  "unique_OSS_PASS": 1,
+  "unique_OSS_PASS": 3,
   "Native_unique_OSS_PASS": {
     "codex": 0,
     "claude-code": 0
   },
-  "preset_only_PASS": 1,
+  "preset_only_PASS": 3,
   "final_cleanup_confirmed_for_completed_cells": true,
   "actual_internal_calls_and_billing": "unknown",
   "SDK_reported_tokens_are_not_call_count_or_invoice": true,
@@ -1657,14 +1670,1329 @@
       },
       "ordinary_Run_authorized": false,
       "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 18,
+      "name": "PdfDing",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "7505a64997177097a20ece83b0506f7be52a480b",
+      "source_closure_ref": "sha256:34126bf4849b510fceec90005d75fcf8664c72cf99dd63b7a42fd2bcc7894402",
+      "K_ref": "sha256:4a3d6d67f50bfabaaf5594814c4c83a531e3630953e2c2e0be94834e21851f29",
+      "search_id": "search_b445f2d59f9abbbae7cd8292aa451646",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791229827566,
+      "authority_deadline_ms": 1791229831189,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "no_progress",
+      "termination_reason": "no_progress",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 3,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 104840,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 30,
+            "outputTokens": 8436,
+            "cacheReadInputTokens": 617528,
+            "cacheCreationInputTokens": 82962,
+            "thinkingTokens": 2397,
+            "costUSD": 0.9560416
+          }
+        },
+        "SDK_cost_estimate_usd": 0.9560416,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 3,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 19,
+      "name": "Grist core",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "b4ccc892202a3aefd6e565f0bc0c01081433a53c",
+      "source_closure_ref": "sha256:55bdb95f16bdc9e31118eb785b0b67dfa2f85eaa07deab5b8ac72a609e8c884e",
+      "K_ref": "sha256:5226168e409045a9ea3be946de2e9161cc30c2e54b372dfa017098aa472f25c2",
+      "search_id": "search_2dc0852cfa8c445518116378270c01e7",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791230071132,
+      "authority_deadline_ms": 1791230177301,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "no_progress",
+      "termination_reason": "no_progress",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 161971,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 324388,
+          "inputTokens": 323223,
+          "cachedInputTokens": 284032,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1165,
+          "reasoningOutputTokens": 56
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "inspection_budget_exhausted",
+              "detail": "Frozen inspection feedback reports inspection_budget_exhausted. The completed inspection supplied no additional source context or inspection evidence for the requested build and launch scripts."
+            },
+            {
+              "code": "incomplete_process_basis",
+              "detail": "Manifest declares build:prod and start:prod, but buildtools/build.sh and sandbox/run.sh contents are absent from recorded context. No source-backed process port, state configuration or complete dependency lifecycle plan can be established without inventing facts.",
+              "source": {
+                "digest": "sha256:0f10238b678de4cc9c4e183899b0e4e42e93aa79e5399e125a0c85e0fafaeb1b",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "alternative_oci_unavailable",
+              "detail": "Trusted lowering capabilities report source OCI builder unbound and unavailable, and no approved OCI image is available. This does not establish broken Source."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "insufficient_source"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 20,
+      "name": "File Browser",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "833d908884d5c801f30f5c098d7977177eb3a36b",
+      "source_closure_ref": "sha256:40f41f37f9ef1f7fbfb8dff9ead3ca57767e9e16c507be4e6db952d1894f0267",
+      "K_ref": "sha256:be0d2405d65cf6e85b3f8cac0c00c4aa8dc53a5c8933549090634053f62ec017",
+      "search_id": "search_3b949232a18049614db22215868d1dda",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791230295175,
+      "authority_deadline_ms": 1791230316670,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 68343,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 20,
+            "outputTokens": 3770,
+            "cacheReadInputTokens": 231058,
+            "cacheCreationInputTokens": 43732,
+            "thinkingTokens": 694,
+            "costUSD": 0.4715476
+          }
+        },
+        "SDK_cost_estimate_usd": 0.4715476,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "go_backend_required",
+              "detail": "CONTRIBUTING.md states the backend is written in Go and is built/run with go mod download, go build / go run . (or task build via Taskfile). No Go toolchain or Taskfile runner is present in the frozen operation catalog (gcc, make, node, npm, oci, pkg-config, python only).",
+              "source": {
+                "digest": "sha256:9d38e0086581e205d033c8816e7bca12ce0c4844a7bc4459df480a8c3b399907",
+                "file_id": "f_eca12c0a30e25b4b46522ebf"
+              }
+            },
+            {
+              "code": "prebuilt_binary_oci_only",
+              "detail": "Root Dockerfile copies a prebuilt 'filebrowser' binary rather than building it; source_oci builder and oci_image are unavailable (source_oci_builder_unavailable, no images).",
+              "source": {
+                "digest": "sha256:ce7acb8a7dce0d9e69911b54a097bb113bf7a34e0d2f314ece8756620e16074e",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            },
+            {
+              "code": "frontend_pnpm_no_manifest_ref",
+              "detail": "Frontend is Vue built with pnpm install / pnpm run build in frontend/; pnpm is not a catalog operation and no frontend package.json or lockfile is in the recorded inventory, so no static or Node route can be referenced. The frontend alone is not the File Browser HTTP server.",
+              "source": {
+                "digest": "sha256:9d38e0086581e205d033c8816e7bca12ce0c4844a7bc4459df480a8c3b399907",
+                "file_id": "f_eca12c0a30e25b4b46522ebf"
+              }
+            },
+            {
+              "code": "compose_multi_service",
+              "detail": "compose.yaml uses a published image plus a redis service; compose/multiple services and image acquisition are unavailable.",
+              "source": {
+                "digest": "sha256:8d39d4d64f62690049d13f7dd12c87fccf97469c762f09ea2f2ab85617e608ad",
+                "file_id": "f_facaded51b7d1c9656ae43b4"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 21,
+      "name": "2048",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "478b6ec346e3787f589e4af751378d06ded4cbbc",
+      "source_closure_ref": "sha256:1b92a5799e48141d70e3f0246626833c985e51885f2a037e5ebdfefc1c5f1aa4",
+      "K_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+      "search_id": "search_7945d39ca71b562041620a81a32607cf",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791230410111,
+      "authority_deadline_ms": 1791230412233,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "satisfied",
+      "category": "initial_PASS",
+      "termination_reason": "submitted",
+      "unique_OSS_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 0,
+      "exchanges": 0,
+      "Runtime_attempts": 1,
+      "Runtime_workload_started": 1,
+      "inspections": 0,
+      "elapsed_ms": 5106,
+      "receipt": {
+        "attempt_id": "01M46RQ3RS4RCHHX91WSKZ0WTE",
+        "contract_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+        "derivation_ref": "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:4f8919a0c2f8f8782d34df115731c5951edd83a2db0435b9f49904e3946811d1",
+        "status": "k_reached_awaiting_assessment"
+      },
+      "SDK_reported_usage": null,
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": true,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": false,
+      "Native_turns_completed": 0,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 22,
+      "name": "reveal.js",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "f8c9ec3bb3b288e061b166fba5e4975920dd5cd4",
+      "source_closure_ref": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+      "K_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+      "search_id": "search_de294d8d77ff2c495eb76f5df014e9e3",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791230469757,
+      "authority_deadline_ms": 1791230511113,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "satisfied",
+      "category": "initial_PASS",
+      "termination_reason": "submitted",
+      "unique_OSS_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 0,
+      "exchanges": 0,
+      "Runtime_attempts": 1,
+      "Runtime_workload_started": 1,
+      "inspections": 0,
+      "elapsed_ms": 50161,
+      "receipt": {
+        "attempt_id": "01M46RT4B9T3XGB1R3M7SAJZ2E",
+        "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+        "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:07ea7d2d231e0b45c25df1356d4d881deda06e45f184c4146aa86489b37550c4",
+        "status": "k_reached_awaiting_assessment"
+      },
+      "SDK_reported_usage": null,
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": true,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": false,
+      "Native_turns_completed": 0,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 23,
+      "name": "CyberChef",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "d0267c3cf7691e9c2ed51e2d5071b9fd6004fcc1",
+      "source_closure_ref": "sha256:f72b3ed8632df6a31e11935033986d6bcde4b73384d75a19ff6485d794ada51e",
+      "K_ref": "sha256:53b3ca69e54a3e0554590ac4340ba95c04698eacd54061a2191d3987800ef65d",
+      "search_id": "search_c742baf014b5a63fccb4d1fe973292b4",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791230591601,
+      "authority_deadline_ms": 1791230615437,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 50208,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 90414,
+          "inputTokens": 89894,
+          "cachedInputTokens": 65152,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 520,
+          "reasoningOutputTokens": 21
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "unsupported_toolchain",
+              "detail": "The frozen package.json requires Node >=24 <27; the catalog and bound Runtime provide only Node 22.14.0. No compatible Node toolchain is admitted.",
+              "source": {
+                "digest": "sha256:ab054ea3652e90c715416e496a1a2b358570fab6331cf90b9b44358401951e72",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "The trusted source_oci capability reports its builder unbound and unavailable, and no approved OCI image is available; this alternative cannot supply a compatible environment."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 24,
+      "name": "IT-Tools",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "d505845f918e946ec300af7b36efc107e2f66e9e",
+      "source_closure_ref": "sha256:6e0885c6bc0d17eb373e36b3defcd8c49ea7bbe1d94da2e356315aadd0e20be3",
+      "K_ref": "sha256:9104fc737a4a1763d642587ca3ec13612402b7894ded58670f2d3aea5bfe3edc",
+      "search_id": "search_3058f19f44b3bdd723cb49879a6ca107",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791230687251,
+      "authority_deadline_ms": 1791230707872,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 87964,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 20,
+            "outputTokens": 4738,
+            "cacheReadInputTokens": 264878,
+            "cacheCreationInputTokens": 52239,
+            "thinkingTokens": 734,
+            "costUSD": 0.5657275999999999
+          }
+        },
+        "SDK_cost_estimate_usd": 0.5657275999999999,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "pnpm_lockfile_only",
+              "detail": "package.json declares packageManager pnpm@9.11.0 and the only lockfile in inventory is pnpm-lock.yaml; no package-lock.json or npm-shrinkwrap.json exists",
+              "source": {
+                "digest": "sha256:89f7442384f5365ddc8f274d3968725366379375917f2a39e46ec688aad2e23e",
+                "file_id": "f_32824c984905bb02bc7ffcef"
+              }
+            },
+            {
+              "code": "validator_rejected_npm_ci",
+              "detail": "inspection_feedback reports unsupported_dependency_manifest for npm_ci with pnpm-lock.yaml; no pnpm dependency operation exists in the frozen catalog/lowering capabilities",
+              "source": {
+                "digest": "sha256:f80cf1b724124a495e57c36996114bed138849ea42c8a97bcbc809782aa3d7f5",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "oci_route_unavailable",
+              "detail": "Dockerfile uses pnpm i --frozen-lockfile then nginx; source_oci is unavailable (source_oci_builder_unavailable) and no acquired oci_image exists",
+              "source": {
+                "digest": "sha256:70c52f9f2a044fcc6e52f421cff19e781e6ff53187e006bfdb54cf8965f4a4a7",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            },
+            {
+              "code": "not_source_broken",
+              "detail": "Source build is plausible with pnpm; failure is an unsupported v0 dependency capability, not source breakage"
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_dependency_operation"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 25,
+      "name": "Squoosh",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "e8d35e0fb66eb16eff6fe8fc773eabcbb7128de3",
+      "source_closure_ref": "sha256:caf6cdcc40876a2a2c6653c2f64de9efcc1b4c62d955f242cb59585d9b8ab7a4",
+      "K_ref": "sha256:3a2edba7530f539b5314ed145523d9e9020ef325f2a9ade28bf44a00f525694b",
+      "search_id": "search_6634801506940166cd58a6c2c8f9f2cf",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791230879236,
+      "authority_deadline_ms": 1791231088920,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 256752,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 283751,
+          "inputTokens": 282612,
+          "cachedInputTokens": 236672,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1139,
+          "reasoningOutputTokens": 76
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "unsupported_source_glob",
+              "detail": "Saved inspection feedback confirms recursive expansion is unavailable in v0 for **/*.ts, **/*.tsx and **/* referenced by rollup.config.js; the build config uses **/* to emit source copy assets.",
+              "source": {
+                "digest": "sha256:412d544b895e210628e13fdbcf9e0416d9f4ca25fe20f8ab622d8531ddee517d",
+                "file_id": "f_6814bf77564b4f1c92f5861e"
+              }
+            },
+            {
+              "code": "inspection_budget_exhausted",
+              "detail": "Saved feedback reports inspection_budget_exhausted. The requested nested file contents were not acquired; the final output location after lib/move-output.js remains unverified. No source breakage or Runtime failure is established."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_source_layout"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 26,
+      "name": "Hoppscotch",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "a9ffa29ce5036ef5be0768db35a8b6bae32e1160",
+      "source_closure_ref": "sha256:97cad76dfa6abfdc2bcd176889e2f54ee9d8efdeeab72d9759c7f37c1d9289ee",
+      "K_ref": "sha256:02ea2b68b87582ff8f11ba2b4d487a4efa305d7defbfdc1e94ea249693ebfaa9",
+      "search_id": "search_3e43244d528c364659d25efff2e44722",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791231212345,
+      "authority_deadline_ms": 1791231259233,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 73340,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 2205,
+            "cacheReadInputTokens": 74527,
+            "cacheCreationInputTokens": 30593,
+            "thinkingTokens": 507,
+            "costUSD": 0.3037894
+          }
+        },
+        "SDK_cost_estimate_usd": 0.3037894,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "pnpm_workspace_required",
+              "detail": "Root package.json declares packageManager pnpm@10.34.5, preinstall 'npx only-allow pnpm', pnpm.overrides/onlyBuiltDependencies, and scripts that run 'pnpm -r'; the root start script serves packages/hoppscotch-selfhost-web/dist which must be produced by a pnpm recursive workspace build.",
+              "source": {
+                "digest": "sha256:10f18ff862da5ba11edebd69cf481be2b17854d7d876b63dd781a0c85862a08f",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "no_npm_lockfile",
+              "detail": "The only lockfile in the inventory is pnpm-lock.yaml; no package-lock.json exists, so the frozen npm_ci operation (npm toolchain also listed unbound) has no admissible lockfile and no pnpm dependency operation is in the frozen catalog.",
+              "source": {
+                "digest": "sha256:dd4704aa687a5e8e5d259217e3d8d4955181e57dedbc54420896b6729fd4dd7f",
+                "file_id": "f_32824c984905bb02bc7ffcef"
+              }
+            },
+            {
+              "code": "source_oci_unavailable",
+              "detail": "Dockerfile routes are unavailable: lowering_capabilities.source_oci reports source_oci_builder_unavailable and oci_image has no images."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_dependency_operation"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 27,
+      "name": "Wiki.js",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "712a3a5bb23b70d7f7325a04b80cc5f20a8f9d9a",
+      "source_closure_ref": "sha256:4bd1d0730bfdd2a996e68bea8fb5ebece5f30291f77f300b87bd1c569ff1d1a8",
+      "K_ref": "sha256:cf5a5d384303ae7e5771c2759a377cdb8bbd87ac7742c4c8804b9965d950b238",
+      "search_id": "search_1c793eb2800c1c61b8b5fdd6a288b3a0",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791231352700,
+      "authority_deadline_ms": 1791231375072,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "no_progress",
+      "termination_reason": "no_progress",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 69718,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 272621,
+          "inputTokens": 271488,
+          "cachedInputTokens": 217600,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1133,
+          "reasoningOutputTokens": 55
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "inspection_budget_exhausted",
+              "detail": "The saved inspection feedback reports inspection_budget_exhausted; inspection_evidence is empty and the requested lockfile and webpack configuration contents were not provided."
+            },
+            {
+              "code": "missing_execution_basis",
+              "detail": "The manifest context is truncated. The recorded lockfile is yarn.lock, while the admitted dependency operation is npm_ci; no compatible npm lockfile contents or supported Yarn operation are evidenced. HTTP port, configuration, state requirements and build output cannot be established from the supplied context.",
+              "source": {
+                "digest": "sha256:3550d0a3eafe07028f2f3e44e773079240795ca4a89ef07bf119589d8a8796de",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "insufficient_source"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 28,
+      "name": "Kutt",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "279b491b53bbd01fbae70f603222526962772061",
+      "source_closure_ref": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+      "K_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "search_id": "search_ba5acd6ad71c908c91bbddd7b0fde828",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791231470150,
+      "authority_deadline_ms": 1791231474130,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "needs_input",
+      "termination_reason": "needs_input",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 3,
+      "exchanges": 5,
+      "Runtime_attempts": 2,
+      "Runtime_workload_started": 2,
+      "inspections": 1,
+      "elapsed_ms": 330978,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 50,
+            "outputTokens": 15617,
+            "cacheReadInputTokens": 1637591,
+            "cacheCreationInputTokens": 133238,
+            "thinkingTokens": 3321,
+            "costUSD": 1.7059622000000003
+          }
+        },
+        "SDK_cost_estimate_usd": 1.7059622000000003,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 5,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "http_status_mismatch",
+              "detail": "Attempt 01M46SWR0H9KG3T95YR2GQR7QJ (D sha256:d7b47d3dc271d2e8dddefb52925f3595a26244b7e84a3b2bfb7910c0a5bc5ff9) built, migrated and launched; npm native audit passed; GET / on app.http returned 302, K expects 200."
+            },
+            {
+              "code": "first_run_admin_required",
+              "detail": "README states that on first start the app prompts creation of an admin account; the 302 is consistent with this first-run redirect, not a source breakage.",
+              "source": {
+                "digest": "sha256:12fd66dd4e5ccd12a6a3ca06c88f35ba173d20799bf69a9a0fffe7fde050b2c0",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "missing_runtime_input",
+              "detail": "Satisfying K requires an owned local initial admin account (email and password) supplied as runtime-phase variable bindings with artifact_embedding:false; no such variables are available and values must not be guessed or generated in D."
+            },
+            {
+              "code": "endpoint_basis_uninspected",
+              "detail": "The admin-creation route and its fields live in server/routes/index.js and server/handlers (inventory-listed, uninspected); inspection budget is exhausted, so a runtime_port_operation cannot be source-justified in this round."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "needs_input"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 29,
+      "name": "Umami",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "ec0ff50388c264ed8ce46f00967e92f7e71476ae",
+      "source_closure_ref": "sha256:09b31b23ad973ba81e7a68e61035fb2131a562b8bd0cf0decba0834e42228ffc",
+      "K_ref": "sha256:0b287fd1c2c06bf666f75ac153b986248719168c81a15be68866a026332ca48e",
+      "search_id": "search_5d0ac978626164ea224b96db0d640be0",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791232267747,
+      "authority_deadline_ms": 1791232294937,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 53024,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 94885,
+          "inputTokens": 94303,
+          "cachedInputTokens": 67968,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 582,
+          "reasoningOutputTokens": 25
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "pnpm_install_not_admitted",
+              "detail": "Root manifest declares pnpm 12.3.4; the root Dockerfile performs pnpm install --frozen-lockfile using pnpm-lock.yaml and workspace manifests. The admitted Node dependency operation is npm_ci with an npm lockfile; no pnpm dependency operation or npm lockfile is recorded. Converting the lockfile or modifying Source is not authorized.",
+              "source": {
+                "digest": "sha256:dedbb8593c7a9ca097ab95dce26267ea33cb68ef1f05d5974f3d9b3857b25006",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            },
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "The source-owned Dockerfile alternative cannot be lowered: source_oci configured, builder_bound and available are false; no approved acquired OCI image is available. This is an unsupported capability, not evidence of broken Source."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_dependency_operation"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 30,
+      "name": "Ghost",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "edea774531f4159bc343cc2d81e2d694dc240c02",
+      "source_closure_ref": "sha256:1bcbdd3ed9d3f6a3b8f1b8e695c21913f0c2c0abde0c6f17a285ae9af44461b9",
+      "K_ref": "sha256:77af6293b86b3f7ff0717019cf5b5588b6701c2a7cf8e366df69b4de8545e442",
+      "search_id": "search_4125814833ff40e4429c0a747aaa6488",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791232467980,
+      "authority_deadline_ms": 1791232652569,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 210557,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 2202,
+            "cacheReadInputTokens": 73143,
+            "cacheCreationInputTokens": 29926,
+            "thinkingTokens": 376,
+            "costUSD": 0.2981166
+          }
+        },
+        "SDK_cost_estimate_usd": 0.2981166,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "pnpm_workspace_required",
+              "detail": "Root package.json declares packageManager pnpm@12.7.0 and a preinstall hook running scripts/enforce-package-manager.js; all application scripts invoke pnpm/nx. The frozen catalog binds only npm_ci/npm_rebuild for Node and npm itself is not bound; no pnpm dependency operation exists in v0.",
+              "source": {
+                "digest": "sha256:96b5b275e6d76233e3c693879a42a282a25514d4bf65ab7f3ddb09fc43967218",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "pnpm_catalog_specifiers",
+              "detail": "Root devDependencies use the pnpm 'catalog:' protocol, which npm ci cannot resolve, and no root package-lock.json is present in the recorded inventory.",
+              "source": {
+                "digest": "sha256:96b5b275e6d76233e3c693879a42a282a25514d4bf65ab7f3ddb09fc43967218",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "node_engine_mismatch",
+              "detail": "engines.node requires ^22.23.1 || ^24.20.0 (devEngines 22.23.3 with download); the only bound Node toolchain is 22.14.0.",
+              "source": {
+                "digest": "sha256:96b5b275e6d76233e3c693879a42a282a25514d4bf65ab7f3ddb09fc43967218",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "source_oci_unavailable",
+              "detail": "lowering_capabilities.source_oci reports source_oci_builder_unavailable and oci_image has no images, so no container alternative exists."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_dependency_operation"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
     }
   ],
   "category_counts": {
-    "unsupported_capability": 9,
+    "unsupported_capability": 16,
     "withheld_old_UNKNOWN": 1,
-    "initial_PASS": 1,
-    "no_progress": 4,
-    "infrastructure_failure": 2
+    "initial_PASS": 3,
+    "no_progress": 7,
+    "infrastructure_failure": 2,
+    "needs_input": 1
   },
   "wave_gates": [
     {
@@ -1799,6 +3127,319 @@
       "SDK_counters_separate_from_actual_calls_and_invoice": true,
       "historical_13_12_and_WBO_preserved": true,
       "at_ms": 1791226285262
+    },
+    {
+      "schema": "ato.formation-OSS100-wave-gate/1",
+      "indices": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28
+      ],
+      "authority_and_Runtime_checked_before_each_retirement": true,
+      "remote_checkpoint": {
+        "wave_gate_passed": true,
+        "cells": [
+          {
+            "index": 1,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 3,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 4,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 5,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 6,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 7,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 8,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 9,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 10,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 11,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 12,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 13,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 14,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 15,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 16,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 17,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 18,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 19,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 20,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 21,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 22,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 23,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 24,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 25,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 26,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 27,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 28,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          }
+        ],
+        "available_bytes": 26855624704,
+        "next_declared_expanded_stored_bytes": 3221225472,
+        "disk_floor_bytes": 21474836480
+      },
+      "aggregate_campaign_audit": {
+        "schema": "ato.native-acceptance-start-admission/1",
+        "measurement_id": "formation-v0-OSS100-native-20261006-01",
+        "used": {
+          "D_rounds": 26,
+          "exchanges": 46,
+          "Runtime_attempts": 5,
+          "inspections": 17,
+          "sequential_elapsed_seconds": 3135,
+          "searches": 27
+        },
+        "held": {
+          "D_rounds": 0,
+          "exchanges": 0,
+          "Runtime_attempts": 0,
+          "inspections": 0,
+          "sequential_elapsed_seconds": 0,
+          "searches": 0
+        },
+        "requested": {},
+        "exceeded": {},
+        "admitted": true,
+        "direct_API_ledger_modified": false
+      },
+      "secret_scan_hits": 0,
+      "SDK_counters_separate_from_actual_calls_and_invoice": true,
+      "historical_13_12_and_WBO_preserved": true,
+      "at_ms": 1791230428477
     }
   ],
   "infrastructure_diagnostics": [
@@ -1823,6 +3464,59 @@
       "new_exchanges": 0,
       "new_Searches": 0,
       "original_infrastructure_failure_unchanged": true
+    },
+    {
+      "index": 16,
+      "category_unchanged": "infrastructure_failure",
+      "offline_diagnostic_only": true,
+      "not_new_Search_or_exchange": true,
+      "scoped_inventory_count": 77,
+      "projection_count": 4,
+      "inspection_feedback_count": 0,
+      "minimum_no_text_input_bytes": 36151,
+      "prompt_bytes": 12989,
+      "fixed_overhead": 1024,
+      "input_cap": 49152,
+      "minimum_total": 50164,
+      "budget_exceeded": true,
+      "inference": "Python projection of current Rust scope function; production error message was not persisted"
     }
-  ]
+  ],
+  "consumed": {
+    "new_Searches": 29,
+    "D_rounds": 28,
+    "exchanges": 48,
+    "Runtime_attempts": 5,
+    "inspections": 17,
+    "elapsed_ms": 3385724
+  },
+  "Native_contexts_started": 26,
+  "owner_cleanup_recovery_028": {
+    "original_halt_retained": true,
+    "halted_after_index": 28,
+    "cause": "encrypted temporary signing secret remained after terminal needs_input",
+    "normal_owner_API_revocation_completed": true,
+    "new_Source_or_attempt_or_inference_used_for_recovery": false,
+    "same_attempts_ACK_closed": true,
+    "cleanup_zero": {
+      "unresolved_UNKNOWN": 0,
+      "reservations": 0,
+      "active_writer": 0,
+      "temporary_inputs": 0,
+      "workload_directories": 0,
+      "Runtime_stopped": true,
+      "Coordinator_stopped": true,
+      "secret_scan_hits": 0
+    },
+    "at_ms": 1791230382648
+  },
+  "generated_input_scan_028": {
+    "generated_secret_components": 1,
+    "public_model_tool_and_journal_files_scanned": 34,
+    "hits": [],
+    "plaintext_or_master_output": false,
+    "decryption_uses_existing_product_crypto": true,
+    "scope": "actual generated temporary signing secret only; not a universal owner-tool guarantee"
+  },
+  "release_done": false
 }
