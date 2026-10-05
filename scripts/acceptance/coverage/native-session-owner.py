@@ -44,6 +44,37 @@ def source_declaration_pass(view):
             and type(attempts.get("used")) is int and attempts["used"] > 0)
 
 
+def pre_exchange_infrastructure_terminal(view):
+    """A failed input preparation must not require a reporting-only Native turn."""
+    progress = view.get("progress", {})
+    attempts = progress.get("search_budget", {}).get("attempts", {})
+    return (progress.get("status") == "unsatisfied"
+            and progress.get("termination_reason") == "infrastructure_failure"
+            and "input" in view and view["input"] is None
+            and type(view.get("exchanges_used")) is int and view["exchanges_used"] == 0
+            and type(view.get("inspection_exchanges_completed")) is int
+            and view["inspection_exchanges_completed"] == 0
+            and type(progress.get("rounds_consumed")) is int
+            and progress["rounds_consumed"] > 0
+            and type(progress.get("unresolved_attempts")) is int
+            and progress["unresolved_attempts"] == 0
+            and progress.get("receipt") is None
+            and type(attempts.get("used")) is int and attempts["used"] == 0
+            and type(attempts.get("reserved")) is int and attempts["reserved"] == 0)
+
+
+def native_completion_evidence(entry):
+    if type(entry.get("native_exit_code")) is int:
+        return True
+    if "native_started_at_ms" in entry:
+        return False
+    view = entry["snapshots"][0]
+    return ((entry.get("native_not_required") == "source_declaration_PASS"
+             and source_declaration_pass(view))
+            or (entry.get("native_not_required") == "pre_exchange_infrastructure_terminal"
+                and pre_exchange_infrastructure_terminal(view)))
+
+
 def load_plan(path):
     plan = json.loads(path.read_text())
     BUDGET.audit(plan, [])  # Strict ceiling/request types, including empty plans.
@@ -148,9 +179,7 @@ def refresh(plan, ledger, ato, requested=None, reader=None):
                     or len(entry["snapshots"]) != 1
                     or seal.get("snapshot_sha256") != fingerprint(entry["snapshots"][0])
                     or seal.get("descriptor_sha256") != fingerprint(json.loads(connection.read_text()))
-                    or not (type(entry.get("native_exit_code")) is int
-                            or (entry.get("native_not_required") == "source_declaration_PASS"
-                                and source_declaration_pass(entry["snapshots"][0])))):
+                    or not native_completion_evidence(entry)):
                 raise ValueError("campaign_terminal_evidence_changed")
             view = entry["snapshots"][0]
             if view["progress"]["status"] not in TERMINAL or view.get("input") is not None:
@@ -269,6 +298,8 @@ def guarded_native(plan, ledger_path, args, execute=subprocess.run):
                 raise ValueError("campaign_wall_clock_exceeded")
             native_args = [*native_args, "--owner-wall-clock-deadline-ms", str(wall_deadline)]
         # Serialize Native launches too; reconnect is not a second aggregate slot.
+        entry.setdefault("native_started_at_ms", int(time.time() * 1000))
+        publish(ledger_path, ledger)  # A lost Native launch cannot become "not started".
         result = execute([sys.executable, str(args.native_launcher), "--connection", str(args.connection),
                           *native_args], check=False)
         entry["native_exit_code"] = result.returncode
@@ -313,16 +344,22 @@ def retire_search(plan, ledger_path, args, reader=None):
                         or view["configuration_ref"] != descriptor["configuration_ref"]):
                     raise ValueError("campaign_terminal_reconciliation_required")
                 if type(entry.get("native_exit_code")) is not int:
-                    if not source_declaration_pass(view):
+                    if "native_started_at_ms" in entry:
                         raise ValueError("campaign_Native_completion_required")
-                    # A completed product preset has no agent input. Do not invent
-                    # a Native exit code or dispatch a reporting turn to retire it.
-                    entry["native_not_required"] = "source_declaration_PASS"
+                    if source_declaration_pass(view):
+                        entry["native_not_required"] = "source_declaration_PASS"
+                    elif pre_exchange_infrastructure_terminal(view):
+                        entry["native_not_required"] = "pre_exchange_infrastructure_terminal"
+                    else:
+                        raise ValueError("campaign_Native_completion_required")
+                    # Preserve allocated rounds. Never fabricate a Native exit code.
             return view
         report = refresh(plan, ledger, args.ato, reader=terminal_reader)
         if not report["admitted"]:
             publish(ledger_path, ledger)
             return report
+        if not native_completion_evidence(entry):
+            raise ValueError("campaign_Native_completion_required")
         entry["terminal_retirement"] = {
             "schema": "ato.native-terminal-retirement/1",
             "snapshot_sha256": fingerprint(entry["snapshots"][0]),
