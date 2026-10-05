@@ -140,8 +140,17 @@ class Wave:
             self.token.write_text('ato_rnr_'+secrets.token_hex(32))
             self.token.chmod(0o600)
         if fresh_receiver:
+            # Owner-only, fresh per acceptance root. Neither agent input nor
+            # tool output may use a fixed public test account identifier.
+            identity = self.root/'private-identity.json'
+            if not identity.exists():
+                fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump({'email':secrets.token_hex(16)+'@acceptance.invalid'}, stream)
+                    stream.write('\n')
+            owner_identity = read(identity)
             self.sql('INSERT INTO "user"(id,name,email) VALUES(?,?,?)',
-                     ['exploration','exploration','exploration@acceptance.invalid'])
+                     ['exploration','exploration',owner_identity['email']])
             self.sql('INSERT INTO runner_devices(id,user_id,display_name,token_hash) VALUES(?,?,?,?)',
                      ['local','exploration','isolated exploration',sha(self.token)])
         if not (self.root/'sandbox.json').exists():
