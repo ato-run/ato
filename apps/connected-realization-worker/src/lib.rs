@@ -5871,7 +5871,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 Some(realization_generation.clone()),
             )
             .expect_err("old fixed descriptor must not cross registry replacement");
-        assert!(stale_registry_click.to_string().contains("stale_operation"));
+        assert!(
+            stale_registry_click.to_string().contains("stale_operation"),
+            "expected stale_operation, got: {stale_registry_click:#}"
+        );
         assert_eq!(
             host.evaluate("document.querySelector('#counter').textContent")
                 .unwrap()
@@ -5911,7 +5914,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 Some(realization_generation.clone()),
             )
             .expect_err("old WebMCP descriptor must not resolve in replacement document");
-        assert!(stale_webmcp.to_string().contains("stale_operation"));
+        assert!(
+            stale_webmcp.to_string().contains("stale_operation"),
+            "expected stale_operation, got: {stale_webmcp:#}"
+        );
         let stale_click = ingress
             .accept_with_operation_context(
                 "aop-old-document-click".to_owned(),
@@ -5923,7 +5929,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 Some(realization_generation),
             )
             .expect_err("old fixed Browser descriptor must not target replacement document");
-        assert!(stale_click.to_string().contains("stale_operation"));
+        assert!(
+            stale_click.to_string().contains("stale_operation"),
+            "expected stale_operation, got: {stale_click:#}"
+        );
         assert_eq!(
             host.evaluate("document.querySelector('#counter').textContent")
                 .unwrap()
