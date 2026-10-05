@@ -2,14 +2,15 @@
 //! verification evidence. Ato alone resolves logical IDs and compiles canonical D.
 //! This core has no provider transport, durable storage or execution authority.
 mod execution_plan;
+mod native_dependencies;
 mod node_static_workspace;
 mod python_http;
 mod source_context;
 pub use execution_plan::{
-    CatalogSource, DependencyOperation, ExecutionPlanProposal, PlanAuthorization,
-    PlanStateRequirement, RuntimeSelection, SourceReference, VerifiedSourceFile, is_discovery_root,
-    isolated_state_id, isolated_state_mount, source_file_allowed, source_inspection_priority,
-    source_path,
+    CatalogSource, DependencyOperation, ExecutionPlanProposal, NativeBuildNetwork,
+    PlanAuthorization, PlanStateRequirement, PythonBuildDependency, RuntimeSelection,
+    SourceReference, VerifiedSourceFile, is_discovery_root, isolated_state_id,
+    isolated_state_mount, source_file_allowed, source_inspection_priority, source_path,
 };
 pub use node_static_workspace::{
     MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,

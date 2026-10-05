@@ -46,7 +46,7 @@ pub fn source_inspection_priority(path: &str) -> (u8, usize) {
             | "app.py" | "main.js" => 2,
             "configuration.mjs" | "config.mjs" | "configuration.js" | "config.js"
             | "settings.py" | "gulpfile.js" | "gruntfile.js" | "vite.config.js"
-            | "vite.config.ts" | "webpack.config.js" | "rollup.config.js" => 3,
+            | "vite.config.ts" | "webpack.config.js" | "rollup.config.js" | "binding.gyp" => 3,
             "package-lock.json" | "requirements.txt" => 4,
             "dockerfile" => 5,
             _ if name.ends_with(".py")
@@ -185,8 +185,10 @@ impl PlanAuthorization {
                     || !is_sha256(&file.digest)
             })
             || self.toolchains.iter().any(|(name, version)| {
-                !matches!(name.as_str(), "python" | "node" | "npm" | "oci")
-                    || semver::Version::parse(version).is_err()
+                !matches!(
+                    name.as_str(),
+                    "python" | "node" | "npm" | "oci" | "gcc" | "make" | "pkg-config"
+                ) || semver::Version::parse(version).is_err()
             })
         {
             return Err(ProposalError("execution_plan_authorization_invalid"));
@@ -194,7 +196,7 @@ impl PlanAuthorization {
         Ok(())
     }
 
-    fn resolve(&self, reference: &SourceReference) -> Result<&str, ProposalError> {
+    pub(super) fn resolve(&self, reference: &SourceReference) -> Result<&str, ProposalError> {
         let file = self
             .files
             .get(&reference.file_id)
@@ -228,6 +230,21 @@ pub struct RuntimeSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonBuildDependency {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeBuildNetwork {
+    #[default]
+    Denied,
+    ScopedBuild,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyOperation {
     PythonRequirements {
@@ -238,11 +255,27 @@ pub enum DependencyOperation {
     PythonResolveRequirements {
         requirements: SourceReference,
     },
+    PythonBuildRequirements {
+        requirements: SourceReference,
+        build_dependencies: Vec<PythonBuildDependency>,
+        toolchains: Vec<RuntimeSelection>,
+        #[serde(default)]
+        network: NativeBuildNetwork,
+    },
     NpmCi {
         manifest: SourceReference,
         lockfile: SourceReference,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         production_only: bool,
+    },
+    NpmRebuild {
+        manifest: SourceReference,
+        lockfile: SourceReference,
+        packages: Vec<String>,
+        root_lifecycle: Vec<String>,
+        toolchains: Vec<RuntimeSelection>,
+        #[serde(default)]
+        network: NativeBuildNetwork,
     },
 }
 
@@ -269,6 +302,10 @@ pub struct ExecutionPlanProposal {
     pub static_output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    /// A source-owned npm script, allowing generated/server framework outputs
+    /// without inventing a source reference to a file that does not exist yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_script: Option<String>,
     pub argv: Vec<String>,
     pub cwd: String,
     /// Static serving allocates its port through the browser adapter. Process
@@ -411,12 +448,31 @@ impl ExecutionPlanProposal {
                 || entrypoint != manifest
                 || !source_path(output)
                 || self.module.is_some()
+                || self.launch_script.is_some()
                 || !self.argv.is_empty()
                 || !self.environment.is_empty()
                 || !self.variable_bindings.is_empty()
                 || !self.state.is_empty()
             {
                 return Err(ProposalError("unsupported_static_output"));
+            }
+        } else if let Some(script) = &self.launch_script {
+            let manifest = if self.cwd == "." {
+                "package.json".into()
+            } else {
+                format!("{}/package.json", self.cwd)
+            };
+            if self.runtime.name != "node"
+                || entrypoint != manifest
+                || self.module.is_some()
+                || script.is_empty()
+                || script.len() > 64
+                || !script
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
+                || !authorization.toolchains.contains_key("npm")
+            {
+                return Err(ProposalError("unsupported_launch_script"));
             }
         } else if (self.runtime.name == "python" && !entrypoint.ends_with(".py"))
             || (self.runtime.name == "node"
@@ -459,6 +515,28 @@ impl ExecutionPlanProposal {
         ];
         let runtimes = vec![json!({"name":self.runtime.name,"version":self.runtime.version})];
         for dependency in &self.dependencies {
+            if let DependencyOperation::NpmCi {
+                manifest, lockfile, ..
+            } = dependency
+            {
+                super::native_dependencies::compile_npm_initialize(
+                    self,
+                    authorization,
+                    &executable,
+                    manifest,
+                    lockfile,
+                    &mut steps,
+                )?;
+            }
+            if super::native_dependencies::compile_operation(
+                dependency,
+                self,
+                authorization,
+                &executable,
+                &mut steps,
+            )? {
+                continue;
+            }
             if let DependencyOperation::PythonResolveRequirements { requirements } = dependency {
                 if self.runtime.name != "python" {
                     return Err(ProposalError("unsupported_dependency_operation"));
@@ -592,6 +670,19 @@ impl ExecutionPlanProposal {
             steps.push(json!({"id":format!("dependencies-{}",steps.len()),"use":"ato.process@1","op":"exec",
                 "argv":argv,"cwd":self.cwd,"network":"scoped-dependencies"}));
         }
+        if self.runtime.name == "node"
+            && self
+                .dependencies
+                .iter()
+                .any(|d| matches!(d, DependencyOperation::NpmCi { .. }))
+        {
+            super::native_dependencies::compile_npm_audit(
+                self,
+                authorization,
+                &executable,
+                &mut steps,
+            )?;
+        }
         for script in &self.build_scripts {
             if self.runtime.name != "node"
                 || script.is_empty()
@@ -616,31 +707,45 @@ impl ExecutionPlanProposal {
             );
             json!({"id":port,"use":"ato.http@1","from":"app"})
         } else {
-            let mut argv = match &self.module {
-                None => vec![executable, format!("/app/{entrypoint}")],
-                Some(module) => {
-                    if self.runtime.name != "python"
-                        || module.is_empty()
-                        || module.len() > 128
-                        || !module.split('.').all(|s| {
-                            !s.is_empty()
-                                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                        })
-                    {
-                        return Err(ProposalError("unsupported_module_entrypoint"));
+            let mut argv = if let Some(script) = &self.launch_script {
+                let guard = r#"const fs=require('node:fs'),crypto=require('node:crypto');const p=JSON.parse(process.argv[1]);let code='source_launch_manifest_changed';try{if(fs.statSync(p.file).size>8388608)throw Error();const b=fs.readFileSync(p.file);if('sha256:'+crypto.createHash('sha256').update(b).digest('hex')!==p.sha256)throw Error();const m=JSON.parse(b);code='source_launch_script_missing';if(typeof m.scripts?.[p.script]!=='string')throw Error();}catch{console.error('ATO_FORMATION_FAILURE '+JSON.stringify({code,message:'The source-owned launch script is unavailable in the frozen manifest'}));process.exit(1);}"#;
+                steps.push(json!({"id":"check-launch-script","use":"ato.process@1","op":"exec","argv":[executable,"-e",guard,json!({"file":format!("/app/{entrypoint}"),"sha256":self.entrypoint.digest,"script":script}).to_string()],"cwd":self.cwd,"network":"denied"}));
+                let mut argv = vec![
+                    format!("/opt/ato/toolchains/node/{}/bin/npm", self.runtime.version),
+                    "run".into(),
+                    script.clone(),
+                ];
+                if !self.argv.is_empty() {
+                    argv.push("--".into());
+                }
+                argv
+            } else {
+                match &self.module {
+                    None => vec![executable, format!("/app/{entrypoint}")],
+                    Some(module) => {
+                        if self.runtime.name != "python"
+                            || module.is_empty()
+                            || module.len() > 128
+                            || !module.split('.').all(|s| {
+                                !s.is_empty()
+                                    && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            })
+                        {
+                            return Err(ProposalError("unsupported_module_entrypoint"));
+                        }
+                        let prefix = if self.cwd == "." {
+                            String::new()
+                        } else {
+                            format!("{}/", self.cwd)
+                        };
+                        let module_path = format!("{prefix}{}", module.replace('.', "/"));
+                        if entrypoint != format!("{module_path}.py")
+                            && entrypoint != format!("{module_path}/__main__.py")
+                        {
+                            return Err(ProposalError("proposal_module_source_mismatch"));
+                        }
+                        vec![executable, "-m".into(), module.clone()]
                     }
-                    let prefix = if self.cwd == "." {
-                        String::new()
-                    } else {
-                        format!("{}/", self.cwd)
-                    };
-                    let module_path = format!("{prefix}{}", module.replace('.', "/"));
-                    if entrypoint != format!("{module_path}.py")
-                        && entrypoint != format!("{module_path}/__main__.py")
-                    {
-                        return Err(ProposalError("proposal_module_source_mismatch"));
-                    }
-                    vec![executable, "-m".into(), module.clone()]
                 }
             };
             argv.extend(self.argv.iter().cloned());
@@ -683,6 +788,22 @@ impl ExecutionPlanProposal {
             .iter()
             .map(|(name, version)| format!("toolchain.{name}.{version}"))
             .collect();
+        for dependency in &self.dependencies {
+            let tools = match dependency {
+                DependencyOperation::PythonBuildRequirements { toolchains, .. }
+                | DependencyOperation::NpmRebuild { toolchains, .. } => toolchains,
+                _ => continue,
+            };
+            for tool in tools {
+                let requirement = crate::search::Requirement {
+                    fact: format!("toolchain.{}.{}", tool.name, tool.version),
+                    one_of: Some(vec!["present".into()]),
+                };
+                if !candidate.requirements.contains(&requirement) {
+                    candidate.requirements.push(requirement);
+                }
+            }
+        }
         Ok((
             CompiledGeneration {
                 capsule_toml,
@@ -702,6 +823,7 @@ impl ExecutionPlanProposal {
         if self.cwd != "."
             || !self.argv.is_empty()
             || self.module.is_some()
+            || self.launch_script.is_some()
             || !self.environment.is_empty()
             || !self.variable_bindings.is_empty()
             || !self.dependencies.is_empty()
