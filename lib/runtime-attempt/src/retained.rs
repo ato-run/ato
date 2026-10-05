@@ -104,6 +104,30 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
         None
     }
     fn realize(&self, attempt_id: &str, attempt_root: &Path) -> Result<Realized, RealizeFailure> {
+        self.realize_inner(attempt_id, attempt_root, None)
+    }
+    fn realize_controlled(
+        &self,
+        attempt_id: &str,
+        attempt_root: &Path,
+        control: &crate::control::ExecutionControl,
+    ) -> Result<Realized, RealizeFailure> {
+        self.realize_inner(attempt_id, attempt_root, Some(control))
+    }
+}
+impl RetainedCandidateRealizer<'_> {
+    fn realize_inner(
+        &self,
+        attempt_id: &str,
+        attempt_root: &Path,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Realized, RealizeFailure> {
+        let _source_timing = control
+            .map(|c| c.phase(crate::control::AttemptPhase::Source))
+            .transpose()
+            .map_err(RealizeFailure::Execution)?;
+        let can_continue =
+            || control.is_none_or(|c| c.remaining(crate::control::AttemptPhase::Source).is_ok());
         let result = (|| -> Result<_> {
             self.descriptor
                 .match_assignment(self.expected_contract_ref, self.expected_derivation_ref)?;
@@ -111,11 +135,12 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
                 max_total_bytes: self.expanded_limit.min(512 * 1024 * 1024),
                 ..Default::default()
             };
-            let mut archive = FileVerifiedArchive::verify(
+            let mut archive = FileVerifiedArchive::verify_with_guard(
                 fs::File::open(self.archive).context("retained object missing")?,
                 &self.descriptor.artifact.content_ref,
                 self.descriptor.artifact.bytes,
                 limits,
+                &can_continue,
             )?;
             ensure!(
                 archive.expanded_bytes() == self.descriptor.artifact.expanded_bytes,
@@ -123,7 +148,12 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
             );
             // Reuse the hardened archive boundary/path validator. The retained
             // artifact closure is NOT reinterpreted as the original source I.
-            let root = archive.materialize(&attempt_root.join("retained"), "", limits)?;
+            let root = archive.materialize_with_guard(
+                &attempt_root.join("retained"),
+                "",
+                limits,
+                &can_continue,
+            )?;
             let executed = match self.descriptor.shape {
                 RetainedShape::ProcessWorkspace { .. } => ExecutedCandidate::Process {
                     workspace_root: root,
@@ -147,6 +177,11 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
             Ok((executed, planned))
         })()
         .map_err(|error| {
+            if let Some(control) = control
+                && let Err(deadline) = control.remaining(crate::control::AttemptPhase::Source)
+            {
+                return RealizeFailure::Execution(deadline);
+            }
             RealizeFailure::Execution(
                 ato_formation::failure::FormationFailure::new(
                     "retained_artifact_invalid",
@@ -166,12 +201,15 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
                 NetworkPolicy::Denied
             },
         };
-        let mut realized = match &self.exploration {
-            Some(e) => {
-                launcher.realize_scoped(executed, attempt_id, attempt_root, e.runtime_gate)?
-            }
-            None => launcher.realize(executed, attempt_id, attempt_root)?,
-        };
+        drop(_source_timing);
+        let mut realized = launcher.realize_controlled(
+            executed,
+            attempt_id,
+            attempt_root,
+            self.exploration.as_ref().map(|e| e.runtime_gate),
+            &[],
+            control,
+        )?;
         // This is an existing immutable object, not a new publication. A fresh
         // receipt still comes exclusively from the enclosing common attempt.
         realized.kept = None;

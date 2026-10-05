@@ -23,6 +23,7 @@ pub mod build;
 pub mod build_sandbox;
 pub mod build_sandbox_exec;
 mod cached_toolchain;
+pub mod control;
 pub mod ephemeral;
 pub mod execution_facts;
 pub mod executor;

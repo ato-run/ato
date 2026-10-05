@@ -2413,6 +2413,7 @@ fn start_portable_attempt(
                 run_id: runtime_state.run_id,
             },
             interrupt: shutdown,
+            control: None,
         },
         &portable_attempt::PortableBundleExecutor {
             bundle,
