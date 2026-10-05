@@ -359,6 +359,7 @@ fn attempt_one(
             continuation: Continuation::Stop,
             receipt: ReceiptContext::formation(),
             interrupt: None,
+            control: None,
         },
         &FormationRealizer {
             planned: &planned,
@@ -577,9 +578,18 @@ impl std::io::Write for ArchiveWriter {
 }
 
 pub(crate) fn freeze_verified_file(
+    verified: ato_formation::source::FileVerifiedArchive,
+    work_root: &Path,
+    limits: SourceLimits,
+) -> Result<FrozenSource> {
+    freeze_verified_file_with_guard(verified, work_root, limits, &|| true)
+}
+
+pub(crate) fn freeze_verified_file_with_guard(
     mut verified: ato_formation::source::FileVerifiedArchive,
     work_root: &Path,
     limits: SourceLimits,
+    can_continue: &dyn Fn() -> bool,
 ) -> Result<FrozenSource> {
     let closure_ref = verified.closure_ref("")?;
     let scratch = work_root.join(format!(
@@ -593,7 +603,8 @@ pub(crate) fn freeze_verified_file(
         root: PathBuf::new(),
         scratch: scratch.clone(),
     };
-    frozen.root = verified.materialize(&scratch.join("tree"), "", limits)?;
+    frozen.root =
+        verified.materialize_with_guard(&scratch.join("tree"), "", limits, can_continue)?;
     Ok(frozen)
 }
 

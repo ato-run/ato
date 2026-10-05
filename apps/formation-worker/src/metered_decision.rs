@@ -243,6 +243,7 @@ impl MeteredDecisionProvider {
         match (input, output) {
             (Some(i), Some(o)) => {
                 let response = ResponseEvidence {
+                    latency_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
                     cell,
                     finish_reason: FinishReason::Stop,
                     model_matches: matches,
