@@ -1,11 +1,17 @@
-# 実UNKNOWN専用の追加受入枠
+# 実UNKNOWN専用の追加受入
 
-ユーザーが明示承認した別measurement `formation-native-real-unknown-20261005-01` を準備した。Search最大1、D round最大2、exchange最大3、Runtime attempt最大1、inspection最大2、wall clock最大20分。旧campaignは13/12超過で終了のまま。audit SHA-256 `91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197` の不変を確認した。新campaignのSearch/Native/ledger実行はまだ開始しておらず、消費0。[保存済み計画](formation-native-unknown-supplemental-20261005.json)。
+ユーザーが40分案を承認したため、`formation-native-real-unknown-20261005-01`を実Codex 0.160.0 / gpt-6.1-solで実行した。上限はSearch 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 2400秒。元Searchの期限は1800秒のまま。30分のsilence expiry、時計、DB timestamp、旧campaignの13/12を変更していない。
 
-現在のCoordinatorはclaimed attemptのcompletion silenceを30分後にUNKNOWNとする。実workload開始 → completion/ACK transport切断だけを注入すると、20分枠内には真正なUNKNOWNへ到達しない。DB timestampの変更、時計偽装、失効値のテスト専用短縮、旧台帳上限の上書きは行わない。wall clockのみ40分へ変更する案、または20分のままRuntimeを実停止・復旧してdurable started_unfinishedを報告する案を提示しており、追加条件の回答待ち。後者を純粋なACK喪失試験と同一視しない。予算guardと元Searchのdeadline/消費量保持はどちらも維持する。
+このmeasurementはUNKNOWNへ到達せず終了した。最初のNative turnはSkillが要求するowner隔離確認を起動promptに見つけられず、typed `needs_input`を提出した。Search `search_36ebcf9479b6c5b359d9df8e685c3da4`は`unsatisfied / needs_input`で終端した。消費はSearch 1、割当round 1、exchange 1、inspection 0、Runtime attempt 0、経過51秒。新D、workload、transport切断、30分失効、UNKNOWN、receiptは未観測である。[公開証拠](evidence/formation-native-unknown-supplemental-20261005-01.json)。
 
-実行時はowner開始入口のaggregate admissionを通し、同じSource/Kから実NativeのD submit、Runtime claim/実開始、障害後UNKNOWN、Native終了、新Native文脈から同Searchの保存記録照合を行う。新input/D round/attempt/期限延長/予算返却/UNKNOWNの失敗扱いを禁止し、可能なら保存済みresultで同attemptを確定する。fixtureのagent名変更を実Native受入と数えない。現時点でこのgateは未実施で、#1485はDraft維持。
+元Searchをreopen/resetせず、別Searchを無断で作らない。承認済みSearch枠は消費済みであり、再試験には別measurementの明示承認が必要である。旧campaignは13/12超過で終了のまま。audit SHA-256 `91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197`の不変を再確認した。独立API台帳、旧WBO UNKNOWN、過去の成功D・実測pinは変更していない。
 
-Kuttはこの枠を使わず、既存successful SearchからSource Result/form-verify/通常StateServiceの実Run A/BをPASSした。証跡は#1481/API #731の `docs/ops/formation-kutt-source-result-product-20261005.md` と同名evidence JSONに分離した。Source再探索/Native/LLM API追加0、functional attempt5（2失敗を保持し3PASS）、最後のactive writer/reservation/temporary values0。Kutt成功をUNKNOWN gateの代用にしない。
+原因を#1480の共通launcherで修正した。推論前に既存のOS負例を実際のCodex Code Mode model policyへ適用し、13項目・8クラスのcanaryのbool/digestをowner確認として渡す。欠落・一部だけの証拠はfail closed。Claudeではmodel policy fixtureとrestricted native tool configurationの範囲を区別する。新head `e03b5b2f5`のSkill関連43 testと実OS負例13項目はPASSしたが、このheadからの実Source探索は追加枠未承認のため未実施である。共通validatorは既存のClaude向けfrontmatter `disable-model-invocation`を未認識として拒否したため、そのvalidatorだけを根拠に形式を変えていない。
 
-#1479/#1480はReady for review。model MCPはstatus/next/submitのみ、owner cancel、tokenなしpublic descriptor/private capability分離の契約を維持する。実行pinの3OS CI PASSは既存記録を参照。秘密のFD/RAMだけでの保持を実装済みとは主張しない。old WBO UNKNOWN、独立API残3計画、配備、remote cloud migration、100件測定は今回触っていない。
+期限後のNative `reconcile-only`は保存されたUNKNOWNを報告するstatus/nextだけに限定し、報告windowを最大120秒・owner campaignのwall clock以内とする。元Searchの期限と消費枠は不変で、新しい探索input、submit、D、inspection、Runtime attemptは許可しない。null exchangeを新しい応答待ちと誤判定する条件も修正した。報告turnのSDK usageと内部LLM call/実請求は探索exchangeと別に記録する。この新経路の実UNKNOWN受入は未実施である。
+
+開始guardはcampaignのwall clock予約とSearch期限を分けた。`--wall-clock-seconds 2400 --deadline-seconds 1800`は2400秒を予約する一方、Coordinatorへは1800秒だけを渡す。再接続のowner wall clockを保存済み期限と最初の予約から計算し、古いsnapshot、unanswered/cancelled round、reserved attemptが消費量を減らすことを認めない。guard/budget関連17 test PASS。今回の実台帳の最初の1800秒予約は、失敗後に2400秒へ書き換えていない。
+
+今回の失敗Searchに新規UNKNOWN/attempt/resource reservationはない。active writerとquarantineは0。Native/Bridge、Runtime、Coordinator、proxy、SSH forwardを停止した。temporary owner sessionは通常signout APIのHTTP 200で失効し、remoteのprivate credential copy4件とlocal capability/auth link4件を削除した。SDKは累積tokenを報告したが、内部call数・実請求は不明であり、Ato direct LLM API call 0を推論費用0へ読み替えない。
+
+Kuttの既存successful Search → Source Result → form-verify → State Run A/Bは別受入として#1481/API #731の証拠を維持する。今回の失敗をKutt成功で代替せず、#1485はDraft維持。stack merge、最終integration CI、staging/production、100 OSS、独立API残3計画はUNKNOWN gateの後に進める。

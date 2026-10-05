@@ -15,13 +15,15 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 SPEC = importlib.util.spec_from_file_location("campaign_budget", Path(__file__).with_name("native-session-budget.py"))
 BUDGET = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BUDGET)
 KEYS = (*BUDGET.FIELDS, "searches")
-TERMINAL = {"stopped", "cancelled", "failed", "k_reached_awaiting_assessment"}
+TERMINAL = {"stopped", "cancelled", "failed", "unsatisfied", "exhausted", "satisfied",
+            "k_reached_awaiting_assessment"}
 
 
 def fingerprint(value):
@@ -168,7 +170,10 @@ def guarded_start(plan, ledger_path, args, spawn=subprocess.Popen):
     with locked(ledger_path):
         ledger = read_ledger(plan, ledger_path)
         config = json.loads(args.exploration_config.read_text())
-        requested = scope(config, args.max_attempts, args.deadline_seconds)
+        wall_seconds = getattr(args, "wall_clock_seconds", None) or args.deadline_seconds
+        if type(wall_seconds) is not int or wall_seconds < args.deadline_seconds:
+            raise ValueError("campaign_wall_clock_invalid")
+        requested = scope(config, args.max_attempts, wall_seconds)
         report = refresh(plan, ledger, args.ato, requested)
         if not report["admitted"]:
             publish(ledger_path, ledger)
@@ -177,7 +182,8 @@ def guarded_start(plan, ledger_path, args, spawn=subprocess.Popen):
         if any(p.exists() or p.is_symlink() for p in (args.connection, args.work_root)):
             raise ValueError("fresh_Search_paths_required")
         entry = {"id": str(uuid.uuid4()), "reservation": requested, "start_state": "prepared",
-                 "config_sha256": fingerprint(config), "connection": str(args.connection.absolute()), "snapshots": []}
+                 "config_sha256": fingerprint(config), "connection": str(args.connection.absolute()),
+                 "Search_deadline_seconds": args.deadline_seconds, "snapshots": []}
         ledger["entries"].append(entry)
         publish(ledger_path, ledger)  # Write-ahead reservation before Search create.
         # The real CLI reads the admitted bytes, not a mutable planning file.
@@ -211,11 +217,26 @@ def guarded_native(plan, ledger_path, args, execute=subprocess.run):
         publish(ledger_path, ledger)
         if not report["admitted"]:
             return report
-        if not any(Path(e["connection"]).resolve() == args.connection.resolve() for e in ledger["entries"]):
+        entries = [e for e in ledger["entries"] if Path(e["connection"]).resolve() == args.connection.resolve()]
+        if len(entries) != 1:
             raise ValueError("registered_Search_required")
         native_args = args.native_args[1:] if args.native_args[:1] == ["--"] else args.native_args
         if any(a == "--connection" or a.startswith("--connection=") for a in native_args):
             raise ValueError("connection_is_owner_fixed")
+        if any(a == "--owner-wall-clock-deadline-ms" or a.startswith("--owner-wall-clock-deadline-ms=")
+               for a in native_args):
+            raise ValueError("wall_clock_is_owner_fixed")
+        if "--reconcile-only" in native_args:
+            entry = entries[0]
+            seconds = entry.get("Search_deadline_seconds")
+            if type(seconds) is not int or seconds <= 0 or not entry.get("snapshots"):
+                raise ValueError("campaign_clock_evidence_required")
+            original_deadline = entry["snapshots"][0]["deadline_ms"]
+            wall_deadline = original_deadline + (
+                entry["reservation"]["sequential_elapsed_seconds"] - seconds) * 1000
+            if wall_deadline <= time.time() * 1000:
+                raise ValueError("campaign_wall_clock_exceeded")
+            native_args = [*native_args, "--owner-wall-clock-deadline-ms", str(wall_deadline)]
         # Serialize Native launches too; reconnect is not a second aggregate slot.
         result = execute([sys.executable, str(args.native_launcher), "--connection", str(args.connection),
                           *native_args], check=False)
@@ -237,6 +258,8 @@ def main():
     start.add_argument("--exact-runtime", required=True)
     start.add_argument("--max-attempts", type=int, default=4)
     start.add_argument("--deadline-seconds", type=int, default=1800)
+    start.add_argument("--wall-clock-seconds", type=int,
+                       help="campaign reservation including reporting; never changes Search deadline")
     for name in ("transfer", "expanded", "stored"):
         start.add_argument("--max-" + name + "-bytes", type=int, required=True)
     native = commands.add_parser("native")
