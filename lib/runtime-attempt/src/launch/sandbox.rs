@@ -413,7 +413,9 @@ pub fn guest_environment(context: &ResolvedRuntimeLaunchContext) -> BTreeMap<Str
 /// Checked before a launch rather than after: a Runner that cannot contain a
 /// workload must refuse the Run, not run it unconfined and report success.
 pub fn containment_available() -> bool {
-    ato_sandbox::bubblewrap_containment_available()
+    // A Runner started in host-boundary mode has already proved it can
+    // deliver that mode; it does not also need namespaces.
+    super::host_boundary::active().is_some() || ato_sandbox::bubblewrap_containment_available()
 }
 
 /// Refuse rather than silently degrade.
