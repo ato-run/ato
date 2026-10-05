@@ -14,6 +14,8 @@ use crate::authoring::{
     ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL,
     TCP_EGRESS_PROTOCOL, WORKSPACE_PROTOCOL,
 };
+use crate::model_set::MODEL_SET_PROTOCOL;
+use crate::requirements::HostRequirement;
 
 pub const CAPSULE_SCHEMA_V2: &str = "ato.capsule/2";
 pub const OCI_PROTOCOL: &str = "ato.oci@1";
@@ -44,6 +46,18 @@ pub struct PortableAuthoringDraftV2 {
     pub observations: Vec<PortableHttpObservationDraftV2>,
     pub derivations: Vec<PortableDerivationDraftV2>,
     pub effects: EffectClass,
+    /// `ato.model-set@1` inputs every route consumes (at most two in v0).
+    pub model_sets: Vec<PortableModelSetInputDraftV2>,
+}
+
+/// A Model Set input as authored: the manifest file carried with the source
+/// and the digest the author pinned. The bundle builder reads the file and
+/// refuses it unless its canonical digest is exactly `content_ref`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableModelSetInputDraftV2 {
+    pub id: String,
+    pub manifest_path: String,
+    pub content_ref: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +101,9 @@ pub struct PortableDerivationDraftV2 {
     pub guest_port: u16,
     /// Empty unless `kind` is [`PortableDerivationKindV2::OciServiceGroup`].
     pub services: Vec<PortableServiceDraftV2>,
+    /// The host this route must run on, bound as `requirements.host` of its
+    /// Derivation. Validated; absent means no host condition.
+    pub host: Option<HostRequirement>,
 }
 
 /// One serving step of an OCI service group. Authoring shorthand only: it
@@ -172,6 +189,9 @@ struct Input {
     protocol: String,
     #[serde(default = "default_workspace_path")]
     path: String,
+    /// Required for, and only for, `ato.model-set@1`: the pinned digest.
+    #[serde(default, rename = "ref")]
+    content_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +227,8 @@ struct Derivation {
     guest_port: Option<u16>,
     #[serde(default)]
     service: Vec<Service>,
+    #[serde(default)]
+    host: Option<HostRequirement>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,18 +347,79 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             ));
         }
     };
-    if document.input.len() != 1 {
+    let (workspace_inputs, other_inputs): (Vec<_>, Vec<_>) = document
+        .input
+        .iter()
+        .partition(|input| input.protocol == WORKSPACE_PROTOCOL);
+    if workspace_inputs.len() != 1 {
         return Err(invalid(
             "input",
             "portable v0 requires exactly one workspace input",
         ));
     }
-    let input = &document.input[0];
+    let input = workspace_inputs[0];
     validate_id("input.id", &input.id)?;
-    if input.id != "workspace" || input.protocol != WORKSPACE_PROTOCOL || input.path != "." {
+    if input.id != "workspace" || input.path != "." || input.content_ref.is_some() {
         return Err(invalid(
             "input",
             format!("must declare id=workspace, use={WORKSPACE_PROTOCOL:?}, path=\".\""),
+        ));
+    }
+    let mut model_sets = Vec::new();
+    let mut input_names = BTreeSet::from(["WORKSPACE".to_owned()]);
+    for input in other_inputs {
+        validate_id("input.id", &input.id)?;
+        // The process adapter exposes each input through ATO_INPUT_PATH_<ID>.
+        // Distinct authoring IDs must not overwrite the same environment name.
+        let env_id: String = input
+            .id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if input.id == "assets" || !input_names.insert(env_id) {
+            return Err(invalid(
+                "input.id",
+                "duplicate or reserved input environment name",
+            ));
+        }
+        if input.protocol != MODEL_SET_PROTOCOL {
+            return Err(invalid(
+                "input.use",
+                format!(
+                    "{:?} is unsupported; use {WORKSPACE_PROTOCOL:?} or {MODEL_SET_PROTOCOL:?}",
+                    input.protocol
+                ),
+            ));
+        }
+        let Some(content_ref) = input.content_ref.clone().filter(|r| is_sha256_ref(r)) else {
+            return Err(invalid(
+                "input.ref",
+                "a Model Set input pins its manifest digest as sha256:<64 lowercase hex>",
+            ));
+        };
+        if input.path == "." {
+            return Err(invalid(
+                "input.path",
+                "a Model Set input names its manifest file, not the source root",
+            ));
+        }
+        validate_relative(&input.path, "input.path")?;
+        model_sets.push(PortableModelSetInputDraftV2 {
+            id: input.id.clone(),
+            manifest_path: input.path.clone(),
+            content_ref,
+        });
+    }
+    if model_sets.len() > 2 {
+        return Err(invalid(
+            "input",
+            "portable v0 supports at most two Model Set inputs",
         ));
     }
     if document.state.len() > 1 {
@@ -490,11 +573,17 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
                     format!("duplicate id {:?}", derivation.id),
                 ));
             }
-            if derivation.service.is_empty() {
+            let host = derivation.host.clone();
+            if let Some(host) = &host {
+                host.validate()
+                    .map_err(|e| invalid("derivation.host", e.0))?;
+            }
+            let route = if derivation.service.is_empty() {
                 parse_single_route(derivation)
             } else {
                 parse_service_group(derivation, &state_ids, &binding_ids)
-            }
+            }?;
+            Ok(PortableDerivationDraftV2 { host, ..route })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -506,6 +595,7 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
         observations,
         derivations,
         effects,
+        model_sets,
     })
 }
 
@@ -602,6 +692,7 @@ fn parse_single_route(
         env,
         guest_port,
         services: Vec::new(),
+        host: None,
     })
 }
 
@@ -765,6 +856,7 @@ fn parse_service_group(
         env: BTreeMap::new(),
         guest_port: 0,
         services,
+        host: None,
     })
 }
 
@@ -831,6 +923,62 @@ default = "pure"
         assert_eq!(draft.derivations.len(), 2);
         assert_eq!(draft.derivations[0].label, "python-a");
         assert_eq!(draft.derivations[1].env["ROUTE"], "b");
+    }
+
+    #[test]
+    fn a_model_set_input_is_pinned_by_digest_and_names_its_manifest() {
+        let base = include_str!("../../../samples/portable-model-set-probe/capsule.toml");
+        let draft = parse_capsule_toml_v2(base).unwrap();
+        assert_eq!(draft.model_sets.len(), 1);
+        assert_eq!(draft.model_sets[0].id, "models");
+        assert_eq!(
+            draft.model_sets[0].manifest_path,
+            "models/probe.model-set.json"
+        );
+        let pinned = draft.model_sets[0].content_ref.clone();
+        for (what, text) in [
+            ("no ref", base.replace(&format!("ref = \"{pinned}\"\n"), "")),
+            ("bad ref", base.replace(&pinned, "sha256:ABC")),
+            ("source root", base.replace("path = \"models/probe.model-set.json\"", "path = \".\"")),
+            ("escapes", base.replace("models/probe.model-set.json", "../x.json")),
+            ("unknown protocol", base.replace("ato.model-set@1", "ato.model-set@2")),
+            (
+                "three model sets",
+                base.replace(
+                    "[contract]",
+                    &format!("[[input]]\nid = \"more\"\nuse = \"ato.model-set@1\"\npath = \"m.json\"\nref = \"{pinned}\"\n\n[[input]]\nid = \"third\"\nuse = \"ato.model-set@1\"\npath = \"t.json\"\nref = \"{pinned}\"\n\n[contract]"),
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
+        }
+    }
+
+    #[test]
+    fn two_immutable_inputs_have_distinct_process_paths() {
+        let base = include_str!("../../../samples/portable-model-set-probe/capsule.toml");
+        let pinned = parse_capsule_toml_v2(base).unwrap().model_sets[0]
+            .content_ref
+            .clone();
+        let add = |id: &str| {
+            base.replace("[contract]", &format!(
+            "[[input]]\nid = \"{id}\"\nuse = \"ato.model-set@1\"\npath = \"software.json\"\nref = \"{pinned}\"\n\n[contract]"
+        ))
+        };
+        let draft = parse_capsule_toml_v2(&add("software")).unwrap();
+        assert_eq!(
+            draft
+                .model_sets
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["models", "software"]
+        );
+        for id in ["models", "workspace", "assets"] {
+            assert!(parse_capsule_toml_v2(&add(id)).is_err(), "{id}");
+        }
+        let colliding = add("model-data").replace("id = \"models\"", "id = \"model_data\"");
+        assert!(parse_capsule_toml_v2(&colliding).is_err());
     }
 
     #[test]

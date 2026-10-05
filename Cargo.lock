@@ -788,6 +788,7 @@ dependencies = [
  "landlock",
  "libc",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]
