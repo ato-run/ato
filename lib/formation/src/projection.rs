@@ -401,29 +401,7 @@ pub fn project_exec(step: &BoundStep) -> Result<BuildStepV1, ProjectionError> {
 
 /// `""` / `"."` is the workspace root; otherwise plain names only. Absolute
 /// paths and `..` anywhere are refused, even when they would land inside.
-pub fn workspace_relative_cwd(cwd: &str) -> Result<String, String> {
-    if cwd.contains('\0') || cwd.contains('\\') {
-        return Err(format!("cwd {cwd:?} is not a workspace path"));
-    }
-    if cwd.starts_with('/') {
-        return Err(format!(
-            "cwd {cwd:?} is absolute; a step runs inside the workspace"
-        ));
-    }
-    let mut parts = Vec::new();
-    for part in cwd.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                return Err(format!(
-                    "cwd {cwd:?} climbs with `..`; a step runs inside the workspace"
-                ));
-            }
-            name => parts.push(name),
-        }
-    }
-    Ok(parts.join("/"))
-}
+pub use crate::process_binding::workspace_relative_cwd;
 
 #[cfg(test)]
 mod tests {

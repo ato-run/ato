@@ -527,6 +527,16 @@ impl BoundContract {
 
 impl BoundDerivation {
     pub fn derivation_ref(&self) -> Result<String, AuthoringError> {
+        if self
+            .runtime_port_operations
+            .iter()
+            .any(|o| !o.legacy_exploration_supported())
+        {
+            return Err(malformed(
+                "runtime_port_operations",
+                "advanced HTTP operations require separately approved functional verification",
+            ));
+        }
         crate::port_operations::validate_bound(
             &self.runtime_port_operations,
             &self.ports,
@@ -719,6 +729,16 @@ fn bind_derivation(
         .map_err(|e| malformed("variable_bindings", e))?;
     let mut variable_bindings = draft.variable_bindings.clone();
     variable_bindings.sort_by(|a, b| (&a.name, a.phase).cmp(&(&b.name, b.phase)));
+    if draft
+        .runtime_port_operations
+        .iter()
+        .any(|o| !o.legacy_exploration_supported())
+    {
+        return Err(malformed(
+            "runtime_port_operations",
+            "advanced HTTP operations require separately approved functional verification",
+        ));
+    }
     crate::port_operations::validate_bound(
         &draft.runtime_port_operations,
         &ports,
