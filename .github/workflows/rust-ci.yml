@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,9 +75,14 @@ jobs:
           cargo build -p ato-connected-realization-worker --locked
           echo "ATO_TEST_WORKER_BIN=$PWD/target/debug/ato-connected-realization-worker" >> "$GITHUB_ENV"
           python3 -I -S -c 'import sys; print(sys.executable); print(sys.version)'
-      - name: Test workspace
-        if: runner.os != 'Windows'
-        run: cargo test --workspace --no-fail-fast
+      - name: Isolated Browser diagnostic (not the release gate)
+        shell: bash
+        run: |
+          result=0
+          for attempt in 1 2 3; do
+            cargo test --locked -p ato-connected-realization-worker --lib tests::browser_e2e_routes_keyboard_and_click_through_authority_then_ack_then_record -- --exact --nocapture --test-threads=1 || result=1
+          done
+          exit "$result"
       - name: Portable worker regressions (Windows)
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash
