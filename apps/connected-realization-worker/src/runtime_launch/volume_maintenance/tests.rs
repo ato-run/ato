@@ -134,8 +134,17 @@ fn a_restore_replaces_only_this_volume_with_the_revision() {
     let mut plane = plane(VOLUME, 3);
     plane.revision_ref = Some("isrev_c1".to_owned());
     plane.artifact = Some(pack_state_tree(source.path()).unwrap());
-    perform(&command(VolumeOperationKind::Restore, 3), &store, &plane).unwrap();
-    assert_eq!(read(&store, VOLUME), "A");
+    let result = perform(&command(VolumeOperationKind::Restore, 3), &store, &plane);
+    if cfg!(unix) {
+        result.unwrap();
+        assert_eq!(read(&store, VOLUME), "A");
+    } else {
+        // Windows has no directory exchange implementation. Exercise its
+        // fail-closed result and prove that the existing volume survives.
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains("atomic volume replacement is unavailable"));
+        assert_eq!(read(&store, VOLUME), "B");
+    }
     assert_eq!(read(&store, OTHER), "other");
     assert!(plane.commits.borrow().is_empty());
 }
