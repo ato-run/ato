@@ -123,6 +123,11 @@ pub fn probe_cpu(cgroup_root: &Path) -> CpuResources {
 
 /// Free space where the Runner actually writes, not on `/`.
 pub fn probe_scratch_mib(work_root: &Path) -> Option<u64> {
+    // GetDiskFreeSpaceEx on Windows can resolve the containing volume even
+    // when this directory does not exist. Admission needs the actual work root.
+    if !std::fs::metadata(work_root).ok()?.is_dir() {
+        return None;
+    }
     fs2::available_space(work_root)
         .ok()
         .map(|bytes| bytes / MIB)
@@ -325,6 +330,9 @@ mod tests {
         let work_root = tempfile::tempdir().unwrap();
         assert!(probe_scratch_mib(work_root.path()).is_some());
         assert_eq!(probe_scratch_mib(&work_root.path().join("missing")), None);
+        let regular_file = work_root.path().join("not-a-work-directory");
+        std::fs::write(&regular_file, b"fixture").unwrap();
+        assert_eq!(probe_scratch_mib(&regular_file), None);
     }
 
     #[test]
