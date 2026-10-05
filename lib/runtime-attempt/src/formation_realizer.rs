@@ -45,6 +45,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
         if planned.derivation.source_oci.is_some()
+            || planned.derivation.runtimes.contains_key("oci.image")
             || !planned.derivation.requirements.is_empty()
             || !planned.derivation.variable_bindings.is_empty()
             || planned.derivation.steps.iter().any(|s| {

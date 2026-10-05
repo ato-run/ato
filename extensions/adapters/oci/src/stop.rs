@@ -77,54 +77,17 @@ pub(crate) fn docker_output<'a>(
     arguments: impl IntoIterator<Item = &'a str>,
     timeout: Duration,
 ) -> Result<Output> {
-    use std::io::Read;
-
-    let mut child = docker
-        .command()
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("start Docker CLI")?;
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
-            }
-            bytes
-        })
-    };
-    let stdout = drain(
-        child
-            .stdout
-            .take()
-            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
-    );
-    let stderr = drain(
-        child
-            .stderr
-            .take()
-            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
-    );
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait().context("wait for Docker CLI")? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("Docker CLI did not answer within {}s", timeout.as_secs());
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    Ok(Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
+    let budget = docker
+        .control
+        .as_ref()
+        .map(|c| c.remaining())
+        .transpose()?
+        .map_or(timeout, |left| left.min(timeout));
+    let mut command = docker.command();
+    command.args(arguments).stdin(Stdio::null());
+    super::command_control::CommandControl::cleanup(budget)
+        .output(&mut command)
+        .context("bounded Docker CLI")
 }
 
 /// `(running, exit_code)` of a container.

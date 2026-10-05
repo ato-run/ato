@@ -12,14 +12,12 @@
 //! device or cgroup of the session is left before deleting the work root.
 use std::cell::{Cell, RefCell};
 use std::fs::{self, File};
-use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use ato_adapter_oci::command_control::CommandControl;
 use serde_json::{Value, json};
 
 use super::egress::{EgressAllowance, EgressGate, EgressReport};
@@ -29,43 +27,7 @@ use super::{
     tail,
 };
 
-/// Absolute paths of the host tools the session runs; nothing is resolved
-/// through the caller's `PATH`.
-#[derive(Debug, Clone)]
-pub struct SessionTools {
-    pub sh: PathBuf,
-    pub docker: PathBuf,
-    pub dockerd: PathBuf,
-    pub unshare: PathBuf,
-    pub mkfs_ext4: PathBuf,
-    pub mount: PathBuf,
-    pub umount: PathBuf,
-    pub kill: PathBuf,
-    /// Needed only for an egress session.
-    pub ip: PathBuf,
-    pub nsenter: PathBuf,
-    pub iptables: PathBuf,
-    pub sysctl: PathBuf,
-}
-
-impl Default for SessionTools {
-    fn default() -> Self {
-        Self {
-            sh: "/bin/sh".into(),
-            docker: "/usr/bin/docker".into(),
-            dockerd: "/usr/bin/dockerd".into(),
-            unshare: "/usr/bin/unshare".into(),
-            mkfs_ext4: "/usr/sbin/mkfs.ext4".into(),
-            mount: "/usr/bin/mount".into(),
-            umount: "/usr/bin/umount".into(),
-            kill: "/usr/bin/kill".into(),
-            ip: "/usr/sbin/ip".into(),
-            nsenter: "/usr/bin/nsenter".into(),
-            iptables: "/usr/sbin/iptables".into(),
-            sysctl: "/usr/sbin/sysctl".into(),
-        }
-    }
-}
+pub use super::SessionTools;
 
 const TOOL_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
@@ -87,6 +49,7 @@ pub struct PrivateDockerSession {
     released: Cell<bool>,
     cgroup_made: bool,
     egress: Option<EgressWiring>,
+    control: Option<CommandControl>,
 }
 
 /// The only way out of an egress session: a veth whose host end carries the
@@ -136,14 +99,18 @@ fn io(what: &str) -> impl Fn(std::io::Error) -> super::SourceOciError + '_ {
     move |e| err("source_oci_session_failed", format!("{what}: {e}"))
 }
 
-fn run_tool(program: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new(program)
+fn run_tool(program: &Path, args: &[&str], control: Option<&CommandControl>) -> Result<()> {
+    let mut command = Command::new(program);
+    command
         .env_clear()
         .env("PATH", TOOL_PATH)
         .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(io(&program.display().to_string()))?;
+        .stdin(Stdio::null());
+    let output = match control {
+        Some(c) => c.output(&mut command),
+        None => command.output(),
+    }
+    .map_err(io(&program.display().to_string()))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -158,14 +125,22 @@ fn run_tool(program: &Path, args: &[&str]) -> Result<()> {
     }
 }
 
-fn run_tool_output(program: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
+fn run_tool_output(
+    program: &Path,
+    args: &[&str],
+    control: Option<&CommandControl>,
+) -> Result<String> {
+    let mut command = Command::new(program);
+    command
         .env_clear()
         .env("PATH", TOOL_PATH)
         .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(io(&program.display().to_string()))?;
+        .stdin(Stdio::null());
+    let output = match control {
+        Some(c) => c.output(&mut command),
+        None => command.output(),
+    }
+    .map_err(io(&program.display().to_string()))?;
     if !output.status.success() {
         return Err(err(
             "source_oci_session_failed",
@@ -315,6 +290,18 @@ impl PrivateDockerSession {
         tools: SessionTools,
         egress: Option<SessionEgress>,
     ) -> Result<Self> {
+        Self::start_controlled(work_root, limits, tools, egress, None)
+    }
+    pub fn start_controlled(
+        work_root: &Path,
+        limits: &BuildLimits,
+        tools: SessionTools,
+        egress: Option<SessionEgress>,
+        control: Option<CommandControl>,
+    ) -> Result<Self> {
+        if let Some(control) = &control {
+            control.remaining().map_err(io("builder deadline"))?;
+        }
         if effective_uid() != Some(0) {
             return Err(refused(
                 "a private builder session must own a network namespace, a cgroup and a filesystem (root required)",
@@ -368,6 +355,13 @@ impl PrivateDockerSession {
                 )));
             }
         }
+        if tools
+            .buildx
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute() || !p.is_file())
+        {
+            return Err(refused("bound buildx is not an absolute file"));
+        }
         let controllers = read_trim(&Path::new(CGROUP_ROOT).join("cgroup.subtree_control"));
         if !["cpu", "memory", "pids"]
             .iter()
@@ -402,6 +396,7 @@ impl PrivateDockerSession {
             released: Cell::new(false),
             cgroup_made: false,
             egress,
+            control,
         };
         match session.setup() {
             Ok(()) => Ok(session),
@@ -423,7 +418,11 @@ impl PrivateDockerSession {
             .map_err(io("size session disk"))?;
         drop(image);
         let image = self.image.display().to_string();
-        run_tool(&self.tools.mkfs_ext4, &["-q", "-F", "-m", "0", &image])?;
+        run_tool(
+            &self.tools.mkfs_ext4,
+            &["-q", "-F", "-m", "0", &image],
+            self.operation_control().as_ref(),
+        )?;
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&self.fs_root)
@@ -436,6 +435,7 @@ impl PrivateDockerSession {
                 &image,
                 &self.fs_root.display().to_string(),
             ],
+            self.operation_control().as_ref(),
         )?;
         // One cgroup for the daemon and (through --cgroup-parent) every
         // build step; the limits apply to their sum.
@@ -459,11 +459,20 @@ impl PrivateDockerSession {
                 .create(self.fs_root.join(dir))
                 .map_err(io("create session layout"))?;
         }
+        if let Some(buildx) = &self.tools.buildx {
+            let plugins = self.fs_root.join("cli/cli-plugins");
+            fs::create_dir(&plugins).map_err(io("create private plugin directory"))?;
+            std::os::unix::fs::symlink(buildx, plugins.join("docker-buildx"))
+                .map_err(io("bind builder plugin"))?;
+        }
         // An empty daemon config: the host's daemon.json (mirrors, proxies,
         // registries, data root) never applies to a session.
         fs::write(self.fs_root.join("daemon.json"), "{}").map_err(io("daemon config"))?;
         let log = File::create(self.fs_root.join("dockerd.log")).map_err(io("daemon log"))?;
         let path = |p: &Path| p.display().to_string();
+        if let Some(control) = self.operation_control() {
+            control.remaining().map_err(io("daemon deadline"))?;
+        }
         let child = Command::new(&self.tools.sh)
             .env_clear()
             .env("PATH", TOOL_PATH)
@@ -507,7 +516,13 @@ impl PrivateDockerSession {
             .spawn()
             .map_err(io("start private daemon"))?;
         *self.daemon.borrow_mut() = Some(child);
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let remaining = self
+            .operation_control()
+            .map(|c| c.remaining())
+            .transpose()
+            .map_err(io("builder deadline"))?;
+        let deadline = Instant::now()
+            + remaining.map_or(Duration::from_secs(60), |d| d.min(Duration::from_secs(60)));
         loop {
             let exited = self
                 .daemon
@@ -561,7 +576,7 @@ impl PrivateDockerSession {
         let program = program.display().to_string();
         all.push(&program);
         all.extend_from_slice(args);
-        run_tool_output(&self.tools.nsenter, &all)
+        run_tool_output(&self.tools.nsenter, &all, self.operation_control().as_ref())
     }
 
     fn host_rule(&self, chain: &str, spec: &[String]) -> Result<()> {
@@ -576,7 +591,11 @@ impl PrivateDockerSession {
         args.extend(spec.iter().cloned());
         args.extend(["-m", "comment", "--comment", e.comment.as_str()].map(str::to_owned));
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_tool(&self.tools.iptables, &refs)?;
+        run_tool(
+            &self.tools.iptables,
+            &refs,
+            self.operation_control().as_ref(),
+        )?;
         let mut stored = spec.to_vec();
         stored.extend(["-m", "comment", "--comment", e.comment.as_str()].map(str::to_owned));
         e.host_rules.borrow_mut().push((chain.to_owned(), stored));
@@ -599,6 +618,7 @@ impl PrivateDockerSession {
             &[
                 "link", "add", &e.host_if, "type", "veth", "peer", "name", &e.ns_if,
             ],
+            self.operation_control().as_ref(),
         )?;
         run_tool(
             &self.tools.ip,
@@ -609,8 +629,13 @@ impl PrivateDockerSession {
                 "dev",
                 &e.host_if,
             ],
+            self.operation_control().as_ref(),
         )?;
-        run_tool(&self.tools.ip, &["link", "set", &e.host_if, "up"])?;
+        run_tool(
+            &self.tools.ip,
+            &["link", "set", &e.host_if, "up"],
+            self.operation_control().as_ref(),
+        )?;
         let gate = EgressGate::start(
             std::net::SocketAddr::from((e.host_ip, 0)),
             e.allowance.clone(),
@@ -631,7 +656,11 @@ impl PrivateDockerSession {
                 s("ACCEPT"),
             ],
         )?;
-        run_tool(&self.tools.ip, &["link", "set", &e.ns_if, "netns", &pid])?;
+        run_tool(
+            &self.tools.ip,
+            &["link", "set", &e.ns_if, "netns", &pid],
+            self.operation_control().as_ref(),
+        )?;
         for key in [
             "net.ipv6.conf.all.disable_ipv6=1",
             "net.ipv6.conf.default.disable_ipv6=1",
@@ -773,6 +802,16 @@ impl PrivateDockerSession {
         }
     }
 
+    fn operation_control(&self) -> Option<CommandControl> {
+        self.control.as_ref().map(|c| {
+            if self.released.get() {
+                CommandControl::cleanup(Duration::from_secs(20))
+            } else {
+                c.clone()
+            }
+        })
+    }
+
     fn command(&self) -> Command {
         let cli = self.fs_root.join("cli");
         let mut command = Command::new(&self.tools.docker);
@@ -789,12 +828,13 @@ impl PrivateDockerSession {
     }
 
     fn docker(&self, args: &[&str]) -> Result<String> {
-        let output = self
-            .command()
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
+        let mut command = self.command();
+        command.args(args).stdin(Stdio::null());
+        let output = match self.operation_control() {
+            Some(control) => control.output(&mut command),
+            None => command.output(),
+        }
+        .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
         if !output.status.success() {
             return Err(err(
                 "source_oci_builder_failed",
@@ -819,7 +859,11 @@ impl PrivateDockerSession {
         }
         if let Some(mut child) = self.daemon.borrow_mut().take() {
             // Graceful stop first so the daemon unmounts its own layers.
-            let _ = run_tool(&self.tools.kill, &["-TERM", &child.id().to_string()]);
+            let _ = run_tool(
+                &self.tools.kill,
+                &["-TERM", &child.id().to_string()],
+                self.operation_control().as_ref(),
+            );
             let deadline = Instant::now() + Duration::from_secs(20);
             while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
                 std::thread::sleep(Duration::from_millis(100));
@@ -845,7 +889,11 @@ impl PrivateDockerSession {
             }
         }
         for mount in mounts_under(&self.work_root) {
-            if let Err(e) = run_tool(&self.tools.umount, &[&mount.display().to_string()]) {
+            if let Err(e) = run_tool(
+                &self.tools.umount,
+                &[&mount.display().to_string()],
+                self.operation_control().as_ref(),
+            ) {
                 problems.push(format!("umount {}: {}", mount.display(), e.detail));
             }
         }
@@ -871,7 +919,11 @@ impl PrivateDockerSession {
         }
         if let Some(e) = &self.egress {
             if Path::new("/sys/class/net").join(&e.host_if).exists()
-                && let Err(error) = run_tool(&self.tools.ip, &["link", "del", &e.host_if])
+                && let Err(error) = run_tool(
+                    &self.tools.ip,
+                    &["link", "del", &e.host_if],
+                    self.operation_control().as_ref(),
+                )
             {
                 problems.push(format!("veth {}: {}", e.host_if, error.detail));
             }
@@ -884,12 +936,20 @@ impl PrivateDockerSession {
                 ];
                 args.extend(spec.iter().cloned());
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                if let Err(error) = run_tool(&self.tools.iptables, &refs) {
+                if let Err(error) = run_tool(
+                    &self.tools.iptables,
+                    &refs,
+                    self.operation_control().as_ref(),
+                ) {
                     problems.push(format!("host rule {chain}: {}", error.detail));
                 }
             }
-            let rules =
-                run_tool_output(&self.tools.iptables, &["-w", "5", "-S"]).unwrap_or_default();
+            let rules = run_tool_output(
+                &self.tools.iptables,
+                &["-w", "5", "-S"],
+                self.operation_control().as_ref(),
+            )
+            .unwrap_or_default();
             if rules.contains(&e.comment) {
                 problems.push(format!("host rules tagged {} remain", e.comment));
             }
@@ -990,6 +1050,24 @@ impl OciBuilder for DockerCliBuilder {
         tag: &str,
         timeout: Duration,
     ) -> Result<BuildOutcome> {
+        self.build_selected(
+            context,
+            &context.join(SELECTED_DOCKERFILE),
+            platform,
+            named_contexts,
+            tag,
+            timeout,
+        )
+    }
+    fn build_selected(
+        &self,
+        context: &Path,
+        dockerfile: &Path,
+        platform: &str,
+        named_contexts: &[(String, String)],
+        tag: &str,
+        timeout: Duration,
+    ) -> Result<BuildOutcome> {
         let mut command = self.session.command();
         command.args(["buildx", "build", "--builder", "default"]);
         match &self.session.egress {
@@ -1018,78 +1096,37 @@ impl OciBuilder for DockerCliBuilder {
             platform,
             "--file",
         ]);
-        command.arg(context.join(SELECTED_DOCKERFILE));
+        command.arg(dockerfile);
         for (name, target) in named_contexts {
             command
                 .arg("--build-context")
                 .arg(format!("{name}={target}"));
         }
         command.args(["--tag", tag, "--load"]).arg(context);
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
+        let remaining = self
+            .session
+            .operation_control()
+            .map(|c| c.remaining())
+            .transpose()
             .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
-        // Progress output is read as it arrives and bounded: only a tail is
-        // kept, and exceeding the bound aborts the build.
-        let mut stderr = child.stderr.take().expect("piped");
-        let exceeded = Arc::new(AtomicBool::new(false));
-        let flag = exceeded.clone();
-        let reader = std::thread::spawn(move || {
-            let mut kept: Vec<u8> = Vec::new();
-            let mut total = 0_u64;
-            let mut buffer = [0_u8; 8192];
-            while let Ok(n) = stderr.read(&mut buffer) {
-                if n == 0 {
-                    break;
-                }
-                total += n as u64;
-                kept.extend_from_slice(&buffer[..n]);
-                if kept.len() > 16 * 1024 {
-                    kept.drain(..kept.len() - 8 * 1024);
-                }
-                if total > MAX_BUILD_LOG_BYTES {
-                    flag.store(true, Ordering::SeqCst);
-                }
+        let budget = remaining.map_or(timeout, |d| d.min(timeout));
+        match CommandControl::cleanup(budget)
+            .output_with_limit(command.stdin(Stdio::null()), MAX_BUILD_LOG_BYTES)
+        {
+            Ok(output) if output.status.success() => Ok(BuildOutcome::Built),
+            Ok(output) => Ok(BuildOutcome::Failed {
+                log_tail: tail(&String::from_utf8_lossy(&output.stderr), 4000),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                Ok(BuildOutcome::TimedOut)
             }
-            String::from_utf8_lossy(&kept).into_owned()
-        });
-        let deadline = Instant::now() + timeout;
-        let result = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(Some(status)),
-                Ok(None) if Instant::now() >= deadline => break Ok(None),
-                Ok(None) if exceeded.load(Ordering::SeqCst) => break Ok(None),
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                Err(e) => break Err(e),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                Ok(BuildOutcome::LogExceeded)
             }
-        };
-        let status = match result {
-            Ok(status) => status,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(err("source_oci_builder_unavailable", e.to_string()));
-            }
-        };
-        if status.is_none() {
-            // The daemon-side build is stopped by the session release, which
-            // confirms that nothing remains in the session cgroup.
-            let _ = child.kill();
-            let _ = child.wait();
+            Err(error) => Err(err("source_oci_builder_unavailable", error.to_string())),
         }
-        let log = reader.join().unwrap_or_default();
-        Ok(match status {
-            _ if exceeded.load(Ordering::SeqCst) => BuildOutcome::LogExceeded,
-            None => BuildOutcome::TimedOut,
-            Some(s) if s.success() => BuildOutcome::Built,
-            Some(_) => BuildOutcome::Failed {
-                log_tail: tail(&log, 4000),
-            },
-        })
     }
+
     fn image_id(&self, reference: &str) -> Result<String> {
         Ok(self
             .session
@@ -1123,11 +1160,15 @@ impl OciBuilder for DockerCliBuilder {
         let listed = e.allowance.hosts.first().expect("validated allowlist");
         // A public address of a listed host, resolved on the host: dialing
         // it directly must fail just like any other destination.
-        let listed_ip = std::net::ToSocketAddrs::to_socket_addrs(&(listed.as_str(), 443))
-            .ok()
-            .and_then(|mut a| a.find(|a| a.is_ipv4()))
-            .map(|a| a.ip().to_string())
-            .unwrap_or_else(|| "1.1.1.1".to_owned());
+        let timeout = self
+            .session
+            .operation_control()
+            .map(|c| c.remaining())
+            .transpose()
+            .map_err(io("egress preflight deadline"))?
+            .unwrap_or(Duration::from_secs(3))
+            .min(Duration::from_secs(3));
+        let listed_ip = resolve_preflight_ip(listed.clone(), timeout)?;
         let gate = e.host_ip.to_string();
         let port = e.port.get().to_string();
         let script = r#"
@@ -1143,9 +1184,8 @@ d "$GATE" 22
 echo "UNLISTED $(p example.com:443)"
 echo "LISTED $(p "$LISTED":443)"
 "#;
-        let output = self
-            .session
-            .command()
+        let mut command = self.session.command();
+        command
             .args([
                 "run",
                 "--rm",
@@ -1171,9 +1211,12 @@ echo "LISTED $(p "$LISTED":443)"
                 "-c",
                 script,
             ])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
+            .stdin(Stdio::null());
+        let output = match self.session.operation_control() {
+            Some(control) => control.output(&mut command),
+            None => command.output(),
+        }
+        .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
         if !output.status.success() || lines.contains(&"NO_NC") {
@@ -1243,9 +1286,8 @@ echo "LISTED $(p "$LISTED":443)"
         }
         // Offline, read-only, unprivileged: what the package manager of the
         // built image reports, if it has one.
-        let output = self
-            .session
-            .command()
+        let mut command = self.session.command();
+        command
             .args([
                 "run",
                 "--rm",
@@ -1261,9 +1303,12 @@ echo "LISTED $(p "$LISTED":443)"
                 "-c",
                 "command -v apk >/dev/null 2>&1 && apk info -v 2>/dev/null | sort",
             ])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
+            .stdin(Stdio::null());
+        let output = match self.session.operation_control() {
+            Some(control) => control.output(&mut command),
+            None => command.output(),
+        }
+        .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
         let packages: Vec<String> = String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(str::trim)
@@ -1272,4 +1317,39 @@ echo "LISTED $(p "$LISTED":443)"
             .collect();
         Ok((output.status.success() && !packages.is_empty()).then_some(packages))
     }
+}
+
+/// Reuse netd's cancellable resolver rather than blocking libc DNS. A separate
+/// thread also allows this synchronous builder to run inside a Tokio caller.
+fn resolve_preflight_ip(host: String, timeout: Duration) -> Result<String> {
+    std::thread::spawn(move || {
+        use netd::net::resolver::{Resolver, SystemResolver};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(io("egress preflight resolver"))?;
+        runtime.block_on(async {
+            let resolver = SystemResolver::new()
+                .map_err(|e| err("source_oci_egress_preflight_unavailable", e.to_string()))?;
+            let options = ato_ipc::net::resolver::ResolveOptions {
+                timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+            };
+            let record = tokio::time::timeout(timeout, resolver.resolve(&host, &options))
+                .await
+                .map_err(|_| err("source_oci_egress_preflight_unavailable", "DNS deadline"))?
+                .map_err(|e| err("source_oci_egress_preflight_unavailable", e.to_string()))?;
+            record
+                .addrs_v4
+                .first()
+                .map(ToString::to_string)
+                .ok_or_else(|| err("source_oci_egress_preflight_unavailable", "no IPv4 address"))
+        })
+    })
+    .join()
+    .map_err(|_| {
+        err(
+            "source_oci_egress_preflight_unavailable",
+            "resolver stopped",
+        )
+    })?
 }

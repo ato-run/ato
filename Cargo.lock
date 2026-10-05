@@ -180,6 +180,7 @@ name = "ato-adapter-oci"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -659,6 +660,7 @@ name = "ato-portable-application"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-oci",
  "ato-computation",
  "ato-formation",
  "ato-ipc",
