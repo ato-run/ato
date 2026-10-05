@@ -5,8 +5,9 @@ No deployment, remote migration, feature flag or ordinary Run permission.
 
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
 `9e0031900836090612b94e775e26f980a68f32d7`. Latest code candidate:
-Ato `1de0e3a008f73226171d83fa026c50ec20dde976` (status transport retries,
-#1465); latest actual SVGOMG/OCI source execution uses that same code, while
+Ato `e185f2d97d869615e23a83f950efb147d317f6b7` (explicit verification state
+bindings, #1466); latest actual SVGOMG/OCI source execution used status retry
+code `1de0e3a008f73226171d83fa026c50ec20dde976` (#1465), while
 changedetection.io source/functional Runtime used
 `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`. Both use API
 `fa825a176b715962351466dc1a7149bec5979c7f`, prompt 12. Receipt authority
@@ -273,6 +274,33 @@ Both are submitted, awaiting assessment, with zero outstanding reservations.
 Combined final-pin fault proof SHA-256
 `91f5474fbe2d469fffd84b723bf53443ad95c1c6037d960f11a0449c0d112a70`.
 These regressions add no new unique OSS app. API-provider trials remain zero.
+
+## Verification state connection
+
+[Explicit Runtime state bindings](formation-verification-state-bindings-20261002.md)
+at `e185f2d9` preserve assigned logical/private state resolution and prevent
+candidate cleanup from deleting a borrowed working copy. Local Runtime 85 PASS
+plus one added launcher rejection case PASS (86 distinct), Worker 75 PASS;
+formatting and Runtime/Worker/CLI all-target clippy PASS. Existing API state
+tests are 39 PASS / 1 failure, identically reproduced at merged main `9e003190`.
+The recovery fixture reads an uncreated Run row; its failure is preserved.
+
+Current Linux retained functional trial reuses changedetection.io trial-14
+artifact without feeding it to the API provider. First and second actual
+contained launches at `e185f2d9` passed unchanged K. The first non-PTY helper
+received stdin EOF and confirmed cleanup before UI interaction; preserve that
+receipt/cleanup evidence. A separately controlled second launch created, edited
+and paused a test watch through Chromium, then confirmed stop. The third launch
+found the same title and paused state in a fresh process and browser context,
+passed unchanged K, deleted the own test watch and confirmed final cleanup.
+All three fresh receipts PASS, zero allowed Runtime network bytes. Proof SHA-256
+`f925202933e2e2ea25b4f00e118e5232650c4cc891a2b24abb63ad462790e5ac`.
+Preregistration, additive harness correction and
+helper versions are separately recorded. This is an explicitly owned local
+state-binding fixture, not Coordinator state-assignment authentication. It does
+not complete Kutt, current-owner/current-assignment or stale-fence acceptance.
+The production Worker still has no borrowed state transport and does not
+advertise persistent state on that unbound path. No ordinary Run/deploy grant.
 
 ## Accounting
 

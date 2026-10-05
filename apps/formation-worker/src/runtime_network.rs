@@ -2996,6 +2996,7 @@ fn execute_retained_ticket(
                         runtime_gate: &s.sockets
                             [&ato_formation::requirements::ExecutionPhase::Runtime],
                         variables: &resolved_variables,
+                        state: None,
                     },
                 ),
         },

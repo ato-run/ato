@@ -3,7 +3,7 @@
 use crate::{
     build_sandbox::NetworkPolicy,
     executor::ExecutedCandidate,
-    formation_realizer::CandidateLauncher,
+    formation_realizer::{CandidateLauncher, RuntimeBindings},
     plan::{BoundCandidate, PlannedCandidate},
     realize::{CandidateRealizer, RealizeFailure, Realized},
     static_lane::StaticFormationOutput,
@@ -27,6 +27,9 @@ pub struct RetainedExploration<'a> {
     pub ceiling: &'a ato_formation::requirements::ExecutionRequirements,
     pub runtime_gate: &'a Path,
     pub variables: &'a [crate::variables::ResolvedVariable],
+    /// Explicitly assigned, caller-owned state for functional verification.
+    /// A descriptor/Search does not authorize or resolve this binding.
+    pub state: Option<&'a crate::state_bindings::VerificationStateBindings<'a>>,
 }
 
 pub struct RetainedCandidateRealizer<'a> {
@@ -210,8 +213,11 @@ impl RetainedCandidateRealizer<'_> {
             executed,
             attempt_id,
             attempt_root,
-            self.exploration.as_ref().map(|e| e.runtime_gate),
-            self.exploration.as_ref().map_or(&[], |e| e.variables),
+            &RuntimeBindings {
+                gate: self.exploration.as_ref().map(|e| e.runtime_gate),
+                variables: self.exploration.as_ref().map_or(&[], |e| e.variables),
+                state: self.exploration.as_ref().and_then(|e| e.state),
+            },
             control,
         )?;
         // This is an existing immutable object, not a new publication. A fresh
