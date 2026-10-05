@@ -14,8 +14,9 @@ SPEC.loader.exec_module(OWNER)
 
 def view(rounds=1, reserved=0, state='running'):
     return {'search_id': 'search', 'configuration_ref': 'sha256:fixture', 'deadline_ms': 123,
+            'input': None,
             'exchanges_used': rounds, 'inspection_exchanges_completed': 0, 'search_elapsed_ms': 1000,
-            'progress': {'status': state, 'rounds_consumed': rounds,
+            'progress': {'status': state, 'rounds_consumed': rounds, 'unresolved_attempts': 0,
                          'search_budget': {'attempts': {'used': 0, 'reserved': reserved}}}}
 
 class OwnerAdmissionTests(unittest.TestCase):
@@ -152,6 +153,66 @@ class OwnerAdmissionTests(unittest.TestCase):
         spawn = Mock()
         report = OWNER.guarded_start(self.plan, self.ledger, self.args, spawn)
         self.assertFalse(report['admitted']); spawn.assert_not_called()
+
+    def retirement_fixture(self, snapshots=None):
+        self.args.connection.write_text(json.dumps({
+            'search_id': 'search', 'configuration_ref': 'sha256:fixture'}))
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        ledger['entries'] = [dict(self.entry(snapshots), native_exit_code=0)]
+        OWNER.publish(self.ledger, ledger)
+
+    def test_terminal_retirement_audits_without_reopening_dead_Bridge(self):
+        self.retirement_fixture([view(3, reserved=4, state='cancelled')])
+        report = OWNER.retire_search(self.plan, self.ledger, self.args,
+                                    reader=lambda _: view(1, state='cancelled'))
+        self.assertTrue(report['terminal_Search_retired'])
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        unavailable = Mock(side_effect=RuntimeError('Bridge is closed'))
+        report = OWNER.refresh(self.plan, ledger, Path('ato'), reader=unavailable)
+        unavailable.assert_not_called()
+        self.assertEqual(report['used']['D_rounds'], 3)
+        self.assertEqual(report['used']['Runtime_attempts'], 4)
+        self.assertEqual(report['used']['searches'], 1)
+        self.assertEqual(report['held']['searches'], 0)
+        self.assertEqual(ledger['entries'][0]['snapshots'][0]['deadline_ms'], 123)
+
+    def test_old_terminal_snapshot_cannot_retire_live_unknown_or_reserved_attempt(self):
+        self.retirement_fixture([view(state='satisfied')])
+        for current in [view(state='running'), view(reserved=1, state='unsatisfied'),
+                        view(state='unknown')]:
+            with self.assertRaisesRegex(ValueError, 'terminal_reconciliation_required'):
+                OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: current)
+        current = view(state='unsatisfied'); current['progress']['unresolved_attempts'] = 1
+        with self.assertRaisesRegex(ValueError, 'terminal_reconciliation_required'):
+            OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: current)
+        self.assertNotIn('terminal_retirement', OWNER.read_ledger(self.plan, self.ledger)['entries'][0])
+
+    def test_changed_retirement_snapshot_descriptor_and_missing_completion_fail_closed(self):
+        self.retirement_fixture()
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        del ledger['entries'][0]['native_exit_code']; OWNER.publish(self.ledger, ledger)
+        with self.assertRaisesRegex(ValueError, 'Native_completion_required'):
+            OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: view(state='satisfied'))
+        ledger['entries'][0]['native_exit_code'] = 0; OWNER.publish(self.ledger, ledger)
+        OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: view(state='satisfied'))
+        original = OWNER.read_ledger(self.plan, self.ledger)
+        for field in ['deadline_ms', 'exchanges_used']:
+            ledger = json.loads(json.dumps(original)); ledger['entries'][0]['snapshots'][0][field] += 1
+            with self.assertRaisesRegex(ValueError, 'terminal_evidence_changed'):
+                OWNER.refresh(self.plan, ledger, Path('ato'))
+        self.args.connection.write_text(json.dumps({'search_id': 'different'}))
+        with self.assertRaisesRegex(ValueError, 'terminal_evidence_changed'):
+            OWNER.refresh(self.plan, original, Path('ato'))
+
+    def test_retired_Search_cannot_launch_another_Native_context(self):
+        self.retirement_fixture()
+        OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _: view(state='satisfied'))
+        execute = Mock()
+        args = SimpleNamespace(ato=Path('ato'), connection=self.args.connection,
+                               native_launcher=Path('native-session.py'), native_args=['--reconcile-only'])
+        with self.assertRaisesRegex(ValueError, 'Search_retired'):
+            OWNER.guarded_native(self.plan, self.ledger, args, execute)
+        execute.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
