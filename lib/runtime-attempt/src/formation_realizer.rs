@@ -123,6 +123,13 @@ pub(crate) struct CandidateLauncher<'a> {
     pub shim: &'a Path,
     pub network: NetworkPolicy,
 }
+
+#[derive(Default)]
+pub(crate) struct RuntimeBindings<'a> {
+    pub gate: Option<&'a Path>,
+    pub variables: &'a [crate::variables::ResolvedVariable],
+    pub state: Option<&'a crate::state_bindings::VerificationStateBindings<'a>>,
+}
 impl CandidateLauncher<'_> {
     pub(crate) fn realize(
         &self,
@@ -130,7 +137,13 @@ impl CandidateLauncher<'_> {
         attempt_id: &str,
         attempt_root: &Path,
     ) -> Result<Realized, RealizeFailure> {
-        self.realize_inner(executed, attempt_id, attempt_root, None, &[], None)
+        self.realize_controlled(
+            executed,
+            attempt_id,
+            attempt_root,
+            &RuntimeBindings::default(),
+            None,
+        )
     }
 
     pub(crate) fn realize_controlled(
@@ -138,19 +151,7 @@ impl CandidateLauncher<'_> {
         executed: ExecutedCandidate,
         attempt_id: &str,
         attempt_root: &Path,
-        gate: Option<&Path>,
-        variables: &[crate::variables::ResolvedVariable],
-        control: Option<&crate::control::ExecutionControl>,
-    ) -> Result<Realized, RealizeFailure> {
-        self.realize_inner(executed, attempt_id, attempt_root, gate, variables, control)
-    }
-    fn realize_inner(
-        &self,
-        executed: ExecutedCandidate,
-        attempt_id: &str,
-        attempt_root: &Path,
-        gate: Option<&Path>,
-        variables: &[crate::variables::ResolvedVariable],
+        bindings: &RuntimeBindings<'_>,
         control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let _launch = control
@@ -162,13 +163,18 @@ impl CandidateLauncher<'_> {
                     workspace_root,
                     attempt_id,
                     attempt_root,
-                    gate,
-                    variables,
+                    bindings,
                     control,
                 )?;
                 (candidate, evidence, "process")
             }
             ExecutedCandidate::StaticWeb { output } => {
+                if bindings.state.is_some() {
+                    return Err(RealizeFailure::Launch {
+                        error: anyhow::anyhow!("verification_state_requires_process_route"),
+                        evidence: None,
+                    });
+                }
                 let (candidate, evidence) =
                     realize_static(output, self.planned).map_err(|error| {
                         RealizeFailure::Launch {
@@ -201,8 +207,7 @@ impl CandidateLauncher<'_> {
         workspace_root: &Path,
         attempt_id: &str,
         attempt_root: &Path,
-        runtime_gate: Option<&Path>,
-        variables: &[crate::variables::ResolvedVariable],
+        bindings: &RuntimeBindings<'_>,
         control: Option<&crate::control::ExecutionControl>,
     ) -> Result<(Box<dyn RunningCandidate>, RealizationEvidence), RealizeFailure> {
         let planned = self.planned;
@@ -233,7 +238,7 @@ impl CandidateLauncher<'_> {
             // no egress, TCP bind only on the allocated host ports. A
             // `dependency-resolution` request widens the BUILD, never the run.
             build_network: crate::attempt::network_name(self.network).to_owned(),
-            candidate_network: if runtime_gate.is_some() {
+            candidate_network: if bindings.gate.is_some() {
                 "isolated namespace; declared ingress; phase-scoped HTTPS egress broker"
             } else {
                 "no-egress; tcp bind limited to allocated host ports"
@@ -251,8 +256,13 @@ impl CandidateLauncher<'_> {
             shim: self.shim,
             attempt_id,
         };
-        let launched =
-            TemporaryRealization::launch_controlled(&request, runtime_gate, variables, control);
+        let launched = TemporaryRealization::launch_controlled_with_state(
+            &request,
+            bindings.gate,
+            bindings.variables,
+            bindings.state,
+            control,
+        );
         let realization = match launched {
             Ok(realization) => realization,
             Err(error) => {
