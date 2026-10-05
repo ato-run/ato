@@ -19,6 +19,11 @@ SKILL = Path(__file__).resolve().parents[1]
 MCP_TOOLS = ["status", "next", "submit"]
 CANARIES = ["source", "owner-credential", "session-capability", "private-grant", "runtime-ticket",
             "state-db", "old-measurements", "credential-store-file"]
+BOUNDARY_CHECKS = {"public_skill_read", "public_skill_write_denied", "private_classes_read_denied",
+                   "private_classes_write_denied", "scratch_write", "symlink_escape_denied",
+                   "fork_inherits_denial", "source_direct_launch_denied", "shell_exec_denied",
+                   "security_exec_denied", "curl_exec_denied", "docker_unix_socket_denied",
+                   "arbitrary_tcp_denied"}
 MACH_AUTH = ["com.apple.secd", "com.apple.SecurityServer"]
 MACHO = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
          b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
@@ -276,14 +281,11 @@ def verify(root):
     return info
 
 
-def probe(root):
+def probe_boundary(public, scratch, work, policy=None, relay_socket=None):
+    """Measure the model policy before an agent turn; only bool/digests escape."""
     if sys.platform != "darwin":
         reject("native_macos_required")
-    root = safe_path(root)
-    info = verify(root)
-    if (root / "probe").exists() or (root / "os-fixture.json").exists():
-        reject("fresh_probe_required")
-    work = root / "probe"
+    public, scratch = safe_path(public), safe_path(scratch)
     work.mkdir(mode=0o700)
     private = work / "private"
     private.mkdir(mode=0o700)
@@ -297,41 +299,47 @@ def probe(root):
     executable = private / "direct-launch"
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o700)
-    escape = root / "public/canary-escape"
+    escape = public / "canary-escape"
     escape.symlink_to(private / "owner-credential")
-    source = root / "public/skill/scripts/producer-isolation-probe.c"
+    source = public / "skill/scripts/producer-isolation-probe.c"
     runner = work / "runner"
-    clean_env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": str(root / "scratch"),
+    clean_env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": str(scratch),
                  "LANG": "C", "LC_ALL": "C"}
     compiled = subprocess.run(["/usr/bin/clang", "-Wall", "-Wextra", "-Werror", "-O2",
                                str(source), "-o", str(runner)], env=clean_env,
                               capture_output=True, timeout=60)
     if compiled.returncode != 0:
         reject("fixture_compile_failed")
-    text = profile(root / "public", root / "scratch", [runner], auth_ipc=True,
-                   relay_socket=info.get("relay_socket"))
-    policy = work / "fixture.sb"
-    policy.write_text(text)
+    base_policy = policy or profile(public, scratch, [], auth_ipc=True, relay_socket=relay_socket)
+    text = base_policy
+    # Only the probe executable is added. Its private parent is metadata-only;
+    # no file or network access is granted to make a negative check pass.
+    text += f'(allow process-exec (literal {quoted(runner)}))\n'
+    text += f'(allow file-read* (literal {quoted(runner)}))\n'
+    text += ''.join(f'(allow file-read-metadata (literal {quoted(p)}))\n'
+                    for p in runner.parents if str(p) != '/')
+    policy_file = work / "fixture.sb"
+    policy_file.write_text(text)
     endpoint = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     endpoint.bind(("127.0.0.1", 0))
     endpoint.listen()
     docker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     # Relative socket paths avoid macOS's short Unix socket path limit.
-    docker_path = root / "scratch/docker.sock"
+    docker_path = scratch / "docker.sock"
     try:
         previous_directory = Path.cwd()
         try:
-            os.chdir(root)
-            docker.bind("scratch/docker.sock")
+            os.chdir(scratch)
+            docker.bind("docker.sock")
         finally:
             os.chdir(previous_directory)
         docker.listen()
-        completed = subprocess.run(["/usr/bin/sandbox-exec", "-f", str(policy), str(runner),
-                                    str(root / "public/skill/SKILL.md"), str(private),
-                                    str(root / "scratch"), str(escape), "../../scratch/docker.sock",
+        completed = subprocess.run(["/usr/bin/sandbox-exec", "-f", str(policy_file), str(runner),
+                                    str(public / "skill/SKILL.md"), str(private),
+                                    str(scratch), str(escape), "docker.sock",
                                     str(endpoint.getsockname()[1])] +
-                                   ([info["relay_socket"]] if info.get("relay_socket") else []), env=clean_env,
-                                   cwd=root / "public/project", capture_output=True, timeout=30)
+                                   ([str(relay_socket)] if relay_socket else []), env=clean_env,
+                                   cwd=scratch, capture_output=True, timeout=30)
     finally:
         endpoint.close()
         docker.close()
@@ -342,29 +350,26 @@ def probe(root):
         reject("fixture_canary_exposure")
     if completed.returncode != 0 or len(completed.stdout) > 8192:
         failure = {"schema": "ato.formation-producer-isolation-os-fixture-failure/1",
-                   "measurement_id": info["measurement_id"], "execution_pin": info["execution_pin"],
-                   "public_package_sha256": info["public_package_sha256"],
                    "code": "kernel_fixture_failed", "fixture_returncode": completed.returncode,
                    "stdout_bytes": len(completed.stdout), "stderr_bytes": len(completed.stderr),
                    "native_agent_or_auth_invoked": False, "native_acceptance_ready": False}
-        (root / "os-fixture-failure.json").write_text(json.dumps(failure, indent=2) + "\n")
+        (work / "os-fixture-failure.json").write_text(json.dumps(failure, indent=2) + "\n")
         reject("kernel_fixture_failed")
     try:
         checks = json.loads(completed.stdout)
     except (ValueError, UnicodeError):
         reject("fixture_result_invalid")
-    if not isinstance(checks, dict) or not checks or any(value is not True for value in checks.values()):
+    if (not isinstance(checks, dict) or not BOUNDARY_CHECKS.issubset(checks)
+            or any(value is not True for value in checks.values())):
         reject("kernel_boundary_not_enforced")
     for name, value in zip(CANARIES, values):
         if (private / name).read_bytes() != value:
             reject("private_fixture_changed")
-    verify(root)
-    result = {
+    return {
         "schema": "ato.formation-producer-isolation-os-fixture/1",
-        "measurement_id": info["measurement_id"], "execution_pin": info["execution_pin"],
-        "public_package_sha256": info["public_package_sha256"],
         "environment": {"platform": platform.platform(), "machine": platform.machine()},
-        "runner_sha256": digest(runner), "profile_sha256": digest(policy),
+        "runner_sha256": digest(runner), "profile_sha256": digest(policy_file),
+        "model_policy_sha256": hashlib.sha256(base_policy.encode()).hexdigest(),
         "checks": checks, "private_fixture_classes": CANARIES,
         "private_fixture_class_count": len(CANARIES), "fixture_canary_output_exposure": False,
         "captured_output_sha256": hashlib.sha256(completed.stdout + completed.stderr).hexdigest(),
@@ -375,6 +380,18 @@ def probe(root):
         "Formation_inference_dispatches": 0, "paid_API_calls": 0, "real_Runtime_attempts": 0,
         "agent_internal_LLM_calls": "unknown", "agent_internal_cost": "unknown",
     }
+
+
+def probe(root):
+    root = safe_path(root)
+    info = verify(root)
+    if (root / "probe").exists() or (root / "os-fixture.json").exists():
+        reject("fresh_probe_required")
+    result = probe_boundary(root / "public", root / "scratch", root / "probe",
+                            relay_socket=info.get("relay_socket"))
+    verify(root)
+    result.update(measurement_id=info["measurement_id"], execution_pin=info["execution_pin"],
+                  public_package_sha256=info["public_package_sha256"])
     (root / "os-fixture.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
