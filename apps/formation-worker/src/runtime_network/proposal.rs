@@ -758,11 +758,7 @@ impl Submission {
                             exit_code: execution_fact(a)["exit_code"]
                                 .as_i64()
                                 .and_then(|n| i32::try_from(n).ok()),
-                            log_tail: public_log_tail(
-                                execution_fact(a)["log_tail"]
-                                    .as_str()
-                                    .unwrap_or_else(|| f["message"].as_str().unwrap_or("")),
-                            ),
+                            log_tail: failure_log_tail(a),
                             artifacts: artifact_refs(a),
                             network_denials: denied_network(a),
                             authority_denials: denied_authority(a),
@@ -1594,6 +1590,15 @@ fn public_log_tail(text: &str) -> String {
         out.remove(0);
     }
     out
+}
+
+fn failure_log_tail(attempt: &Value) -> String {
+    let fact = execution_fact(attempt);
+    let execution = fact["log_tail"].as_str().unwrap_or("");
+    let message = attempt["failure"]["message"].as_str().unwrap_or("");
+    // A successful build audit must not hide a later launch/K failure. Put
+    // the typed failure last so the existing bounded/redacted tail retains it.
+    public_log_tail(&format!("{execution}\n[failure] {message}"))
 }
 
 fn denied_network(attempt: &Value) -> Vec<ato_formation::requirements::NetworkRequirement> {
