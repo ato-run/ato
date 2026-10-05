@@ -5,6 +5,10 @@ Historical ledgers and provider configurations remain immutable. The selected
 OSS and cases are preregistered in formation-codex-prototype-selection.json;
 executable, input, output and resource hashes are frozen before actual execution.
 
+The later shared-agent Session extension below is implemented but still awaits
+actual Native Codex/Claude Code acceptance. The original prototype measurements
+are not measurements of this extension.
+
 The common CandidateProducer input contains frozen K/source identity, bounded
 public inventory and acquired source context, operation/toolchain capabilities,
 the frozen sandbox ceiling, past canonical D/validation/execution evidence and
@@ -88,3 +92,74 @@ submission, and unresolved workload effects keep their existing UNKNOWN fence.
 No allowance, round, Search deadline, reservation or cost is reset. Old records
 with no pre-dispatch fact retain their original classification. Receiver support
 and its additive migration must precede sending the new optional field.
+
+## Shared-agent Session extension
+
+`agent_session` accepts a frozen `agent` containing `kind` (`codex` or
+`claude_code`), observed product `version`, and optional observed `model`.
+Unknown model information remains absent in metadata and `unknown` in the
+provider model field. The legacy `codex_session` / `codex-session` configuration
+omits this field; its serialized bytes and digest retain their old meaning.
+Agent metadata participates in the new configuration digest and cannot be
+changed on reconnect. No automatic agent switch or direct LLM API fallback is
+provided. The independent API adapter remains available under its own explicit
+configuration and existing authority.
+
+The Owner uses the existing approved plan and `ato form --session-bridge PATH`.
+The Producer uses `ato form-session` or the same four Session MCP tools:
+`status`, `next`, `submit`, and `cancel`. Starting, resuming, granting execution,
+claiming attempts, and issuing receipts remain Owner/Coordinator/Rust concerns.
+The external broker and Producer-only descriptor are specified in
+[FORMATION_SESSION_PRODUCER_RELAY.md](FORMATION_SESSION_PRODUCER_RELAY.md).
+
+One exclusive Owner journal lock, saved start clock, original Search deadline,
+immutable exchange windows, input digest and exchange identifier govern the
+Session. `next` reads an already saved input without allocating another
+exchange. `submit` atomically publishes an input-bound typed inspection,
+proposal or decline. An identical saved response is idempotent; conflicting,
+stale, malformed or differently bound responses are rejected. Reconnect must
+reconcile saved responses, unacknowledged completions and running/UNKNOWN
+attempts before continuing. It must not create a new inference or execution to
+resolve uncertainty. Cancellation is saved before the API request; lost
+cancellation ACK closes new submissions until Owner reconciliation.
+
+Search budgets distinguish exchanges, D rounds, completed inspection exchanges,
+Runtime attempts and elapsed time. Session exchange counts do not imply internal
+LLM calls, tokens or cost: these remain `unknown`. Waiting, reconnecting and
+provider unavailability preserve all consumed allowances and the original
+deadline. ACK, confirmed execution stop, reservation release and private-input
+cleanup are independently observed; a terminal status alone is not completion.
+
+### Public input projection and digest
+
+The owner-saved `ato.formation-reasoning-input/1` bytes remain immutable.
+The Session view labels its separate model-visible projection as
+`ato.formation-session-public-input/1` and declares
+`input_sha256_scope = owner_saved_input`. The Producer must echo the provided
+digest and exchange identifier; hashing the projection is not a replacement
+for the saved-input digest.
+
+Owner variable metadata is strictly parsed and checked against the frozen
+Source closure and Search scope before exposing only typed slot requirements,
+reuse/expiry/revocation metadata. Free-text purpose, service, endpoint, account,
+tenant, grant candidates and application/scope lists are not projected. Runtime
+facts are allowlisted from the same validated typed operation catalog; unknown
+toolchain/image prefixes, host paths, arbitrary health text and unexpected
+metadata are omitted. This projection does not grant access to owner values,
+private grants, Runtime tickets, credentials or the Source filesystem. Whole
+process/tool isolation is a separate acceptance condition, not a consequence
+of file mode 0600 or Skill prose.
+
+### Saved response after a closed deadline
+
+After the immutable exchange or Search deadline closes, an already published
+response can be validated and recorded once as `session_closed_response`.
+The optional record contains the original exchange deadline, the minimum
+admission deadline and observation time. Its absence preserves old record
+serialization and interpretation. The public view then returns no new input,
+`closed_response_reconciled`, and an Owner reconciliation operation. This is an
+evidence receipt only: it cannot return a proposal for lowering, inspect more
+Source, launch Runtime, reset budget or revive a terminal Search. The requester
+classifies this path as timeout instead of provider infrastructure failure.
+Tampered responses, mismatched windows, ambiguous pending exchanges and UNKNOWN
+effects retain their existing rejection/fence behavior.
