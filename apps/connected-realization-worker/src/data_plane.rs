@@ -1076,4 +1076,26 @@ mod portable_tests {
         assert!(error.to_string().contains("unsupported_capability"));
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_asset_fails_before_http_or_directory_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let client = Client::builder().no_proxy().build().unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let data = LeaseData {
+            client: &client,
+            base: &base,
+            token: "fixture-not-a-credential",
+            lease_id: "unsupported-platform",
+        };
+        let error = data.asset("ast_fixture", root.path()).unwrap_err();
+        assert!(error.to_string().contains("unsupported_capability"));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(
+            server.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
