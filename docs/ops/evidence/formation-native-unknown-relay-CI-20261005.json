@@ -1,0 +1,174 @@
+{
+  "schema": "ato.formation-reconciliation-relay-ci/1",
+  "runs": [
+    {
+      "run_id": 37289335413,
+      "head": "438efd6a864a1edaba7a89ac8a78a9643f97eea6",
+      "url": "https://github.com/ato-run/ato/actions/runs/37289335413",
+      "conclusion": "success",
+      "jobs": [
+        {
+          "name": "cli (windows-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/ato-run/ato/actions/runs/37289335413/job/111695777538",
+          "completed_at": "2026-10-05T09:24:31Z",
+          "tests_and_clippy_steps": [
+            {
+              "name": "Windows durable attempt journal",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "name": "cli (ubuntu-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/ato-run/ato/actions/runs/37289335413/job/111695777707",
+          "completed_at": "2026-10-05T09:22:28Z",
+          "tests_and_clippy_steps": [
+            {
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "name": "cli (macos-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/ato-run/ato/actions/runs/37289335413/job/111695777825",
+          "completed_at": "2026-10-05T09:21:58Z",
+          "tests_and_clippy_steps": [
+            {
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": 37289489916,
+      "head": "78c257fdd7d461984a72c1548a500761887b25a9",
+      "url": "https://github.com/ato-run/ato/actions/runs/37289489916",
+      "conclusion": "success",
+      "jobs": [
+        {
+          "name": "cli (macos-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/ato-run/ato/actions/runs/37289489916/job/111696271051",
+          "completed_at": "2026-10-05T09:24:22Z",
+          "tests_and_clippy_steps": [
+            {
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "name": "cli (ubuntu-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/ato-run/ato/actions/runs/37289489916/job/111696271128",
+          "completed_at": "2026-10-05T09:23:15Z",
+          "tests_and_clippy_steps": [
+            {
+              "name": "Windows durable attempt journal",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "name": "cli (windows-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/ato-run/ato/actions/runs/37289489916/job/111696271129",
+          "completed_at": "2026-10-05T09:26:46Z",
+          "tests_and_clippy_steps": [
+            {
+              "name": "Windows durable attempt journal",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "local_checks": {
+    "CLI_library_tests": 57,
+    "MCP_tests_subset": 28,
+    "MCP_startup_argument_tests": 1,
+    "Skill_tests": 44,
+    "strict_clippy": "PASS: cargo clippy -p ato-cli --all-targets --all-features --locked -- -D warnings"
+  },
+  "final_integration_CI_completed": false,
+  "real_Native_reconciliation_after_fix": "not run; additional measurement approval pending"
+}
