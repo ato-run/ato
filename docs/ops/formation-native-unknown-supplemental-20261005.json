@@ -8,7 +8,7 @@
     "exchanges": 3,
     "Runtime_attempts": 1,
     "inspections": 2,
-    "sequential_elapsed_seconds": 1200,
+    "sequential_elapsed_seconds": 2400,
     "searches": 1
   },
   "previous_campaign": {
@@ -19,23 +19,19 @@
   },
   "normal_Run_authorized": false,
   "direct_API_budget_changed": false,
-  "execution_status": "prepared_not_started",
+  "execution_status": "ended_without_runtime_start",
   "admission_guard": "native-session-owner.py before Search creation and Native launch",
-  "actual_admission_or_runtime_execution": false,
+  "actual_admission_or_runtime_execution": true,
   "gate": {
     "completion_silence_unknown_timeout_seconds": 1800,
-    "approved_wall_clock_seconds": 1200,
-    "reason": "Pure completion/ACK transport loss cannot become genuine Coordinator UNKNOWN within the approved wall clock. Do not alter timestamps, product timeout or the old campaign.",
-    "adjustment_requested": [
-      "40 minute wall clock, other ceilings unchanged",
-      "20 minute wall clock plus actual Runtime stop/restart and durable started_unfinished report"
-    ],
-    "adjustment_approved": false
+    "approved_wall_clock_seconds": 2400,
+    "adjustment_approved": true,
+    "reason": "40 minute wall clock explicitly authorized; actual Native declined for absent owner isolation confirmation before Runtime. Search ceiling 1 consumed; no retry or reset authorized."
   },
   "actual_new_consumption": {
-    "Searches": 0,
-    "D_rounds": 0,
-    "exchanges": 0,
+    "Searches": 1,
+    "D_rounds": 1,
+    "exchanges": 1,
     "Runtime_attempts": 0,
     "inspections": 0
   },
