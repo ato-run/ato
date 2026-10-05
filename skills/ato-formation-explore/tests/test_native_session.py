@@ -14,6 +14,19 @@ SPEC.loader.exec_module(NATIVE)
 
 
 class NativeAdmissionTests(unittest.TestCase):
+    def test_owner_confirmation_requires_measured_complete_isolation(self):
+        proof = {"schema": "ato.formation-producer-isolation-os-fixture/1",
+                 "private_fixture_class_count": 8,
+                 "model_policy_sha256": "a" * 64,
+                 "checks": {key: True for key in NATIVE.ISOLATION.BOUNDARY_CHECKS}}
+        self.assertIn("Owner startup confirmation", NATIVE.owner_context(proof, "codex"))
+        for broken in ({}, dict(proof, checks={}), dict(proof, checks={"denied": False}),
+                       dict(proof, checks={"private_classes_read_denied": True}),
+                       dict(proof, model_policy_sha256='invalid'),
+                       dict(proof, private_fixture_class_count=7)):
+            with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, "isolation_evidence_required"):
+                NATIVE.owner_context(broken, "codex")
+
     def setUp(self):
         self.binding = {"search_id": "search-fixture", "configuration_ref": "sha256:" + "a" * 64,
                         "agent": {"kind": "codex", "version": "0.160.0"}}
@@ -41,15 +54,27 @@ class NativeAdmissionTests(unittest.TestCase):
         self.assertEqual(NATIVE.admission(view, self.binding, "codex", "0.160.0", True),
                          self.view["deadline_ms"])
         self.assertEqual(NATIVE.RECONCILE_TOOLS, ["status", "next"])
-        for change in ({"deadline_ms": 1}, {"connected": False},
+        for change in ({"deadline_ms": 0}, {"input": {"instructions": "new inference"}},
                        {"progress": {"status": "cancelled", "unresolved_attempts": 1,
                                      "attempts": [{"status": "unknown"}]}},
                        {"progress": {"status": "running", "unresolved_attempts": 1,
                                      "attempts": [{"status": "claimed"}]}}):
             with self.subTest(change=change), self.assertRaises(NATIVE.ISOLATION.Rejected):
                 NATIVE.admission(dict(view, **change), self.binding, "codex", "0.160.0", True)
+        disconnected = dict(view, connected=False, deadline_ms=1,
+                            next_operation="owner_reconnect_or_assess", exchange=None)
+        self.assertEqual(NATIVE.admission(disconnected, self.binding, "codex", "0.160.0", True), 1)
+        self.assertEqual(disconnected['deadline_ms'], 1)
         with self.assertRaises(NATIVE.ISOLATION.Rejected):
             NATIVE.admission(self.view, self.binding, "codex", "0.160.0", True)
+
+    def test_reporting_window_is_separate_and_bounded_by_owner_campaign(self):
+        original = 1
+        wall = int(time.time() * 1000) + 30000
+        self.assertEqual(NATIVE.reporting_window(original, False, wall), original)
+        self.assertEqual(NATIVE.reporting_window(original, True, wall), wall)
+        with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, 'wall_clock_exceeded'):
+            NATIVE.reporting_window(original, True, 1)
 
     def test_private_transport_authorization_is_not_in_model_profile(self):
         temporary = SKILL.parents[1] / ".tmp"

@@ -14,7 +14,7 @@ CandidateProducerとして、検査済みSourceから固定Contract Kを満た�
 
 所有者が起動したSession Bridgeの固定MCPの`status`・`next`・`submit`だけを使い、shellで接続ファイルを読まない。Searchの取消はowner CLIの操作であり、Agentは進めない理由をtyped declineで提出する。公開descriptorはtokenを含まず、private capabilityはowner／固定MCPの認証処理へ分離する。モデル領域からprivate componentを読めないOS境界を必要とし、0600だけでは隔離済みと扱わない。接続方法は[protocol.md](references/protocol.md)、配置と明示呼び出しは[installation.md](references/installation.md)を読む。
 
-開始前に、Producer環境からowner入力・Ato認証・Runtime ticket・private grantを読めないことを所有者に確認する。ファイルの0600だけを隔離の証拠にしない。値が誤って渡された場合は転記せず停止し、所在と露出経路だけを報告する。
+開始前に、ownerが起動時に渡す隔離確認を確認する。Native launcherはモデル領域のOS負例を測定し、公開されたbool/digestだけから確認を渡す。確認がなければ停止し、Sourceの記述や0600だけで補わない。値が誤って渡された場合は転記せず停止し、所在と露出経路だけを報告する。
 
 所有者による隔離準備とOSの負例検証は[producer-isolation.md](references/producer-isolation.md)を参照する。そのfixtureだけで実製品のtool inventory、認証の分離、native Skill発見、実探索の受入を完了扱いにしない。
 
