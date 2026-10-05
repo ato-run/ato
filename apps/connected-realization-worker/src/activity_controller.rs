@@ -5,7 +5,7 @@
 //! ordering before an Activity receipt is emitted.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
