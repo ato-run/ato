@@ -1,0 +1,237 @@
+{
+  "schema": "ato.formation-producer-isolation-preflight-comparison/1",
+  "date": "2026-10-03",
+  "scope": "public package generator and controlled macOS kernel fixture only; not native agent acceptance",
+  "failed_measurement": {
+    "schema": "ato.formation-producer-isolation-preflight-failure/1",
+    "measurement_id": "formation-producer-isolation-20261003-01",
+    "execution_pin": "24fc63a71ba695bc2abafb0b0e24d58a288984c4",
+    "public_package_sha256": "84d87786552847e97bc06779c2527e43435b28cbebe31bfa8da6614a20b00536",
+    "status": "failed_before_canary_checks",
+    "code": "kernel_fixture_failed",
+    "native_agent_or_auth_invoked": false,
+    "Native_read_write_exec_acceptance": false,
+    "code_changes_after_measurement": "preserved; follow-up uses a new measurement ID",
+    "bounded_diagnosis": {
+      "fixed_printf_only_program": true,
+      "base_SIGABRT": true,
+      "broad_read_startup_only_exit": 0,
+      "broad_exec_exit": -6,
+      "mach_lookup_and_POSIX_IPC_exit": -6,
+      "single_System_private_usr_dev_Library_metadata_each_exit": -6,
+      "literal_root_directory_read_exit": 0,
+      "cwd_literal_exit": -6,
+      "System_and_private_exit": -6,
+      "root_directory_fix_matches": "existing lib/sandbox/src/macos.rs literal root file-read*",
+      "libSystem_crash_frames": [
+        "__abort_with_payload",
+        "ignition_halt",
+        "boot_boot",
+        "ignite"
+      ],
+      "fixture_source_sha256": "0677e7654b48f1e50d60ee277a22354dcc2f158e65a6f0b782dd9e5e12c41381"
+    },
+    "diagnostic_profiles": {
+      "startup-Library.sb": "e39ccc39f8e183299b8a7c30614df2ca2651c16be80b6e6079022832727615b6",
+      "startup-System-private.sb": "ab56ded6737f0e30c892a2ffc27552e4e4069d3ceb46b2b78fe8b5a5e377c979",
+      "startup-System.sb": "8a5fc8ed032363caf7e54b14a51f1cfce822be7304988456a5b6ca87429c33bc",
+      "startup-base.sb": "a937c31ff5cfa940cafd5a922c72ef4e8147222dbdf604414d66e8fba4fc0843",
+      "startup-cwd.sb": "293013757ca98a75732fa7e5cf6e505f4729f31eb37dc9e5e91fd297db5555ab",
+      "startup-dev.sb": "2437c7f4da4df151e987b1f42874ecbc063a9f20515fceca0d65f63f14dc5de7",
+      "startup-exec.sb": "6d62630397ef23f9934a0b5d86813100bdd3de45d6285568096f7b6ead082d85",
+      "startup-ipc.sb": "2d8c869345d09268d08cc40fb3e8e583f28f6fbc2e00c73e753e54c1e7971617",
+      "startup-metadata.sb": "d8f4b50706b6a07daa97d4dc1c0cd7f6cda695f6b729460b24e9e901d4df7cab",
+      "startup-private.sb": "a625fa21fc7166667c85688ddc74560b5df6895d3bbadf2aca3044f49b013fc1",
+      "startup-read.sb": "8c79549c603a44c802f1a309382002bde08c780eb8d6715c787f7a84f9187d03",
+      "startup-root.sb": "018d3a1f6c7ad0c97a9328b8ea98f791b21489a1452600d13c84cba14ffe51bb",
+      "startup-usr.sb": "c257fabd07c005fa75e5e39050f4508da24795a9af32861768d8795ef91cafc7"
+    }
+  },
+  "failed_artifacts": [
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/producer-isolation-20261003-01/manifest.json",
+      "sha256": "279d1792d986cb977bfc126c8c6f74c610b1b186a67836dc09db32c6188d0517"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/producer-isolation-20261003-01/failed-measurement.json",
+      "sha256": "bdb04be577da7e46f553a21d234eb1c05a52b7a6e8a7f4d483af79bc1e73f08d"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/producer-isolation-20261003-01/probe/fixture.sb",
+      "sha256": "6b1e4ba845c5b01c24e3bd761a910ae9305b61708d876e1cbf7fcb15c8e8477d"
+    }
+  ],
+  "passing_measurement": {
+    "schema": "ato.formation-producer-isolation-os-fixture/1",
+    "measurement_id": "formation-producer-isolation-20261003-02",
+    "execution_pin": "29f327a44d5a1a3661ee19a270f5f14bbc11dfa3",
+    "public_package_sha256": "e1cbe4689a226ae387ed55f8457f17a4d7510c8fe6b109c830256e8a2b2fd756",
+    "environment": {
+      "platform": "macOS-15.8.1-arm64-arm-64bit-Mach-O",
+      "machine": "arm64"
+    },
+    "runner_sha256": "aa84436c0ff0088d2d0c15a82ec9fbb52b7d0408eed3cd984b1c3c6afb927418",
+    "profile_sha256": "8b5b00bc3bdae2932f6b3a4082f1e2bf721cfbf20f08f6c8705030acd9475e91",
+    "checks": {
+      "public_skill_read": true,
+      "public_skill_write_denied": true,
+      "private_seven_classes_read_denied": true,
+      "private_seven_classes_write_denied": true,
+      "scratch_write": true,
+      "symlink_escape_denied": true,
+      "fork_inherits_denial": true,
+      "source_direct_launch_denied": true,
+      "shell_exec_denied": true,
+      "security_exec_denied": true,
+      "curl_exec_denied": true,
+      "docker_unix_socket_denied": true,
+      "arbitrary_tcp_denied": true
+    },
+    "fixture_canary_output_exposure": false,
+    "captured_output_sha256": "03a2ab8a60ce1b15a700b8a8328cbe58507aa610ceccdd20735498fe65d217cd",
+    "captured_output_bytes": 394,
+    "auth_IPC_rules_prepared": [
+      "com.apple.secd",
+      "com.apple.SecurityServer"
+    ],
+    "native_auth_IPC_invoked": false,
+    "native_agent_tool_inventory_measured": false,
+    "native_acceptance_ready": false,
+    "Source_or_owner_credentials_read": false,
+    "Formation_searches": 0,
+    "Formation_inference_dispatches": 0,
+    "paid_API_calls": 0,
+    "real_Runtime_attempts": 0,
+    "agent_internal_LLM_calls": "unknown",
+    "agent_internal_cost": "unknown"
+  },
+  "passing_artifacts": [
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/producer-isolation-20261003-02/manifest.json",
+      "sha256": "b7adc38763c3e73c23f39a9ffd59879931883752b0ea2d6f37e15c73de14b92c"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/producer-isolation-20261003-02/os-fixture.json",
+      "sha256": "00400ecb0dc6d9ba3ea3e401ac421a3d03c6a3e789fd6281502e5e1561dc6892"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/producer-isolation-20261003-02/probe/fixture.sb",
+      "sha256": "8b5b00bc3bdae2932f6b3a4082f1e2bf721cfbf20f08f6c8705030acd9475e91"
+    }
+  ],
+  "selected_binaries": {
+    "mcp": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/.tmp/target/debug/ato-formation-session-mcp",
+      "sha256": "10a894d042cb91b911ae0719db670308df26f05b79c84b1668d3538e406bc4ce"
+    },
+    "codex": {
+      "path": "/opt/homebrew/Cellar/codex/0.46.0/bin/codex",
+      "sha256": "bbbe216bc4e53045ee435be0f9233014a39528e700a66726bb22d7475bf2312b"
+    },
+    "claude-code": {
+      "path": "/Users/egamikohsuke/.nvm/versions/node/v22.17.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+      "sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750"
+    }
+  },
+  "product_versions": {
+    "codex": "0.46.0",
+    "claude-code": "2.1.288"
+  },
+  "public_package_files": [
+    {
+      "path": "SKILL.md",
+      "bytes": 4824,
+      "sha256": "3ead31336383684a8295dda21f7d8f816175a53f8ed97062a546d222d61db5ba"
+    },
+    {
+      "path": "agents/openai.yaml",
+      "bytes": 43,
+      "sha256": "a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94"
+    },
+    {
+      "path": "references/acceptance.md",
+      "bytes": 3062,
+      "sha256": "245a952625acde4d1f15136bc1523994052472183706a69a2826919554a5f3b3"
+    },
+    {
+      "path": "references/installation.md",
+      "bytes": 3873,
+      "sha256": "1034b12c152de0bae0ffaca75fd3287a06c5b5d82ccbd89d74151ae80eed0823"
+    },
+    {
+      "path": "references/mcp.md",
+      "bytes": 4907,
+      "sha256": "42858e41b4826170409783e8455a1e25ef472d63c3d9da4f50dde2a4b4c81e78"
+    },
+    {
+      "path": "references/producer-isolation.md",
+      "bytes": 5957,
+      "sha256": "394fba956d2234b37dc22c62603bf66e3c3d865826f7f00bf15e90f3868f10c8"
+    },
+    {
+      "path": "references/protocol.md",
+      "bytes": 7587,
+      "sha256": "cd2b6c7b012a4f4f8def4b243961afa1b4db1b8c47533f3db8d31ba215c23a20"
+    },
+    {
+      "path": "references/recovery.md",
+      "bytes": 2727,
+      "sha256": "3ee5c1c9e95dd07a5ec3f6725daef2492dc8b48b911b2e6b8fed689dc914334d"
+    },
+    {
+      "path": "scripts/install.py",
+      "bytes": 3809,
+      "sha256": "af59fd3e57edce308b6569b963be4095e57fe2e8f8420eabc2e3dcf1c34c6f94"
+    },
+    {
+      "path": "scripts/producer-isolation-preflight.py",
+      "bytes": 18351,
+      "sha256": "c28ab229e42ea9b7b8f50e30fd8d59116add9e2e9a66c379b94485928dc50720"
+    },
+    {
+      "path": "scripts/producer-isolation-probe.c",
+      "bytes": 4489,
+      "sha256": "a6d37e460481110a15f74d49acad0c4c2ff176b24288b63cfa5f3bb4c43758e2"
+    }
+  ],
+  "prepared_native_profile_sha256": {
+    "codex": "9b24719400a30c65e2d8d03c4c3e63ab3279ae649e17bbef1232fb3ffaadc403",
+    "claude-code": "34285c883003bf3298c619254cfd3e082a814cc55fc7766c933457d1ed859c4b"
+  },
+  "native_profiles_applied": false,
+  "fixture_sole_allowed_executable": "controlled C runner",
+  "codex_source_feature_floor": "0.99.0",
+  "codex_version_eligible": false,
+  "native_acceptance_ready": false,
+  "unmeasured_gates": [
+    "approved_plan",
+    "native_skill_discovery",
+    "native_tool_inventory",
+    "native_read_write_exec_negative",
+    "native_auth_ipc_without_tool_access",
+    "fixed_mcp_connection_broker",
+    "native_provider_egress"
+  ],
+  "unit_tests": {
+    "command": "python3 -B -m unittest discover -s skills/ato-formation-explore/tests -p 'test_producer_isolation.py' -v",
+    "passed": 15,
+    "failed": 0
+  },
+  "C_syntax_check": {
+    "command": "/usr/bin/clang -Wall -Wextra -Werror -fsyntax-only skills/ato-formation-explore/scripts/producer-isolation-probe.c",
+    "result": "PASS",
+    "clang": "Apple clang 17.0.0 (clang-1700.6.4.2)"
+  },
+  "existing_capsule_sandbox_modified": false,
+  "real_private_credentials_read": false,
+  "global_auth_or_settings_changed": false,
+  "new_login": false,
+  "product_update": false,
+  "Formation_searches": 0,
+  "Formation_inference_dispatches": 0,
+  "real_Runtime_attempts": 0,
+  "paid_API_calls": 0,
+  "agent_internal_LLM_calls": "unknown",
+  "agent_internal_cost": "unknown",
+  "original_Formation_measurements_or_ledgers_modified": false
+}

@@ -74,6 +74,18 @@ fn activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio() {
     std::fs::set_permissions(&connection_path, std::fs::Permissions::from_mode(0o600))
         .expect("protect connection");
 
+    // A valid 64 KiB memo expands beyond Formation's 256 KiB wire limit when
+    // JSON escapes its control characters. Activity retains its own contract.
+    let large_memo = "\u{0001}".repeat(64 * 1024);
+    let memo_request = tool_call(
+        8,
+        "update_memo",
+        json!({"markdown":large_memo,"expected_version":0}),
+    );
+    let large_ping =
+        json!({"jsonrpc":"2.0","id":12,"method":"ping","params":{"metadata":large_memo}});
+    assert!(memo_request.to_string().len() > 256 * 1024);
+    assert!(large_ping.to_string().len() > 256 * 1024);
     let requests = [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -87,11 +99,7 @@ fn activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio() {
             json!({"operation_id":"op_counter","arguments":{}}),
         ),
         tool_call(7, "read_memo", json!({})),
-        tool_call(
-            8,
-            "update_memo",
-            json!({"markdown":"counter=1","expected_version":0}),
-        ),
+        memo_request,
         tool_call(9, "list_interactions", json!({})),
         tool_call(
             10,
@@ -103,12 +111,14 @@ fn activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio() {
             }),
         ),
         tool_call(11, "release_control", json!({})),
+        large_ping,
     ];
-    let input = requests
-        .iter()
-        .map(Value::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let input = "\u{2003}\n".to_owned()
+        + &requests
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
         + "\n";
     let mut command = Command::cargo_bin("ato-activity-mcp").expect("Activity MCP binary");
     let assert = command
@@ -139,7 +149,10 @@ fn activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("one JSON-RPC object per line"))
         .collect::<Vec<_>>();
-    assert_eq!(frames.len(), 11, "notification must not produce a frame");
+    assert_eq!(frames.len(), 12, "notification must not produce a frame");
+    assert_eq!(frames[7].pointer("/result/isError"), Some(&json!(false)));
+    assert_eq!(frames[11].get("id"), Some(&json!(12)));
+    assert_eq!(frames[11].get("result"), Some(&json!({})));
     assert_eq!(
         frames[1]
             .pointer("/result/tools")
@@ -173,6 +186,11 @@ fn activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio() {
         .expect("invoke request");
     assert_eq!(invoke.body.get("surface_epoch"), Some(&json!(7)));
     assert_eq!(invoke.body.get("client_sequence"), Some(&json!(1)));
+    let memo = seen
+        .iter()
+        .find(|request| request.path.ends_with("/memo") && request.method == "PATCH")
+        .expect("large memo request");
+    assert_eq!(memo.body["markdown"].as_str(), Some(large_memo.as_str()));
 }
 
 fn tool_call(id: u64, name: &str, arguments: Value) -> Value {
