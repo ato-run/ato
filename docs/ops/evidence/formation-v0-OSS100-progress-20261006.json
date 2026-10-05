@@ -58,14 +58,18 @@
     52,
     53,
     54,
-    55
+    55,
+    56,
+    57,
+    58,
+    59
   ],
   "preregistered_plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
   "Runtime_builder_bound": false,
   "historical_13_12_and_WBO_unchanged": true,
-  "unique_OSS_PASS": 7,
+  "unique_OSS_PASS": 8,
   "Native_unique_OSS_PASS": {
-    "codex": 0,
+    "codex": 1,
     "claude-code": 0
   },
   "preset_only_PASS": 7,
@@ -5537,15 +5541,435 @@
       },
       "ordinary_Run_authorized": false,
       "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 56,
+      "name": "AudioMass",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "21f5ee1362a47be6f0dbe6e4969a15e43d21b044",
+      "source_closure_ref": "sha256:ac42887a0092537d0bbdeba4ac4264f1c1dc1cdca63f4a10a60697f4e427272b",
+      "K_ref": "sha256:756c12ef36abed9b72e0e1d2957bd266f54f3ba924df46a201b37aad7ae380bb",
+      "search_id": "search_11825d14c166110e9fc17fc5a690b83e",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791236607380,
+      "authority_deadline_ms": 1791236633459,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "no_progress",
+      "termination_reason": "no_progress",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 50131,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 2174,
+            "cacheReadInputTokens": 56811,
+            "cacheCreationInputTokens": 21714,
+            "thinkingTokens": 675,
+            "costUSD": 0.2285942
+          }
+        },
+        "SDK_cost_estimate_usd": 0.2285942,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "entrypoint_not_in_inventory",
+              "detail": "README directs serving via src/audiomass-server.py (or audiomass-server.go) on port 5055, but no such file is present in the recorded inventory with a file_id/digest; it cannot be referenced without inventing a source ref.",
+              "source": {
+                "digest": "sha256:b53adb7a23888e21e87eb277fe27f25dcc09d680c3c7e530bc182579062e678c",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "no_manifest_for_static_route",
+              "detail": "No package.json or other manifest is in the inventory, so the static_http route (manifest entrypoint) is unavailable; inventory files are browser JS/WASM libraries, which are not HTTP entrypoints."
+            },
+            {
+              "code": "oci_unavailable",
+              "detail": "source_oci builder unavailable and no acquired OCI images; not used."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "insufficient_source"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 57,
+      "name": "SVGOMG",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "f925656d40a507c512bf95ee14ad16445a4ad3ed",
+      "source_closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+      "K_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "search_id": "search_1caaf60eeee6b039dc1ccd8ac6c0eb78",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791236713389,
+      "authority_deadline_ms": 1791236717631,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 54273,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 280920,
+          "inputTokens": 279821,
+          "cachedInputTokens": 241152,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1099,
+          "reasoningOutputTokens": 81
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "unsupported_source_glob",
+              "detail": "Frozen inspection feedback confirms recursive source glob expansion is unavailable in v0. Further nested source acquisition cannot be assumed or broadened.",
+              "source": {
+                "digest": "sha256:ac5b4f38788164eab74cd7d527b2aeb8b4c5da80580204b953f6853572d6c664",
+                "file_id": "f_25789e3ba4c2adf4a6899626"
+              }
+            },
+            {
+              "code": "inspection_budget_exhausted",
+              "detail": "The saved inspection response produced inspection_budget_exhausted feedback and no additional source context. This is a discovery capability limitation; no Runtime reproduction establishes broken Source."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_source_layout"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 58,
+      "name": "quiver",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "2f289ecbae9b7e5a473e04b924750c538ed5c4cf",
+      "source_closure_ref": "sha256:a934d3aac006bbf35aeda2fa6e3aa1e617e0740fc712c8df832ad7eab9bd031b",
+      "K_ref": "sha256:4c10efddf1f43de5a07cdd8a1e807517c1ab3b5db6df0e00cd0db523593a7c42",
+      "search_id": "search_45e72b55c2ddb85bf3180a02426e95e7",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791236822335,
+      "authority_deadline_ms": 1791236831091,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 52391,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 20,
+            "outputTokens": 3707,
+            "cacheReadInputTokens": 292275,
+            "cacheCreationInputTokens": 58956,
+            "thinkingTokens": 791,
+            "costUSD": 0.604323
+          }
+        },
+        "SDK_cost_estimate_usd": 0.604323,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "no_server_entrypoint",
+              "detail": "service-worker/build.js only runs workbox-build generateSW over ../src/ to emit src/service-worker.js; it is a build helper, not an HTTP server. Source is a browser static app under src/.",
+              "source": {
+                "digest": "sha256:636f4b91d0ac5539454bf8e3c65670060732e7dcc406447eed0a84bccb240c89",
+                "file_id": "f_9c74d9ecda8f87ed06838f4d"
+              }
+            },
+            {
+              "code": "no_static_manifest",
+              "detail": "No package.json manifest or lockfile appears in the inspectable inventory, so static_http (package.json entrypoint + source build script + declared output dir) and npm_ci cannot be constructed; inventory otherwise holds only markdown and PNG files."
+            },
+            {
+              "code": "unsupported_source_glob",
+              "detail": "Ato inspection_feedback: build.js references **/*; recursive expansion is unavailable in v0."
+            },
+            {
+              "code": "root_declaration_not_projected",
+              "detail": "Root declaration f_76ed074a9305c04054cdebb9 (4977 bytes) and f_9b9f76394a441ff40bf8d7a0 (400 bytes) were acquired but not transmitted (slot_or_input_budget) and are not inspectable references; no source-owned serve route can be evidenced."
+            },
+            {
+              "code": "oci_unavailable",
+              "detail": "source_oci and oci_image unavailable in lowering_capabilities; no Dockerfile evidenced."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_source_layout"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 59,
+      "name": "hello wordl",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "835db051e78d0dba4e38bc4b19ae5560b8efbbc3",
+      "source_closure_ref": "sha256:6be1908c5605005fccc6567a3f674a584e3e03377bdd339360e886ff5a47e1b4",
+      "K_ref": "sha256:37e24d98120dff83b08d7084ce1417d4092ee7feb889aab88cad1d0146b2554a",
+      "search_id": "search_215ceeed7197c569626c2b12d98f2d98",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791236929299,
+      "authority_deadline_ms": 1791236935553,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "satisfied",
+      "category": "repair_PASS",
+      "termination_reason": "submitted",
+      "unique_OSS_PASS": true,
+      "initial_PASS": false,
+      "repair_PASS": true,
+      "new_Searches": 1,
+      "D_rounds": 3,
+      "exchanges": 4,
+      "Runtime_attempts": 2,
+      "Runtime_workload_started": 2,
+      "inspections": 0,
+      "elapsed_ms": 167770,
+      "receipt": {
+        "attempt_id": "01M46Z1F0ZYZK1Y4H3P2XSJKXP",
+        "contract_ref": "sha256:37e24d98120dff83b08d7084ce1417d4092ee7feb889aab88cad1d0146b2554a",
+        "derivation_ref": "sha256:c766e58a841dc647184c7ca7c306863f9f600ce657cb93b6a193a9e730420b46",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:9cb060fb9320d680b8dcd3db3fb7b40c1c2efea7155b291bebcc8c85c83aca68",
+        "status": "k_reached_awaiting_assessment"
+      },
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 780044,
+          "inputTokens": 776407,
+          "cachedInputTokens": 698240,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 3637,
+          "reasoningOutputTokens": 39
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": true,
+      "Native_context_started": true,
+      "Native_turns_completed": 4,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "no_justified_requirement_reduction",
+              "detail": "Saved attempt 01M46Z1F0ZYZK1Y4H3P2XSJKXP passed for derivation sha256:c766e58a841dc647184c7ca7c306863f9f600ce657cb93b6a193a9e730420b46. Its only requirements are dependency HTTPS to registry.npmjs.org, evidenced by locked dependency URLs, and runtime app.http bind, required by frozen K. No justified strict subset exists; decline unchanged resubmission and preserve the saved success."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "no_progress"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
     }
   ],
   "category_counts": {
-    "unsupported_capability": 33,
+    "unsupported_capability": 35,
     "withheld_old_UNKNOWN": 1,
     "initial_PASS": 7,
-    "no_progress": 9,
+    "no_progress": 10,
     "infrastructure_failure": 3,
-    "needs_input": 2
+    "needs_input": 2,
+    "repair_PASS": 1
   },
   "wave_gates": [
     {
@@ -6868,14 +7292,14 @@
     }
   ],
   "consumed": {
-    "new_Searches": 53,
-    "D_rounds": 50,
-    "exchanges": 83,
-    "Runtime_attempts": 11,
-    "inspections": 28,
-    "elapsed_ms": 5212708
+    "new_Searches": 57,
+    "D_rounds": 56,
+    "exchanges": 92,
+    "Runtime_attempts": 13,
+    "inspections": 30,
+    "elapsed_ms": 5537273
   },
-  "Native_contexts_started": 46,
+  "Native_contexts_started": 50,
   "owner_cleanup_recovery_028": {
     "original_halt_retained": true,
     "halted_after_index": 28,
