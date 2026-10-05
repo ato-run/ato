@@ -177,14 +177,26 @@ fn start_process(root: &Path) -> Candidate {
             ready_url: format!("http://127.0.0.1:{port}/"),
         };
     }
+    // Only loopback HTTP is part of this fixture. HTTPServer.server_bind's
+    // reverse-DNS lookup is not, and can block before listen on hosted macOS.
+    // Keep the same standard-library handler, root and HTTP observations.
+    let server = r#"
+import faulthandler, functools, sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
+faulthandler.dump_traceback_later(10)
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
+handler = functools.partial(SimpleHTTPRequestHandler, directory=sys.argv[2])
+httpd = LoopbackHTTPServer(('127.0.0.1', int(sys.argv[1])), handler)
+faulthandler.cancel_dump_traceback_later()
+httpd.serve_forever()
+"#;
     let mut child = Command::new("python3")
-        .args([
-            "-m",
-            "http.server",
-            &port.to_string(),
-            "--bind",
-            "127.0.0.1",
-        ])
+        .args(["-I", "-c", server, &port.to_string()])
         .arg("--directory")
         .arg(root)
         .stdout(Stdio::null())

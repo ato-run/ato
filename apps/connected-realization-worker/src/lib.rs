@@ -5576,8 +5576,17 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             while !stopped.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Chrome may preconnect without sending a request.
+                        // An idle socket must not starve this fixture's page
+                        // request and therefore its Browser bridge handshake.
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .unwrap();
                         let mut request = [0_u8; 1024];
-                        let _ = stream.read(&mut request);
+                        match stream.read(&mut request) {
+                            Ok(0) | Err(_) => continue,
+                            Ok(_) => {}
+                        }
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             PAGE.len(),
