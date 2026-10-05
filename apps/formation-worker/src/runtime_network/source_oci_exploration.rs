@@ -138,6 +138,12 @@ impl CandidateRealizer for SourceOciRealizer<'_> {
         _: &ato_formation::request::RuntimeProfile,
     ) -> Option<ato_formation::request::AttemptFailure> {
         let d = &self.planned.derivation;
+        if !d.runtime_port_operations.is_empty() {
+            return refusal(
+                "unsupported_capability",
+                "OCI HTTP Port operations are not bound on this Runtime",
+            );
+        }
         if d.variable_bindings
             .iter()
             .any(|r| r.phase != ExecutionPhase::Runtime)
@@ -775,6 +781,7 @@ impl SourceOciRealizer<'_> {
             candidate,
             execution,
             evidence: Some(ato_formation::request::RealizationEvidence {
+                port_operations: vec![],
                 executor: "source-oci/runtime-oci".into(),
                 containment:
                     "private bounded builder; internal container network, dropped capabilities"
