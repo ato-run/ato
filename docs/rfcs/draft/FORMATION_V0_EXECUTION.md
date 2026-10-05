@@ -1,13 +1,21 @@
 # Formation v0 execution completion
 
-Status: draft. Requested 2026-10-01. Implementation and acceptance are recorded
-separately; this document does not declare unimplemented capabilities available.
+Status: implemented; release acceptance in progress. Requested 2026-10-01.
+The product stack is merged, and staging/production controlled-Source acceptance
+is measured. The frozen 100-OSS campaign and independent API comparison are still
+in progress. See the [release gate record](../../ops/formation-v0-release-progress-20261006.md)
+for historical pins and measured limitations; no unimplemented capability is
+declared available and no completed receipt is reassigned to a later Git SHA.
 
 The implementation base is ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`
 and ato-api `9e0031900836090612b94e775e26f980a68f32d7`. Reuse the existing
 Coordinator, immutable K/D, Runtime attempt journal, contained build/launch,
 source-OCI builder, encrypted variable store and assignment/grant services.
-No deployment, remote migration or feature enablement is authorized by this work.
+Those are the original implementation bases, not current execution pins. The
+separately authorized release applied the ordered migration chain and deployed
+the measured integration revision. Ordinary Run/publication/fork promotion and
+managed procurement remain disabled; Source success requires explicit owner
+functional-verification authorization before a functional Instance is created.
 
 ## Search control
 
