@@ -108,22 +108,26 @@ impl BrowserHost {
                 return Err(error);
             }
         };
-        let result = attach_bridge(&profile, &config.target_url, &bootstrap, &mut child);
-        match result {
-            Ok((cdp, session_id, browser_context_id)) => {
+        // A successful CDP attachment is not a ready realization yet. Keep
+        // handshake failure inside the same child/profile cleanup boundary.
+        let result = attach_bridge(&profile, &config.target_url, &bootstrap, &mut child).and_then(
+            |attached| {
                 wait_for_bridge_ready(&config.bootstrap_path)?;
-                Ok(Self {
-                    child,
-                    profile,
-                    cdp,
-                    session_id,
-                    browser_context_id,
-                    origin: Url::parse(&config.target_url)?
-                        .origin()
-                        .ascii_serialization(),
-                    stopped: false,
-                })
-            }
+                Ok(attached)
+            },
+        );
+        match result {
+            Ok((cdp, session_id, browser_context_id)) => Ok(Self {
+                child,
+                profile,
+                cdp,
+                session_id,
+                browser_context_id,
+                origin: Url::parse(&config.target_url)?
+                    .origin()
+                    .ascii_serialization(),
+                stopped: false,
+            }),
             Err(error) => {
                 let _ = stop_child(&mut child);
                 let _ = remove_private_profile(&profile);

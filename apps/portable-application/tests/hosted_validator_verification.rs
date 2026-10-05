@@ -177,23 +177,57 @@ fn start_process(root: &Path) -> Candidate {
             ready_url: format!("http://127.0.0.1:{port}/"),
         };
     }
-    let child = Command::new("python3")
-        .args([
-            "-m",
-            "http.server",
-            &port.to_string(),
-            "--bind",
-            "127.0.0.1",
-        ])
-        .arg("--directory")
+    // Only loopback HTTP is part of this fixture. HTTPServer.server_bind's
+    // reverse-DNS lookup is not, and can block before listen on hosted macOS.
+    // Keep the same standard-library handler, root and HTTP observations.
+    let server = r#"
+import faulthandler, functools, sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
+faulthandler.dump_traceback_later(10)
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
+handler = functools.partial(SimpleHTTPRequestHandler, directory=sys.argv[2])
+httpd = LoopbackHTTPServer(('127.0.0.1', int(sys.argv[1])), handler)
+faulthandler.cancel_dump_traceback_later()
+httpd.serve_forever()
+"#;
+    let mut child = Command::new("python3")
+        .args(["-I", "-c", server, &port.to_string()])
         .arg(root)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("python3 runs the LocalProcess candidate");
     let deadline = Instant::now() + Duration::from_secs(20);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "the candidate never listened");
+        if let Some(status) = child.try_wait().expect("candidate status") {
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .take(4096)
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("the candidate exited before listening ({status}): {stderr}");
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop timed-out candidate");
+            child.wait().expect("reap timed-out candidate");
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .take(4096)
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("the candidate never listened: {stderr}");
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
     Candidate::Process {

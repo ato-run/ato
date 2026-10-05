@@ -504,7 +504,9 @@ mod tests {
     }
 
     fn wait_for_process_group_exit(process_group: u32) {
-        for _ in 0..100 {
+        // The host's orphan reaper may settle after the direct child exits.
+        // Require the whole group to disappear within a bounded wait.
+        for _ in 0..500 {
             if !process_group_alive(process_group) {
                 return;
             }

@@ -193,14 +193,12 @@ mod tests {
     #[test]
     fn retained_resume_keeps_grant_checks_but_does_not_reopen_build_network() {
         use ato_formation::requirements::NetworkRequirement;
-        let declared = ExecutionRequirements {
-            network: vec![NetworkRequirement {
-                phase: ExecutionPhase::Dependencies,
-                host: "registry.npmjs.org".into(),
-                port: 443,
-            }],
-            authority: vec![],
-        };
+        let mut declared = ExecutionRequirements::default();
+        declared.network.push(NetworkRequirement {
+            phase: ExecutionPhase::Dependencies,
+            host: "registry.npmjs.org".into(),
+            port: 443,
+        });
         assert!(
             ScopedGates::retained_runtime_requirements(&declared, &Default::default()).is_err()
         );

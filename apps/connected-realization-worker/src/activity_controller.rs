@@ -5,7 +5,7 @@
 //! ordering before an Activity receipt is emitted.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -891,8 +891,8 @@ fn atomic_write_owner_only(root: &Path, destination: &Path, bytes: &[u8]) -> Res
         let mut file = options.open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, destination)?;
-        File::open(root)?.sync_all()?;
+        drop(file);
+        ato_runtime_attempt::durability::rename(&temporary, destination)?;
         Ok(())
     })();
     if result.is_err() {
