@@ -29,3 +29,19 @@ Kuttの既存successful Search → Source Result → form-verify → State Run A
 Linuxでproxy 4 testとmonitor 7 testがPASSした。開始markerの有無、identity不一致での配送拒否、owner release後の配送、実fixture processへのSIGSTOP/SIGCONT、実Node子プロセスの観測、materialized file ID、namespace内のパス差、PID再利用、無関係/終了済みprocessを確認した。fixtureは新Source Search、Formation Runtime attempt、Native推論を作らず、実UNKNOWN受入とは区別する。新measurement 03の40分計画は準備したが、追加Searchを未承認で作っていない。
 
 measurement 02の最終attempt/resource reservation、active writer、quarantine、temporary variable値、live metadataは0。Native/Bridge、Runtime、Coordinator、proxy、watcher、SSH forwardを停止した。owner sessionは通常signoutのHTTP 200で失効し、remoteのcredential copy4件とlocal capability/auth link4件を削除した。保存されたmodel向けイベントのowner credential/capability値14 encodingの一致は0。SDK累積tokens 69,496（input 68,769、cached input 50,816、output 727）を別記録とし、実call数・請求は不明のまま。旧13/12 auditのhash不変を再確認した。
+
+## 追加承認されたmeasurement 03
+
+ユーザーの追加承認で`formation-native-real-unknown-20261005-03`を実行した。Search 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 40分を維持し、旧13/12とmeasurement 01/02は変更していない。実Codex 0.160.0 / gpt-6.1-solは既知Dなしの制御SourceからDを1回提案した。実Runtimeの保存済みfresh receiptによりworkload開始を確認し、result transportを保持した。独立した`/proc` monitorの開始markerは今回も取得できず、最初の切断のmarker欠落を保存した後、同じRuntime/result dispatchの通信retryを開始確認後に再度停止した。独立process観測が成功したとは報告しない。新しいRuntime attemptは作っていない。
+
+Search `search_b44da962307739556f9121288edf1c04`、attempt `01M45JR7BASXDRFDXF8W1CC6YE`は08:26:43.791 UTCにclaimされ、08:56:51.571 UTCに実際のUNKNOWNへ到達した。claimから1,808,017msであり、既存30分失効、時計、DB timestampを変更していない。元NativeはUNKNOWNまで待機状態で保持し、その後終了した。待機中とUNKNOWN後のowner viewではround 1、exchange 1、attempt used 1、元deadline、`input: null`が不変だった。byte予約はUNKNOWN時に保守的な消費へ移り、消費済み量を返却していない。[公開証拠](evidence/formation-native-unknown-supplemental-20261005-03.json)。
+
+新しいNative文脈を同Searchへ`reconcile-only`で起動しようとしたが、MCP brokerが期限後のrelayを拒否した。Native SDK contextの開始前に`fixed_mcp_broker_unavailable`で停止し、新しい推論turnは0だった。launcherだけには最大120秒の報告windowがあった一方、Rust relayは元Search deadlineを超えられず、共通入口の実装不整合が露呈した。この実測はゲート未達であり、#1485をReadyにしていない。40分枠を延長せず、追加Searchやattemptで代用していない。
+
+探索枠終了後の09:06:12.602 UTCに、ownerが保存済み結果の配送を解放した。元result bytesのSHA-256は`f572631646f9261170227ac6389cb9b09d4e7d664eb653545880302435a9bf86`で不変。既存のretry 2により同一attemptのlate evidenceを受理し、ACK `accepted: true`、delivery `closed: true`を確認した。ADR-028の現契約ではlate PASSはUNKNOWNをPASSへ変更しない。Runtime終了、candidateのdisposable realization破棄、cleanup成功を確認し、ownerの通常resolution APIで`effect_reconciled`を保存した。履歴attemptはUNKNOWNのまま、元Searchは`unsatisfied`で終端した。手作業のDB修正、別attempt、通常Run許可、functional registrationは使っていない。
+
+最終状態は未解決UNKNOWN、Search予約、active writer、quarantine、一時変数値、live metadataがすべて0。owner sessionは通常signoutで失効し、remote secret copy4件とlocal capability/auth link4件を削除した。Native/Bridge、Runtime、Coordinator、proxy、monitor、bootstrapを停止し、local forwarding portのlistener不在を確認した。履歴ticketの予約列は監査用に保持されるため、未精算予約はauthorityのSearch budgetで確認した。SDK累積tokens 68,898（input 68,247、cached input 41,472、output 651）は実call・請求と分け、両者は不明とした。秘密値の削除前に全encoding照合を保存できなかったため、measurement 03では「全操作で非露出」と主張しない。起動時のOS負例13項目・8クラスの成功と、cleanupの0件確認を別証拠として扱う。
+
+不整合は#1479のRust relayで修正した。ownerが明示する`--reconcile-only`は、保存済みUNKNOWN、未解決attempt、`input: null`、同じSearch/configurationを必須とし、最大120秒の独立した報告期限だけを認める。signed bindingにread-only scopeを含め、TCP/Unixの共通dispatchで`status / next`だけを公開する。`submit / cancel`の直接呼び出し、scope改変、入力待ちへの変化を拒否する。通常relayの期限制限は元Search deadlineのまま。#1480の共通launcherはこのscopeと報告期限をbrokerへ渡す。MCP 28 test、起動引数1 test、Skill 44 test、strict clippy all-targets/all-featuresがPASSした。
+
+修正後の実UNKNOWNゲートは未実施。measurement 03のSearch/40分枠は消費済みなので、新たな実測は別measurementの明示承認後に行う。今回の実測pinを修正後headへ付け替えず、stack merge、最終integration CI、staging/production、100 OSS、独立API残3計画は引き続きこのゲートの後とする。

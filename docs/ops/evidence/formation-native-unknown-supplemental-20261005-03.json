@@ -1,0 +1,307 @@
+{
+  "schema": "ato.formation-native-supplemental-evidence/1",
+  "measurement_id": "formation-native-real-unknown-20261005-03",
+  "purpose": "real UNKNOWN recovery only",
+  "gate_passed": false,
+  "outcome": "real 30-minute UNKNOWN and same-attempt late-result ACK/closed; fresh Native reconciliation refused by expired MCP relay before inference",
+  "approved_ceiling": {
+    "D_rounds": 2,
+    "exchanges": 3,
+    "Runtime_attempts": 1,
+    "inspections": 2,
+    "sequential_elapsed_seconds": 2400,
+    "searches": 1
+  },
+  "consumption": {
+    "Searches": 1,
+    "D_rounds": 1,
+    "exchanges": 1,
+    "Runtime_attempts": 1,
+    "inspections": 0,
+    "Native_proposal_turns": 1,
+    "Native_reconciliation_turns": 0,
+    "active_acceptance_wall_clock_seconds": 2400,
+    "settlement_continued_after_wall": true
+  },
+  "Search": "search_b44da962307739556f9121288edf1c04",
+  "satisfy_id": "01M45JNRFMRXRP0G2JBT9SRNY9",
+  "attempt_id": "01M45JR7BASXDRFDXF8W1CC6YE",
+  "Source": {
+    "archive_digest": "sha256:1aa30788d7cf082d2aa5697194d945830f77bb0c555f4374d0b593e376e4c0b4",
+    "closure_ref": "sha256:8fc8d179ae0ec3509ab7795461e6fd1e18c7aa1618ab995e55b5c5f8892d0c4b"
+  },
+  "K": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+  "D": "sha256:4c30c5300fc492fcd23ccd7487e39a9454e956c52d8e715b2dbdeba4f8c7bf13",
+  "known_D_seeded": false,
+  "requester_deadline_ms": 1791190520803,
+  "Coordinator_deadline_at": "2026-10-05T08:55:22.117Z",
+  "acceptance_wall_deadline_ms": 1791191120803,
+  "claimed_at": "2026-10-05T08:26:43.791Z",
+  "UNKNOWN_at": "2026-10-05T08:56:51.571Z",
+  "elapsed_since_claim_ms": 1808017,
+  "silence_expiry_modified": false,
+  "DB_or_clock_modified": false,
+  "workload_start_evidence": {
+    "at_ms": 1791188941463,
+    "evidence": "durable Rust Runtime result and same-K fresh receipt",
+    "workload_actually_started": true,
+    "execution_started": true,
+    "attempt_id": "01M45JR7BASXDRFDXF8W1CC6YE",
+    "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "result_sha256": "f572631646f9261170227ac6389cb9b09d4e7d664eb653545880302435a9bf86",
+    "result_saved_at_ms": 1791188804823,
+    "original_first_cut_at_ms": 1791188804923,
+    "independent_proc_observation": false,
+    "first_cut_preserved": true,
+    "Source_or_K_modified": false
+  },
+  "first_cut_without_independent_marker_preserved": true,
+  "final_cut": {
+    "at_ms": 1791188942581,
+    "method": "POST",
+    "path": "/v1/runtime-network/attempts/01M45JR7BASXDRFDXF8W1CC6YE/result",
+    "delivered": false,
+    "runtime_pid": 1350576,
+    "paused_before_retry": true,
+    "cut_after_confirmed_start": true,
+    "product_timeout_changed": false
+  },
+  "transport_cut_count": 2,
+  "extra_Runtime_attempts": 0,
+  "result_transport_retry_counters": [
+    0,
+    1,
+    2
+  ],
+  "custom_max_retries": 3,
+  "Runtime_result_sha256": "f572631646f9261170227ac6389cb9b09d4e7d664eb653545880302435a9bf86",
+  "fresh_receipt": {
+    "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "derivation_ref": "sha256:4c30c5300fc492fcd23ccd7487e39a9454e956c52d8e715b2dbdeba4f8c7bf13",
+    "execution": {
+      "attempt_id": "01M45JR7BASXDRFDXF8W1CC6YE",
+      "endpoint": "http://127.0.0.1:3000/",
+      "platform": "linux/aarch64",
+      "realization": "process",
+      "request_id": "01M45JNRFMRXRP0G2JBT9SRNY9"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:7b357ffee26e63aa8035795a7eb1c909ed540901e7cacd011d8c6efe5a8fa6e5",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "receipt_is_late_evidence_only": true,
+  "ACK": {
+    "accepted": true
+  },
+  "closed": {
+    "closed": true
+  },
+  "final_Search_status": "unsatisfied",
+  "historical_attempt_status": "unknown",
+  "owner_resolution": {
+    "kind": "effect_reconciled",
+    "note": "Same-attempt immutable saved Runtime PASS was accepted as late evidence; ACK accepted and delivery closed. Historical UNKNOWN is preserved, not converted into PASS. The 40-minute Native acceptance failed at expired MCP relay admission; settlement only continues after its wall limit.",
+    "execution_stop": {
+      "kind": "runtime_terminated",
+      "evidence": "Runtime PID 1350576 is terminated (zombie); saved same-attempt formation record confirms disposable realization destroyed and cleanup succeeded; result SHA-256 f572631646f9261170227ac6389cb9b09d4e7d664eb653545880302435a9bf86 and accepted ACK/closed record preserved."
+    },
+    "resolved_at": "2026-10-05T09:07:49.007Z"
+  },
+  "late_result_promoted_to_PASS": false,
+  "same_attempt_preserved": true,
+  "consumption_or_deadline_reset": false,
+  "input_before_Native_reconciliation": null,
+  "reconciliation_next_operation": "owner_reconcile_or_assess",
+  "original_Native_alive_at_UNKNOWN": {
+    "at_ms": 1791190668663,
+    "native_pid": 1609,
+    "UNKNOWN_observed": true,
+    "terminated_before_UNKNOWN": false
+  },
+  "new_Native_launch_failure": {
+    "code": "fixed_mcp_broker_unavailable",
+    "MCP_broker_started": true,
+    "Native_context_started": false,
+    "Native_events_file_exists": false,
+    "SDK_reported_usage": {
+      "scope": "native context; SDK reported counters only",
+      "internal_LLM_calls": "unknown",
+      "account_charge_usd": "unknown",
+      "coverage": "SDK counters unavailable"
+    }
+  },
+  "execution_pins": {
+    "Session_commit": "d7c926f5d5e22fbb4dec30316c918729cf923cae",
+    "Skill_commit": "e03b5b2f5f6ad0552e079c9d50ba5f4896b33f5a",
+    "Runtime_commit": "c5719f69ea2ef009f3f0d677518b843655b3e196",
+    "API_code_commit": "34b44f842490279fbd10cca940b0768a10f52a2a",
+    "Runtime_binary_sha256": "a0168154d15d4c2698f0280115531616131cacf0e183390ed223948cc9670aa7",
+    "Runtime_worker_sha256": "d7f18b37f447696b816a8f8c31441631dddd15f0e09ad3d50d4da40a0cec4b8a",
+    "API_bundle_sha256": "d59becc8692dcb6b4f24167d9032d0dec332c308e80e71fe7ffc684aeab4beae",
+    "Native_version": "0.160.0",
+    "Native_model": "gpt-6.1-sol",
+    "Native_binary_sha256": "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b",
+    "MCP_binary_sha256": "f7cffbd8ea431f33190fc95be476b807e5ec2219cc34192fb294f80e01cf6b3d"
+  },
+  "SDK_reported_usage": {
+    "scope": "native context; SDK reported counters only",
+    "internal_LLM_calls": "unknown",
+    "account_charge_usd": "unknown",
+    "last_cumulative_tokens": {
+      "totalTokens": 68898,
+      "inputTokens": 68247,
+      "cachedInputTokens": 41472,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 651,
+      "reasoningOutputTokens": 0
+    },
+    "coverage": "last SDK update; update events are not LLM calls"
+  },
+  "Ato_direct_LLM_calls": 0,
+  "actual_LLM_calls": "unknown",
+  "actual_charge_USD": "unknown",
+  "inference_cost_zero_claimed": false,
+  "final_search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-05T08:25:22.117Z",
+    "deadline_at": "2026-10-05T08:55:22.117Z",
+    "attempts": {
+      "max": 1,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 0
+    },
+    "transfer_bytes": {
+      "max": 16777216,
+      "used": 4608,
+      "reserved": 0,
+      "remaining": 16772608
+    },
+    "expanded_bytes": {
+      "max": 33554432,
+      "used": 33554432,
+      "reserved": 0,
+      "remaining": 0
+    },
+    "stored_bytes": {
+      "max": 33554432,
+      "used": 33554432,
+      "reserved": 0,
+      "remaining": 0
+    }
+  },
+  "cleanup": {
+    "observed_at": "2026-10-05T09:09:02.313255+00:00",
+    "owner_session_rows": 0,
+    "active_writer": 0,
+    "quarantined_writer": 0,
+    "temporary_values": 0,
+    "live_input_metadata": 0,
+    "unresolved_attempts": 0,
+    "unsettled_search_reservations": 0,
+    "reservation_evidence": "same-attempt authority Search budget; historical attempt ticket reservation columns are retained, not outstanding reservations",
+    "temporary_secret_copies_removed": [
+      "owner-session-token",
+      "runtime-token",
+      "auth.key",
+      "formation-store.key"
+    ]
+  },
+  "process_cleanup": {
+    "observed_at": "2026-10-05T09:09:40.471251+00:00",
+    "owned_process_states": {
+      "1350492": "Z",
+      "1350493": "Z",
+      "1350575": "Z",
+      "1350576": "absent",
+      "1350582": "Z",
+      "1350491": "absent"
+    },
+    "terminated_bootstrap_pids": [
+      1350491
+    ],
+    "temporary_secret_files_present": 0
+  },
+  "local_secret_cleanup": {
+    "removed_owned_copies": [
+      "owner/token",
+      "owner/connection.capability",
+      "native-initial/owner/relay.capability",
+      "native-initial/owner/native-home/auth.json"
+    ],
+    "original_Native_auth_untouched": true
+  },
+  "secret_scan_limit": "Temporary owner cookie and scoped capabilities were deleted before a final exact-value encoding scan; no full-operation non-exposure claim. Measured initial model isolation denied all 13 operations across 8 classes. Provider-auth and remaining Runtime-secret scans, when recorded, have narrower scope.",
+  "old_campaign": {
+    "status": "ended_exceeded",
+    "D_rounds_used": 13,
+    "D_rounds_ceiling": 12,
+    "audit_sha256": "91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197",
+    "unchanged": true
+  },
+  "independent_API_budget_changed": false,
+  "ordinary_Run_authorized": false,
+  "functional_registration_created": false,
+  "cloud_migration_or_deployment": false,
+  "new_WBO_execution": false,
+  "raw_public_evidence_sha256": {
+    "infrastructure-start.json": "0286a39861c3109a5da31f7f13da9be7922901562d9919befc41733e42f8c357",
+    "cleanup-before-service-stop.json": "6f55929931277e6fce6f4196ecfc1fa452573eee04c4db40219103c738746e01",
+    "late-result-before-resolution.json": "595f92b91aceafe25a4a4f37919ee9fbde55e9e96cd63ac189c1aee3925187be",
+    "first-cut-no-independent-marker.json": "b2e6e24a2f9275649697585fa2453aa61eadec170c658e803a6366a77ef463d7",
+    "workload-started.json": "e2e184eecc0659e560de6d562d3cc8652875f8ea7ba95bb2ee4519935819d2fd",
+    "unknown-at-real-expiry.json": "119d1b9cbf943cc8e78be59c84f93639773fcc8efc2c88eeffcaf3d8be88cf14",
+    "result-transport-cut.json": "6ab89f73b22cb39fb0ca96439ab9d5b69020f9ab401bc72d58d1c31756f124e8",
+    "process-cleanup.json": "da473a33da07953a5b2ff5195e15ce6d3daff7ae22499be69775803c8346fa4f",
+    "runtime-public-result.json": "f144c4748d41fa75ea3abcf8ac81c4cdb3e4fcf484c498fefd2f61aedfcf8bdd",
+    "held-second-cut-proof.json": "f8643a8814d070db1a0fc5dd49bfded13ede634c11d6e9c1ea92c8124c774212",
+    "settled-same-attempt.json": "beecb62da2ea5011db31cc17b057fa1eb68401a22effdd2d00b0b8cecd4547d5",
+    "blocked-transport.jsonl": "5151886c7e788766081da53dec5d72169294a0a60b2a9deb821836dd0c7383bb"
+  },
+  "product_fix": {
+    "Session_commit": "438efd6a864a1edaba7a89ac8a78a9643f97eea6",
+    "Skill_commit": "78c257fdd7d461984a72c1548a500761887b25a9",
+    "MCP_tests_passed": 28,
+    "MCP_argument_tests_passed": 1,
+    "Skill_tests_passed": 44,
+    "strict_clippy_all_targets_all_features": "PASS",
+    "real_Native_reconciliation_on_fix": "not_run; approved Search/wall limit consumed",
+    "MCP_binary_sha256": "83a1e07b0f1cca5db127e146fa1123f163c8e04866aa39ba8d9f19c41cb06614",
+    "MCP_differs_from_acceptance_pin": true
+  },
+  "measured_initial_model_isolation": {
+    "schema": "ato.formation-producer-isolation-os-fixture/1",
+    "checks": {
+      "public_skill_read": true,
+      "public_skill_write_denied": true,
+      "private_classes_read_denied": true,
+      "private_classes_write_denied": true,
+      "scratch_write": true,
+      "symlink_escape_denied": true,
+      "fork_inherits_denial": true,
+      "source_direct_launch_denied": true,
+      "shell_exec_denied": true,
+      "security_exec_denied": true,
+      "curl_exec_denied": true,
+      "docker_unix_socket_denied": true,
+      "arbitrary_tcp_denied": true
+    },
+    "model_policy_sha256": "bc7ae7e6eda7ff0de498e1a81e7c5ef0f4b9f9f3209bf896a400d51756391499",
+    "private_fixture_class_count": 8
+  }
+}
