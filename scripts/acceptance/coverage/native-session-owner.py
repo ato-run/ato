@@ -64,6 +64,8 @@ def pre_exchange_infrastructure_terminal(view):
 
 
 def native_completion_evidence(entry):
+    if entry.get("native_launch_in_progress", False) is not False:
+        return False
     if type(entry.get("native_exit_code")) is int:
         return True
     if "native_started_at_ms" in entry:
@@ -280,6 +282,8 @@ def guarded_native(plan, ledger_path, args, execute=subprocess.run):
         entry = entries[0]
         if entry.get("terminal_retirement") is not None:
             raise ValueError("campaign_Search_retired")
+        if entry.get("native_launch_in_progress", False) is not False:
+            raise ValueError("campaign_Native_launch_requires_reconciliation")
         native_args = args.native_args[1:] if args.native_args[:1] == ["--"] else args.native_args
         if any(a == "--connection" or a.startswith("--connection=") for a in native_args):
             raise ValueError("connection_is_owner_fixed")
@@ -299,11 +303,13 @@ def guarded_native(plan, ledger_path, args, execute=subprocess.run):
             native_args = [*native_args, "--owner-wall-clock-deadline-ms", str(wall_deadline)]
         # Serialize Native launches too; reconnect is not a second aggregate slot.
         entry.setdefault("native_started_at_ms", int(time.time() * 1000))
+        entry["native_launch_in_progress"] = True
         publish(ledger_path, ledger)  # A lost Native launch cannot become "not started".
         result = execute([sys.executable, str(args.native_launcher), "--connection", str(args.connection),
                           *native_args], check=False)
         entry["native_exit_code"] = result.returncode
         entry["native_finished_at_ms"] = int(time.time() * 1000)
+        entry["native_launch_in_progress"] = False
         publish(ledger_path, ledger)
         return dict(report, Native_exit_code=result.returncode, Search_reset=False)
 
@@ -333,6 +339,8 @@ def retire_search(plan, ledger_path, args, reader=None):
                                         check=True, timeout=10)
                 view = json.loads(result.stdout)
             if connection.resolve() == args.connection.resolve():
+                if entry.get("native_launch_in_progress", False) is not False:
+                    raise ValueError("campaign_Native_completion_required")
                 descriptor = json.loads(connection.read_text())
                 progress = view["progress"]
                 if (progress["status"] not in TERMINAL or "input" not in view or view["input"] is not None
