@@ -21,11 +21,11 @@ def sha(path):
     return 'sha256:' + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def wheel(path, name, module, source):
+def wheel(path, name, module, source, metadata=None):
     dist = f'{name}-1.0.0.dist-info'
     with zipfile.ZipFile(path, 'w') as archive:
         archive.writestr(module + '.py', source)
-        archive.writestr(dist + '/METADATA', f'Metadata-Version: 2.1\nName: {name}\nVersion: 1.0.0\n')
+        archive.writestr(dist + '/METADATA', metadata or f'Metadata-Version: 2.1\nName: {name}\nVersion: 1.0.0\n')
         archive.writestr(dist + '/WHEEL', 'Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
         archive.writestr(dist + '/RECORD', '')
 
@@ -49,7 +49,9 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
   z.writestr(dist+'/RECORD','')
  return name
 '''
-    wheel(backend, 'ato_fixture_backend', 'ato_fixture_backend', backend_code)
+    wheel(backend, 'ato_fixture_backend', 'ato_fixture_backend', backend_code,
+          'Metadata-Version: 2.1\nName: ato_fixture_backend\nVersion: 1.0.0\n'
+          '\nA description may include command output:\nName: example\nVersion: 9.9.9\n')
     # Real setuptools wheels also contain vendored dist-info metadata. It must
     # not be mistaken for a second identity of the outer wheel.
     with zipfile.ZipFile(backend, 'a') as archive:
@@ -80,7 +82,34 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
                    env=dict(environment, PYTHONPATH=str(target)), check=True, timeout=10)
     subprocess.run([sys.executable, '-c', helper, 'cleanup', json.dumps(plan)], env=environment, check=True, timeout=10)
     assert not (source / 'operation/build-env').exists()
-    return dict(sdist_to_wheel=True, offline_hash_install=True, provenance=True)
+    return dict(sdist_to_wheel=True, offline_hash_install=True, provenance=True,
+                description_not_an_identity=True)
+
+
+def wheel_metadata_refusals(root):
+    helper = (HELPERS / 'python-lock-operation.py').read_text()
+    cases = {
+        'duplicate_name': 'Name: fixture\nname: alternate\nVersion: 1.0.0\n',
+        'duplicate_version': 'Name: fixture\nVersion: 1.0.0\nVERSION: 2.0.0\n',
+        'missing_identity': 'Name: fixture\n\nVersion: 1.0.0\n',
+    }
+    for name, metadata in cases.items():
+        directory = root / ('metadata-' + name); directory.mkdir()
+        wheel(directory / 'fixture-1.0.0-py3-none-any.whl', 'fixture', 'fixture',
+              '', 'Metadata-Version: 2.1\n' + metadata)
+        result = subprocess.run([sys.executable, '-c', helper, str(directory)],
+                                capture_output=True, text=True, timeout=10)
+        expected = 'dependency_wheel_metadata_' + ('invalid' if name == 'missing_identity' else 'duplicate')
+        assert result.returncode != 0 and expected in result.stderr
+        if name != 'missing_identity':
+            evidence = json.loads(result.stderr.splitlines()[0])
+            assert evidence['artifact_sha256'] == sha(directory / 'fixture-1.0.0-py3-none-any.whl').removeprefix('sha256:')
+            assert evidence['count'] == 2 and 'alternate' not in result.stderr
+        assert not (directory / 'artifacts.json').exists()
+        assert not (directory / 'requirements.lock').exists()
+    return dict(true_duplicate_headers_refused=True,
+                description_cannot_supply_missing_identity=True,
+                no_lock_after_invalid_identity=True)
 
 
 def node_case(root):
@@ -169,7 +198,8 @@ def main():
     args = parser.parse_args()
     root = (args.work_root or REPO / '.tmp' / ('native-operation-smoke-' + uuid.uuid4().hex)).resolve()
     root.mkdir(parents=True,exist_ok=False); (root / 'tmp').mkdir()
-    result = dict(schema='ato.native-operation-smoke/1', python=python_case(root),node=node_case(root),
+    result = dict(schema='ato.native-operation-smoke/1', python=python_case(root),
+                  wheel_metadata=wheel_metadata_refusals(root), node=node_case(root),
                   runtime_scripts=runtime_scripts_case(root),
                   actual_Coordinator_Runtime=False, provider_calls=0)
     (root / 'result.json').write_text(json.dumps(result,indent=2)+'\n')
