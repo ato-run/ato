@@ -436,6 +436,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
             ],
         },
         derivation: DerivationDraft {
+            runtime_port_operations: vec![],
             variable_bindings: vec![],
             requirements: Default::default(),
             inputs: vec![InputDraft {

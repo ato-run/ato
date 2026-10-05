@@ -102,13 +102,21 @@ class Pilot(wave.Wave):
         if result is not None:
             require(result['contract_ref'] == app['contract_ref'], 'result K changed')
             require(result['approval'] == 'not_assessed' and result['deployed'] is False, 'submission became execution permission')
-            require(result['known_attempts'] == 0, 'known route used in zero-D measurement')
+            if 'known_attempts' in result:
+                require(result['known_attempts'] == 0, 'known route used in zero-D measurement')
+            else:
+                # The dedicated CLI input result has no execution counters.
+                # Its frozen input was independently checked to contain zero D.
+                require(result.get('status') == 'needs_input' and result['submission'] is None,
+                        'unrecognized requester result without execution counters')
         row = {'index': app['index'], 'name':app['name'], 'provider': self.plan['producer_config']['provider'],
             'known_D':False, 'typed_K_pass':result is not None and result['submission'] is not None,
             'rounds_consumed': result.get('rounds_consumed') if result else None,
             'reasoning_accounting':result.get('reasoning_accounting') if result else None,
-            'terminal_origin':'requester_verified' if result else 'untyped_requester_failure_and_durable_coordinator',
+            'terminal_origin':('requester_needs_input' if result.get('status') == 'needs_input' else 'requester_verified') if result else 'untyped_requester_failure_and_durable_coordinator',
             'coordinator_status':status['status'], 'automatic_retry':False,
+            'input_requirements':result.get('input_requirements',[]) if result else [],
+            'search_budget':result.get('search_budget') if result else None,
             'result':str(output.relative_to(self.root)), 'result_sha256':sha(output),
             'exit_code':rc, 'elapsed_seconds':round(time.monotonic()-started,3),
             'functional_acceptance':'not_measured', 'deployed':False}

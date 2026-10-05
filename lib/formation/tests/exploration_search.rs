@@ -49,6 +49,7 @@ fn state() -> SearchStateV1 {
     });
     s.frozen.policy.proposal = Some(ProposalAuthorization {
         execution_plan: Some(PlanAuthorization {
+            runtime_port_operations: false,
             source_oci: None,
             files: BTreeMap::from([(
                 "server".into(),
@@ -1526,4 +1527,60 @@ fn invalid_source_broken_evidence_cannot_set_a_decline_reason() {
         ProposalOutcome::Rejected(_)
     ));
     assert!(registry.decline_reasons().is_empty());
+}
+
+#[test]
+fn runtime_port_proposal_requires_bound_catalog_source_grants_and_adds_only_d() {
+    let mut s = state();
+    let mut p = plan();
+    let reference = p["entrypoint"].clone();
+    p["variable_bindings"] = json!([{"name":"OWNER_INPUT","kind":"configuration","purpose":"source-declared local input",
+        "resource":"app.http","operation":"execute","phase":"runtime","secret":false,"artifact_embedding":false}]);
+    p["runtime_port_operations"] = json!([{"operation":{"port":"app.http","request":{"method":"POST","path":"/source/owner","json_bindings":{"password":"OWNER_INPUT"}},
+        "accepted_statuses":[201],"when":{"path":"/","statuses":[302]}},"basis":reference}]);
+    p["requirements"] = json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"bind"},
+        {"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"execute"}]});
+    p["basis"] = json!([{"source":p["entrypoint"],"reason":"source-declared local interaction"}]);
+    s.frozen.policy.exploration.as_mut().unwrap().ceiling =
+        serde_json::from_value(p["requirements"].clone()).unwrap();
+    assert!(
+        matches!(&compile(&s,p.clone())[0],ProposalOutcome::Rejected(e) if e.0=="runtime_port_operations_unbound")
+    );
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .runtime_port_operations = true;
+    let outcomes = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(
+        candidate.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_eq!(
+        candidate
+            .compiled()
+            .derivation
+            .runtime_port_operations
+            .len(),
+        1
+    );
+    assert!(candidate.candidate().requirements.iter().any(|r| r.fact
+        == ato_formation::port_operations::RUNTIME_CAPABILITY
+        && r.one_of == Some(vec!["true".into()])));
+    p["runtime_port_operations"][0]["basis"]["file_id"] = json!("never-inspected");
+    assert!(
+        matches!(&compile(&s,p.clone())[0],ProposalOutcome::Rejected(e)if e.0=="source_inspection_required")
+    );
+    p["runtime_port_operations"][0]["basis"] = p["entrypoint"].clone();
+    p["variable_bindings"][0]["artifact_embedding"] = json!(true);
+    assert!(
+        matches!(&compile(&s,p)[0],ProposalOutcome::Rejected(e)if e.0=="proposal_compilation_failed")
+    );
 }

@@ -289,6 +289,7 @@ pub enum EffectClass {
 /// The proposed route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DerivationDraft {
+    pub runtime_port_operations: Vec<crate::port_operations::RuntimePortOperation>,
     pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub requirements: crate::requirements::ExecutionRequirements,
     pub inputs: Vec<InputDraft>,
@@ -477,6 +478,8 @@ pub struct BoundState {
 #[serde(deny_unknown_fields)]
 pub struct BoundDerivation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_port_operations: Vec<crate::port_operations::RuntimePortOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variable_bindings: Vec<crate::variables::VariableRequirement>,
     pub schema: String,
     #[serde(
@@ -524,6 +527,14 @@ impl BoundContract {
 
 impl BoundDerivation {
     pub fn derivation_ref(&self) -> Result<String, AuthoringError> {
+        crate::port_operations::validate_bound(
+            &self.runtime_port_operations,
+            &self.ports,
+            &self.steps,
+            &self.variable_bindings,
+            &self.requirements,
+        )
+        .map_err(|e| malformed("runtime_port_operations", e))?;
         if self
             .requirements
             .canonicalized()
@@ -708,7 +719,24 @@ fn bind_derivation(
         .map_err(|e| malformed("variable_bindings", e))?;
     let mut variable_bindings = draft.variable_bindings.clone();
     variable_bindings.sort_by(|a, b| (&a.name, a.phase).cmp(&(&b.name, b.phase)));
+    crate::port_operations::validate_bound(
+        &draft.runtime_port_operations,
+        &ports,
+        &steps,
+        &variable_bindings,
+        &draft.requirements,
+    )
+    .map_err(|e| malformed("runtime_port_operations", e))?;
+    if !draft.runtime_port_operations.is_empty()
+        && (draft.source_oci.is_some() || runtimes.contains_key("oci.image"))
+    {
+        return Err(malformed(
+            "runtime_port_operations",
+            "OCI Port operations are not bound in this release",
+        ));
+    }
     Ok(BoundDerivation {
+        runtime_port_operations: draft.runtime_port_operations.clone(),
         variable_bindings,
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         requirements: draft
@@ -868,6 +896,7 @@ mod tests {
                 }],
             },
             derivation: DerivationDraft {
+                runtime_port_operations: vec![],
                 variable_bindings: vec![],
                 requirements: Default::default(),
                 inputs: vec![InputDraft {

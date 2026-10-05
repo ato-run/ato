@@ -173,6 +173,7 @@ dependencies = [
  "serde",
  "serde_jcs",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -724,6 +725,8 @@ name = "ato-runtime-attempt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-api",
+ "ato-adapter-http",
  "ato-adapter-oci",
  "ato-adapter-process",
  "ato-formation",

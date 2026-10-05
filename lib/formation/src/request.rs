@@ -252,6 +252,8 @@ impl AttemptOutcomes {
 /// containment, what network, and that the realization was taken down.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RealizationEvidence {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub port_operations: Vec<crate::port_operations::PortOperationObservation>,
     /// Which execution machinery ran the candidate.
     pub executor: String,
     pub containment: String,

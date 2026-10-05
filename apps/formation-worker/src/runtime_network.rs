@@ -657,6 +657,12 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             one_of: r.one_of,
         }),
     );
+    if !planned.derivation.runtime_port_operations.is_empty() {
+        requirements.push(Requirement {
+            fact: ato_formation::port_operations::RUNTIME_CAPABILITY.into(),
+            one_of: Some(vec!["true".into()]),
+        });
+    }
     requirements.extend(
         ato_formation::proposal::native_runtime_requirements(&planned.derivation)
             .into_iter()
@@ -1598,7 +1604,7 @@ impl Client {
             .context("runtime_capabilities_invalid")?;
         let capabilities = rows.iter().filter(|v| match constraint { RuntimeConstraintWire::Any => true, RuntimeConstraintWire::Exact{runtime_id,..} => v["descriptor"]["runtime_id"] == runtime_id.as_str() }).take(16).map(|v| {
             let environments = v["descriptor"]["execution_environments"].as_array().into_iter().flatten().map(|e| {
-                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.") || k.starts_with("formation.source_oci.") || k.starts_with("formation.oci.image.")) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:/-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
+                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.") || k.starts_with("formation.source_oci.") || k.starts_with("formation.oci.image.") || k.as_str() == ato_formation::port_operations::RUNTIME_CAPABILITY) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:/-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
                 serde_json::json!({"environment_id":e["environment_id"],"facts_ref":e["facts_ref"],"facts":facts})
             }).collect::<Vec<_>>();
             serde_json::json!({"runtime_id":v["descriptor"]["runtime_id"], "environments": environments, "availability": v["availability"]})
@@ -1857,6 +1863,33 @@ impl Client {
     }
 }
 
+// The standalone host probe cannot advertise a configured adapter. Apply the
+// same binding predicate to both advertisement and actual attempt admission.
+fn bind_http_port_capability(
+    facts: &mut BTreeMap<String, String>,
+    contained_process: bool,
+    grant_path_bound: bool,
+) {
+    facts.insert(
+        ato_formation::port_operations::RUNTIME_CAPABILITY.into(),
+        (contained_process && grant_path_bound).to_string(),
+    );
+}
+
+fn ticket_runtime_profile(
+    scoped: bool,
+    publisher: Option<&Client>,
+) -> ato_formation::request::RuntimeProfile {
+    let mut profile = local::probe_local_runtime();
+    let contained = profile.get("formation.containment") == Some("bwrap+landlock");
+    bind_http_port_capability(
+        &mut profile.capabilities,
+        contained,
+        scoped && publisher.is_some(),
+    );
+    profile
+}
+
 // ─────────────────────────────────────────────────────────────── serving
 
 pub struct ServeConfig {
@@ -1881,6 +1914,8 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
         .exploration
         .as_ref()
         .and_then(|e| e.source_oci.as_ref());
+    let contained_process = facts.get("runtime.process").is_some_and(|v| v == "true");
+    bind_http_port_capability(&mut facts, contained_process, config.exploration.is_some());
     let oci_available = source_oci.is_some_and(|o| o.available());
     facts.insert(
         "formation.source_oci.bound".into(),
@@ -2655,7 +2690,7 @@ fn execute_planned_ticket(
                 spec: &spec,
                 contract_ref: &contract_ref,
                 runtime_id: &ticket.runtime_id,
-                profile: &local::probe_local_runtime(),
+                profile: &ticket_runtime_profile(scoped.is_some(), publisher),
                 // A ticket runs unattended, and may be retried elsewhere.
                 authorization: ticket
                     .exploration
@@ -2999,7 +3034,7 @@ fn execute_retained_ticket(
             spec: &spec,
             contract_ref: &ticket.contract_ref,
             runtime_id: &ticket.runtime_id,
-            profile: &local::probe_local_runtime(),
+            profile: &ticket_runtime_profile(scoped.is_some(), context.publisher),
             authorization: ticket
                 .exploration
                 .as_ref()
@@ -3309,6 +3344,23 @@ fn exploration_build_seconds(deadline_ms: Option<u64>, now_ms: u64) -> u64 {
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
+
+    #[test]
+    fn http_port_capability_requires_containment_and_current_grant_path() {
+        for (contained, granted, expected) in [
+            (false, false, "false"),
+            (true, false, "false"),
+            (false, true, "false"),
+            (true, true, "true"),
+        ] {
+            let mut facts = BTreeMap::new();
+            bind_http_port_capability(&mut facts, contained, granted);
+            assert_eq!(
+                facts[ato_formation::port_operations::RUNTIME_CAPABILITY],
+                expected
+            );
+        }
+    }
 
     #[test]
     fn uncertain_candidate_or_journal_keeps_owned_attempt_root() {

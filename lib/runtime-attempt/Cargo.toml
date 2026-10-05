@@ -13,6 +13,8 @@ dist = false
 layer = "runtime"
 
 [dependencies]
+ato-adapter-http = { path = "../../extensions/adapters/http", version = "0.1.0" }
+ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
 anyhow = "1"
 ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "0.1.0" }
 ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }

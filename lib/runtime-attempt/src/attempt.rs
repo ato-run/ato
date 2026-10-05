@@ -332,6 +332,27 @@ fn realize_and_verify(
             attempt.realization = evidence.map(|evidence| *evidence);
             return not_observable(attempt, error, stopped);
         }
+        Err(RealizeFailure::Stopped {
+            error,
+            evidence,
+            stop,
+        }) => {
+            attempt.outcomes.publication = Outcome::not_attempted("candidate_not_observable");
+            attempt.realization = Some(*evidence);
+            let stopped = match stop {
+                StopClass::Confirmed => Ok(()),
+                StopClass::ScratchKept { .. } => {
+                    Err(crate::realize::CandidateStopFailure::ScratchKept {
+                        reason: "candidate termination confirmed; owned scratch retained".into(),
+                    }
+                    .into())
+                }
+                StopClass::Unconfirmed { reason, resources } => Err(
+                    crate::realize::CandidateStopFailure::Unconfirmed { reason, resources }.into(),
+                ),
+            };
+            return not_observable(attempt, error, Some(stopped));
+        }
         Err(RealizeFailure::Abandoned {
             error,
             cleanup,
@@ -897,6 +918,7 @@ mod tests {
             status: AttemptStatus::Failed,
             verification: Some(verification),
             realization: Some(RealizationEvidence {
+                port_operations: vec![],
                 executor: "runtime-process".to_owned(),
                 containment: "bwrap+landlock".to_owned(),
                 workspace: "disposable-copy".to_owned(),
@@ -1236,6 +1258,60 @@ mod tests {
             Some(crate::realize::StopClass::Unconfirmed { .. })
         ));
         assert!(outcome.attempt.receipt.is_none());
+    }
+
+    struct StoppedInteractionRealizer;
+    impl CandidateRealizer for StoppedInteractionRealizer {
+        fn admit(&self, _: &RuntimeProfile) -> Option<AttemptFailure> {
+            None
+        }
+        fn realize(
+            &self,
+            id: &str,
+            root: &Path,
+        ) -> Result<crate::realize::Realized, RealizeFailure> {
+            let realized = AnsweringRealizer::default().realize(id, root)?;
+            realized.candidate.stop().unwrap();
+            let evidence = verified_attempt().realization.unwrap();
+            Err(RealizeFailure::Stopped {
+                error: FormationFailure::new(
+                    "source_runtime_http_status_rejected",
+                    FailureStage::Admission,
+                    "declared interaction returned status 400",
+                )
+                .into(),
+                evidence: Box::new(evidence),
+                stop: StopClass::ScratchKept {
+                    reason: "private-path-canary".into(),
+                },
+            })
+        }
+    }
+    #[test]
+    fn failed_interaction_retains_known_stop_when_scratch_is_kept_without_private_context() {
+        let records = tempfile::tempdir().unwrap();
+        let outcome = served_attempt(
+            200,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+            Continuation::Stop,
+            &StoppedInteractionRealizer,
+            &AttemptJournal::new(records.path()),
+        );
+        assert!(matches!(outcome.stop, Some(StopClass::ScratchKept { .. })));
+        assert_eq!(outcome.attempt_record, AttemptRecordState::Finished);
+        assert!(outcome.attempt.receipt.is_none());
+        assert!(outcome.verified.is_none());
+        assert_eq!(
+            outcome.attempt.failure.as_ref().unwrap().code,
+            "source_runtime_http_status_rejected"
+        );
+        assert!(
+            !serde_json::to_string(&outcome.attempt)
+                .unwrap()
+                .contains("private-path-canary")
+        );
     }
 
     #[test]
