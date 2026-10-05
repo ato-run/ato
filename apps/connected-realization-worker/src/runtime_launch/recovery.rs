@@ -14,7 +14,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -39,15 +38,7 @@ pub fn mark_slot_recovered(recovered: bool) {
 /// This Runner process's incarnation: labels and journal entries written by
 /// a previous process of the same slot carry a different one.
 pub fn incarnation() -> &'static str {
-    static INCARNATION: OnceLock<String> = OnceLock::new();
-    INCARNATION.get_or_init(|| {
-        use rand::Rng;
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or_default();
-        format!("inc-{millis:x}-{:016x}", rand::thread_rng().r#gen::<u64>())
-    })
+    ato_runtime_attempt::launch::volume::incarnation()
 }
 
 /// The stop budget a Run's lifecycle grants.

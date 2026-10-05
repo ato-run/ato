@@ -6,6 +6,7 @@ mod desktop_control;
 mod formation_exploration;
 mod formation_input;
 mod formation_session;
+mod formation_verify;
 mod mcp_stdio;
 mod object_transport;
 mod portable_attempt;
@@ -130,6 +131,8 @@ enum Commands {
     FormInput(formation_input::InputArgs),
     /// Produce bounded Formation proposals through a scoped Session bridge.
     FormSession(formation_session::SessionArgs),
+    /// Explicitly authorize a retained Source result for functional verification.
+    FormVerify(formation_verify::VerifyArgs),
     /// Take part in the Runtime Network: advertise this host's execution
     /// environments and run the Formation attempts addressed to it.
     #[command(subcommand)]
@@ -610,6 +613,7 @@ pub fn run() -> Result<()> {
         Commands::Form(args) => form(*args),
         Commands::FormInput(args) => formation_input::run(args),
         Commands::FormSession(args) => formation_session::run(args),
+        Commands::FormVerify(args) => formation_verify::run(args),
         Commands::RuntimeNetwork(RuntimeNetworkCommand::Serve(args)) => runtime_network_serve(args),
         Commands::Worker {
             project,
