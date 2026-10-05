@@ -14,7 +14,7 @@
 //! - the workload sees hard links in its lease directory, read-only (0444,
 //!   root-owned, and Landlock read-only); the cache and markers are not
 //!   reachable from it. The cache dies with the machine; a new machine misses.
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod delivery;
+mod ranges;
 
 pub const CACHE_FORMAT: &str = "ato-model-cache/1";
 const CHUNK_BYTES: u64 = 256 * 1024 * 1024;
@@ -447,8 +448,8 @@ impl ModelCache {
     pub fn ensure(
         &self,
         entry: &ModelSetEntry,
-        mut fetch: impl FnMut(u64, u64) -> Result<Box<dyn Read>>,
-        mut keepalive: impl FnMut() -> Result<()>,
+        fetch: impl Fn(u64, u64) -> Result<Box<dyn Read>> + Sync,
+        keepalive: impl FnMut() -> Result<()> + Send,
     ) -> Result<ObjectDelivery> {
         let started = Instant::now();
         let mut verification = Duration::ZERO;
@@ -487,57 +488,8 @@ impl ModelCache {
         }
 
         let partial = object.with_extension("partial");
-        let mut requested = 0_u64;
-        let mut transferred = 0_u64;
-        loop {
-            let have = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-            if have > entry.bytes {
-                fs::remove_file(&partial)?;
-                continue;
-            }
-            if have == entry.bytes {
-                break;
-            }
-            keepalive()?;
-            let end = (have + CHUNK_BYTES).min(entry.bytes) - 1;
-            let mut attempt = 0;
-            loop {
-                let result = (|| -> Result<u64> {
-                    requested += end - have + 1;
-                    let reader = CountedRead {
-                        reader: fetch(have, end)?,
-                        transferred: &mut transferred,
-                    };
-                    // A bad range response cannot fill unbounded scratch space.
-                    let mut reader = reader.take(end - have + 2);
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&partial)?;
-                    let copied = std::io::copy(&mut reader, &mut file)?;
-                    file.flush()?;
-                    ensure!(copied == end - have + 1, "short range: {copied} bytes");
-                    Ok(copied)
-                })();
-                match result {
-                    Ok(_) => break,
-                    Err(error) if attempt + 1 < CHUNK_RETRIES => {
-                        attempt += 1;
-                        // A short write leaves a prefix that is still valid;
-                        // anything past `have` is discarded and refetched.
-                        if let Ok(file) = OpenOptions::new().write(true).open(&partial) {
-                            let _ = file.set_len(have);
-                        }
-                        eprintln!(
-                            "[data-plane] retry {attempt} for {}: {error:#}",
-                            entry.digest
-                        );
-                        std::thread::sleep(Duration::from_secs(2_u64.pow(attempt)));
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
+        let (requested, transferred) =
+            ranges::hydrate(&partial, entry.bytes, CHUNK_BYTES, fetch, keepalive)?;
         let verifying = Instant::now();
         let (digest, size) = hash_file(&partial)?;
         verification += verifying.elapsed();
@@ -863,10 +815,10 @@ mod tests {
 
     fn serve(
         data: Vec<u8>,
-        fetched: &std::cell::Cell<u64>,
-    ) -> impl FnMut(u64, u64) -> Result<Box<dyn Read>> + '_ {
+        fetched: &std::sync::atomic::AtomicU64,
+    ) -> impl Fn(u64, u64) -> Result<Box<dyn Read>> + Sync + '_ {
         move |start, end| {
-            fetched.set(fetched.get() + (end - start + 1));
+            fetched.fetch_add(end - start + 1, std::sync::atomic::Ordering::Relaxed);
             Ok(
                 Box::new(Cursor::new(data[start as usize..=end as usize].to_vec()))
                     as Box<dyn Read>,
@@ -880,7 +832,7 @@ mod tests {
         let cache = ModelCache::open(root.path()).unwrap();
         let data: Vec<u8> = (0..300_000_u32).map(|i| (i % 251) as u8).collect();
         let e = entry(&data);
-        let fetched = std::cell::Cell::new(0);
+        let fetched = std::sync::atomic::AtomicU64::new(0);
         let first = cache
             .ensure(&e, serve(data.clone(), &fetched), || Ok(()))
             .unwrap();
@@ -895,7 +847,10 @@ mod tests {
             .unwrap();
         assert_eq!((second.cache, second.bytes_transferred), ("hit", 0));
         assert_eq!(second.bytes_requested, 0);
-        assert_eq!(fetched.get(), data.len() as u64);
+        assert_eq!(
+            fetched.load(std::sync::atomic::Ordering::Relaxed),
+            data.len() as u64
+        );
         fs::remove_file(cache.marker_path(&e.digest).unwrap()).unwrap();
         assert_eq!(
             cache
@@ -919,13 +874,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cache = ModelCache::open(root.path()).unwrap();
         let data = b"verified-object";
-        let mut requests = 0;
+        let requests = std::sync::atomic::AtomicU64::new(0);
         let report = cache
             .ensure(
                 &entry(data),
                 |_, _| {
-                    requests += 1;
-                    let bytes = if requests == 1 {
+                    let request = requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let bytes = if request == 0 {
                         data[..3].to_vec()
                     } else {
                         data.to_vec()
@@ -949,7 +904,7 @@ mod tests {
         let cache = ModelCache::open(root.path()).unwrap();
         let data = b"weights".to_vec();
         let e = entry(&data);
-        let fetched = std::cell::Cell::new(0);
+        let fetched = std::sync::atomic::AtomicU64::new(0);
         cache
             .ensure(&e, serve(data.clone(), &fetched), || Ok(()))
             .unwrap();
@@ -993,12 +948,12 @@ mod tests {
             .unwrap()
             .with_extension("partial");
         fs::write(&partial, &data[..400]).unwrap();
-        let fetched = std::cell::Cell::new(0);
+        let fetched = std::sync::atomic::AtomicU64::new(0);
         let delivered = cache
             .ensure(&e, serve(data.clone(), &fetched), || Ok(()))
             .unwrap();
         assert_eq!(delivered.bytes_transferred, 600);
-        assert_eq!(fetched.get(), 600);
+        assert_eq!(fetched.load(std::sync::atomic::Ordering::Relaxed), 600);
     }
 
     #[test]
@@ -1006,7 +961,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cache = ModelCache::open(root.path()).unwrap();
         let data = vec![1_u8; 10];
-        let fetched = std::cell::Cell::new(0);
+        let fetched = std::sync::atomic::AtomicU64::new(0);
         assert!(
             cache
                 .ensure(&entry(&data), serve(data.clone(), &fetched), || bail!(
@@ -1014,7 +969,7 @@ mod tests {
                 ))
                 .is_err()
         );
-        assert_eq!(fetched.get(), 0);
+        assert_eq!(fetched.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1049,7 +1004,7 @@ mod tests {
         let cache = ModelCache::open(root.path()).unwrap();
         let data = b"abc".to_vec();
         let e = entry(&data);
-        let fetched = std::cell::Cell::new(0);
+        let fetched = std::sync::atomic::AtomicU64::new(0);
         cache
             .ensure(&e, serve(data.clone(), &fetched), || Ok(()))
             .unwrap();
