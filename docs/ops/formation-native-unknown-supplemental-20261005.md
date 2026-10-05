@@ -1,5 +1,7 @@
 # 実UNKNOWN専用の追加受入
 
+現時点のUNKNOWN gateは、別measurement `formation-native-real-unknown-20261005-05`で成立した。40分の上限内に実30分UNKNOWN、実Codexの新しいreconcile-only文脈、同一attemptのlate-result/ACK/closed、通常owner resolution、予約・writer・temporary input・所有processの0件確認まで終了した。旧campaignの13/12超過と01〜04の失敗・制約は変更していない。最新のユーザー指示により、同じ上限・独立measurement IDの追加枠は自動実行が承認されている。以下の「追加承認が必要」という記述は、その承認前の各測定時点の記録である。
+
 ユーザーが40分案を承認したため、`formation-native-real-unknown-20261005-01`を実Codex 0.160.0 / gpt-6.1-solで実行した。上限はSearch 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 2400秒。元Searchの期限は1800秒のまま。30分のsilence expiry、時計、DB timestamp、旧campaignの13/12を変更していない。
 
 このmeasurementはUNKNOWNへ到達せず終了した。最初のNative turnはSkillが要求するowner隔離確認を起動promptに見つけられず、typed `needs_input`を提出した。Search `search_36ebcf9479b6c5b359d9df8e685c3da4`は`unsatisfied / needs_input`で終端した。消費はSearch 1、割当round 1、exchange 1、inspection 0、Runtime attempt 0、経過51秒。新D、workload、transport切断、30分失効、UNKNOWN、receiptは未観測である。[公開証拠](evidence/formation-native-unknown-supplemental-20261005-01.json)。
@@ -53,3 +55,19 @@ Search `search_b44da962307739556f9121288edf1c04`、attempt `01M45JR7BASXDRFDXF8W
 最終secret/process cleanupは40分を超えたため、campaign全体の受入完了とはしない。全処理終了時は新規未解決attempt・予約・writer・temporary input・所有processが0。04の記録と旧13/12超過は保持し、同じ上限・別measurement IDの05で枠内の連続終了を検証する。追加枠の自動実行はユーザー承認済みである。
 
 削除前の実値scanは対象ファイル・符号化を記録している。remoteのraw scanには旧fixtureのowner識別子と固定public protocol語彙が一致するhitがある。canonical prompt/schemaとの一致を別証跡で照合し、raw hitを保存した。credential値・emailのhitは0だが、owner識別子文字列の完全不出現や全操作の非露出を主張しない。SDK tokenは観測値、内部LLM call数・実請求は不明として区別する。
+
+## Supplemental 05: 実UNKNOWNとfresh Native照合を40分内で完了
+
+[測定05の証跡](evidence/formation-native-unknown-supplemental-20261005-05.json)。上限はSearch 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 40分。実消費は1 / 1 / 1 / 1 / 0。Codex 0.160.0 / gpt-6.1-solが、既知Dなしの制御SourceにDを提案した。実Runtimeの開始は保存済みRust receiptの`execution_started`とfresh fixed-K検証で確認し、その後result/completion/ACK transportを切断した。独立した`/proc`によるworkload生存観測とは区別する。保存済みresultは保持し、Coordinatorには失効まで届けていない。
+
+claimed時刻から1,804,155 msで既存の30分silence expiryがUNKNOWNを作った。元Search期限は30分のまま。元Native clientがUNKNOWNまで生存していたことを確認してから終了し、新しいNative文脈で同Searchへreconcile-only接続した。実MCP `status / next`はともに成功し、`input: null`、元deadline、消費round/exchange/attempt各1を維持した。新しい推論input・D round・exchange・Runtime attemptは0。再接続turnのSDK利用は、追加のD探索と別に記録している。
+
+既存のlate-result配送を解放し、保存時と同じresult bytes、同じattempt IDのACK `accepted: true`、delivery `closed: true`を確認した。Runtime終了とdisposable realizationの破棄・cleanup成功を根拠に、通常resolution APIで`effect_reconciled`を保存した。歴史UNKNOWNと期限切れSearchの`unsatisfied`は保全し、late PASSをSource成功・成功D・通常Run許可・公開・forkへ昇格していない。手作業のDB更新はない。
+
+連続終了は開始から2,037,634 ms、追加のprocess/CWD・SSH listener・旧台帳hash照合を含むpostflightは2,109,954 msで、40分内である。未解決attempt、全Search予約、active/quarantined writer、temporary input、live metadata、owner session、所有process、local forwarding listenerは0。secret copyはremote 4件、local 6件とprivate隔離canaryを削除し、元のNative OAuthは保持した。cleanup controllerが終了済みownerのcommandを照合した際に停止したため、保存済み精算・scanからcleanupだけを再開した。controller errorと、実行前の継続script構文エラーも保存した。再推論・再実行・deadline延長で復旧していない。
+
+削除前にmodel-facing project、実SDK event、tool/diagnostic outputの36ファイル・530,229 bytesを、private値の各encodingで照合した。localはcredentialとprivate canaryのhit 0。remote raw scanのowner識別子hit 1は、固定public protocol語彙との一致をcanonical prompt/schemaで別途照合し、raw hitを保全した。credential/emailのhitは0だが、owner文字列の完全不出現や全操作の非露出を主張しない。
+
+実測pinはRequester `d7c926f5d5`、Session `438efd6a864`、Skill `78c257fdd`、Runtime `c5719f69ea2`、API `34b44f842`を保持する。SDK累積tokenは初期文脈69,274、照合文脈30,387。内部LLM call数・実請求は不明。Ato direct LLM API call 0を推論費用0と表示しない。独立API台帳、旧WBO UNKNOWN、過去の実測pinは変更していない。
+
+この結果により#1485をReady for reviewとする。最終mainのintegration CI、staging/production migrationと配備、100 OSS再測定、独立API残計画は別gateであり、この実測から完了を推定しない。
