@@ -6206,11 +6206,27 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         // the worker's next surface poll, the old descriptor/context must not
         // resolve against that new document -- for WebMCP or fixed Browser
         // input.
+        let ready_path =
+            ato_adapter_browser::runtime_discovery_path(workspace.path(), "hosted.browser")
+                .with_extension("ready");
+        let previous_handshake = fs::metadata(&ready_path).unwrap().modified().unwrap();
         host.evaluate("location.reload(); true").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let replacement = loop {
-            if let Ok(snapshot) = host.webmcp_snapshot()
+            // A new document can expose its snapshot while the old WebSocket
+            // is still closing. Sending then correctly yields an indeterminate
+            // physical outcome; this fixture needs the replacement handshake
+            // before testing the stale-document refusal, without applying input.
+            let reconnected = fs::metadata(&ready_path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|modified| modified != previous_handshake);
+            if reconnected
+                && let Ok(snapshot) = host.webmcp_snapshot()
                 && snapshot.document_token != document_token
+                && snapshot
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name.as_str() == Some("slow_increment"))
             {
                 break snapshot;
             }
