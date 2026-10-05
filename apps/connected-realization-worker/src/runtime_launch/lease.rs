@@ -735,7 +735,7 @@ pub fn resolve_run(
 /// the lease, state and recovery around them stay here.
 pub enum ActiveWorkload {
     Process(super::process_executor::LaunchedProcess),
-    Oci(LaunchedOci),
+    Oci(Box<LaunchedOci>),
 }
 
 pub struct ActiveRun {
@@ -774,14 +774,16 @@ impl ActiveRun {
     pub fn execution_subject(&self) -> String {
         match &self.launched {
             ActiveWorkload::Process(process) => format!("pid={}", process.pid()),
-            ActiveWorkload::Oci(LaunchedOci::Container(container)) => {
-                format!("container_id={}", container.container_id())
-            }
-            ActiveWorkload::Oci(LaunchedOci::Group(group)) => group
-                .services()
-                .map(|(name, container)| format!("{name}={}", container.container_id()))
-                .collect::<Vec<_>>()
-                .join(","),
+            ActiveWorkload::Oci(launched) => match launched.as_ref() {
+                LaunchedOci::Container(container) => {
+                    format!("container_id={}", container.container_id())
+                }
+                LaunchedOci::Group(group) => group
+                    .services()
+                    .map(|(name, container)| format!("{name}={}", container.container_id()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            },
         }
     }
 
@@ -801,35 +803,37 @@ impl ActiveRun {
                 platform: None,
                 services: Vec::new(),
             },
-            ActiveWorkload::Oci(LaunchedOci::Container(container)) => RuntimeExecutionEvidence {
-                realization: "oci",
-                runtime_executable: Some("docker".to_owned()),
-                runtime_version: None,
-                pid: None,
-                container_id: Some(container.container_id().to_owned()),
-                image: Some(container.image().to_owned()),
-                platform: Some(container.platform().to_owned()),
-                services: Vec::new(),
-            },
-            ActiveWorkload::Oci(LaunchedOci::Group(group)) => RuntimeExecutionEvidence {
-                realization: "oci_service_group",
-                runtime_executable: Some("docker".to_owned()),
-                runtime_version: None,
-                pid: None,
-                container_id: None,
-                image: None,
-                platform: group
-                    .services()
-                    .next()
-                    .map(|(_, container)| container.platform().to_owned()),
-                services: group
-                    .services()
-                    .map(|(name, container)| ServiceExecutionEvidence {
-                        name: name.to_owned(),
-                        container_id: container.container_id().to_owned(),
-                        image: container.image().to_owned(),
-                    })
-                    .collect(),
+            ActiveWorkload::Oci(launched) => match launched.as_ref() {
+                LaunchedOci::Container(container) => RuntimeExecutionEvidence {
+                    realization: "oci",
+                    runtime_executable: Some("docker".to_owned()),
+                    runtime_version: None,
+                    pid: None,
+                    container_id: Some(container.container_id().to_owned()),
+                    image: Some(container.image().to_owned()),
+                    platform: Some(container.platform().to_owned()),
+                    services: Vec::new(),
+                },
+                LaunchedOci::Group(group) => RuntimeExecutionEvidence {
+                    realization: "oci_service_group",
+                    runtime_executable: Some("docker".to_owned()),
+                    runtime_version: None,
+                    pid: None,
+                    container_id: None,
+                    image: None,
+                    platform: group
+                        .services()
+                        .next()
+                        .map(|(_, container)| container.platform().to_owned()),
+                    services: group
+                        .services()
+                        .map(|(name, container)| ServiceExecutionEvidence {
+                            name: name.to_owned(),
+                            container_id: container.container_id().to_owned(),
+                            image: container.image().to_owned(),
+                        })
+                        .collect(),
+                },
             },
         }
     }
@@ -944,7 +948,7 @@ pub fn start(
                 }
             };
             return Ok(ActiveRun {
-                launched: ActiveWorkload::Oci(LaunchedOci::Group(group)),
+                launched: ActiveWorkload::Oci(Box::new(LaunchedOci::Group(group))),
                 resolved,
             });
         }
@@ -1004,7 +1008,7 @@ pub fn start(
                 let stop = launched.stop_gracefully(budget);
                 return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
             }
-            ActiveWorkload::Oci(LaunchedOci::Container(launched))
+            ActiveWorkload::Oci(Box::new(LaunchedOci::Container(launched)))
         }
     };
     Ok(ActiveRun { launched, resolved })
@@ -1082,7 +1086,7 @@ pub fn finish(
         )],
         // Reverse start order for a group; its networks go only after every
         // service is confirmed stopped.
-        ActiveWorkload::Oci(launched) => launched.stop(budget).services,
+        ActiveWorkload::Oci(launched) => (*launched).stop(budget).services,
     };
     let stop = FinishedStop {
         overall: StopOutcome::worst(services.iter().map(|(_, outcome)| outcome))

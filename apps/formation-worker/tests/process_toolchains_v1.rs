@@ -10,8 +10,11 @@ use ato_formation::detect::detect;
 use ato_formation::failure::FormationFailure;
 use ato_formation::intent::{Lane, ResolvedPackageManager};
 use ato_formation::source::{RESOLVER_CONTRACT_V1, SourceClosureRef};
-use ato_formation_worker::job::{PlannedCandidate, plan_candidate};
+use ato_formation_worker::job::PlannedCandidate;
+#[path = "support/compiler_plan.rs"]
+mod compiler_plan;
 use ato_formation_worker::runtime_network::derivation_requirements;
+use compiler_plan::plan_candidate;
 
 fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -160,7 +160,20 @@ pub struct AttachedVolume {
     data_dir: PathBuf,
     /// True when this attachment created the volume.
     pub provisioned: bool,
-    _lock: File,
+    _lock: VolumeLock,
+}
+
+// Unlock explicitly before close: a concurrent spawn may transiently inherit
+// the file description until exec, even though this attachment has ended.
+#[derive(Debug)]
+struct VolumeLock(File);
+
+impl Drop for VolumeLock {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(&self.0) {
+            tracing::warn!(%error, "release the host-local volume lock");
+        }
+    }
 }
 
 impl AttachedVolume {
@@ -376,8 +389,7 @@ impl VolumeStore {
             "{prefix}{}",
             incarnation().replace(|c: char| !c.is_ascii_alphanumeric(), "")
         ));
-        fs::rename(&dir, &grave)?;
-        File::open(&self.volumes)?.sync_all()?;
+        crate::durability::rename(&dir, &grave)?;
         for entry in fs::read_dir(&self.volumes)? {
             let entry = entry?;
             if entry.file_name().to_string_lossy().starts_with(&prefix) {
@@ -390,7 +402,7 @@ impl VolumeStore {
         Ok(())
     }
 
-    fn lock(&self, volume_ref: &str) -> Result<File, VolumeError> {
+    fn lock(&self, volume_ref: &str) -> Result<VolumeLock, VolumeError> {
         let path = self.locks.join(format!("{volume_ref}.lock"));
         let file = OpenOptions::new()
             .create(true)
@@ -407,7 +419,7 @@ impl VolumeStore {
                 },
             );
         }
-        Ok(file)
+        Ok(VolumeLock(file))
     }
 
     fn verify(&self, dir: &Path, volume_ref: &str) -> Result<(), VolumeError> {
@@ -467,9 +479,9 @@ impl VolumeStore {
         let mut file = File::create(staging.join(METADATA_FILE))?;
         file.write_all(&serde_json::to_vec(&metadata).map_err(anyhow::Error::from)?)?;
         file.sync_all()?;
+        drop(file);
         sync_tree(&staging)?;
-        fs::rename(&staging, dir)?;
-        File::open(&self.volumes)?.sync_all()?;
+        crate::durability::rename(&staging, dir)?;
         Ok(())
     }
 }
@@ -482,10 +494,20 @@ fn sync_tree(root: &Path) -> Result<()> {
         if kind.is_dir() {
             sync_tree(&entry.path())?;
         } else if kind.is_file() {
+            #[cfg(not(windows))]
             File::open(entry.path())?.sync_all()?;
+            #[cfg(windows)]
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(entry.path())?
+                .sync_all()?;
         }
     }
-    File::open(root)?.sync_all()?;
+    // Windows publishes the fully synced tree with a write-through move;
+    // File::open on a directory is not a Unix directory fsync equivalent.
+    #[cfg(not(windows))]
+    crate::durability::sync_directory(root)?;
     Ok(())
 }
 
