@@ -5904,6 +5904,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                             continue;
                         }
                         clients.push(thread::spawn(move || {
+                            // Accepted sockets may inherit the listener's
+                            // nonblocking mode. The bounded HTTP reader below
+                            // requires blocking reads on every host.
+                            stream.set_nonblocking(false).unwrap();
                             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                             let mut request = Vec::new();
                             let mut buffer = [0_u8; 1024];

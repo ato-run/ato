@@ -446,9 +446,18 @@ mod tests {
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 
     fn short_socket_path(label: &str) -> PathBuf {
-        std::fs::create_dir_all(".tmp").unwrap();
-        std::env::current_dir().unwrap().join(format!(
-            ".tmp/{label}-{}-{}",
+        let cwd = std::env::current_dir().unwrap();
+        // Nested worktrees can exceed BSD's Unix socket path limit. Reuse
+        // their workspace .tmp ancestor while keeping the absolute-path
+        // admission contract exercised by the gateway.
+        let directory = cwd
+            .ancestors()
+            .find(|path| path.file_name().is_some_and(|name| name == ".tmp"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cwd.join(".tmp"));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join(format!(
+            "{label}-{}-{}",
             std::process::id(),
             NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
         ))
