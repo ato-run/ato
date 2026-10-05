@@ -604,6 +604,13 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             ),
         });
     }
+    if let Some(oci) = ato_formation::source_oci_plan::runtime_requirements(&planned.derivation) {
+        requirements.extend(oci.into_iter().map(|r| Requirement {
+            fact: r.fact,
+            one_of: r.one_of,
+        }));
+        return (requirements, vec![]);
+    }
     requirements.extend(
         ato_formation::search::execution_requirements(
             planned.plan.lane.is_process(),
@@ -614,6 +621,14 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             fact: r.fact,
             one_of: r.one_of,
         }),
+    );
+    requirements.extend(
+        ato_formation::proposal::native_runtime_requirements(&planned.derivation)
+            .into_iter()
+            .map(|r| Requirement {
+                fact: r.fact,
+                one_of: r.one_of,
+            }),
     );
     let mut provisions: Vec<String> = planned
         .plan
@@ -1510,6 +1525,35 @@ impl Client {
         ensure!(metadata.len() <= 128, "variable_metadata_bounds");
         Ok(metadata.iter().map(|v|serde_json::json!({"metadata":v["metadata"],"revoked_at_ms":v["revoked_at_ms"]})).collect())
     }
+    pub fn formation_input(&self, search_id: &str) -> Result<Value> {
+        ensure!(
+            search_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                && search_id.len() <= 256,
+            "invalid search id"
+        );
+        self.send(
+            self.http
+                .get(self.url(&format!("/exploration/{search_id}/input"))),
+        )?
+        .context("formation_input_empty")
+    }
+    pub fn provide_formation_input(&self, search_id: &str, input: &Value) -> Result<Value> {
+        ensure!(
+            search_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                && search_id.len() <= 256,
+            "invalid search id"
+        );
+        self.send(
+            self.http
+                .post(self.url(&format!("/exploration/{search_id}/input")))
+                .json(input),
+        )?
+        .context("formation_input_empty")
+    }
     pub fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>> {
         let reply: Value = self
             .send(self.http.get(self.url("/runtimes")))?
@@ -1530,6 +1574,7 @@ impl Client {
         &self,
         ticket: &AttemptTicket,
         requirements: &[ato_formation::variables::VariableRequirement],
+        work_root: &Path,
     ) -> Result<Vec<ato_runtime_attempt::variables::ResolvedVariable>> {
         #[derive(Deserialize)]
         struct Reply {
@@ -1537,9 +1582,21 @@ impl Client {
             #[serde(default)]
             variables: Vec<Value>,
         }
+        let deadline = ticket
+            .exploration
+            .as_ref()
+            .and_then(|e| e.deadline_ms)
+            .context("binding_wait_requires_deadline")?;
+        let control = ato_runtime_attempt::control::ExecutionControl::new(deadline);
+        let retries = ticket.exploration.as_ref().map_or(3, |e| e.max_retries);
+        let binding = delivery::Delivery::open(&work_root.join(format!(
+            "binding-{:x}",
+            Sha256::digest(format!("{}:{}", ticket.attempt_id, ticket.fence).as_bytes())
+        )))?;
         let reply = loop {
-            let reply: Reply = self
-                .send(
+            control.remaining(ato_runtime_attempt::control::AttemptPhase::Source)?;
+            let reply: Reply = binding.binding_poll(retries, &control, || {
+                self.send(
                     self.http
                         .post(self.url(&format!(
                             "/attempts/{}/variables/resolve",
@@ -1547,25 +1604,19 @@ impl Client {
                         )))
                         .json(&json!({"fence":ticket.fence,"requirements":requirements})),
                 )?
-                .context("variable_resolution_empty")?;
+                .context("variable_resolution_empty")
+            })?;
             if reply.status == "resolved" {
                 break reply;
             }
             ensure!(reply.status == "needs_input", "variable_resolution_invalid");
-            let deadline = ticket
-                .exploration
-                .as_ref()
-                .and_then(|e| e.deadline_ms)
-                .context("binding_wait_requires_deadline")?;
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-            ensure!(
-                now < deadline,
-                "needs_input: round deadline elapsed awaiting scoped variable information"
-            );
-            std::thread::sleep(Duration::from_millis(
-                deadline.saturating_sub(now).min(5000),
-            ));
+            let _backoff = control.phase(ato_runtime_attempt::control::AttemptPhase::Backoff)?;
+            std::thread::sleep(control.cap(
+                ato_runtime_attempt::control::AttemptPhase::Backoff,
+                Duration::from_secs(5),
+            )?);
         };
+        control.remaining(ato_runtime_attempt::control::AttemptPhase::Launch)?;
         ensure!(
             reply.variables.len() == requirements.len(),
             "variable_resolution_mismatch"
@@ -2356,13 +2407,21 @@ fn execute_planned_ticket(
         match publisher
             .context("variable_resolver_unavailable")
             .and_then(|client| {
-                client.resolve_variables(ticket, &planned.derivation.variable_bindings)
+                client.resolve_variables(
+                    ticket,
+                    &planned.derivation.variable_bindings,
+                    &config.out_dir,
+                )
             }) {
             Ok(v) => v,
             Err(error) => {
                 return refused_after_expansion(
                     attested.clone(),
-                    "needs_input",
+                    if error.chain().any(|e| e.to_string().contains("deadline")) {
+                        "round_deadline_exceeded"
+                    } else {
+                        "infrastructure_failure"
+                    },
                     &format!("{error:#}"),
                 );
             }
@@ -2473,6 +2532,7 @@ fn execute_planned_ticket(
                 || planned.derivation.runtimes.contains_key("oci.image")
         })
         .map(|grant| source_oci_exploration::SourceOciRealizer {
+            variables: &resolved_variables,
             planned: &planned,
             archive: &source_oci_archive,
             archive_digest,
@@ -2752,6 +2812,34 @@ fn execute_retained_ticket(
     attested.effects = Some(effects_name(planned.derivation.effects));
     attested.requirements = requirements;
     attested.provisions = provisions;
+    let resolved_variables = if planned.derivation.variable_bindings.is_empty() {
+        vec![]
+    } else {
+        match context
+            .publisher
+            .context("variable_resolver_unavailable")
+            .and_then(|client| {
+                client.resolve_variables(
+                    ticket,
+                    &planned.derivation.variable_bindings,
+                    &config.out_dir,
+                )
+            }) {
+            Ok(variables) => variables,
+            Err(error) => {
+                return refused(
+                    ticket,
+                    attested.clone(),
+                    if error.chain().any(|e| e.to_string().contains("deadline")) {
+                        "round_deadline_exceeded"
+                    } else {
+                        "infrastructure_failure"
+                    },
+                    &format!("{error:#}"),
+                );
+            }
+        }
+    };
     let scoped = match ticket
         .exploration
         .as_ref()
@@ -2835,6 +2923,7 @@ fn execute_retained_ticket(
                         ceiling: &g.ceiling,
                         runtime_gate: &s.sockets
                             [&ato_formation::requirements::ExecutionPhase::Runtime],
+                        variables: &resolved_variables,
                     },
                 ),
         },

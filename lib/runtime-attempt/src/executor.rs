@@ -165,6 +165,10 @@ impl LocalAttemptExecutor {
             context,
         )?;
 
+        let _materialization = context
+            .control
+            .map(|c| c.phase(crate::control::AttemptPhase::Build))
+            .transpose()?;
         match candidate.plan.lane {
             ato_formation::intent::Lane::PythonProcess | ato_formation::intent::Lane::Process => {
                 let root = output_root(&built, "")?;
@@ -172,13 +176,13 @@ impl LocalAttemptExecutor {
                     &candidate.derivation.variable_bindings,
                     context.variables,
                 );
-                crate::variables::scan_artifact(&root, &secrets)?;
+                crate::variables::scan_artifact_controlled(&root, &secrets, context.control)?;
                 Ok(ExecutedCandidate::Process {
                     workspace_root: root,
                 })
             }
             ato_formation::intent::Lane::StaticWeb => {
-                let produced = crate::static_lane::materialize_static(
+                let produced = crate::static_lane::materialize_static_controlled(
                     &candidate.derivation,
                     &candidate.plan,
                     // The WORKSPACE root: the lane resolves
@@ -191,6 +195,7 @@ impl LocalAttemptExecutor {
                         &candidate.derivation.variable_bindings,
                         context.variables,
                     ),
+                    context.control,
                 )?;
                 Ok(ExecutedCandidate::StaticWeb {
                     output: Box::new(produced),

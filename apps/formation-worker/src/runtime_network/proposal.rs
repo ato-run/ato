@@ -217,6 +217,34 @@ pub fn prepare_exploration_submission_auto(
     Ok(submission)
 }
 
+fn bound_exploration_context(
+    context: &mut ato_formation::proposal::ExplorationContext,
+) -> Result<()> {
+    // Keep the source-owned plan and latest failure. Native operations
+    // embed registered helper bytes in canonical D; those bytes need
+    // not crowd out the evidence used to repair the typed plan.
+    while serde_jcs::to_vec(context)?.len() > 16 * 1024 {
+        if context.previous_derivations.len() > 1 {
+            context.previous_derivations.pop();
+        } else if context.failures.len() > 1 {
+            context.failures.pop();
+        } else if context.failures.iter().any(|f| f.log_tail.len() > 256) {
+            for failure in &mut context.failures {
+                failure.log_tail = public_log_tail_limit(&failure.log_tail, 256);
+            }
+        } else if let Some(d) = context.previous_derivations.pop() {
+            context.omitted_derivation_refs.push(d.derivation_ref()?);
+        } else if context.successful_derivation.take().is_some() {
+            // Its authenticated canonical identity remains explicit.
+            // Complete bytes and receipt stay in the owner ledger.
+        } else if context.previous_plan.take().is_some() {
+        } else {
+            anyhow::bail!("exploration_context_bounds");
+        }
+    }
+    Ok(())
+}
+
 impl Submission {
     /// Validate an unapproved submission against the locally frozen search.
     /// It is never returned as a normal verified route or Run permission.
@@ -746,6 +774,7 @@ impl Submission {
                     effective_max_rounds: p.formation.max_rounds.get(),
                     ceiling: p.ceiling.clone(),
                     previous_derivations,
+                    omitted_derivation_refs: vec![],
                     previous_plan: local.accepted_rounds.values().rev().find_map(|r| {
                         if !r["outcomes"]
                             .as_array()?
@@ -833,24 +862,7 @@ impl Submission {
                 .unwrap_or_else(|| local.source_context.clone()),
         };
         if let Some(context) = &mut value.exploration_context {
-            // Preserve the latest D, latest failure and verified success. Older
-            // redundant context is bounded deterministically; the full owner
-            // evidence remains durable and the frozen source limit is unchanged.
-            while serde_jcs::to_vec(context)?.len() > 16 * 1024 {
-                if context.previous_derivations.len() > 1 {
-                    context.previous_derivations.pop();
-                } else if context.failures.len() > 1 {
-                    context.failures.pop();
-                } else if context.failures.iter().any(|f| f.log_tail.len() > 256) {
-                    for failure in &mut context.failures {
-                        failure.log_tail = public_log_tail_limit(&failure.log_tail, 256);
-                    }
-                } else if context.previous_plan.take().is_some() {
-                    // Canonical previous D still carries all execution fields.
-                } else {
-                    anyhow::bail!("exploration_context_bounds");
-                }
-            }
+            bound_exploration_context(context)?;
         }
         value.validate(
             local

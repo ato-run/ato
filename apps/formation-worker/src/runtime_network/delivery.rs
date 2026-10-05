@@ -123,6 +123,9 @@ impl Delivery {
                         &dir.join(format!("{kind}.error{retry}.json")),
                         &json!({"error":super::super::api::bounded_reason(&format!("{error:#}"))}),
                     )?;
+                    if error.to_string().starts_with("coordinator answered 4") {
+                        return Err(error);
+                    }
                     if retry < retries {
                         let delay = Duration::from_millis(1000_u64 << retry.min(5));
                         let _backoff = control
@@ -155,6 +158,32 @@ impl Delivery {
             }
             return Ok(ticket);
         }
+    }
+    /// Grant values live only in memory. Durable markers contain delivery
+    /// identity/counts, never the reply or redeemed bytes.
+    pub fn binding_poll<T>(
+        &self,
+        retries: u32,
+        control: &ExecutionControl,
+        mut send: impl FnMut() -> Result<T>,
+    ) -> Result<T> {
+        let (_, dir) = self.operation()?;
+        let mut poll = 0u32;
+        while dir.join(format!("binding-{poll}.response.json")).exists() {
+            poll = poll.checked_add(1).context("binding poll bound")?;
+        }
+        let mut reply = None;
+        let _: Value = self.dispatch(
+            &dir,
+            &format!("binding-{poll}"),
+            retries,
+            Some(control),
+            || {
+                reply = Some(send()?);
+                Ok(json!({"delivered":true}))
+            },
+        )?;
+        reply.context("binding reply unavailable in this process")
     }
     pub fn report(
         &self,
@@ -230,6 +259,39 @@ impl Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grant_delivery_journal_never_contains_values_or_resets_lost_retry() {
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        let delivery = Delivery::open(root.path()).unwrap();
+        let control = ExecutionControl::new(ato_runtime_attempt::control::now_ms() + 10000);
+        let private = delivery
+            .binding_poll(0, &control, || {
+                Ok("synthetic-private-grant-value".to_string())
+            })
+            .unwrap();
+        assert_eq!(private, "synthetic-private-grant-value");
+        let (_, dir) = delivery.operation().unwrap();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            assert!(
+                !String::from_utf8_lossy(&std::fs::read(entry.path()).unwrap()).contains(&private)
+            );
+        }
+        assert!(
+            delivery
+                .binding_poll::<String>(0, &control, || anyhow::bail!("response lost"))
+                .is_err()
+        );
+        drop(delivery);
+        let resumed = Delivery::open(root.path()).unwrap();
+        assert!(
+            resumed
+                .binding_poll::<String>(0, &control, || panic!(
+                    "the lost retry must remain consumed"
+                ))
+                .is_err()
+        );
+    }
     #[test]
     fn lost_runtime_dispatch_stays_the_same_operation_after_restart() {
         let root = tempfile::tempdir_in(".tmp").unwrap();
