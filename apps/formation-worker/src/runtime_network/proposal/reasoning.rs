@@ -799,6 +799,79 @@ mod autonomous_tests {
             ))
             .is_err()
         );
+        assert!(
+            p.coordinator_operation(1, "claim", b"same", 0, expires, || panic!("policy reset"))
+                .is_err()
+        );
+        assert!(
+            p.coordinator_operation(3, "claim", b"expired", 0, 0, || panic!("expired inference"))
+                .is_err()
+        );
+        p.coordinator_operation(4, "complete", b"report", 0, 0, || {
+            Ok(json!({"expired_result_reported":true}))
+        })?;
+        Ok(())
+    }
+    #[test]
+    fn a_recovered_response_cannot_hide_a_lost_calls_unknown_usage() -> Result<()> {
+        std::fs::create_dir_all(".tmp")?;
+        let root = tempfile::tempdir_in(".tmp")?;
+        let config = deepseek::DeepSeekConfig {
+            provider: "deepseek".into(),
+            model: "deepseek-chat".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+            max_output_tokens: 1024,
+            timeout_ms: 1000,
+            thinking: deepseek::ThinkingMode::Disabled,
+        };
+        let plan = budget::BudgetPlan {
+            max_calls: 3,
+            input_token_cap: 1024,
+            output_token_cap: 1024,
+            input_price: 1,
+            output_price: 1,
+            ceiling_usd_micros: 6,
+        };
+        let journal = Arc::new(budget::CallBudget::create(
+            &root.path().join("calls.jsonl"),
+            plan.clone(),
+        )?);
+        let api = Arc::new(DeepSeekCandidateProducer::new_mock(
+            config.clone(),
+            journal,
+        )?);
+        let producer = ReasoningProducer::new(
+            ReasoningProviderConfig::Api(config),
+            plan,
+            root.path().join("producer"),
+            Some(api.clone()),
+        )?;
+        let mut provenance = api.identity().unknown_usage();
+        provenance.estimated_cost_usd_micros = Some(2);
+        let error = producer
+            .finish_round(
+                b"{}".to_vec(),
+                vec![],
+                vec![ProviderCall {
+                    provenance,
+                    status: CallStatus::Success,
+                    error_class: None,
+                }],
+            )
+            .err()
+            .context("unknown usage must stop the round")?;
+        let failure = error
+            .downcast_ref::<ReasoningProviderFailure>()
+            .context("typed failure")?;
+        assert_eq!(failure.0.class, ErrorClass::TransportError);
+        assert_eq!(failure.0.provenance.usage.input_tokens, None);
+        assert_eq!(failure.0.provenance.estimated_cost_usd_micros, Some(2));
+        assert_eq!(
+            api.credential_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         Ok(())
     }
 }
@@ -906,6 +979,18 @@ impl ReasoningProducer {
             .write(true)
             .open(self.directory.join(format!("{name}.lock")))?;
         lock.lock_exclusive()?;
+        ensure!(max_retries <= 16, "invalid frozen coordinator retry limit");
+        let policy_path = self.directory.join(format!("{name}.policy.json"));
+        let policy =
+            serde_jcs::to_vec(&json!({"max_retries":max_retries,"expires_at_ms":expires}))?;
+        if policy_path.exists() {
+            ensure!(
+                bounded_read(&policy_path, 4096)? == policy,
+                "coordinator retry policy changed"
+            );
+        } else {
+            save(&policy_path, &policy)?;
+        }
         let result_path = self.directory.join(format!("{name}.result.json"));
         let request_hash = digest(request);
         if result_path.exists() {
@@ -926,10 +1011,23 @@ impl ReasoningProducer {
                     old["request_sha256"] == request_hash,
                     "operation identity changed"
                 );
+                let error_path = self
+                    .directory
+                    .join(format!("{name}.error{attempt:03}.json"));
+                if error_path.exists() {
+                    let error: Value = serde_json::from_slice(&bounded_read(&error_path, 4096)?)?;
+                    ensure!(
+                        error["retryable"] != false,
+                        "coordinator operation permanently refused; preserved"
+                    );
+                }
                 continue;
             }
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-            ensure!(now < expires, "coordinator operation deadline");
+            ensure!(
+                kind == "complete" || now < expires,
+                "coordinator operation deadline"
+            );
             save(
                 &path,
                 &serde_jcs::to_vec(&json!({"request_sha256":request_hash,
@@ -961,7 +1059,10 @@ impl ReasoningProducer {
                     }
                     let delay = 100_u64.saturating_mul(1 << attempt.min(6));
                     ensure!(
-                        now.saturating_add(delay) < expires,
+                        kind == "complete"
+                            || (SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+                                .saturating_add(delay)
+                                < expires,
                         "retry backoff exceeds deadline"
                     );
                     std::thread::sleep(Duration::from_millis(delay));
@@ -1082,6 +1183,23 @@ impl ReasoningProducer {
         };
         let provider_call = if let Some(api) = &self.api {
             let mut provenance = api.identity().unknown_usage();
+            if calls.iter().any(|call| {
+                call.provenance.usage.input_tokens.is_none()
+                    || call.provenance.usage.output_tokens.is_none()
+            }) {
+                // A recovered response does not reveal the lost call's usage.
+                // Stop with the durable full charge instead of inventing a
+                // successful round's zero-token accounting.
+                provenance.estimated_cost_usd_micros = calls
+                    .iter()
+                    .map(|call| call.provenance.estimated_cost_usd_micros)
+                    .collect::<Option<Vec<_>>>()
+                    .map(|costs| costs.into_iter().fold(0u64, u64::saturating_add));
+                return Err(anyhow::anyhow!(ReasoningProviderFailure(GeneralFailure {
+                    class: ErrorClass::TransportError,
+                    provenance,
+                })));
+            }
             provenance.usage = provenance::Usage {
                 input_tokens: Some(
                     calls
@@ -1138,8 +1256,9 @@ impl ReasoningProducer {
             .as_ref()
             .map(|api| api.accounting_snapshot())
             .transpose()?;
+        let actual_calls = self.api.as_ref().map(|api| api.accounting()).transpose()?;
         Ok(
-            json!({"provider_transport":transport,"schema":"ato.formation-reasoning-accounting/1", "provider":if self.config.is_session(){"codex_session"}else{"deepseek"},
+            json!({"provider_transport":transport,"actual_provider_calls":actual_calls,"schema":"ato.formation-reasoning-accounting/1", "provider":if self.config.is_session(){"codex_session"}else{"deepseek"},
             "calls":calls,"call_count":calls.len(),"API_calls":records.iter().filter(|(_,_,r)|r.provider_call.is_some()).count(),
             "session_token_usage":"not_exposed; no fabricated usage", "session_cost":"not_exposed", "configuration_ref":self.configuration_ref}),
         )

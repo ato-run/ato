@@ -374,6 +374,7 @@ pub fn run_claimed_job_with_ledger(
             continuation: Continuation::Stop,
             receipt: ReceiptContext::formation(),
             interrupt: None,
+            control: None,
         },
         &FormationRealizer {
             planned: &planned,

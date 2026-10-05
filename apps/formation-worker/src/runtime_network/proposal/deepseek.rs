@@ -276,6 +276,9 @@ impl DeepSeekCandidateProducer {
     pub fn accounting_snapshot(&self) -> Result<super::budget::BudgetSnapshot> {
         self.budget.snapshot()
     }
+    pub fn accounting(&self) -> Result<serde_json::Value> {
+        self.budget.accounting()
+    }
     /// A shared exchange owns a fixed set of actual call IDs. A lost sent call
     /// stays visible and conservatively charged; it is never an idempotent resend.
     pub fn propose_reasoning_recover(
@@ -498,6 +501,7 @@ impl DeepSeekCandidateProducer {
             }
             Credentials::Mock => "synthetic-mock-key".into(),
         };
+        let dispatch_started = std::time::Instant::now();
         let sent = self
             .http
             .post(format!(
@@ -533,6 +537,9 @@ impl DeepSeekCandidateProducer {
                         retry_after_ms: 0,
                         recorded_at_ms: now_ms(),
                         error_class: class,
+                        latency_ms: Some(
+                            dispatch_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        ),
                     });
                 return Err(class);
             }
@@ -576,6 +583,9 @@ impl DeepSeekCandidateProducer {
                     retry_after_ms,
                     recorded_at_ms: now_ms(),
                     error_class: class,
+                    latency_ms: Some(
+                        dispatch_started.elapsed().as_millis().min(u64::MAX as u128) as u64
+                    ),
                 });
             return Err(class);
         }
@@ -619,6 +629,7 @@ impl DeepSeekCandidateProducer {
             model_matches: envelope.model == self.config.model,
             input_tokens: envelope.usage.prompt_tokens,
             output_tokens: envelope.usage.completion_tokens,
+            latency_ms: Some(dispatch_started.elapsed().as_millis().min(u64::MAX as u128) as u64),
         };
         if !evidence.within(self.budget.plan()) {
             self.budget

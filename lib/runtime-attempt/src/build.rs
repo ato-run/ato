@@ -156,6 +156,41 @@ pub fn run_build_with_variables(
     refusal: Option<&NetworkRefusalObserver<'_>>,
     variables: &[crate::variables::ResolvedVariable],
 ) -> Result<BuildOutcome> {
+    run_build_controlled(
+        plan,
+        derivation,
+        attempt,
+        sandbox,
+        &BuildContext {
+            gates,
+            refusal,
+            variables,
+            control: None,
+        },
+    )
+}
+
+pub struct BuildContext<'a> {
+    pub gates: &'a std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
+    pub refusal: Option<&'a NetworkRefusalObserver<'a>>,
+    pub variables: &'a [crate::variables::ResolvedVariable],
+    pub control: Option<&'a crate::control::ExecutionControl>,
+}
+
+pub fn run_build_controlled(
+    plan: &ExecutionPlan,
+    derivation: &BoundDerivation,
+    attempt: BuildAttempt,
+    sandbox: &BuildSandbox<'_>,
+    context: &BuildContext<'_>,
+) -> Result<BuildOutcome> {
+    use crate::control::AttemptPhase;
+    let BuildContext {
+        gates,
+        refusal,
+        variables,
+        control,
+    } = context;
     let (source_root, workspace_root, cache_root, shim, network, limits) = (
         sandbox.source_root,
         sandbox.workspace_root,
@@ -206,6 +241,13 @@ pub fn run_build_with_variables(
     }
 
     for step in &steps {
+        let phase = match step.network_phase {
+            Some(ato_formation::requirements::ExecutionPhase::Dependencies) => {
+                AttemptPhase::Dependencies
+            }
+            _ => AttemptPhase::Build,
+        };
+        let _timing = control.map(|c| c.phase(phase)).transpose()?;
         // A step that declared no network must not get one, even when the job's
         // policy would have allowed it. The narrower of the two wins.
         ensure!(
@@ -257,7 +299,11 @@ pub fn run_build_with_variables(
         )
         .context("cannot write the build sandbox policy")?;
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let configured_remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = match control {
+            Some(c) => c.cap(phase, configured_remaining)?,
+            None => configured_remaining,
+        };
         if remaining.is_zero() {
             bail!(
                 "the build exceeded its {}s budget",
@@ -266,14 +312,22 @@ pub fn run_build_with_variables(
         }
         let facts = (network == NetworkPolicy::Scoped)
             .then(|| policy_path.with_file_name("execution-facts.jsonl"));
-        let output = run_step_with_variables(
+        let result = run_step_with_variables(
             step,
             &command.argv,
             remaining,
             facts.as_deref(),
-            refusal,
+            *refusal,
             variables,
-        )?;
+        );
+        // Deadline cancellation never erases uncertainty about process cleanup.
+        if let Err(error) = &result
+            && error.downcast_ref::<BuildStopUnconfirmed>().is_none()
+            && let Some(control) = control
+        {
+            control.remaining(phase)?;
+        }
+        let output = result?;
         diagnostics.push(crate::variables::redact(
             &bounded_diagnostic(&step.name, &output),
             variables,
