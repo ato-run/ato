@@ -28,7 +28,7 @@ use crate::build_sandbox::{
 /// never controls this callback; absence of a record does not imply permission.
 pub type NetworkRefusalObserver<'a> = dyn Fn(
         ato_formation::requirements::ExecutionPhase,
-    ) -> Option<ato_formation::requirements::NetworkRequirement>
+    ) -> Option<ato_formation::failure::FormationFailure>
     + 'a;
 
 #[derive(Debug, thiserror::Error)]
@@ -650,15 +650,7 @@ fn run_step_with_variables(
                     ),
                 )?;
             }
-            return Err(FormationFailure::new(
-                "network_denied",
-                FailureStage::Build,
-                format!(
-                    "phase {:?} gate refused {}:{}; build process group stopped",
-                    denied.phase, denied.host, denied.port
-                ),
-            )
-            .into());
+            return Err(denied.into());
         }
 
         // Seen without reaping: the step's process stays a zombie, so its pid
@@ -939,7 +931,7 @@ mod tests {
 
     #[test]
     fn positive_phase_gate_refusal_stops_a_waiting_step_and_retains_execution_facts() {
-        use ato_formation::requirements::{ExecutionPhase, NetworkRequirement};
+        use ato_formation::requirements::ExecutionPhase;
         let marker = format!("ato-build-refused-{}", std::process::id());
         let (mut step, argv) = step(&format!(
             "echo waiting; sh -c 'sleep 600; :' {marker} & wait"
@@ -950,10 +942,12 @@ mod tests {
         let start = Instant::now();
         let refusal = |phase| {
             assert_eq!(phase, ExecutionPhase::Dependencies);
-            (start.elapsed() > Duration::from_millis(100)).then(|| NetworkRequirement {
-                phase,
-                host: "registry.npmjs.org".into(),
-                port: 443,
+            (start.elapsed() > Duration::from_millis(100)).then(|| {
+                FormationFailure::new(
+                    "network_denied",
+                    FailureStage::Build,
+                    "dependency phase gate refused registry.npmjs.org:443",
+                )
             })
         };
         let error = run_step_with_facts(
@@ -973,6 +967,35 @@ mod tests {
         let recorded = crate::execution_facts::read(&facts).unwrap();
         assert_eq!(recorded.len(), 1);
         assert!(std::fs::read_to_string(facts).unwrap().contains("waiting"));
+    }
+
+    #[test]
+    fn network_transfer_budget_failure_survives_confirmed_process_cleanup() {
+        use ato_formation::requirements::ExecutionPhase;
+        let marker = format!("ato-build-transfer-budget-{}", std::process::id());
+        let (mut step, argv) = step(&format!(
+            "echo waiting; sh -c 'sleep 600; :' {marker} & wait"
+        ));
+        step.network_phase = Some(ExecutionPhase::Dependencies);
+        let start = Instant::now();
+        let refusal = |_| {
+            (start.elapsed() > Duration::from_millis(100)).then(|| {
+                FormationFailure::new(
+                    "exploration_network_budget_exhausted",
+                    FailureStage::Build,
+                    "the frozen attempt transfer budget is exhausted",
+                )
+            })
+        };
+        let error =
+            run_step_with_facts(&step, &argv, Duration::from_secs(60), None, Some(&refusal))
+                .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<FormationFailure>().unwrap().code,
+            "exploration_network_budget_exhausted"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(survivors(&marker).is_empty());
     }
 
     #[test]

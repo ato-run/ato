@@ -3,6 +3,22 @@ use ato_formation::proposal::ProposalRoundRecord;
 use ato_formation::proposal::{CandidateProducerPolicy, PythonHttpProcess, SourceDomain};
 use ato_formation::search::BudgetCounters;
 
+#[test]
+fn successful_native_audit_does_not_hide_later_http_verification_failure() {
+    let attempt = json!({
+        "failure":{"code":"http_status_mismatch","stage":"verification",
+            "message":"root: GET / on app.http returned 302; expected 200"},
+        "exploration_evidence":[{"kind":"exploration_execution_facts","facts":[{
+            "exit_code":0,"log_tail":"native audit completed","stage":"build","step":"native-4"
+        }]}]
+    });
+    let log = failure_log_tail(&attempt);
+    assert!(log.contains("native audit completed"));
+    assert!(log.contains("returned 302; expected 200"));
+    let unsafe_message = json!({"failure":{"message":"secret=private-value"}});
+    assert!(!failure_log_tail(&unsafe_message).contains("private-value"));
+}
+
 fn authorization() -> ProposalAuthorization {
     ProposalAuthorization {
         execution_plan: None,
