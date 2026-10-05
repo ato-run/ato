@@ -375,6 +375,10 @@ impl Bridge {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let answer = (|| -> Result<Value> {
+                            // Accepted sockets may inherit nonblocking mode
+                            // on BSD hosts. The bounded frame reader below
+                            // must wait for fragmented authenticated requests.
+                            stream.set_nonblocking(false)?;
                             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                             stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                             let raw = read_frame(&mut stream)?;
