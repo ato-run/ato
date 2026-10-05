@@ -4,16 +4,19 @@ Status: in progress. Keep historical failures and WBO UNKNOWN unchanged.
 No deployment, remote migration, feature flag or ordinary Run permission.
 
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
-`9e0031900836090612b94e775e26f980a68f32d7`. Current execution candidate:
-Ato code `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`, API
+`9e0031900836090612b94e775e26f980a68f32d7`. Latest code candidate:
+Ato `1de0e3a008f73226171d83fa026c50ec20dde976` (status transport retries,
+#1465); latest actual SVGOMG/OCI source execution uses that same code, while
+changedetection.io source/functional Runtime used
+`3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`. Both use API
 `fa825a176b715962351466dc1a7149bec5979c7f`, prompt 12. Receipt authority
 WASM SHA-256 `cc7445874bcea354b0ea03d96a71e10ea4e34b80b5516111457f1bdc92af3c03`,
 2,196,846 bytes, source Ato `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`.
 The [private build Record retention change](formation-build-record-retention-20261002.md)
 is reviewed in Ato #1464 / API #718; API requires migration 0315, applied only
 to the owned isolated acceptance database, not a remote environment.
-The new pin requires new real application acceptance; earlier PASS does not
-prove these later changes. The review stack remains Draft.
+Remaining state/input changes require a new final acceptance pin; earlier PASS
+does not prove later changes. The review stack remains Draft.
 
 ## Measured previous pins
 
@@ -124,7 +127,8 @@ was created at `3e60a9a5`; this is a separate functional observation, not a new
 automatic exploration or permission. Earlier selector/temporary-path harness
 failures remain recorded and are not counted as application failures.
 
-Current historical unique OSS successes: Codex **1**, API **0**. Codex SVGOMG is
+At that earlier checkpoint, historical unique OSS successes were Codex **1**,
+API **0**. Codex SVGOMG is
 a repair PASS, not first-attempt PASS. OCI is a separate infrastructure fixture.
 No final-pin success rate or 100-case reachability rate is asserted yet.
 
@@ -176,9 +180,10 @@ contain no protected configuration. Paid API calls are zero for these fixtures.
 Earlier custom retry/lost-response/restart/UNKNOWN observations remain at their
 separate pins. The old WBO UNKNOWN has not been replayed.
 
-Current unique OSS apps with usable submitted D: Codex 1 (SVG repair PASS),
-API 0. Runtime K reached without successful publication additionally includes
-changedetection.io; that is reported separately, not added to usable successes.
+Current historical unique OSS apps with usable submitted D: Codex **2**
+(SVG repair PASS and changedetection.io trial-14 first generated D PASS), API **0**.
+The changedetection.io original Requester transport failure and report-only
+publication recovery are recorded below; this is not final-head acceptance.
 The OCI and private-input fixtures are not OSS app successes. Native claims
 repair `70e8ba07` is proven by native integration and actual WASM tests; whole-app
 acceptance remains required after the remaining materialization/state changes.
@@ -202,11 +207,72 @@ exchanges, no submitted D, no paid API call. Preserve it unchanged:
 This is not a budget reset or a proven settlement defect: existing D1 invariants
 charge full claimed network reservations across rounds and later requests.
 
-Separately preregistered trial 14 uses the exact same source/K/code/toolchains
+Separately preregistered trial 14 used the exact same source/K/code/toolchains
 and capacity limits, zero known D, original source-owned requirements and a
-source-derived `app.data` state slot. It is in progress; no success is asserted.
+source-derived `app.data` state slot. Three sdists (feedgen, jstyleson, websockets)
+built into a total 168 hash-fixed wheels, followed by offline installation,
+normal contained Runtime launch and fresh frozen-K PASS. The first generated D
+passed; a later Codex reduction answer made no further execution.
 Plan SHA-256 `4af9ffaffdc8f589949d8f8fb7f7b21dcab5b8ac892ef8a2f0669e8955407d51`.
+
+Requester status transport lost its connection after BuildRecord Ready, stopping
+the original controller/Runtime mid-publication. Preserve its failure summary.
+The confirmed finished/verified checkpoint resumed publication/reporting only,
+without source acquisition, build, launch or inference. Original Search limits
+and deadline are identical before/after; combined stored usage 306,002,627 bytes
+equals BuildRecord 138,713,682 plus retained archive 167,288,945. Expanded usage
+16,887,438 bytes; the dependency network shared counter is 157,248,045 bytes,
+while the conservative claimed network debit remains 402,653,184 bytes.
+BuildRecord `sha256:4b1e581775cc6e8a59a6bae4c2f82b424120f8ba1dd621e7168c3e9c95166ce8`;
+retained `sha256:5a4563db6cd7a412c84ba31e2bcf123eff81be06d1514be61409fabf133a5f0d`.
+
+That recovered attempt PASS did not itself settle the Search: the existing policy
+allows a strict requirements-reduction round. A separate Requester resume opened
+that common-input exchange; its read-only assertion failed and it was stopped
+without another Runtime execution. Its logs remain preserved. The actual input
+included `successful_derivation_ref` and the previous source-owned plan. Codex
+answered `no_progress` because no supported strict authority/network subset kept
+the same execution semantics. Search `search_fa9b884b3a7c0f73836ae5fc6bedf05f`
+then became `satisfied`, two rounds / three session exchanges, one Runtime attempt,
+zero paid API calls, no reservations outstanding. Result SHA-256
+`19f5c89cfc45866c9dabe2a42fb2703eeb13669af0e69122c8fa2528e939a62b`.
+The D awaits assessment; it grants no ordinary Run, deployment or public visibility.
+Fresh retained Runtime replay and representative function checks completed
+separately at Runtime `3ac36fa2`: original artifact digest and same frozen K
+verified, actual Chromium 149 UI create/edit/pause/delete of an owned test watch
+PASS, stopped Runtime cleanup PASS. Runtime network allowed zero bytes; external
+fetch/change detection and stop/restart persistence are unverified. The corrected
+harness uses the existing deny-all netd gate and Runtime bridge. Earlier missing
+gate and UI modal-selector failures remain preserved, not counted as source/K
+failures. Functional proof SHA-256
+`fd6a1b2b2d61954322d019cd69fda5770f5a2379de3f4f1e122212126191507f`;
+fresh receipt `0307bf218cf4ed9299c0c3054afdb84b0a77d0831a64345e02a0a310400e5e12`.
+These source/receipt/function observations precede Requester retry code
+`1de0e3a0`; final-head changedetection.io regression remains required.
 Neither trial restarts old WBO UNKNOWN or supplies a Codex D to the API arm.
+
+## Actual status-retry pin regressions
+
+Ato `1de0e3a0` / API `fa825a17`, authority source `3ac36fa2`, Linux exact-pin
+CLI/Worker/preflight binaries, zero known D, same source/K as earlier trials:
+
+| Case | Result | Rounds / session exchanges / claimed attempts |
+| --- | --- | --- |
+| SVGOMG trial 15 | Authoring schema failure; no_progress, no Runtime execution. Preserved separately. | 1 / 2 / 0 |
+| SVGOMG trial 16 | Correction PASS: HTTP authority admission refusal, then source-evidenced lifecycle audit, then typed es5-ext rebuild fresh same-K PASS. | 3 / 4 / 3 (one admission refusal, two actual executions) |
+| OCI fixture trial 15 | First generated Dockerfile D fresh same-K PASS. Strict reduction answer made no further execution. | 2 / 2 / 1 |
+
+The real Coordinator proxy dropped exactly one successful status response in
+each SVG trial. Original custom one retry recovered via two durable sends;
+no cached stale status, extra round, paid provider call or deadline/budget reset.
+SVG Search `search_5177b730f7abfe243ed9469cdd2cb3aa`, result SHA-256
+`e4a9012dd239eab568ccb553f3d8249df496dc28fb8a97e290cbd5cfcc7bda46`.
+OCI Search `search_6bbd43b2d1a08575dc97a5eb1481ea41`, result SHA-256
+`6f61ae5605803d867b94e1c2f54da651fe7e0e6f25f23d6a8263e6a741cc8cf4`.
+Both are submitted, awaiting assessment, with zero outstanding reservations.
+Combined final-pin fault proof SHA-256
+`91f5474fbe2d469fffd84b723bf53443ad95c1c6037d960f11a0449c0d112a70`.
+These regressions add no new unique OSS app. API-provider trials remain zero.
 
 ## Accounting
 
@@ -228,13 +294,14 @@ trials must start from the same initial source/K/capabilities with zero known D.
 
 ## Remaining gates
 
-Final-pin Codex then API application acceptance; changedetection.io function;
+Final-pin Codex then API application acceptance; changedetection.io external
+fetch and persistence where explicitly granted;
 Kutt native dependency, source-owned Runtime migration, temporary JWT, isolated
 state and persistence after stop/restart; actual retry/deadline/lost-response/
 restart/uncertain disconnect; scoped input reuse/revoke/expiry/cleanup and
 embedding observations. These are not replaced by fixture/unit test PASS.
 Current code-pin validation: Formation library 122 and compiler/exploration
-integration 33 PASS; Worker library 73 PASS; Runtime Network 31 PASS / 1
+integration 33 PASS; Worker library 75 PASS; Runtime Network 31 PASS / 1
 explicitly ignored; authority 7 library / 8 integration PASS; process transport
 2 PASS; retained replay 3 reported PASS with the macOS process containment
 guard skipping actual Python/Node launch. Rust formatting/clippy and exact-pin

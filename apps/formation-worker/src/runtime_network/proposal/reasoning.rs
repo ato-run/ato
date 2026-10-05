@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -1077,6 +1077,114 @@ mod autonomous_tests {
         })?;
         Ok(())
     }
+    fn observation_producer(directory: &Path) -> Result<ReasoningProducer> {
+        ReasoningProducer::new(
+            ReasoningProviderConfig::Session(SessionConfig {
+                provider: "codex_session".into(),
+                model: "codex-session".into(),
+                prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+            }),
+            budget::BudgetPlan {
+                max_calls: 6,
+                input_token_cap: 1024,
+                output_token_cap: 1024,
+                input_price: 1,
+                output_price: 1,
+                ceiling_usd_micros: 12,
+            },
+            directory.into(),
+            None,
+        )
+    }
+    #[test]
+    fn observations_retry_dropped_http_and_read_fresh_after_restart() -> Result<()> {
+        std::fs::create_dir_all(".tmp")?;
+        let root = tempfile::tempdir_in(".tmp")?;
+        let server = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/status", server.local_addr()?);
+        let serving = std::thread::spawn(move || -> std::io::Result<()> {
+            // Drop the first response, then return different persisted states.
+            for snapshot in [None, Some("running"), Some("pass")] {
+                let (mut stream, _) = server.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte)?;
+                    request.push(byte[0]);
+                    assert!(request.len() <= 4096, "HTTP fixture request bounds");
+                }
+                if let Some(status) = snapshot {
+                    let body = format!(r#"{{"status":"{status}"}}"#);
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )?;
+                }
+            }
+            Ok(())
+        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()?;
+        let p = observation_producer(root.path())?;
+        assert_eq!(
+            p.coordinator_observation("original-search", 1, 0, || {
+                Ok(client.get(&url).send()?.json()?)
+            })?["status"],
+            "running"
+        );
+        // Reopening skips completed read ledgers without replaying old status.
+        let p = observation_producer(root.path())?;
+        assert_eq!(
+            p.coordinator_observation("original-search", 1, 0, || {
+                Ok(client.get(&url).send()?.json()?)
+            })?["status"],
+            "pass"
+        );
+        serving.join().expect("HTTP fixture panicked")?;
+        let saved: Value = serde_json::from_slice(&std::fs::read(
+            root.path().join("r000.observe.result.json"),
+        )?)?;
+        assert_eq!(saved["response"], json!({"delivered":true}));
+        assert!(root.path().join("r000.observe.dispatch001.json").exists());
+        assert!(!root.path().join("r001.observe.dispatch001.json").exists());
+        Ok(())
+    }
+    #[test]
+    fn failed_observation_does_not_reset_custom_retry_limit() -> Result<()> {
+        std::fs::create_dir_all(".tmp")?;
+        let root = tempfile::tempdir_in(".tmp")?;
+        let p = observation_producer(root.path())?;
+        let mut count = 0;
+        assert!(
+            p.coordinator_observation("same-search", 1, 0, || {
+                count += 1;
+                anyhow::bail!("coordinator answered 503")
+            })
+            .is_err()
+        );
+        assert_eq!(count, 2);
+        let p = observation_producer(root.path())?;
+        assert!(
+            p.coordinator_observation("same-search", 1, 0, || {
+                count += 1;
+                Ok(json!({"status":"pass"}))
+            })
+            .is_err()
+        );
+        assert_eq!(count, 2);
+        assert!(
+            p.coordinator_observation("same-search", 3, 0, || panic!("retry allowance reset"))
+                .is_err()
+        );
+        assert!(
+            p.coordinator_observation("different-search", 1, 0, || panic!("operation renamed"))
+                .is_err()
+        );
+        Ok(())
+    }
     #[test]
     fn a_recovered_response_cannot_hide_a_lost_calls_unknown_usage() -> Result<()> {
         std::fs::create_dir_all(".tmp")?;
@@ -1181,6 +1289,7 @@ pub struct ReasoningProducer {
     budget: budget::BudgetPlan,
     directory: PathBuf,
     api: Option<Arc<DeepSeekCandidateProducer>>,
+    observation_seq: Mutex<u64>,
 }
 #[derive(Debug)]
 pub(super) struct ReasoningProviderFailure(pub GeneralFailure);
@@ -1221,6 +1330,52 @@ fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl ReasoningProducer {
+    /// Each successful observation reads a fresh snapshot. Only its completion
+    /// is cached; failed reads retain their original retry allowance on restart.
+    pub fn coordinator_observation(
+        &self,
+        satisfy_id: &str,
+        max_retries: u32,
+        expires: u64,
+        mut dispatch: impl FnMut() -> Result<Value>,
+    ) -> Result<Value> {
+        use fs2::FileExt;
+        let mut seq = self
+            .observation_seq
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator observation lock poisoned"))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.directory.join("observations.lock"))?;
+        lock.lock_exclusive()?;
+        while self
+            .directory
+            .join(format!("r{:03}.observe.result.json", *seq))
+            .exists()
+        {
+            *seq = seq
+                .checked_add(1)
+                .context("observation sequence exhausted")?;
+        }
+        let mut response = None;
+        self.coordinator_operation(
+            *seq,
+            "observe",
+            &serde_jcs::to_vec(&json!({"satisfy_id":satisfy_id}))?,
+            max_retries,
+            expires,
+            || {
+                response = Some(dispatch()?);
+                Ok(json!({"delivered":true}))
+            },
+        )?;
+        *seq = seq
+            .checked_add(1)
+            .context("observation sequence exhausted")?;
+        response.context("coordinator observation snapshot missing")
+    }
     /// Exactly one retry ledger per semantic operation, independent of worker
     /// restarts and transport names. Dispatch reservation is durable first.
     pub fn coordinator_operation(
@@ -1234,7 +1389,7 @@ impl ReasoningProducer {
     ) -> Result<Value> {
         use fs2::FileExt;
         ensure!(
-            matches!(kind, "start" | "claim" | "complete"),
+            matches!(kind, "start" | "claim" | "complete" | "observe"),
             "unknown coordinator operation"
         );
         let name = format!("r{seq:03}.{kind}");
@@ -1290,7 +1445,7 @@ impl ReasoningProducer {
             }
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
             ensure!(
-                kind == "complete" || now < expires,
+                matches!(kind, "complete" | "observe") || now < expires,
                 "coordinator operation deadline"
             );
             save(
@@ -1324,7 +1479,7 @@ impl ReasoningProducer {
                     }
                     let delay = 100_u64.saturating_mul(1 << attempt.min(6));
                     ensure!(
-                        kind == "complete"
+                        matches!(kind, "complete" | "observe")
                             || (SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
                                 .saturating_add(delay)
                                 < expires,
@@ -1364,6 +1519,7 @@ impl ReasoningProducer {
             budget,
             directory,
             api,
+            observation_seq: Mutex::new(0),
         })
     }
     pub fn configuration_ref(&self) -> &str {
