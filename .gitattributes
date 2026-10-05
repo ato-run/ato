@@ -1,0 +1,2 @@
+# These embedded bytes define the producer's versioned prompt digest.
+apps/formation-worker/src/runtime_network/proposal/prompt*.txt text eol=lf

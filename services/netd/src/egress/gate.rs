@@ -271,6 +271,16 @@ mod tests {
         assert!(connect(&gate, "localhost:22").contains("403"));
         // Listed name and port, but it resolves to loopback: refused.
         assert!(connect(&gate, "localhost:443").contains("403"));
+        // The response and the bounded observational collector are async.
+        // Observe this decision before stop cancels the collector's task.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !gate.report().refused.iter().any(|t| t.stage == "cidr") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "CIDR decision was not collected"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let report = gate.stop();
         let stages: Vec<_> = report.refused.iter().map(|t| t.stage.as_str()).collect();
         assert!(stages.contains(&"hostname") && stages.contains(&"port"));
