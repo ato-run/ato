@@ -348,8 +348,8 @@ fn m0_through_m12_exact_raw_transport_and_validator_authority() {
             }
             assert!(sub.contracts.is_empty());
         }
-        assert_eq!(mock.count(), usize::from(case != 8), "M{case} never retry");
-        if case != 8 {
+        assert_eq!(mock.count(), 1, "M{case} never retry");
+        {
             let seen = mock.seen.lock().unwrap();
             let (path, body) = &seen[0];
             assert_eq!(path, "/chat/completions");
