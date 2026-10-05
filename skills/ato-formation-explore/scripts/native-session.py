@@ -43,6 +43,28 @@ PROMPT = ("Use the explicitly invoked ato-formation-explore Skill for the one "
           "saved Ato evidence determines success. Report unknown agent costs as unknown.")
 
 
+def owner_context(proof, agent):
+    """A measured owner statement, never a Source-supplied instruction."""
+    checks = proof.get("checks", {})
+    if (proof.get("schema") != "ato.formation-producer-isolation-os-fixture/1"
+            or proof.get("private_fixture_class_count") != len(ISOLATION.CANARIES)
+            or not isinstance(checks, dict) or not ISOLATION.BOUNDARY_CHECKS.issubset(checks)
+            or not isinstance(proof.get("model_policy_sha256"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", proof["model_policy_sha256"])
+            or any(value is not True for value in checks.values())):
+        raise ISOLATION.Rejected("owner_isolation_evidence_required")
+    boundary = ("the same deny-default Code Mode model policy" if agent == "codex"
+                else "the deny-default model policy fixture and the restricted native tool configuration")
+    return ("Owner startup confirmation: this Search is explicitly authorized. Before this turn, "
+            "the owner measured " + boundary + ". Private Source, owner credentials, Session "
+            "capabilities, grants, Runtime tickets, state DB, old measurements and credential "
+            "store canaries were unreadable and unwritable. Shell/direct execution and arbitrary "
+            "network access were denied. The agent has only the selected Formation MCP tools. "
+            "This is the owner isolation confirmation required by the Skill; it does not grant "
+            "additional authority or establish a Runtime PASS. Model-policy SHA-256: "
+            + proof["model_policy_sha256"] + ".\n")
+
+
 def write(path, value):
     with path.open("x") as stream:
         json.dump(value, stream, indent=2)
@@ -146,15 +168,17 @@ def admission(view, binding, agent, version, reconcile_only=False):
     if reconcile_only:
         progress = view.get("progress", {})
         deadline = view.get("deadline_ms")
-        if (view.get("connected") is not True
-                or progress.get("status") not in ("pending", "running")
+        if (type(view.get("connected")) is not bool
+                or progress.get("status") not in ("pending", "running", "unknown")
                 or type(progress.get("unresolved_attempts")) is not int
                 or progress["unresolved_attempts"] <= 0
                 or not any(a.get("status") == "unknown" for a in progress.get("attempts", []))
-                or view.get("next_operation") not in ("owner_reconcile", "owner_reconcile_or_assess")):
+                or view.get("input") is not None
+                or view.get("next_operation") not in ("owner_reconcile", "owner_reconcile_or_assess",
+                                                       "owner_reconnect_or_assess")):
             raise ISOLATION.Rejected("unknown_reconciliation_only")
-        if type(deadline) is not int or deadline <= time.time() * 1000:
-            raise ISOLATION.Rejected("deadline_exceeded")
+        if type(deadline) is not int or deadline <= 0:
+            raise ISOLATION.Rejected("original_deadline_required")
         return deadline
     if view.get("connected") is not True or view.get("next_operation") != "submit":
         raise ISOLATION.Rejected("owner_reconciliation_required")
@@ -167,6 +191,21 @@ def admission(view, binding, agent, version, reconcile_only=False):
     if not isinstance(deadline, int) or deadline <= time.time() * 1000:
         raise ISOLATION.Rejected("deadline_exceeded")
     return view["deadline_ms"]
+
+
+def reporting_window(original_deadline, reconcile_only, owner_wall_deadline=None):
+    if not reconcile_only:
+        return original_deadline
+    # A read-only report is bounded separately. It never restores the expired
+    # Search, exposes reasoning input or gains submit authority.
+    end = int(time.time() * 1000) + 120000
+    if owner_wall_deadline is not None:
+        if type(owner_wall_deadline) is not int or owner_wall_deadline <= 0:
+            raise ISOLATION.Rejected("owner_reporting_window_required")
+        end = min(end, owner_wall_deadline)
+    if end <= time.time() * 1000:
+        raise ISOLATION.Rejected("campaign_wall_clock_exceeded")
+    return end
 
 
 def public_package(output):
@@ -368,6 +407,8 @@ def run(args):
         raise ISOLATION.Rejected("session_model_binding_mismatch")
     view = status(mcp, connection)
     deadline = admission(view, binding, args.agent, args.version, args.reconcile_only)
+    native_deadline = reporting_window(deadline, args.reconcile_only,
+                                       args.owner_wall_clock_deadline_ms)
     tools = RECONCILE_TOOLS if args.reconcile_only else TOOLS
     prompt = RECONCILE_PROMPT if args.reconcile_only else PROMPT
     output = Path(args.output).absolute()
@@ -394,6 +435,8 @@ def run(args):
               "internal_LLM_calls": "unknown", "token_usage": "unknown", "cost": "unknown",
               "ordinary_Run_authorized": False, "Search_cancelled_by_launcher": False}
     result["reconcile_only"] = args.reconcile_only
+    if args.reconcile_only:
+        result["reporting_deadline_ms"] = native_deadline
 
     def launch(command, label, environment=None, stdin=False):
         log = (owner / (label + ".stderr")).open("xb"); handles.append(log)
@@ -407,7 +450,7 @@ def run(args):
         broker = launch([str(mcp), "--connection", str(connection), "--publish-relay",
                          str(descriptor), "--publish-capability-file", str(relay_capability),
                          "--relay-socket", str(selected)], "broker")
-        end = min(time.time() + 10, deadline / 1000)
+        end = min(time.time() + 10, native_deadline / 1000)
         while not descriptor.exists() and broker.poll() is None and time.time() < end:
             time.sleep(.02)
         if not descriptor.exists():
@@ -433,10 +476,14 @@ def run(args):
             child_profile += '(allow network-bind (local tcp "localhost:' + str(port) + '"))\n'
             child_profile += '(allow network-inbound (local tcp "localhost:' + str(port) + '"))\n'
             child_file = owner / "model-region.sb"; child_file.write_text(child_profile)
+            proof = ISOLATION.probe_boundary(public, scratch, owner / "model-boundary",
+                                             policy=child_profile)
+            write(owner / "model-boundary-proof.json", proof)
+            prompt = owner_context(proof, args.agent) + prompt
             child_environment = dict(environment, HOME=str(scratch), TMPDIR=str(scratch))
             launch(["/usr/bin/sandbox-exec", "-f", str(child_file), str(helper), "--listen",
                     "grpc://127.0.0.1:" + str(port)], "code-mode", child_environment)
-            ready_end = min(time.time() + 5, deadline / 1000)
+            ready_end = min(time.time() + 5, native_deadline / 1000)
             while True:
                 try:
                     with socket.create_connection(("127.0.0.1", port), timeout=.2):
@@ -456,7 +503,7 @@ def run(args):
             process = launch(command, "codex", environment, True)
             events = (owner / "native-events.jsonl").open("x"); handles.append(events)
             client = AppServer(process, events)
-            end = deadline / 1000
+            end = native_deadline / 1000
             client.request("initialize", {"clientInfo": {"name": "ato-formation-native-session",
                            "version": "1"}, "capabilities": {"experimentalApi": True}}, end)
             client.send("initialized", {})
@@ -481,7 +528,7 @@ def run(args):
                 if action == "submit" or (args.reconcile_only and turns == 0):
                     admission(current, binding, args.agent, args.version, args.reconcile_only)
                     exchange = current["exchange"]
-                    if exchange == previous_exchange:
+                    if not args.reconcile_only and exchange == previous_exchange:
                         raise ISOLATION.Rejected("exchange_not_saved_owner_reconciliation_required")
                     inputs = [{"type": "text", "text": prompt}]
                     if turns == 0:
@@ -503,6 +550,9 @@ def run(args):
         else:
             if args.version != "2.1.288":
                 raise ISOLATION.Rejected("measured_claude_configuration_required")
+            proof = ISOLATION.probe_boundary(public, scratch, owner / "model-boundary")
+            write(owner / "model-boundary-proof.json", proof)
+            prompt = owner_context(proof, args.agent) + prompt
             # The native auth host uses an existing same-account credential,
             # while the model has fixed MCP tools and no file/shell tool.
             host_profile = auth_host_profile(public, home, native, mcp, selected,
@@ -510,7 +560,7 @@ def run(args):
             host_file = owner / "auth-host.sb"; host_file.write_text(host_profile)
             environment.update(CLAUDE_CONFIG_DIR=str(home), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
                 CLAUDE_CODE_SUBPROCESS_ENV_SCRUB="1", CLAUDE_CODE_TMPDIR=str(home),
-                CLAUDE_CODE_OAUTH_TOKEN=claude_keychain_token(deadline))
+                CLAUDE_CODE_OAUTH_TOKEN=claude_keychain_token(native_deadline))
             prefix = ["/usr/bin/sandbox-exec", "-f", str(host_file), str(native)]
             authenticated = subprocess.run(prefix + ["auth", "status", "--json"],
                 cwd=project, env=environment, capture_output=True, timeout=15, check=True)
@@ -538,7 +588,7 @@ def run(args):
             frames = NativeFrames(process.stdout)
             previous_exchange = None
             turns = 0
-            end = deadline / 1000
+            end = native_deadline / 1000
             while time.time() < end:
                 current = status(mcp, connection)
                 result["saved_status"] = current
@@ -546,7 +596,7 @@ def run(args):
                 if action == "submit" or (args.reconcile_only and turns == 0):
                     admission(current, binding, args.agent, args.version, args.reconcile_only)
                     exchange = current["exchange"]
-                    if exchange == previous_exchange:
+                    if not args.reconcile_only and exchange == previous_exchange:
                         raise ISOLATION.Rejected("exchange_not_saved_owner_reconciliation_required")
                     message = ("/ato-formation-explore " if turns == 0 else "") + prompt
                     process.stdin.write((json.dumps({"type": "user", "message": {
@@ -613,6 +663,8 @@ def main():
         parser.add_argument("--" + name)
     parser.add_argument("--reconcile-only", action="store_true",
                         help="Fresh native context with status/next only for a saved UNKNOWN; never reopens inference")
+    parser.add_argument("--owner-wall-clock-deadline-ms", type=int,
+                        help="Owner campaign deadline for the read-only report, independent of Search lifetime")
     try:
         print(json.dumps(run(parser.parse_args())))
     except (ISOLATION.Rejected, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
