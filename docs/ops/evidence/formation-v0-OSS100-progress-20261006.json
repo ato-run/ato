@@ -77,7 +77,8 @@
     71,
     72,
     73,
-    74
+    74,
+    75
   ],
   "preregistered_plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
   "Runtime_builder_bound": false,
@@ -7569,10 +7570,113 @@
       },
       "ordinary_Run_authorized": false,
       "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 75,
+      "name": "Home Assistant",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "0dcada8811f34caa8a3166e279a97e244d49a7b8",
+      "source_closure_ref": "sha256:85d2b3ba87ca5a25f970797141e88fd1e4a5d57c4861155b64fdb7267d7c6d23",
+      "K_ref": "sha256:fd11ebf47a213ad803489c33c039d5bf3f6b5a4a1dc41a7d49a24abec21781f0",
+      "search_id": "search_7807663cc5023bbbe65efbad248014af",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791241776494,
+      "authority_deadline_ms": 1791242168875,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 419201,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 84179,
+          "inputTokens": 83627,
+          "cachedInputTokens": 61056,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 552,
+          "reasoningOutputTokens": 0
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "python_version_mismatch",
+              "detail": "Root project requires Python >=3.14.2; the frozen catalog and bound Runtime provide only Python 3.12.7.",
+              "source": {
+                "digest": "sha256:9f9ff25054725a80205df0ce1b369a731cc5afcdbaf62811df0d5b8e8fa85451",
+                "file_id": "f_50c86b7ed8ac2cf95bd48334"
+              }
+            },
+            {
+              "code": "oci_alternative_unavailable",
+              "detail": "The root Dockerfile cannot be lowered: source_oci builder is unbound and unavailable, and no approved acquired OCI image is available.",
+              "source": {
+                "digest": "sha256:264cd0cb2101f0cd88cf955f23da719d42f7b18eaf3892ccf7cb958ab4fa2b07",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
     }
   ],
   "category_counts": {
-    "unsupported_capability": 43,
+    "unsupported_capability": 44,
     "withheld_old_UNKNOWN": 1,
     "initial_PASS": 7,
     "no_progress": 15,
@@ -9602,14 +9706,14 @@
     }
   ],
   "consumed": {
-    "new_Searches": 71,
-    "D_rounds": 76,
-    "exchanges": 128,
+    "new_Searches": 72,
+    "D_rounds": 77,
+    "exchanges": 129,
     "Runtime_attempts": 19,
     "inspections": 43,
-    "elapsed_ms": 7870672
+    "elapsed_ms": 8289873
   },
-  "Native_contexts_started": 64,
+  "Native_contexts_started": 65,
   "owner_cleanup_recovery_028": {
     "original_halt_retained": true,
     "halted_after_index": 28,
