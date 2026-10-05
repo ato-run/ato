@@ -252,6 +252,11 @@ pub struct SandboxPolicy {
     pub read_write_paths: Vec<PathBuf>,
     /// Paths allowed for read-only access (system libraries, /usr, etc.)
     pub read_only_paths: Vec<PathBuf>,
+    /// Linux: write/truncate already-existing files without allowing
+    /// creation, removal, rename, or execution. Serialized explicitly so
+    /// operators can inspect these additions to read-only baseline paths.
+    #[serde(default)]
+    pub file_write_paths: Vec<PathBuf>,
     /// Whether to enable network access (default: true for now)
     pub allow_network: bool,
     /// TCP ports the workload may bind when unrestricted network access is
@@ -276,6 +281,7 @@ impl SandboxPolicy {
         Self {
             read_write_paths: Vec::new(),
             read_only_paths: Vec::new(),
+            file_write_paths: Vec::new(),
             allow_network: true,
             allowed_bind_tcp_ports: Vec::new(),
             allowed_connect_tcp_ports: Vec::new(),
@@ -298,6 +304,17 @@ impl SandboxPolicy {
     pub fn allow_read_only<P: Into<PathBuf>>(mut self, paths: impl IntoIterator<Item = P>) -> Self {
         self.read_only_paths
             .extend(paths.into_iter().map(|p| p.into()));
+        self
+    }
+
+    /// Linux-only existing-file writes/truncation. Other platforms refuse this policy
+    /// rather than silently widening it to full read-write access.
+    pub fn allow_file_write<P: Into<PathBuf>>(
+        mut self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Self {
+        self.file_write_paths
+            .extend(paths.into_iter().map(Into::into));
         self
     }
 
@@ -608,6 +625,14 @@ mod tests {
         assert_eq!(policy.read_write_paths.len(), 1);
         assert_eq!(policy.read_only_paths.len(), 1);
         assert!(policy.allow_network);
+    }
+
+    #[test]
+    fn old_serialized_policies_do_not_gain_existing_file_writes() {
+        let mut old = serde_json::to_value(SandboxPolicy::new()).unwrap();
+        old.as_object_mut().unwrap().remove("file_write_paths");
+        let restored: SandboxPolicy = serde_json::from_value(old).unwrap();
+        assert!(restored.file_write_paths.is_empty());
     }
 
     #[test]

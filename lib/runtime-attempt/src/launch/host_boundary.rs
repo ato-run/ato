@@ -122,7 +122,9 @@ pub fn landlock_policy(context: &ResolvedRuntimeLaunchContext, scratch: &Path) -
             read_only.push(path);
         }
     }
-    read_write.extend(writable_devices());
+    let devices = writable_devices();
+    let file_writes = gpu_process_metadata_writes(&devices);
+    read_write.extend(devices);
     read_only.extend(
         [
             "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/dev", "/proc", "/sys",
@@ -143,6 +145,7 @@ pub fn landlock_policy(context: &ResolvedRuntimeLaunchContext, scratch: &Path) -
     SandboxPolicy::new()
         .allow_read_write(read_write)
         .allow_read_only(read_only)
+        .allow_file_write(file_writes)
         // No outbound TCP: the workload cannot reach the Coordinator, the
         // provider's metadata endpoints, or anything else. It may bind only
         // the ports this Run was allocated.
@@ -153,6 +156,34 @@ pub fn landlock_policy(context: &ResolvedRuntimeLaunchContext, scratch: &Path) -
                 .iter()
                 .map(|endpoint| endpoint.host_port),
         )
+}
+
+/// A visible NVIDIA character device is already part of this physical
+/// machine's driver binding. CUDA also names threads through procfs, including
+/// threads in descendants, whose procfs inodes cannot be known before exec.
+/// Grant only WriteFile/Truncate, explicitly in the serialized policy. Kernel DAC and
+/// the unprivileged UID still protect the root Runner and system controls;
+/// Landlock still denies credentials, other leases and file creation/removal.
+/// CPU-only hosts receive no additional rule.
+fn gpu_process_metadata_writes(devices: &[PathBuf]) -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if devices.iter().any(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("nvidia"))
+                && std::fs::metadata(path)
+                    .is_ok_and(|metadata| metadata.file_type().is_char_device())
+        }) {
+            eprintln!(
+                "[host-boundary] NVIDIA device binding: /proc existing-file rights=write_file,truncate"
+            );
+            return vec![PathBuf::from("/proc")];
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = devices;
+    Vec::new()
 }
 
 /// Give the workload user what it must own: the scratch directory and every
