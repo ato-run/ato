@@ -329,5 +329,23 @@ class OwnerAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'terminal_evidence_changed'):
             OWNER.refresh(self.plan, ledger, Path('ato'))
 
+    def test_lost_reconnect_cannot_reuse_older_native_exit_or_launch_again(self):
+        self.retirement_fixture()
+        args = SimpleNamespace(ato=Path('ato'), connection=self.args.connection,
+                               native_launcher=Path('native-session.py'), native_args=[])
+        real_refresh = OWNER.refresh
+        with patch.object(OWNER, 'refresh', side_effect=lambda p,l,a: real_refresh(p,l,a,reader=lambda _:view())):
+            with self.assertRaises(OSError):
+                OWNER.guarded_native(self.plan, self.ledger, args, Mock(side_effect=OSError('lost reconnect')))
+            execute = Mock()
+            with self.assertRaisesRegex(ValueError, 'launch_requires_reconciliation'):
+                OWNER.guarded_native(self.plan, self.ledger, args, execute)
+            execute.assert_not_called()
+        entry = OWNER.read_ledger(self.plan, self.ledger)['entries'][0]
+        self.assertEqual(entry['native_exit_code'], 0)
+        self.assertTrue(entry['native_launch_in_progress'])
+        with self.assertRaisesRegex(ValueError, 'Native_completion_required'):
+            OWNER.retire_search(self.plan, self.ledger, self.args, reader=lambda _:view(state='cancelled'))
+
 if __name__ == '__main__':
     unittest.main()
