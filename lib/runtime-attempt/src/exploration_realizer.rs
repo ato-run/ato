@@ -4,7 +4,7 @@ use crate::{
     build::BuildAttempt,
     build_sandbox::NetworkPolicy,
     executor::{AttemptExecution, LocalAttemptExecutor},
-    formation_realizer::CandidateLauncher,
+    formation_realizer::{CandidateLauncher, RuntimeBindings},
     plan::PlannedCandidate,
     realize::{CandidateRealizer, RealizeFailure, Realized},
 };
@@ -160,16 +160,19 @@ impl ExplorationRealizer<'_> {
             executed,
             attempt_id,
             root,
-            Some(
-                self.gates
-                    .get(&ExecutionPhase::Runtime)
-                    .ok_or_else(|| RealizeFailure::Launch {
-                        error: anyhow::anyhow!("runtime phase gate missing"),
-                        evidence: None,
-                    })?
-                    .as_path(),
-            ),
-            self.variables,
+            &RuntimeBindings {
+                gate: Some(
+                    self.gates
+                        .get(&ExecutionPhase::Runtime)
+                        .ok_or_else(|| RealizeFailure::Launch {
+                            error: anyhow::anyhow!("runtime phase gate missing"),
+                            evidence: None,
+                        })?
+                        .as_path(),
+                ),
+                variables: self.variables,
+                state: None,
+            },
             control,
         )
     }
