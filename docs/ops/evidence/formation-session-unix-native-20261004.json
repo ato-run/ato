@@ -1,0 +1,141 @@
+{
+  "evidence_id": "formation-session-unix-native-20261004-01",
+  "source_pin": "b88f25866fca74ed4d667aed2dd60761e1292985",
+  "rust_execution_pin": "da9ca69b1613ca47581e819bfb0528466e1c42e3",
+  "review_session_pin": "23ae6ba88",
+  "review_session_pr": "https://github.com/ato-run/ato/pull/1479",
+  "mcp_binary_sha256": "b3b9a651581f997b649d6231e4b9256118019948762cdfa86fcc9b32816138a2",
+  "tests": {
+    "CLI_library": 53,
+    "MCP_binary_grammar": 1,
+    "strict_CLI_all_target_clippy": "PASS",
+    "skill_unit_tests": 26
+  },
+  "os_fixture": {
+    "execution_pin": "b88f25866fca74ed4d667aed2dd60761e1292985",
+    "checks": {
+      "public_skill_read": true,
+      "public_skill_write_denied": true,
+      "private_seven_classes_read_denied": true,
+      "private_seven_classes_write_denied": true,
+      "scratch_write": true,
+      "symlink_escape_denied": true,
+      "fork_inherits_denial": true,
+      "source_direct_launch_denied": true,
+      "shell_exec_denied": true,
+      "security_exec_denied": true,
+      "curl_exec_denied": true,
+      "docker_unix_socket_denied": true,
+      "arbitrary_tcp_denied": true,
+      "selected_relay_unix_socket_connected": true
+    },
+    "native_acceptance_ready": false
+  },
+  "native_product_protocol_fixtures": {
+    "codex": {
+      "version": "0.160.0",
+      "skill_body_present": true,
+      "visible_tools": [
+        "functions.exec",
+        "functions.wait",
+        "functions.request_user_input",
+        "functions.request_user_input_async",
+        "clock.sleep",
+        "mcp__formation.cancel",
+        "mcp__formation.next",
+        "mcp__formation.status",
+        "mcp__formation.submit"
+      ],
+      "nested_tool_sections": [
+        "apply_patch",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "read_mcp_resource",
+        "clock__curr_time"
+      ],
+      "real_provider_inference": false
+    },
+    "claude_code": {
+      "version": "2.1.288",
+      "skill_body_present": true,
+      "visible_tools": [
+        "mcp__formation__cancel",
+        "mcp__formation__next",
+        "mcp__formation__status",
+        "mcp__formation__submit"
+      ],
+      "real_provider_inference": false,
+      "project_skill_requires_project_setting_source": true,
+      "restricted_mode_project_skill_not_loaded": true
+    }
+  },
+  "authentication": {
+    "claude_existing_os_store_only_host_probe": "PASS",
+    "plaintext_auth_store_files_published": false,
+    "codex_temporary_keyring_lookup": "bounded timeout; sampled in SecKeychainFindGenericPassword/getData; no cause or successful authentication established",
+    "global_login_or_config_changed": false,
+    "native_auth_host_profile_is_os_fixture_profile": false
+  },
+  "native_codex_pin": {
+    "version": "0.160.0",
+    "binary_sha256": "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b",
+    "code_mode_host_sha256": "679eedaea70529aa1cffc9bc0a0788c186412663544fa76c09d63b57f383a65a",
+    "official_release_archive_digests_verified": true,
+    "global_install_changed": false
+  },
+  "actual_acceptance": {
+    "native_fresh_receipts": 0,
+    "new_Searches": 0,
+    "Runtime_attempts": 0,
+    "model_credential_read_write_exec_negative": "not yet measured",
+    "PWA_input_permission_resume": "not executed",
+    "new_Kutt_artifact_function_state_restore": "not executed"
+  },
+  "accounting": {
+    "direct_paid_API_calls_this_followup": 0,
+    "provider_fixture_requests_are_LLM_calls": false,
+    "real_native_agent_inference_calls_this_followup": 0,
+    "native_inference_cost_when_executed": "unknown unless provider evidence is obtainable",
+    "historical_paid_call_budget_reset": false
+  },
+  "remote_disk_preflight": {
+    "free_bytes": 18679173120,
+    "previous_minimum_bytes": 21474836480,
+    "passes": false,
+    "broad_cleanup_performed": false
+  },
+  "records": [
+    {
+      "path": ".tmp/session-unix-relay-01/final-poll-tests.log",
+      "sha256": "48b67bb280845cda6e43ea6b0b2e1871e7fa4d17cf0bdafaa48d1be0ba754d79"
+    },
+    {
+      "path": ".tmp/session-unix-relay-01/final-poll-clippy.log",
+      "sha256": "08b40ead705cabaeb89fb650367807be84b438aeb26db85e887dfeb344df3d14"
+    },
+    {
+      "path": ".tmp/session-unix-relay-01/skill-final-native-host.log",
+      "sha256": "db88dcbfc534f475df09fec2549bce3f43d2903277e371f44b6955d8620d5c9f"
+    },
+    {
+      "path": ".tmp/unix-native-probe-02/os-fixture.json",
+      "sha256": "0273edca97051165f5f84bc3bbc0e609348708bbf8358b28c157114682b2a948"
+    },
+    {
+      "path": ".tmp/native-auth-inventory/discovery.json",
+      "sha256": "d83cb4d3d03dc78fa94e2ae3027df81643384072fbf4514b9649ad031f7f37b2"
+    },
+    {
+      "path": ".tmp/native-auth-inventory/claude-native-auth-host.json",
+      "sha256": "7a1a9dd314d496ed6ce337d6adcd5c1952911267fb01566cb63c088856fece84"
+    }
+  ],
+  "exclusions": [
+    "deployment",
+    "remote migration",
+    "feature flag changes",
+    "100-app remeasurement",
+    "normal Run permission",
+    "old UNKNOWN reexecution"
+  ]
+}

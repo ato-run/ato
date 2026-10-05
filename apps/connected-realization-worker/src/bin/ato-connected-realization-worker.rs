@@ -28,6 +28,36 @@ fn main() -> Result<()> {
             .position(|arg| arg == "--")
             .map(|index| args[index + 1..].to_vec())
             .unwrap_or_default();
+        // Host-boundary form: no bwrap ran before this, so the shim itself
+        // becomes the workload user. All three options come together or not at
+        // all; a partial set is a malformed re-entry, not a namespace launch.
+        let option = |name: &str| {
+            args.iter()
+                .take_while(|arg| *arg != "--")
+                .position(|arg| arg == name)
+                .and_then(|index| args.get(index + 1))
+        };
+        match (
+            option("--drop-uid"),
+            option("--drop-gid"),
+            option("--chdir"),
+        ) {
+            (None, None, None) => {}
+            (Some(uid), Some(gid), Some(cwd)) => {
+                return sandbox_exec::run_host_boundary(
+                    std::path::Path::new(policy),
+                    &workload,
+                    uid.parse()
+                        .map_err(|_| anyhow::anyhow!("sandbox-exec: --drop-uid is not a number"))?,
+                    gid.parse()
+                        .map_err(|_| anyhow::anyhow!("sandbox-exec: --drop-gid is not a number"))?,
+                    std::path::Path::new(cwd),
+                );
+            }
+            _ => anyhow::bail!(
+                "sandbox-exec: --drop-uid, --drop-gid and --chdir must be given together"
+            ),
+        }
         return sandbox_exec::run(std::path::Path::new(policy), &workload);
     }
 

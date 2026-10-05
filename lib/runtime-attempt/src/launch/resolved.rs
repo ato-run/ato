@@ -162,6 +162,16 @@ pub struct ResolvedRuntimeLaunchContext {
     secrets: Vec<ResolvedSecret>,
     state_attachments: Vec<ResolvedStateAttachment>,
     endpoints: Vec<ResolvedEndpoint>,
+    read_only_inputs: Vec<ResolvedReadOnlyInput>,
+    output_dir: Option<PathBuf>,
+}
+
+/// An immutable input the Runner delivered for this Run (a Model Set): a host
+/// path the workload may read and never write, named to it by `env_name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReadOnlyInput {
+    pub env_name: String,
+    pub path: PathBuf,
 }
 
 impl ResolvedRuntimeLaunchContext {
@@ -217,7 +227,31 @@ impl ResolvedRuntimeLaunchContext {
             secrets,
             state_attachments,
             endpoints,
+            read_only_inputs: Vec::new(),
+            output_dir: None,
         })
+    }
+
+    /// Delivered read-only inputs. Only a host-boundary launch can honour
+    /// them in v0; every other launch refuses a context that has any.
+    pub fn with_read_only_inputs(mut self, inputs: Vec<ResolvedReadOnlyInput>) -> Self {
+        self.read_only_inputs = inputs;
+        self
+    }
+
+    pub fn read_only_inputs(&self) -> &[ResolvedReadOnlyInput] {
+        &self.read_only_inputs
+    }
+
+    /// Where the workload writes files the Runner saves as outputs when the Run
+    /// stops (`ATO_OUTPUT_DIR`). Host-boundary only in v0.
+    pub fn with_output_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.output_dir = dir;
+        self
+    }
+
+    pub fn output_dir(&self) -> Option<&Path> {
+        self.output_dir.as_deref()
     }
 
     pub fn workspace_root(&self) -> &Path {
