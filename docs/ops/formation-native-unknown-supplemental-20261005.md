@@ -45,3 +45,11 @@ Search `search_b44da962307739556f9121288edf1c04`、attempt `01M45JR7BASXDRFDXF8W
 不整合は#1479のRust relayで修正した。ownerが明示する`--reconcile-only`は、保存済みUNKNOWN、未解決attempt、`input: null`、同じSearch/configurationを必須とし、最大120秒の独立した報告期限だけを認める。signed bindingにread-only scopeを含め、TCP/Unixの共通dispatchで`status / next`だけを公開する。`submit / cancel`の直接呼び出し、scope改変、入力待ちへの変化を拒否する。通常relayの期限制限は元Search deadlineのまま。#1480の共通launcherはこのscopeと報告期限をbrokerへ渡す。MCP 28 test、起動引数1 test、Skill 44 test、strict clippy all-targets/all-featuresがPASSした。
 
 修正後の実UNKNOWNゲートは未実施。measurement 03のSearch/40分枠は消費済みなので、新たな実測は別measurementの明示承認後に行う。今回の実測pinを修正後headへ付け替えず、stack merge、最終integration CI、staging/production、100 OSS、独立API残3計画は引き続きこのゲートの後とする。
+
+## Supplemental 04: 復旧は確認、campaign内のcleanupは未成立
+
+[測定04の証跡](evidence/formation-native-unknown-supplemental-20261005-04.json)。修正済みSession/MCP `438efd6a864` とSkill `78c257fdd`を固定し、実Codexで1 Search・1 D round・1 exchange・1 Runtime attemptを使用した。既存の30分silence expiryでUNKNOWNとなり、新しいCodex文脈の実`status` / `next`は入力を返さず、同Search・同attempt・元deadline・消費量を維持した。保存済み同一結果のACK・closedと予約精算は40分以内に成立した。ownerの既存`effect_reconciled`経路で履歴UNKNOWNを保全し、期限後のPASSを成功Dや通常Run許可へ昇格していない。
+
+最終secret/process cleanupは40分を超えたため、campaign全体の受入完了とはしない。全処理終了時は新規未解決attempt・予約・writer・temporary input・所有processが0。04の記録と旧13/12超過は保持し、同じ上限・別measurement IDの05で枠内の連続終了を検証する。追加枠の自動実行はユーザー承認済みである。
+
+削除前の実値scanは対象ファイル・符号化を記録している。remoteのraw scanには旧fixtureのowner識別子と固定public protocol語彙が一致するhitがある。canonical prompt/schemaとの一致を別証跡で照合し、raw hitを保存した。credential値・emailのhitは0だが、owner識別子文字列の完全不出現や全操作の非露出を主張しない。SDK tokenは観測値、内部LLM call数・実請求は不明として区別する。
