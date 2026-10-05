@@ -5575,32 +5575,44 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
   }
 }];
 </script>"#;
+            let mut clients: Vec<JoinHandle<()>> = Vec::new();
             while !stopped.load(Ordering::Acquire) {
+                clients.retain(|client| !client.is_finished());
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        // Chrome may preconnect without sending a request.
-                        // An idle socket must not starve this fixture's page
-                        // request and therefore its Browser bridge handshake.
-                        stream
-                            .set_read_timeout(Some(Duration::from_millis(200)))
-                            .unwrap();
-                        let mut request = [0_u8; 1024];
-                        match stream.read(&mut request) {
-                            Ok(0) | Err(_) => continue,
-                            Ok(_) => {}
+                        // Chrome's speculative idle sockets must not block
+                        // another request or be closed before navigation.
+                        if clients.len() >= 32 {
+                            continue;
                         }
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            PAGE.len(),
-                            PAGE
-                        );
-                        let _ = stream.write_all(response.as_bytes());
+                        clients.push(thread::spawn(move || {
+                            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                            let mut request = Vec::new();
+                            let mut buffer = [0_u8; 1024];
+                            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                                match stream.read(&mut buffer) {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(count) => request.extend_from_slice(&buffer[..count]),
+                                }
+                                if request.len() > 16_384 {
+                                    return;
+                                }
+                            }
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                PAGE.len(), PAGE
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }));
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10))
                     }
-                    Err(_) => return,
+                    Err(_) => break,
                 }
+            }
+            for client in clients {
+                client.join().unwrap();
             }
         });
         (address, stop, thread)
