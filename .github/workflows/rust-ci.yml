@@ -68,6 +68,13 @@ jobs:
       - name: Test workspace
         if: runner.os != 'Windows'
         run: cargo test --workspace --no-fail-fast
+      - name: Portable worker regressions (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo test -p ato-formation-worker --lib build_record::tests --locked -- --test-threads=1
+          cargo test -p ato-formation-worker --lib runtime_network::proposal::reasoning::session::tests --locked -- --test-threads=1
+          cargo test -p ato-connected-realization-worker --lib runtime_launch::lease::tests --locked -- --test-threads=1
       # The workspace's execution E2Es exercise POSIX PTYs, /bin/sh paths,
       # Unix path policy, and Linux/macOS daemon lifecycle. Windows host code
       # is still compiled and linted here; portable CLI behavior is exercised
