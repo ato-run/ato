@@ -1,0 +1,744 @@
+{
+  "schema": "ato.formation-kutt-private-functional-state-proof/1",
+  "helper_CLI_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "K": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+  "D": "sha256:1c5a59c45a569c3400fe4993e0068e27eed63cbddc6602353deea09f776def66",
+  "artifact_sha256": "d0ee0467857d589931472c0697413bae72fe75c44b5948b4d514ad70708bd47a",
+  "retained_ref": "sha256:6d7d8b56832f83b04fdd0438e63e1feb55e6448febc4af4f533e1eeff190065f",
+  "preregistration_sha256": "8c6536380529cd86d0bdb29801bcb8a1764225d609a41e6518095da4235f32ab",
+  "private_proof_sha256": "08744915ab740bfda5fe9f7712c331556cf1bd37d02aea71d57a56bc25eef046",
+  "binary_hashes": {
+    "helper": "d6204a72e76ce4009c641b3888ea9a8c76bdd1cd9f2ecaadb49a5dcdb4de180c",
+    "ato": "bad2737892da0d76fa17eef1ab0a017b8d2a368ce8baea75d753d3e1048e6b9b"
+  },
+  "Runtime_shim": {
+    "path": "/opt/ato/.tmp/fv0-kutt-state-3bb-v12/ato",
+    "sha256": "bad2737892da0d76fa17eef1ab0a017b8d2a368ce8baea75d753d3e1048e6b9b"
+  },
+  "receiver_hashes": {
+    "authority-provenance.json": "d257456845b532c14b00353455d06e1fa06ea902ba2d79e94e1178e161042082",
+    "entry.ts": "5d711d4249426b994b14f1f5a0f68926532232377ced332487d77e3ac775492d",
+    "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
+    "receipt_authority.wasm": "9420802a52f32a021fb0839ef64d46f63299a8b5db59ed92c9522c483217987b",
+    "receiver-pin.json": "90b665738aaf08445a159dd1e352397cdf256ac8ba951927a85b5d1989621519",
+    "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+    "schema-baseline.json": "951cc3186a3d8e91ba35b824bfd30ec9cdbc52a1412ce2ce176ba2d0f16ebe3e",
+    "schema-baseline.sql": "db9814fa1346e691a649afb7577fcfe7948326de64bb3bdd0a0c4ef8f1eaaa13",
+    "schema.sql": "02f9f80aab2ac45a57c24148359939abf1eb90e4471768d54caa0146f7375aa6",
+    "worker.js": "7b8838e9fa8e0446d8e71eb2a0996157f494b5de2e13dc7dc6de0935ff05c1c6"
+  },
+  "helper_lock_sha256": "9e7100b70bf571bab6f944e7bc32313f73ea4fb2b732f3d3f1acb2512be54976",
+  "results": [
+    {
+      "generation": 1,
+      "functional": {
+        "owned_login": true,
+        "owned_link_create": true,
+        "link_id": "a2212856-a43d-4409-b05d-5b3301c71bf8",
+        "address": "Zk4kGW",
+        "target": "https://example.invalid/owned-acceptance"
+      },
+      "Search_id": "search_277475a4e9b97b4f91900ac0335496dd",
+      "Source_status": "running",
+      "Source_publication_measured": false,
+      "Requester_ended_after_ACK": true,
+      "fresh_attempt_id": "01M3XSMD5BD0WC9MNWNG6RJP4Y",
+      "state_assignment": [
+        {
+          "state_key": "app_data",
+          "revision_ref": null,
+          "mount_target": "/data",
+          "access": "read_write",
+          "writer_fence": 1
+        }
+      ],
+      "state_outcomes": [
+        {
+          "parent_revision_ref": null,
+          "revision_ref": "isrev_01M3XSPYG2HFG55PTZ2Y27ZBPN",
+          "state_key": "app_data",
+          "writer_fence": 1
+        }
+      ],
+      "fully_satisfied": true,
+      "ACK": {
+        "ACK": true,
+        "execution_replayed": false
+      },
+      "network": {
+        "allowance": {
+          "hosts": [
+            "exploration-denied.invalid"
+          ],
+          "ports": [
+            443
+          ],
+          "max_transfer_bytes": 1
+        },
+        "transferred_bytes": 0,
+        "budget_exhausted": false,
+        "allowed": [],
+        "refused": []
+      },
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T07:52:58.182Z",
+        "deadline_at": "2026-10-02T08:22:58.182Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 1295360,
+          "reserved": 0,
+          "remaining": 1072446464
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 181518590,
+          "reserved": 0,
+          "remaining": 1965965058
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "input_registered_again": false,
+      "ordinary_Run_authorized": false,
+      "API_calls": 0,
+      "fresh_receipt": {
+        "schema": "ato.contract-verification-receipt/1",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:1c5a59c45a569c3400fe4993e0068e27eed63cbddc6602353deea09f776def66",
+        "target": {
+          "kind": "formation-runtime"
+        },
+        "execution": {
+          "realization": "process",
+          "platform": "linux/aarch64",
+          "endpoint": "http://127.0.0.1:3000/",
+          "attempt_id": "01M3XSMD5BD0WC9MNWNG6RJP4Y",
+          "request_id": "01M3XSM942488PJ4TTXGXFX97T"
+        },
+        "observations": [
+          {
+            "id": "root",
+            "outcome": "satisfied",
+            "evidence": {
+              "method": "GET",
+              "path": "/",
+              "status": 200,
+              "body_sha256": "sha256:78ec720b8f886971540591901954e1cf7b58b593e0d876745ded438178e932ac"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": "satisfied",
+            "evidence": {
+              "input": "workspace",
+              "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145"
+            }
+          }
+        ],
+        "fully_satisfied": true
+      },
+      "phase_evidence": [
+        {
+          "kind": "exploration_phase_timings",
+          "phases": [
+            {
+              "elapsed_ms": 454,
+              "phase": "source",
+              "started_at_ms": 1790927583667
+            },
+            {
+              "elapsed_ms": 75526,
+              "phase": "source",
+              "started_at_ms": 1790927584156
+            },
+            {
+              "elapsed_ms": 4598,
+              "phase": "launch",
+              "started_at_ms": 1790927659683
+            },
+            {
+              "elapsed_ms": 90,
+              "phase": "verification",
+              "started_at_ms": 1790927664281
+            },
+            {
+              "elapsed_ms": 964,
+              "phase": "cleanup",
+              "started_at_ms": 1790927664923
+            }
+          ]
+        }
+      ],
+      "metadata_mismatch": [],
+      "original_deadline": "2026-10-02T08:22:58.182Z",
+      "fixed_session_exchanges": 6,
+      "public_report_sha256": "e7af9310e836aac6f4fd861670e5b4b8b11949c07d5c9b45de1558dbe92c919b",
+      "fresh_attempt_sha256": "5c1eba7611134138e20821a0a55b4bfb73e6ed64411cf8eeccf4ecc07657fac4"
+    },
+    {
+      "generation": 2,
+      "functional": {
+        "owned_login_after_restart": true,
+        "prior_JWT_cookie_rejected": true,
+        "persisted_private_API_key_authenticated": true,
+        "owned_link_preserved": true,
+        "owned_link_deleted": true,
+        "link_id": "a2212856-a43d-4409-b05d-5b3301c71bf8"
+      },
+      "Search_id": "search_7f174ffa73c32243d269420d7bf96cbd",
+      "Source_status": "running",
+      "Source_publication_measured": false,
+      "Requester_ended_after_ACK": true,
+      "fresh_attempt_id": "01M3XSQD06FNCKXCMM06EVP6J0",
+      "state_assignment": [
+        {
+          "state_key": "app_data",
+          "revision_ref": "isrev_01M3XSPYG2HFG55PTZ2Y27ZBPN",
+          "mount_target": "/data",
+          "access": "read_write",
+          "writer_fence": 2
+        }
+      ],
+      "state_outcomes": [
+        {
+          "parent_revision_ref": "isrev_01M3XSPYG2HFG55PTZ2Y27ZBPN",
+          "revision_ref": "isrev_01M3XSSVX05DEQ9VWX60AEWK8S",
+          "state_key": "app_data",
+          "writer_fence": 2
+        }
+      ],
+      "fully_satisfied": true,
+      "ACK": {
+        "ACK": true,
+        "execution_replayed": false
+      },
+      "network": {
+        "allowance": {
+          "hosts": [
+            "exploration-denied.invalid"
+          ],
+          "ports": [
+            443
+          ],
+          "max_transfer_bytes": 1
+        },
+        "transferred_bytes": 0,
+        "budget_exhausted": false,
+        "allowed": [],
+        "refused": []
+      },
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T07:54:30.489Z",
+        "deadline_at": "2026-10-02T08:24:30.489Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 1295360,
+          "reserved": 0,
+          "remaining": 1072446464
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 181518590,
+          "reserved": 0,
+          "remaining": 1965965058
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "input_registered_again": false,
+      "ordinary_Run_authorized": false,
+      "API_calls": 0,
+      "fresh_receipt": {
+        "schema": "ato.contract-verification-receipt/1",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:1c5a59c45a569c3400fe4993e0068e27eed63cbddc6602353deea09f776def66",
+        "target": {
+          "kind": "formation-runtime"
+        },
+        "execution": {
+          "realization": "process",
+          "platform": "linux/aarch64",
+          "endpoint": "http://127.0.0.1:3000/",
+          "attempt_id": "01M3XSQD06FNCKXCMM06EVP6J0",
+          "request_id": "01M3XSQ38BWSYGGQSC4EY56NT9"
+        },
+        "observations": [
+          {
+            "id": "root",
+            "outcome": "satisfied",
+            "evidence": {
+              "method": "GET",
+              "path": "/",
+              "status": 200,
+              "body_sha256": "sha256:78ec720b8f886971540591901954e1cf7b58b593e0d876745ded438178e932ac"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": "satisfied",
+            "evidence": {
+              "input": "workspace",
+              "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145"
+            }
+          }
+        ],
+        "fully_satisfied": true
+      },
+      "phase_evidence": [
+        {
+          "kind": "exploration_phase_timings",
+          "phases": [
+            {
+              "elapsed_ms": 932,
+              "phase": "source",
+              "started_at_ms": 1790927682912
+            },
+            {
+              "elapsed_ms": 71,
+              "phase": "source",
+              "started_at_ms": 1790927683844
+            },
+            {
+              "elapsed_ms": 73875,
+              "phase": "source",
+              "started_at_ms": 1790927684008
+            },
+            {
+              "elapsed_ms": 2584,
+              "phase": "launch",
+              "started_at_ms": 1790927757884
+            },
+            {
+              "elapsed_ms": 15,
+              "phase": "verification",
+              "started_at_ms": 1790927760468
+            },
+            {
+              "elapsed_ms": 773,
+              "phase": "cleanup",
+              "started_at_ms": 1790927760994
+            }
+          ]
+        }
+      ],
+      "metadata_mismatch": [],
+      "original_deadline": "2026-10-02T08:24:30.489Z",
+      "fixed_session_exchanges": 6,
+      "public_report_sha256": "8a99edfbc099dd2888e9194fd9e8fdbdc23d71347255a08b6aa810cce65ec4e5",
+      "fresh_attempt_sha256": "3b3b0fe35a62e5d83c50ea0db6326af2b7dff22738284408439457f50be339db"
+    }
+  ],
+  "encrypted_values_after_cleanup": 0,
+  "state_slots": [
+    {
+      "writer_epoch": 2,
+      "active_writer_run_id": null,
+      "quarantined_at": null
+    }
+  ],
+  "protected_value_public_occurrences": 0,
+  "functional_only": true,
+  "independent_API_Source_arm_seeded": false,
+  "Source_publication_measured": false,
+  "new_unique_app_successes": 0,
+  "paid_API_calls": 0,
+  "actual_Codex_provider_calls": null,
+  "deployment_remote_migration_ordinary_Run_permission": false,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "preserved_trials": [
+    {
+      "version": 1,
+      "preexecution-interruption-proof.json": {
+        "sha256": "cda9aaa67c3dc648eb8aaee9e1686142edc4dae46830f072700b1901e17b260e",
+        "summary": {
+          "schema": "ato.formation-functional-preexecution-harness-interruption/1",
+          "Search_id": "search_c6fb16b126cbbb2c54b3fbcc0db9e3ce",
+          "attempts": 0,
+          "State_runs": 0,
+          "encrypted_values_after_cleanup": 0,
+          "source_executed": false,
+          "Runtime_helper_started": false,
+          "reason": "Harness read restart locator immediately after local checkpoint before Satisfy registration committed; 404 was not yet treated as initialization pending",
+          "old_Source_Search_restarted": false,
+          "old_WBO_UNKNOWN_rerun": false,
+          "paid_API_calls": 0
+        }
+      }
+    },
+    {
+      "version": 2,
+      "preexecution-interruption-proof.json": {
+        "sha256": "6ecb9bb17ca7bf2482fa56124bef7f677950cad0f5c54a5326c74902e52cd2f9",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "harness waited for reserved but Coordinator publishes pending",
+          "Runtime_helper_started": false,
+          "paid_API_calls": 0,
+          "old_WBO_reexecuted": false,
+          "attempts": [
+            {
+              "id": "01M3XQ4XM2M1HF2RVDCZEC75SG",
+              "status": "pending"
+            }
+          ],
+          "state_run_count": 0,
+          "encrypted_value_count": 0
+        }
+      }
+    },
+    {
+      "version": 3,
+      "preexecution-interruption-proof.json": {
+        "sha256": "8e3df7516450e8835068e53107416897bfaa51af1709ca774076a959e82fcd79",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "Unix socket path exceeds SUN_LEN",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": false,
+          "temporary_values_revoked_by_production_owner_route": 1,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XQHAJC0S0WXZPJXNASXP8B",
+              "status": "claimed"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 1,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      },
+      "actual-unknown-readonly.json": {
+        "sha256": "3ab9e29a9379d6ef9bb89d14aa800b0b4d3879859b5c0775d6379ece6607c86e",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-actual-unknown/1",
+          "observed_at": "2026-10-02T07:55:02.084278+00:00",
+          "search_id": "search_8ad3e810b5fadd5d3f6cd113c12b005d",
+          "satisfy_id": "01M3XQH6R712KEKEZ5TAVC504B",
+          "original_deadline": "2026-10-02T07:46:20.307Z",
+          "attempt": {
+            "attempt_id": "01M3XQHAJC0S0WXZPJXNASXP8B",
+            "status": "unknown",
+            "failure": null,
+            "metadata_mismatch": []
+          },
+          "budget": {
+            "budget_version": "ato.runtime-network.search-budget/0",
+            "mode": "first_pass",
+            "created_at": "2026-10-02T07:16:20.307Z",
+            "deadline_at": "2026-10-02T07:46:20.307Z",
+            "attempts": {
+              "max": 4,
+              "used": 1,
+              "reserved": 0,
+              "remaining": 3
+            },
+            "transfer_bytes": {
+              "max": 1073741824,
+              "used": 1295360,
+              "reserved": 0,
+              "remaining": 1072446464
+            },
+            "expanded_bytes": {
+              "max": 2147483648,
+              "used": 536870912,
+              "reserved": 0,
+              "remaining": 1610612736
+            },
+            "stored_bytes": {
+              "max": 1073741824,
+              "used": 536870912,
+              "reserved": 0,
+              "remaining": 536870912
+            }
+          },
+          "Source_checkpoint_unchanged": true,
+          "Requester_Runtime_restarted": false,
+          "inference_execution_replayed": false,
+          "deadline_budget_round_retry_reset": false,
+          "encrypted_values_already_revoked": true,
+          "ordinary_Run_authorized": false,
+          "paid_API_calls": 0,
+          "old_WBO_reexecuted": false
+        }
+      }
+    },
+    {
+      "version": 4,
+      "preexecution-interruption-proof.json": {
+        "sha256": "7c46c1632842b37ffe5855b51f346359dd6a2105dc4be283243fab06b50a822a",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "nobody cannot traverse /home/ubuntu (0750); confirmed bwrap startup failure",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": true,
+          "report_ACK": true,
+          "stop_confirmed": true,
+          "temporary_values_revoked_by_production_owner_route": 1,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XQQ37KT0BFCFXQQB6CBS7X",
+              "status": "fail"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 1,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": 5,
+      "preexecution-interruption-proof.json": {
+        "sha256": "ff518f35db5ae7a9b664f9006b4e73724b100a2081fd8271edcb16a253c2eb70",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "nobody cannot traverse /home/ubuntu (0750); confirmed bwrap startup failure",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": true,
+          "report_ACK": true,
+          "stop_confirmed": true,
+          "temporary_values_revoked_by_production_owner_route": 1,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XQWRE82XWRX5KXWVH1BKNR",
+              "status": "fail"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 1,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": 6,
+      "interrupted-functional-proof.json": {
+        "sha256": "7bd304077cd8bdb00f863b451a753a9fa3868eae35ed83b01ad3a9b2bfc37c4b",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "observer read partially written Search checkpoint before claim",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": false,
+          "fresh_status": null,
+          "report_ACK": false,
+          "stop_confirmed": false,
+          "temporary_values_revoked_by_production_owner_route": 0,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [],
+          "encrypted_values": 0,
+          "state_slots": []
+        }
+      }
+    },
+    {
+      "version": 7,
+      "preexecution-interruption-proof.json": {
+        "sha256": "9d4bf58a8135cd6de33b42dca8e070448554db791401f017eb76717676590cc0",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "nobody cannot traverse /home/ubuntu (0750); confirmed bwrap startup failure",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": true,
+          "report_ACK": true,
+          "stop_confirmed": true,
+          "temporary_values_revoked_by_production_owner_route": 1,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XR76VXJ9FFBZWQT4M6GDEB",
+              "status": "fail"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 1,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": 8,
+      "interrupted-functional-proof.json": {
+        "sha256": "9eb5d1212446da0e401451962da86f045e187c827149cdd6577b6593df164282",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "observer heartbeat received HTTP503 after fresh PASS",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": true,
+          "fresh_status": "verified",
+          "report_ACK": true,
+          "stop_confirmed": true,
+          "temporary_values_revoked_by_production_owner_route": 1,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XRCDNHX1118A1S26KEXJKY",
+              "status": "pass"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 1,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": 9,
+      "interrupted-functional-proof.json": {
+        "sha256": "2176b25cf021447bbab3ece8868dad053faa97e486a6754eac451afc69aa73cc",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "functional observer expected link to be an object but it is a URL string",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": true,
+          "fresh_status": "verified",
+          "report_ACK": true,
+          "stop_confirmed": true,
+          "temporary_values_revoked_by_production_owner_route": 1,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XRJGTBV4XHB5MWMY0KR9WM",
+              "status": "pass"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 1,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": 10,
+      "interrupted-functional-proof.json": {
+        "sha256": "8f24ff9bb6e8e80695a04fea1667b2c306a99cd54f475e31ddc1cfc7dba26e7f",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "observer waited for new Source publication in a separate fixed-artifact functional arm",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": true,
+          "fresh_status": "verified",
+          "report_ACK": true,
+          "stop_confirmed": true,
+          "temporary_values_revoked_by_production_owner_route": 1,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XRT2J2QBB6C3QSHWNEDE70",
+              "status": "pass"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 1,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": 11,
+      "interrupted-functional-proof.json": {
+        "sha256": "c4e6cf7dac51051e0af505bd308f68d5eed70a0882f086f46a2e709e1afdccca",
+        "summary": {
+          "schema": "ato.formation-private-preexecution-interruption/1",
+          "cause": "functional observer used JWT bearer for the Source API-key protected link route; first created link was anonymous",
+          "paid_API_calls": 0,
+          "reexecution": false,
+          "fresh_attempt_file_present": true,
+          "fresh_status": "verified",
+          "report_ACK": true,
+          "stop_confirmed": true,
+          "temporary_values_revoked_by_production_owner_route": 2,
+          "Source_checkpoint_unchanged": true,
+          "attempts": [
+            {
+              "id": "01M3XS36GRJW910RPNM8NMGF22",
+              "status": "pass"
+            },
+            {
+              "id": "01M3XSABM66A4HE9BDW4MRHXSV",
+              "status": "pass"
+            }
+          ],
+          "encrypted_values": 0,
+          "state_slots": [
+            {
+              "writer_epoch": 2,
+              "active_writer_run_id": null,
+              "quarantined_at": null
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
