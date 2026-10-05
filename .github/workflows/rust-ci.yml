@@ -36,6 +36,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22.14.0"
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap patchelf
+          # Disposable hosted-runner setup; production admission is unchanged.
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true
       - name: Provision declared Linux fixture toolchains
         if: runner.os == 'Linux'
         shell: bash
@@ -43,18 +53,11 @@ jobs:
           sudo mkdir -p /opt/ato/toolchains/python/3.12.7 /opt/ato/toolchains/node/22.14.0/bin
           sudo cp -a "$(python3 -c 'import sys; print(sys.prefix)')/." /opt/ato/toolchains/python/3.12.7/
           sudo cp "$(command -v node)" /opt/ato/toolchains/node/22.14.0/bin/node
-          /opt/ato/toolchains/python/3.12.7/bin/python3 --version
+          # The build sandbox clears LD_LIBRARY_PATH. Resolve the exact copied
+          # libpython instead of the runner's different system libpython.
+          sudo patchelf --set-rpath '$ORIGIN/../lib' /opt/ato/toolchains/python/3.12.7/bin/python3.12
+          env -i PATH=/usr/bin:/bin /opt/ato/toolchains/python/3.12.7/bin/python3 -I -S -c 'import sys; assert sys.version_info[:3] == (3, 12, 7), sys.version'
           /opt/ato/toolchains/node/22.14.0/bin/node --version
-      - name: Install Linux sandbox dependency
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
-          # Disposable hosted-runner setup; production admission is unchanged.
-          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true
       - run: cargo fmt --all -- --check
       - name: Check workspace
         if: runner.os != 'Windows'
@@ -65,6 +68,13 @@ jobs:
         # guest rootfs, not the Windows host. Exclude both so the latter cannot
         # pull guest-agent back into the dependency graph.
         run: cargo check --workspace --exclude guest-agent --exclude ato-firecracker-guest-image --all-targets --locked
+      - name: Build the worker sandbox shim
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo build -p ato-connected-realization-worker --locked
+          echo "ATO_TEST_WORKER_BIN=$PWD/target/debug/ato-connected-realization-worker" >> "$GITHUB_ENV"
+          python3 -I -S -c 'import sys; print(sys.executable); print(sys.version)'
       - name: Test workspace
         if: runner.os != 'Windows'
         run: cargo test --workspace --no-fail-fast

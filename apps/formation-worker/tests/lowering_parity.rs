@@ -4,7 +4,10 @@ use ato_formation::{
     detect::detect,
     source::{RESOLVER_CONTRACT_V1, SourceClosureRef},
 };
-use ato_formation_worker::{job::plan_candidate, runtime_network::derivation_requirements};
+use ato_formation_worker::runtime_network::derivation_requirements;
+#[path = "support/compiler_plan.rs"]
+mod compiler_plan;
+use compiler_plan::plan_candidate;
 use std::collections::BTreeMap;
 
 #[test]

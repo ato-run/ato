@@ -177,7 +177,7 @@ fn start_process(root: &Path) -> Candidate {
             ready_url: format!("http://127.0.0.1:{port}/"),
         };
     }
-    let child = Command::new("python3")
+    let mut child = Command::new("python3")
         .args([
             "-m",
             "http.server",
@@ -188,12 +188,35 @@ fn start_process(root: &Path) -> Candidate {
         .arg("--directory")
         .arg(root)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("python3 runs the LocalProcess candidate");
     let deadline = Instant::now() + Duration::from_secs(20);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "the candidate never listened");
+        if let Some(status) = child.try_wait().expect("candidate status") {
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .take(4096)
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("the candidate exited before listening ({status}): {stderr}");
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop timed-out candidate");
+            child.wait().expect("reap timed-out candidate");
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .take(4096)
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("the candidate never listened: {stderr}");
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
     Candidate::Process {
