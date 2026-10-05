@@ -1388,6 +1388,15 @@ fn serve_proposal_inner(
         .saturating_sub(now_ms)
         .min(request.remaining_budget.timeout_ms);
     if remaining == 0 {
+        if let Invocation::Reasoning(producer) = &producer {
+            // Reconcile a response already saved by this expired Session; it
+            // cannot open another exchange or authorize a late proposal.
+            producer.reconcile_expired_session_response(
+                &submission.request.search_id,
+                expires,
+                now_ms,
+            )?;
+        }
         return Ok(false);
     }
     let mut completion = json!({"revision":revision,"fence":fence});
@@ -1437,7 +1446,12 @@ fn serve_proposal_inner(
                     }
                 }
                 Err(error) => {
-                    completion["outcome"] = json!("provider_error");
+                    completion["outcome"] =
+                        json!(if error.is::<reasoning::ReasoningSessionDeadline>() {
+                            "timeout"
+                        } else {
+                            "provider_error"
+                        });
                     if error.is::<reasoning::ReasoningCallBudgetExhausted>() {
                         completion["pre_dispatch_error"] = json!("call_budget_exhausted");
                     }
@@ -1650,6 +1664,7 @@ fn denied_network(attempt: &Value) -> Vec<ato_formation::requirements::NetworkRe
             if (ExecutionRequirements {
                 network: vec![n.clone()],
                 authority: vec![],
+                host: None,
             })
             .validate()
             .is_ok()
@@ -1674,6 +1689,7 @@ fn denied_authority(attempt: &Value) -> Vec<ato_formation::requirements::Authori
             && (ExecutionRequirements {
                 network: vec![],
                 authority: vec![a.clone()],
+                host: None,
             })
             .validate()
             .is_ok()

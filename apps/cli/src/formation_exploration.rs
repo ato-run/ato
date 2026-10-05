@@ -11,7 +11,9 @@ use ato_formation_worker::runtime_network::{
         budget::{BudgetPlan, CallBudget},
         deepseek::DeepSeekCandidateProducer,
         prepare_exploration_submission_auto,
-        reasoning::{ReasoningProducer, ReasoningProviderConfig},
+        reasoning::{
+            ReasoningProducer, ReasoningProviderConfig, lock_owner_journal, session::Bridge,
+        },
         serve_general_proposal, serve_reasoning_proposal,
     },
 };
@@ -84,6 +86,15 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
     ensure!(
         shared || !config.provider.is_session(),
         "session requires shared reasoning"
+    );
+    ensure!(
+        args.session_bridge.is_none() || config.provider.is_session(),
+        "Session bridge requires a Session configuration"
+    );
+    ensure!(
+        !matches!(&config.provider, ReasoningProviderConfig::Session(c) if c.provider == "agent_session")
+            || (args.session_bridge.is_some() && config.decision.is_none()),
+        "agent Session needs --session-bridge and no direct inference API decision provider"
     );
     config.exploration.validate()?;
     let reserve = config.provider_budget.validate()?;
@@ -166,7 +177,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             .is_none_or(|r| r == &provider_ref),
         "provider config mismatch"
     );
-    config.exploration.provider_configuration_ref = Some(provider_ref);
+    config.exploration.provider_configuration_ref = Some(provider_ref.clone());
     let api = args.api.context("--runtime-network needs --api")?;
     let token = super::read_token(
         &args
@@ -178,6 +189,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         .unwrap_or_else(|| PathBuf::from(".tmp/formation-exploration"));
     let restart_checkpoint =
         std::path::absolute(&config.provider_journal)?.with_extension("search.json");
+    let _owner_lock = lock_owner_journal(&config.provider_journal)?;
     let continuation = args.search_id.is_some() || restart_checkpoint.exists();
     let search_id = match args.search_id {
         Some(id) => id,
@@ -350,11 +362,14 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
     let expires = if start_deadline.exists() {
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&start_deadline)?)?["deadline_ms"].as_u64().context("start deadline missing")?
     } else {
-        let expires = (SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
-            .saturating_add(args.deadline_seconds.saturating_mul(1000));
+        let started_at_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+        let expires = started_at_ms.saturating_add(args.deadline_seconds.saturating_mul(1000));
         ato_formation_worker::runtime_network::proposal::reasoning::save_owner_checkpoint(
             &start_deadline,
-            &serde_jcs::to_vec(&serde_json::json!({"deadline_ms": expires}))?,
+            &serde_jcs::to_vec(&serde_json::json!({
+                "deadline_ms": expires,"started_at_ms":started_at_ms,"search_id":search_id,
+                "configuration_ref":provider_ref
+            }))?,
         )?;
         expires
     };
@@ -400,6 +415,35 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         .as_str()
         .context("satisfy identity missing")?
         .to_string();
+    let bridge = args
+        .session_bridge
+        .as_ref()
+        .map(|path| -> Result<Bridge> {
+            let mut entropy = [0; 32];
+            getrandom::fill(&mut entropy)
+                .map_err(|e| anyhow::anyhow!("bridge capability unavailable: {e}"))?;
+            let (owner, search, satisfy) =
+                (reporting_client.clone(), search_id.clone(), id.clone());
+            Bridge::start(
+                reasoning
+                    .as_ref()
+                    .context("Session producer missing")?
+                    .clone(),
+                &search_id,
+                expires,
+                path,
+                entropy,
+                Arc::new(move || {
+                    let cancellation = owner.cancel_exploration(&search)?;
+                    let mut status = owner.satisfy_status(&satisfy)?;
+                    status["input_cleanup"] = cancellation["input_cleanup"].clone();
+                    status["execution_stop_confirmed"] =
+                        cancellation["execution_stop_confirmed"].clone();
+                    Ok(status)
+                }),
+            )
+        })
+        .transpose()?;
     let deadline = Instant::now()
         + Duration::from_millis(
             expires
@@ -424,6 +468,9 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             reporting_client.satisfy_status(&id)?
         };
         let settled = Settlement::of(&status)? != Settlement::Running;
+        if let Some(bridge) = &bridge {
+            bridge.update(&status)?;
+        }
         let expired = Instant::now() >= deadline
             || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() >= u128::from(expires);
         if !settled && !expired && status["pause_reason"] == "needs_input" {
@@ -475,7 +522,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             result["candidate_producer_accounting"] = match &budget {
                 Some(b) => serde_json::to_value(b.snapshot()?)?,
                 None => {
-                    serde_json::json!({"provider":"codex_session","API_calls":0,"token_usage":"not_exposed","cost":"not_exposed"})
+                    serde_json::json!({"provider":match &config.provider {ReasoningProviderConfig::Session(c)=>c.provider.as_str(), _=>"unknown"},"API_calls":0,"internal_LLM_calls":"unknown","token_usage":"unknown","cost":"unknown"})
                 }
             };
             if let Some(p) = &reasoning {
@@ -487,6 +534,12 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
                     serde_json::json!({"calls":0,"no_call_reason":"decision_provider_not_required"})
                 }
             };
+            if let Some(bridge) = &bridge {
+                bridge.finish(
+                    &result,
+                    serde_json::to_value(super::BuildIdentity::current())?,
+                )?;
+            }
             println!("{}", serde_json::to_string_pretty(&result)?);
             ensure!(
                 budget.as_ref().map_or(Ok(true), |b| b

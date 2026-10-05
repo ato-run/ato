@@ -129,6 +129,7 @@ impl ExplorationContext {
                     || (crate::requirements::ExecutionRequirements {
                         network: f.network_denials.clone(),
                         authority: f.authority_denials.clone(),
+                        host: None,
                     })
                     .validate()
                     .is_err()
