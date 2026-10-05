@@ -1086,7 +1086,10 @@ impl Submission {
             "durable candidate scope mismatch"
         );
         anyhow::ensure!(
-            record.diagnostics.iter().any(|d| d == "reasoning_call_budget_exhausted")
+            record
+                .diagnostics
+                .iter()
+                .any(|d| d == "reasoning_call_budget_exhausted")
                 == (round["pre_dispatch_error"] == "call_budget_exhausted"),
             "durable pre-dispatch diagnosis mismatch"
         );
