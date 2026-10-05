@@ -476,6 +476,22 @@ pub fn recover_slot(
     budget: StopBudget,
     leases_dir: &Path,
 ) -> Result<RecoveryResult> {
+    recover_slot_on(journal, scanner, reporter, budget, leases_dir, true)
+}
+
+/// As [`recover_slot`], for a Runner that states whether it can create
+/// containers at all. A host-boundary Runner cannot (no namespaces, no
+/// engine, no OCI ABI advertised): an absent Docker is then not a gap in what
+/// can be checked, because nothing of a Run could have become a container.
+/// Process identities are still settled and still required where recorded.
+pub fn recover_slot_on(
+    journal: &RunJournal,
+    scanner: Option<&OwnedResourceScanner>,
+    reporter: &dyn RecoveryReporter,
+    budget: StopBudget,
+    leases_dir: &Path,
+    containers_possible: bool,
+) -> Result<RecoveryResult> {
     let entries = journal.load()?;
     let owned = match scanner {
         Some(scanner) => Some(scanner.scan()?),
@@ -578,8 +594,9 @@ pub fn recover_slot(
         match (scanner, &owned) {
             (Some(scanner), Some(_)) => outcomes.push(settle_with(scanner, &lease_id, budget)),
             // Containers may exist that nothing can see: without Docker a
-            // non-process Run cannot be confirmed stopped.
-            _ if entry.is_none_or(|entry| entry.process.is_none()) => {
+            // non-process Run cannot be confirmed stopped — unless this
+            // Runner cannot create containers at all.
+            _ if containers_possible && entry.is_none_or(|entry| entry.process.is_none()) => {
                 outcomes.push(StopOutcome::Unconfirmed {
                     reason: "Docker is unavailable to confirm the Run's containers".to_owned(),
                 });
@@ -765,6 +782,43 @@ mod tests {
         assert!(!result.clean);
         assert_eq!(result.reports[0].outcome, "unconfirmed");
         assert!(lease.exists());
+    }
+
+    #[test]
+    fn a_runner_that_cannot_create_containers_settles_a_run_that_never_started() {
+        // Host-boundary: the launch failed before any process was spawned
+        // (e.g. a missing toolchain), so the journal holds no process. With
+        // no container engine on the host, nothing of the Run can remain.
+        let root = tempfile::tempdir().unwrap();
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        let mut entry = RunJournalEntry::new(&owner("L-never"));
+        entry.phase = RunPhase::StopUnconfirmed;
+        journal.record(&entry).unwrap();
+        let reporter = Reporter::default();
+        let result = recover_slot_on(
+            &journal,
+            None,
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+            false,
+        )
+        .unwrap();
+        assert!(result.clean);
+        assert_ne!(result.reports[0].outcome, "unconfirmed");
+        // The same journal on a Runner that could have made containers stays
+        // unconfirmed without Docker.
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        journal.record(&entry).unwrap();
+        let result = recover_slot(
+            &journal,
+            None,
+            &Reporter::default(),
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
+        assert!(!result.clean);
     }
 
     #[cfg(unix)]

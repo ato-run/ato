@@ -392,6 +392,31 @@ fn launch_process_inner(
     }
 
     let policy_path = host.runtime_root.join("sandbox-policy.json");
+    if super::host_boundary::active().is_none() {
+        ensure!(
+            context.read_only_inputs().is_empty(),
+            "delivered read-only inputs (Model Sets) run only on a host-boundary Runner in v0"
+        );
+    }
+    if let Some(boundary) = super::host_boundary::active() {
+        // No namespace exists on this host, so there is no isolated network to
+        // put a broker in front of. Refuse rather than share the host network
+        // with a workload that was promised a scoped one.
+        ensure!(
+            scoped.is_none(),
+            "a scoped-network launch cannot run on a host-boundary Runner"
+        );
+        return launch_host_boundary(
+            spec,
+            context,
+            host,
+            process_spec,
+            &policy_path,
+            boundary,
+            runtime_executable,
+            runtime_version,
+        );
+    }
     let mut sandboxed = match scoped {
         Some((socket, ingress)) => super::sandbox::sandboxed_command_scoped(
             context,
@@ -469,6 +494,84 @@ fn launch_process_inner(
     let handle = adapter
         .spawn(context.workspace_root())
         .context("failed to spawn the contained workload")?;
+    Ok(LaunchedProcess {
+        handle,
+        run_id: spec.context.run_id.clone(),
+        runtime_executable,
+        runtime_version,
+        stopped: false,
+    })
+}
+
+/// The host-boundary launch: the same adapter, port and teardown machinery,
+/// with the shim changing user in place of bwrap setting up namespaces.
+#[allow(clippy::too_many_arguments)]
+fn launch_host_boundary(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+    process_spec: ProcessSpec,
+    policy_path: &Path,
+    boundary: super::host_boundary::HostBoundary,
+    runtime_executable: String,
+    runtime_version: Option<String>,
+) -> Result<LaunchedProcess> {
+    let scratch = host.runtime_root.join("scratch");
+    super::host_boundary::prepare_ownership(context, &scratch, boundary)?;
+    let sandboxed = super::host_boundary::host_boundary_command(
+        context,
+        &process_spec.command,
+        &host.shim,
+        policy_path,
+        &scratch,
+        boundary,
+    )?;
+    std::fs::write(
+        policy_path,
+        serde_json::to_vec_pretty(&sandboxed.policy)
+            .context("failed to serialize the sandbox policy")?,
+    )
+    .context("failed to write the sandbox policy")?;
+
+    // `process_spec.environment` is the host-path form: there is no guest
+    // namespace here, so `ATO_STATE_PATH_<KEY>` names a real directory. It
+    // holds only what the spec declared; nothing of the Runner's own
+    // environment — its credential, an enrollment token — is passed on.
+    let mut environment = process_spec.environment.clone();
+    let scratch_text = scratch
+        .to_str()
+        .context("scratch path is not valid UTF-8")?
+        .to_owned();
+    environment.insert("TMPDIR".into(), scratch_text.clone());
+    environment.insert("HOME".into(), scratch_text);
+    for input in context.read_only_inputs() {
+        environment.insert(
+            input.env_name.clone(),
+            input
+                .path
+                .to_str()
+                .context("input path is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
+    environment
+        .entry("PATH".into())
+        .or_insert_with(|| "/usr/local/bin:/usr/bin:/bin".into());
+
+    let adapter = ProcessAdapter::new(ProcessSpec {
+        cwd: PathBuf::new(),
+        command: sandboxed.argv,
+        environment,
+        ..process_spec
+    })
+    .context("host-boundary process spec is unusable")?;
+    let adapter = match &host.output {
+        Some((path, max_bytes)) => adapter.with_output_file(path, *max_bytes),
+        None => adapter,
+    };
+    let handle = adapter
+        .spawn(context.workspace_root())
+        .context("failed to spawn the host-boundary workload")?;
     Ok(LaunchedProcess {
         handle,
         run_id: spec.context.run_id.clone(),
