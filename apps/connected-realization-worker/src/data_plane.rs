@@ -16,6 +16,7 @@
 //!   reachable from it. The cache dies with the machine; a new machine misses.
 use std::fs::{self, File};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -243,6 +244,7 @@ impl LeaseData<'_> {
     /// Download one granted input Asset to `dest/<asset_id>/<filename>`,
     /// verified against the SHA-256 the Coordinator recorded for it.
     pub fn asset(&self, asset_id: &str, dest: &Path) -> Result<PathBuf> {
+        require_cache_platform()?;
         ensure!(
             asset_id.starts_with("ast_")
                 && asset_id
@@ -277,7 +279,7 @@ impl LeaseData<'_> {
             .unwrap_or_else(|| "asset".to_owned());
         let dir = dest.join(asset_id);
         fs::create_dir_all(&dir)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))?;
+        set_mode(&dir, 0o755)?;
         let path = dir.join(filename);
         let partial = path.with_extension("partial");
         {
@@ -290,7 +292,7 @@ impl LeaseData<'_> {
             let _ = fs::remove_file(&partial);
             bail!("input Asset {asset_id} failed verification");
         }
-        fs::set_permissions(&partial, fs::Permissions::from_mode(0o444))?;
+        set_mode(&partial, 0o444)?;
         fs::rename(&partial, &path)?;
         Ok(path)
     }
@@ -376,9 +378,33 @@ impl Read for CountedRead<'_> {
     }
 }
 
+// The cache relies on POSIX owner/mode enforcement. A Windows readonly bit
+// cannot provide the private marker boundary or the same workload permissions.
+#[cfg(unix)]
+fn require_cache_platform() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_cache_platform() -> Result<()> {
+    bail!("unsupported_capability: Model Set cache requires POSIX permissions")
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
+    require_cache_platform()
+}
+
 impl ModelCache {
     /// Under the Runner's work root, outside every lease directory.
     pub fn open(work_root: &Path) -> Result<Self> {
+        require_cache_platform()?;
         let root = work_root.join("model-cache");
         let cache = Self {
             objects: root.join("objects"),
@@ -388,7 +414,7 @@ impl ModelCache {
             fs::create_dir_all(dir)?;
         }
         // Markers are the Runner's alone.
-        fs::set_permissions(&cache.markers, fs::Permissions::from_mode(0o700))?;
+        set_mode(&cache.markers, 0o700)?;
         Ok(cache)
     }
 
@@ -421,7 +447,7 @@ impl ModelCache {
     }
 
     fn seal(&self, entry: &ModelSetEntry, object: &Path) -> Result<()> {
-        fs::set_permissions(object, fs::Permissions::from_mode(0o444))?;
+        set_mode(object, 0o444)?;
         let marker = Marker {
             format: CACHE_FORMAT.to_owned(),
             digest: entry.digest.clone(),
@@ -515,14 +541,14 @@ impl ModelCache {
     /// Hard-link a verified Model Set into `dest` as `dest/<path>`, read-only.
     pub fn materialize(&self, manifest: &ModelSetManifest, dest: &Path) -> Result<()> {
         fs::create_dir_all(dest)?;
-        fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
+        set_mode(dest, 0o755)?;
         for entry in &manifest.objects {
             let target = dest.join(&entry.path);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
                 let mut dir = parent.to_path_buf();
                 while dir.starts_with(dest) {
-                    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))?;
+                    set_mode(&dir, 0o755)?;
                     if !dir.pop() {
                         break;
                     }
@@ -589,7 +615,7 @@ pub fn deliver(
     if !grant.input_assets.is_empty() {
         let dest = lease_root.join("inputs").join("assets");
         fs::create_dir_all(&dest)?;
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))?;
+        set_mode(&dest, 0o755)?;
         for asset_id in &grant.input_assets {
             keepalive()?;
             data.asset(asset_id, &dest)?;
@@ -800,7 +826,7 @@ fn save_one(data: &LeaseData<'_>, key: &str, path: &Path, max_bytes: u64) -> Out
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Cursor;
@@ -1020,6 +1046,15 @@ mod tests {
             fs::metadata(&linked).unwrap().permissions().mode() & 0o777,
             0o444
         );
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    #[test]
+    fn manifests_must_hash_and_paths_must_stay_relative() {
         assert_eq!(env_name("models"), "ATO_INPUT_PATH_MODELS");
         assert_eq!(env_name("wan-2.2"), "ATO_INPUT_PATH_WAN_2_2");
 
@@ -1028,5 +1063,39 @@ mod tests {
         assert!(parse_manifest(bytes, &sha256_ref(b"other")).is_err());
         let escape = br#"{"objects":[{"bytes":3,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","path":"../a"}],"schema":"ato.model-set/1"}"#;
         assert!(parse_manifest(escape, &sha256_ref(escape)).is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_cache_fails_before_creating_any_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let error = match ModelCache::open(root.path()) {
+            Ok(_) => panic!("POSIX cache must not be admitted on this platform"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unsupported_capability"));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_asset_fails_before_http_or_directory_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let client = Client::builder().no_proxy().build().unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let data = LeaseData {
+            client: &client,
+            base: &base,
+            token: "fixture-not-a-credential",
+            lease_id: "unsupported-platform",
+        };
+        let error = data.asset("ast_fixture", root.path()).unwrap_err();
+        assert!(error.to_string().contains("unsupported_capability"));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(
+            server.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }
