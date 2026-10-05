@@ -41,6 +41,39 @@ class FinalPilot(pilot.Pilot):
         else:
             super().stop(process)
 
+    def acknowledged_attempts(self):
+        delivery_root = Path(self.a.runtime_root)/'out/delivery'
+        if self.plan.get('runtime_owner_root') is True:
+            # Read only the completed attempt IDs. Root-owned delivery files
+            # contain private tickets; keep their permissions and contents.
+            observer = '''
+import json, sys
+from pathlib import Path
+ids = []
+root = Path(sys.argv[1])
+for delivery in root.iterdir():
+    if not delivery.is_dir() or not (delivery/'closed.json').exists():
+        continue
+    claim = delivery/'claim.response.json'
+    if claim.exists() and (delivery/'result.response.json').exists():
+        ticket = json.loads(claim.read_text())
+        if ticket:
+            ids.append(ticket['attempt_id'])
+print(json.dumps(ids))
+'''
+            return set(json.loads(subprocess.check_output(
+                ['sudo', '-n', '--', '/usr/bin/python3', '-c', observer,
+                 str(delivery_root)], timeout=10)))
+        ids = set()
+        for delivery in delivery_root.iterdir():
+            if not delivery.is_dir() or not (delivery/'closed.json').exists():
+                continue
+            if (delivery/'result.response.json').exists() and (delivery/'claim.response.json').exists():
+                ticket = pilot.read(delivery/'claim.response.json')
+                if ticket:
+                    ids.add(ticket['attempt_id'])
+        return ids
+
     def app(self, app):
         super().app(app)
         cell = self.root/'cells'/f"{app['index']:03}"
@@ -49,15 +82,7 @@ class FinalPilot(pilot.Pilot):
         def acknowledged(view):
             expected = {a['attempt_id'] for a in view['attempts']
                         if a['status'] in ('pass', 'fail', 'inconclusive')}
-            acknowledged_ids = set()
-            for delivery in (Path(self.a.runtime_root)/'out/delivery').iterdir():
-                if not delivery.is_dir() or not (delivery/'closed.json').exists():
-                    continue
-                if (delivery/'result.response.json').exists() and (delivery/'claim.response.json').exists():
-                    ticket = pilot.read(delivery/'claim.response.json')
-                    if ticket:
-                        acknowledged_ids.add(ticket['attempt_id'])
-            return expected <= acknowledged_ids
+            return expected <= self.acknowledged_attempts()
         if status['status'] != 'running' and acknowledged(status):
             return
         # Requester timeout does not finish a claimed Runtime operation. Keep

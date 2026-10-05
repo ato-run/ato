@@ -1,0 +1,143 @@
+{
+  "schema": "ato.formation-preserved-reasoning-budget-failure/1",
+  "execution_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "search_id": "search_7affee8b7cbcdcf409cda689d853d763",
+  "source_ref": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+  "K": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+  "known_D": false,
+  "saved_terminal": {
+    "reason": "infrastructure_failure",
+    "status": "not_reached",
+    "stopped_at": "2026-10-03T03:58:11.138Z"
+  },
+  "identified_cause": "Six completed exchanges consumed the frozen per-Search max_calls=6 before round 2; the local pre-dispatch limit was incorrectly surfaced as provider_error / infrastructure_failure",
+  "provider_budget": {
+    "max_calls": 6,
+    "input_token_cap": 49152,
+    "output_token_cap": 2048,
+    "input_price": 300000,
+    "output_price": 1200000,
+    "ceiling_usd_micros": 103224
+  },
+  "completed_session_exchanges": 6,
+  "frames": [
+    {
+      "input_sha256": "bf1a64d6aeb2cfb38f3c32f12402e3960cce0cf8fe56fb2a1ab14d548d9f978a",
+      "record_sha256": "72b771ddaf784c2ea92fcb6ea5136fa66bbc85de77de11c032fc5975cb9950f1",
+      "inspection_error": null
+    },
+    {
+      "input_sha256": "8c586bb5d4a0b73e7f44359cb16e26c3722328870b5686ecc4846a3fbc505f80",
+      "record_sha256": "6d4e2a1d196148e7a8c9f589e26407c7462b78056bf5595448b449fa09a10b1e",
+      "inspection_error": null
+    },
+    {
+      "input_sha256": "bfb687e1eda81adb226f6668fb5cc012ff88f19d208d0e429c1622e583a79c54",
+      "record_sha256": "11b6a85233ca9d95af11f79644664bff65c5fcff07d93d76bc368dac81ea3f35",
+      "inspection_error": null
+    },
+    {
+      "input_sha256": "29944143bcb10760ac062374197804e9ca99a50b5e065b1ef76830b35d3554d6",
+      "record_sha256": "eb9809e35bd66996b901402b7ea394c5b1c342f3e6dc0dbf652fd162dbe6cdec",
+      "inspection_error": null
+    },
+    {
+      "input_sha256": "097f5d4430a97757f95c3a83190d9eab17c68f23511eb73e3b5ff7ac6eba7f7a",
+      "record_sha256": "f960c83594f6747e2114b26fc2cdfe263ea453997b30410cc04584770eb96ad3",
+      "inspection_error": "inspection_budget_exhausted"
+    },
+    {
+      "input_sha256": "fbc17029bfbb623825623246ead1f5c174ea1ee9dece969ef992f641cf1bd0ee",
+      "record_sha256": "9792bcdc3574f56a4ee940fc1382031d597bdc0d4fd286f4bf24b9069f1ae36e",
+      "inspection_error": null
+    }
+  ],
+  "rounds": [
+    {
+      "opened_at_ms": 1790999475454,
+      "expires_at_ms": 1791000075454,
+      "outcome": "completed"
+    },
+    {
+      "opened_at_ms": 1790999889592,
+      "expires_at_ms": 1791000489592,
+      "outcome": "provider_error"
+    }
+  ],
+  "attempt": {
+    "attempt_id": "01M3ZYJKYDEW03Y93E52NSHCM9",
+    "derivation_ref": "sha256:3044f5caedc221516493b7d4b68657c1b80986adb976001636981f5b0191bd87",
+    "status": "fail",
+    "failure": {
+      "code": "npm_lifecycle_plan_required",
+      "stage": "build",
+      "message": "{\"packages\":[\"msgpackr-extract\"],\"root_lifecycle\":[]}"
+    },
+    "metadata_mismatch": []
+  },
+  "delivery": {
+    "attempt_id": "01M3ZYJKYDEW03Y93E52NSHCM9",
+    "fence": 1,
+    "result_ACK": true,
+    "delivery_closed": true
+  },
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-03T03:51:15.454Z",
+    "deadline_at": "2026-10-03T04:21:15.454Z",
+    "attempts": {
+      "max": 4,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 3
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 1295360,
+      "reserved": 0,
+      "remaining": 1072446464
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 1098877,
+      "reserved": 0,
+      "remaining": 2146384771
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 1073741824
+    }
+  },
+  "budget_counters": {
+    "attempts_reserved": 0,
+    "attempts_used": 1,
+    "expanded_reserved": 0,
+    "expanded_used": 1098877,
+    "network_transfer_used": 134217728,
+    "stored_reserved": 0,
+    "stored_used": 0,
+    "transfer_reserved": 0,
+    "transfer_used": 1295360
+  },
+  "result_sha256": "0d491a665cdc16c16d4ccc48d8a8b77a34156e4f4e6687a232c63837f2aca95f",
+  "saved_evidence_archive_sha256": "48b6d937fd73ea9aa1e285ab19379029745b7a91f55b7b6cc926207a0dba72a9",
+  "elapsed_seconds": 418.45,
+  "owner_input_cleanup": {
+    "reusable_owner_values_revoked": 2,
+    "remaining_encrypted_values": 0,
+    "Requester_restarted": false,
+    "budget_reset": false
+  },
+  "public_password_occurrences": 0,
+  "public_files_checked": 113,
+  "paid_API_calls": 0,
+  "actual_provider_calls": null,
+  "source_or_K_rewritten": false,
+  "Requester_resumed": false,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "ordinary_Run_permission": false
+}
