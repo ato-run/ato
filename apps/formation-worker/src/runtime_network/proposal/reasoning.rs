@@ -14,12 +14,34 @@ use std::{
 pub const INPUT_SCHEMA: &str = "ato.formation-reasoning-input/1";
 pub const SESSION_RESPONSE_SCHEMA: &str = "ato.formation-session-response/1";
 
+pub mod session;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAgentKind {
+    Codex,
+    ClaudeCode,
+}
+
+/// Observed session metadata, not a claim about internal model usage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAgent {
+    pub kind: SessionAgentKind,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionConfig {
     pub provider: String,
     pub model: String,
     pub prompt_version: String,
+    // Omit on the legacy wire so its configuration digest stays identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<SessionAgent>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -33,8 +55,19 @@ impl ReasoningProviderConfig {
             Self::Api(c) => c.configuration_ref(budget),
             Self::Session(c) => {
                 ensure!(
-                    c.provider == "codex_session"
+                    ((c.provider == "codex_session"
                         && c.model == "codex-session"
+                        && c.agent.is_none())
+                        || (c.provider == "agent_session"
+                            && c.agent.as_ref().is_some_and(|agent| {
+                                !agent.version.is_empty()
+                                    && agent.version.len() <= 128
+                                    && agent.version.chars().all(|v| !v.is_control())
+                                    && c.model == agent.model.as_deref().unwrap_or("unknown")
+                                    && !c.model.is_empty()
+                                    && c.model.len() <= 128
+                                    && c.model.chars().all(|v| !v.is_control())
+                            })))
                         && matches!(
                             c.prompt_version.as_str(),
                             deepseek::PROMPT_VERSION_V5
@@ -715,6 +748,7 @@ mod autonomous_tests {
             provider: "codex_session".into(),
             model: "codex-session".into(),
             prompt_version: deepseek::PROMPT_VERSION_V8.into(),
+            agent: None,
         })
         .configuration_ref(&budget::BudgetPlan {
             max_calls: 6,
@@ -1097,24 +1131,43 @@ mod autonomous_tests {
             provider: "codex_session".into(),
             model: "codex-session".into(),
             prompt_version: deepseek::PROMPT_VERSION_V13.into(),
+            agent: None,
         });
         let plan = budget::BudgetPlan {
-            max_calls: 6, input_token_cap: 49152, output_token_cap: 2048,
-            input_price: 300000, output_price: 1200000, ceiling_usd_micros: 103224,
+            max_calls: 6,
+            input_token_cap: 49152,
+            output_token_cap: 2048,
+            input_price: 300000,
+            output_price: 1200000,
+            ceiling_usd_micros: 103224,
         };
-        let producer = ReasoningProducer::new(config.clone(), plan.clone(), root.path().into(), None)?;
+        let producer =
+            ReasoningProducer::new(config.clone(), plan.clone(), root.path().into(), None)?;
         for exchange in 1..=6 {
             let path = root.path().join(format!("r001_s{exchange:03}.input.json"));
             assert_eq!(producer.check_exchange_budget(&path)?, exchange - 1);
             std::fs::write(path, b"saved input")?;
         }
         // Saved input recovery remains possible; creating another exchange does not.
-        assert_eq!(producer.check_exchange_budget(&root.path().join("r001_s006.input.json"))?, 6);
+        assert_eq!(
+            producer.check_exchange_budget(&root.path().join("r001_s006.input.json"))?,
+            6
+        );
         let next = root.path().join("r002_s001.input.json");
-        assert!(producer.check_exchange_budget(&next).unwrap_err().is::<ReasoningCallBudgetExhausted>());
+        assert!(
+            producer
+                .check_exchange_budget(&next)
+                .unwrap_err()
+                .is::<ReasoningCallBudgetExhausted>()
+        );
         drop(producer);
         let restored = ReasoningProducer::new(config, plan, root.path().into(), None)?;
-        assert!(restored.check_exchange_budget(&next).unwrap_err().is::<ReasoningCallBudgetExhausted>());
+        assert!(
+            restored
+                .check_exchange_budget(&next)
+                .unwrap_err()
+                .is::<ReasoningCallBudgetExhausted>()
+        );
         assert!(!next.exists());
         assert!(!root.path().join("r002_s001.dispatch.json").exists());
         Ok(())
@@ -1127,6 +1180,7 @@ mod autonomous_tests {
             provider: "codex_session".into(),
             model: "codex-session".into(),
             prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+            agent: None,
         });
         let budget = budget::BudgetPlan {
             max_calls: 6,
@@ -1190,6 +1244,7 @@ mod autonomous_tests {
                 provider: "codex_session".into(),
                 model: "codex-session".into(),
                 prompt_version: deepseek::PROMPT_VERSION_V5.into(),
+                agent: None,
             }),
             budget::BudgetPlan {
                 max_calls: 6,
@@ -1379,15 +1434,28 @@ struct StepRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     validation_error: Option<String>,
     inspected_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_closed_response: Option<SessionClosedResponse>,
+}
+/// Receipt of an input-bound response after its execution window closed.
+/// This records known evidence; it never authorizes inspection or execution.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionClosedResponse {
+    exchange_deadline_ms: u64,
+    admission_deadline_ms: u64,
+    observed_at_ms: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionResponse {
     schema: String,
     input_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exchange_id: Option<String>,
     // Parse proposal schema at the shared validation/repair boundary, just as
     // API outputs are parsed. Invalid authoring is not a bridge outage.
-    output: Value,
+    output: Box<serde_json::value::RawValue>,
 }
 
 pub struct ReasoningProducer {
@@ -1397,6 +1465,8 @@ pub struct ReasoningProducer {
     directory: PathBuf,
     api: Option<Arc<DeepSeekCandidateProducer>>,
     observation_seq: Mutex<u64>,
+    session_cancelled: std::sync::atomic::AtomicBool,
+    session_reconciliation: Mutex<()>,
 }
 #[derive(Debug)]
 pub(super) struct ReasoningProviderFailure(pub GeneralFailure);
@@ -1416,6 +1486,15 @@ impl std::fmt::Display for ReasoningCallBudgetExhausted {
     }
 }
 impl std::error::Error for ReasoningCallBudgetExhausted {}
+
+#[derive(Debug)]
+pub(super) struct ReasoningSessionDeadline;
+impl std::fmt::Display for ReasoningSessionDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Session deadline reached; saved evidence retained without admission")
+    }
+}
+impl std::error::Error for ReasoningSessionDeadline {}
 
 pub(super) struct RoundAnswer {
     pub output: ProducerOutput,
@@ -1438,6 +1517,20 @@ pub(super) fn save(path: &Path, bytes: &[u8]) -> Result<()> {
 pub fn save_owner_checkpoint(path: &Path, bytes: &[u8]) -> Result<()> {
     save(path, bytes)
 }
+
+/// Hold for the whole requester lifetime. Two reconnecting owners may observe,
+/// but cannot simultaneously claim/replay exchanges using one durable journal.
+pub fn lock_owner_journal(journal: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(journal.with_extension("requester.lock"))?;
+    lock.try_lock_exclusive()
+        .context("another requester is connected to this Search journal")?;
+    Ok(lock)
+}
 fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -1454,7 +1547,9 @@ impl ReasoningProducer {
             .iter()
             .filter(|name| name.to_string_lossy().ends_with(".input.json"))
             .count();
-        let provider_calls = self.api.as_ref()
+        let provider_calls = self
+            .api
+            .as_ref()
             .map(|api| api.accounting_snapshot())
             .transpose()?
             .map_or(0, |snapshot| snapshot.cells.len());
@@ -1649,6 +1744,7 @@ impl ReasoningProducer {
         } else {
             save(&path, &binding)?;
         }
+        let session_cancelled = directory.join("cancellation.requested.json").exists();
         Ok(Self {
             config,
             configuration_ref,
@@ -1656,6 +1752,8 @@ impl ReasoningProducer {
             directory,
             api,
             observation_seq: Mutex::new(0),
+            session_cancelled: std::sync::atomic::AtomicBool::new(session_cancelled),
+            session_reconciliation: Mutex::new(()),
         })
     }
     pub fn configuration_ref(&self) -> &str {
@@ -1694,6 +1792,26 @@ impl ReasoningProducer {
                     && output.len() <= ato_formation::proposal::MAX_BATCH_BYTES,
                 "reasoning evidence changed"
             );
+            if let Some(closed) = &record.session_closed_response {
+                ensure!(
+                    self.config.is_session()
+                        && closed.observed_at_ms >= closed.admission_deadline_ms
+                        && closed.admission_deadline_ms <= closed.exchange_deadline_ms
+                        && record.provider_call.is_none()
+                        && record.failure.is_none()
+                        && record.inspected.is_empty()
+                        && record.inspection_error.is_none()
+                        && record.validation_error.is_none()
+                        && record.inspected_bytes == 0
+                        && record.inspection_ms == 0
+                        && record.validation_ms == 0
+                        && self.exchange_deadline(name, &input_bytes, &input)?
+                            == Some(closed.exchange_deadline_ms)
+                        && output
+                            == self.saved_session_response(name, &input_bytes, &input, true)?,
+                    "closed Session response evidence changed"
+                );
+            }
             records.push((name.to_owned(), input, record));
         }
         Ok(records)
@@ -1804,10 +1922,16 @@ impl ReasoningProducer {
     }
     pub fn accounting(&self) -> Result<Value> {
         let records = self.records()?;
-        let calls: Vec<_> = records.iter().map(|(name,input,r)| json!({"call_id":input.call_id,
+        let calls: Vec<_> = records.iter().map(|(name,input,r)| {
+            let mut call = json!({"call_id":input.call_id,
             "input_sha256":r.input_sha256,"output_sha256":r.output_sha256,"latency_ms":r.elapsed_ms,"reasoning_ms":r.reasoning_ms,"inspection_ms":r.inspection_ms,"validation_ms":r.validation_ms,
             "provider_call":r.provider_call,"inspection_refs":r.inspected,"inspection_error":r.inspection_error,
-            "input_file":format!("{name}.input.json"),"output_file":format!("{name}.record.json")})).collect();
+            "input_file":format!("{name}.input.json"),"output_file":format!("{name}.record.json")});
+            if let Some(closed) = &r.session_closed_response {
+                call["session_closed_response"] = serde_json::to_value(closed)?;
+            }
+            Ok(call)
+        }).collect::<Result<Vec<_>>>()?;
         let transport = self
             .api
             .as_ref()
@@ -1815,9 +1939,9 @@ impl ReasoningProducer {
             .transpose()?;
         let actual_calls = self.api.as_ref().map(|api| api.accounting()).transpose()?;
         Ok(
-            json!({"provider_transport":transport,"actual_provider_calls":actual_calls,"schema":"ato.formation-reasoning-accounting/1", "provider":if self.config.is_session(){"codex_session"}else{"deepseek"},
+            json!({"provider_transport":transport,"actual_provider_calls":actual_calls,"schema":"ato.formation-reasoning-accounting/1", "provider":match &self.config {ReasoningProviderConfig::Session(c)=>c.provider.as_str(),ReasoningProviderConfig::Api(_)=>"deepseek"},
             "calls":calls,"call_count":calls.len(),"API_calls":records.iter().filter(|(_,_,r)|r.provider_call.is_some()).count(),
-            "session_token_usage":"not_exposed; no fabricated usage", "session_cost":"not_exposed", "configuration_ref":self.configuration_ref}),
+            "session_token_usage":"unknown", "session_cost":"unknown", "session_internal_LLM_calls":"unknown", "agent":match &self.config {ReasoningProviderConfig::Session(c)=>c.agent.as_ref(),_=>None}, "configuration_ref":self.configuration_ref}),
         )
     }
     pub(super) fn run_round(
@@ -1865,6 +1989,18 @@ impl ReasoningProducer {
                         == submission.request.source.archive_digest),
             "reasoning search changed"
         );
+        if self.config.is_session() {
+            if records.iter().any(|(_, input, record)| {
+                input.request.round_seq == Some(round) && record.session_closed_response.is_some()
+            }) {
+                return Err(ReasoningSessionDeadline.into());
+            }
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            if now >= expires {
+                self.reconcile_expired_session_response(&request.search_id, expires, now)?;
+                return Err(ReasoningSessionDeadline.into());
+            }
+        }
         for (_, input, _) in &records {
             input.validate(auth)?;
             for entry in &input.request.source_context {
@@ -1979,6 +2115,10 @@ impl ReasoningProducer {
         }
         loop {
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            if self.config.is_session() && now >= expires {
+                self.reconcile_expired_session_response(&request.search_id, expires, now)?;
+                return Err(ReasoningSessionDeadline.into());
+            }
             ensure!(now < expires, "reasoning round deadline");
             let name = format!("r{round:03}_s{step:03}");
             let call_id = format!("{}_r{round}_s{step}", request.search_id);
@@ -2180,6 +2320,19 @@ impl ReasoningProducer {
                 save(&input_path, &bytes)?;
             }
             let input_sha256 = digest(&bytes);
+            if self.config.is_session() {
+                let window_path = self.directory.join(format!("{name}.window.json"));
+                let window = serde_jcs::to_vec(&json!({"input_sha256":input_sha256,
+                    "exchange_id":input.call_id,"deadline_ms":expires}))?;
+                if window_path.exists() {
+                    ensure!(
+                        bounded_read(&window_path, 4096)? == window,
+                        "Session deadline changed"
+                    );
+                } else {
+                    save(&window_path, &window)?;
+                }
+            }
             let call_started = Instant::now();
             let (raw, call) = if let Some(api) = &self.api {
                 let answer = match api.propose_reasoning_recover(
@@ -2217,6 +2370,7 @@ impl ReasoningProducer {
                             inspection_error: None,
                             validation_error: None,
                             inspected_bytes: 0,
+                            session_closed_response: None,
                         };
                         save(&record_path, &serde_jcs::to_vec(&record)?)?;
                         return Err(anyhow::anyhow!(ReasoningProviderFailure(failure)));
@@ -2230,33 +2384,29 @@ impl ReasoningProducer {
                 call.validate(&api.identity())?;
                 (answer.output.raw().to_vec(), Some(call))
             } else {
-                let response_path = self.directory.join(format!("{name}.response.json"));
-                loop {
-                    if response_path.exists() {
-                        break;
-                    }
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-                    ensure!(
-                        now < expires,
-                        "session response timeout; same search and budget retained"
-                    );
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                let response: SessionResponse = serde_json::from_slice(&bounded_read(
-                    &response_path,
-                    ato_formation::proposal::MAX_BATCH_BYTES + 4096,
-                )?)?;
-                ensure!(
-                    response.schema == SESSION_RESPONSE_SCHEMA
-                        && response.input_sha256 == input_sha256,
-                    "session response input mismatch"
-                );
-                (serde_jcs::to_vec(&response.output)?, None)
+                (
+                    self.wait_session_response(
+                        &name,
+                        &bytes,
+                        &input,
+                        expires,
+                        || Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64),
+                        || std::thread::sleep(Duration::from_millis(100)),
+                    )?,
+                    None,
+                )
             };
             ensure!(
                 raw.len() <= ato_formation::proposal::MAX_BATCH_BYTES,
                 "reasoning output bounds"
             );
+            if self.config.is_session() {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+                if now >= expires {
+                    self.reconcile_expired_session_response(&request.search_id, expires, now)?;
+                    return Err(ReasoningSessionDeadline.into());
+                }
+            }
             let reasoning_ms = call_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
             let validation_started = Instant::now();
             let parsed = serde_json::from_slice::<ProposalBatch>(&raw);
@@ -2346,6 +2496,13 @@ impl ReasoningProducer {
                 .elapsed()
                 .as_millis()
                 .min(u64::MAX as u128) as u64;
+            if self.config.is_session() {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+                if now >= expires {
+                    self.reconcile_expired_session_response(&request.search_id, expires, now)?;
+                    return Err(ReasoningSessionDeadline.into());
+                }
+            }
             let inspection_started = Instant::now();
             if let Some(sources) = inspection {
                 inspection_exchanges += 1;
@@ -2441,8 +2598,18 @@ impl ReasoningProducer {
                 inspection_error: error.clone(),
                 validation_error: validation_error.clone(),
                 inspected_bytes: retrieved_bytes,
+                session_closed_response: None,
             };
-            save(&record_path, &serde_jcs::to_vec(&record)?)?;
+            if let Err(error) = save(&record_path, &serde_jcs::to_vec(&record)?) {
+                if self.config.is_session()
+                    && self.records()?.iter().any(|(record_name, _, saved)| {
+                        record_name == &name && saved.session_closed_response.is_some()
+                    })
+                {
+                    return Err(ReasoningSessionDeadline.into());
+                }
+                return Err(error);
+            }
             inspection_ms_used = inspection_ms_used.saturating_add(record.inspection_ms);
             if let Some(call) = call {
                 round_calls.push(call);
@@ -2451,7 +2618,81 @@ impl ReasoningProducer {
                 step += 1;
                 continue;
             }
+            if self.config.is_session()
+                && SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() >= u128::from(expires)
+            {
+                return Err(ReasoningSessionDeadline.into());
+            }
             return self.finish_round(raw, round_inspections, round_calls);
+        }
+    }
+
+    fn saved_session_response(
+        &self,
+        name: &str,
+        input_bytes: &[u8],
+        input: &ReasoningInput,
+        closed: bool,
+    ) -> Result<Vec<u8>> {
+        let response: SessionResponse = serde_json::from_slice(&bounded_read(
+            &self.directory.join(format!("{name}.response.json")),
+            ato_formation::proposal::MAX_BATCH_BYTES + 4096,
+        )?)?;
+        ensure!(
+            response.schema == SESSION_RESPONSE_SCHEMA
+                && response.input_sha256 == digest(input_bytes)
+                && if closed {
+                    response.exchange_id.as_ref() == Some(&input.call_id)
+                } else {
+                    response
+                        .exchange_id
+                        .as_ref()
+                        .is_none_or(|id| id == &input.call_id)
+                },
+            "session response input mismatch"
+        );
+        let raw = response.output.get().as_bytes().to_vec();
+        if closed {
+            let batch: ProposalBatch = serde_json::from_slice(&raw)?;
+            ensure!(
+                raw.len() <= ato_formation::proposal::MAX_BATCH_BYTES
+                    && batch.schema == ato_formation::proposal::PROPOSAL_SCHEMA
+                    && batch.proposals.len() == 1,
+                "closed Session response invalid"
+            );
+        }
+        Ok(raw)
+    }
+
+    fn wait_session_response(
+        &self,
+        name: &str,
+        input_bytes: &[u8],
+        input: &ReasoningInput,
+        expires: u64,
+        mut clock: impl FnMut() -> Result<u64>,
+        mut wait: impl FnMut(),
+    ) -> Result<Vec<u8>> {
+        loop {
+            ensure!(
+                !self
+                    .session_cancelled
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "Session cancelled; saved evidence retained"
+            );
+            let now = clock()?;
+            if now >= expires {
+                self.reconcile_expired_session_response(&input.request.search_id, expires, now)?;
+                return Err(ReasoningSessionDeadline.into());
+            }
+            if self
+                .directory
+                .join(format!("{name}.response.json"))
+                .exists()
+            {
+                return self.saved_session_response(name, input_bytes, input, false);
+            }
+            wait();
         }
     }
 }

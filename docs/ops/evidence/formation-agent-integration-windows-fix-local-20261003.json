@@ -1,0 +1,63 @@
+{
+  "schema": "ato.formation-integration-windows-fix-local/1",
+  "measurement_id": "formation-agent-integration-local-20261003-02",
+  "execution_source_revision": "b0408d46c9a4574139fd7ab1a7672f7e4c989c94",
+  "prior_measurement_source": "8bb3a2b1dd1a3ab3b8e10da270ed9a627d53c0ec",
+  "changed_code": "Windows durable publication/request lock, journal regression tests; Unix publication refactored without changing its sync contract",
+  "environment": {
+    "rust": "1.96.0",
+    "platform": "macOS arm64",
+    "target": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/target",
+    "temporary_root": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp",
+    "cargo_locked_offline": true,
+    "cargo_incremental": false,
+    "source_tree_clean_during_tests_and_build": true
+  },
+  "tests": [
+    {
+      "name": "cli-lib",
+      "passed": 49,
+      "failed": 0,
+      "log_sha256": "05e8729dcd689dd70d5a33b61dff21a72076a5dfe17c609fb69485817bce015c"
+    },
+    {
+      "name": "worker-lib",
+      "passed": 100,
+      "failed": 0,
+      "log_sha256": "af2df2f313437ddf9df7cd1dd7131c21f8007ff592183268162a3afa9903070b"
+    },
+    {
+      "name": "journal",
+      "passed": 7,
+      "failed": 0,
+      "log_sha256": "482e6790d3035227f50bc7a25db2f9e535ea33e3398f4427642f66705967f50a"
+    }
+  ],
+  "checks": [
+    {
+      "name": "clippy",
+      "exit_code": 0,
+      "log_sha256": "4cd200f07e5e8dc65c318fe05d1a04c30bbccaa16cbf5fb6a44aea453083a1f4"
+    },
+    {
+      "name": "fmt",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "build",
+      "exit_code": 0,
+      "log_sha256": "86f3925f7894c3cc13332707fe56aecffcec602c353ce11e41adec99d7296c0a"
+    }
+  ],
+  "artifact": {
+    "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-windows-final/ato-formation-session-mcp",
+    "bytes": 6092472,
+    "sha256": "3a56748bdc3ce8189b7f9bb81ec43f3e11f5aa38df493137ef7dc755e1aa9582",
+    "mode": "0555"
+  },
+  "native_agent_acceptance_invocations": 0,
+  "functional_acceptance_runs": 0,
+  "paid_api_calls": 0,
+  "old_measurements_reassigned": false
+}

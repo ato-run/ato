@@ -1857,6 +1857,24 @@ impl Client {
             .context("empty status answer")
     }
 
+    /// Owner cancellation keeps started/UNKNOWN evidence and awaits cleanup.
+    pub fn cancel_exploration(&self, search_id: &str) -> Result<Value> {
+        ensure!(
+            search_id.len() <= 256
+                && !search_id.is_empty()
+                && search_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "invalid search id"
+        );
+        self.send(
+            self.http
+                .post(self.url(&format!("/exploration/{search_id}/cancel")))
+                .json(&json!({})),
+        )?
+        .context("empty exploration cancellation answer")
+    }
+
     /// Reattach to the same owner's durable exploration. Never resubmit an
     /// active request, allocate a second search, or reset any frozen budget.
     pub fn resume_exploration(&self, submission: &Submission) -> Result<serde_json::Value> {
