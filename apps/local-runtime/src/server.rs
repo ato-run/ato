@@ -334,11 +334,29 @@ impl Server {
         } else {
             self.work_root.join(candidate)
         };
-        let root = self
-            .work_root
-            .canonicalize()
-            .unwrap_or_else(|_| self.work_root.clone());
-        let resolved_canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+        let root = self.work_root.canonicalize().context("invalid work root")?;
+        // Missing projects are allowed inside the root, but a lexical prefix
+        // on an unresolved path cannot establish confinement. Resolve its
+        // nearest existing parent (including symlinks) before appending names.
+        let mut ancestor = resolved.as_path();
+        let mut missing = Vec::new();
+        while let Err(error) = ancestor.symlink_metadata() {
+            anyhow::ensure!(
+                error.kind() == std::io::ErrorKind::NotFound,
+                "cannot inspect project parent: {error}"
+            );
+            missing.push(
+                ancestor
+                    .file_name()
+                    .context("unresolved project path component")?
+                    .to_os_string(),
+            );
+            ancestor = ancestor.parent().context("invalid project path")?;
+        }
+        let mut resolved_canonical = ancestor.canonicalize().context("invalid project parent")?;
+        for name in missing.into_iter().rev() {
+            resolved_canonical.push(name);
+        }
         anyhow::ensure!(
             resolved_canonical.starts_with(&root),
             "project path escapes the work root"
@@ -516,8 +534,22 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
         };
         assert!(server.resolve("inside").is_ok());
+        assert!(server.resolve("inside/not-created").is_ok());
+        assert!(server.resolve("not-created/../../outside").is_err());
         assert!(server.resolve("../../etc").is_err());
         assert!(server.resolve("/etc").is_err());
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.path().join("outside-link")).unwrap();
+            assert!(server.resolve("outside-link/not-created").is_err());
+            std::os::unix::fs::symlink(
+                outside.path().join("not-created"),
+                root.path().join("dangling-link"),
+            )
+            .unwrap();
+            assert!(server.resolve("dangling-link/nested").is_err());
+        }
     }
 
     #[test]
