@@ -22,7 +22,7 @@ struct Config {
 }
 fn prepare() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
-    if a.len() == 3 && a[1] == "--journal-snapshot" {
+    if a.len() == 3 && matches!(a[1].as_str(), "--journal-snapshot" | "--journal-accounting") {
         use ato_formation_worker::runtime_network::proposal::budget::{BudgetPlan, CallBudget};
         let bytes = std::fs::read_to_string(&a[2])?;
         let plan: BudgetPlan = serde_json::from_str(
@@ -32,7 +32,12 @@ fn prepare() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("journal plan missing"))?,
         )?;
         let reservation = plan.validate()?;
-        let snapshot = CallBudget::reopen(std::path::Path::new(&a[2]), plan.clone())?.snapshot()?;
+        let budget = CallBudget::reopen(std::path::Path::new(&a[2]), plan.clone())?;
+        if a[1] == "--journal-accounting" {
+            println!("{}", serde_json::to_string(&budget.accounting()?)?);
+            return Ok(());
+        }
+        let snapshot = budget.snapshot()?;
         ensure!(
             snapshot.cells.values().all(|c| c.is_settled()),
             "unresolved provider reservation"

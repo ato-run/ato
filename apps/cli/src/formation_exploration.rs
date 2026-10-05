@@ -404,7 +404,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(
-                    &serde_json::json!({"status":"needs_input","search_id":search_id,"contract_ref":submission.request.contract_ref,"input_requirements":status["input_requirements"],"search_budget":status["search_budget"],"approval":"not_assessed","deployed":false,"submission":null,"reasoning_accounting":reasoning.as_ref().map(|p|p.accounting()).transpose()?})
+                    &serde_json::json!({"status":"needs_input","search_id":search_id,"contract_ref":submission.request.contract_ref,"input_requirements":status["input_requirements"],"input_command":format!("ato form-input --search-id {search_id} --api <same API> --token-file <same owner token file>"),"input_path":format!("/formations/{search_id}/input"),"search_budget":status["search_budget"],"approval":"not_assessed","deployed":false,"submission":null,"reasoning_accounting":reasoning.as_ref().map(|p|p.accounting()).transpose()?})
                 )?
             );
             return Ok(());

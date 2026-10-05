@@ -87,7 +87,7 @@ fn plan() -> serde_json::Value {
 fn compile(s: &SearchStateV1, plan: serde_json::Value) -> Vec<ProposalOutcome> {
     let bytes = serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,"proposals":[
         {"kind":"propose_derivation","operations":[{"operation":"execution_plan@1","plan":plan}]}]})).unwrap();
-    CandidateRegistry::new(&s.frozen)
+    let outcomes = CandidateRegistry::new(&s.frozen)
         .unwrap()
         .validate_batch(
             &BTreeMap::new(),
@@ -100,7 +100,31 @@ fn compile(s: &SearchStateV1, plan: serde_json::Value) -> Vec<ProposalOutcome> {
             )
             .unwrap(),
         )
-        .unwrap()
+        .unwrap();
+    for outcome in &outcomes {
+        if let ProposalOutcome::Admitted(candidate) = outcome {
+            validate_candidate_scope(&s.frozen, &[candidate.candidate().clone()]).unwrap();
+        }
+    }
+    outcomes
+}
+
+#[test]
+fn structural_candidate_scope_rejects_unbound_native_facts_and_metadata_changes() {
+    let s = state();
+    let outcomes = compile(&s, plan());
+    let ProposalOutcome::Admitted(c) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    let mut forged = c.candidate().clone();
+    forged.requirements.push(Requirement {
+        fact: "toolchain.gcc.99.0.0".into(),
+        one_of: Some(vec!["present".into()]),
+    });
+    assert!(validate_candidate_scope(&s.frozen, &[forged]).is_err());
+    let mut forged = c.candidate().clone();
+    forged.effects = "privileged".into();
+    assert!(validate_candidate_scope(&s.frozen, &[forged]).is_err());
 }
 
 #[test]
@@ -469,6 +493,23 @@ fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
     assert!(c.compiled().derivation.steps[0].argv.is_empty());
     assert!(c.compiled().derivation.source_oci.is_some());
     assert_eq!(c.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let binding = json!({"name":"JWT_SECRET","kind":"signing_secret","purpose":"Sign local sessions","resource":"session.signing","operation":"execute","phase":"runtime","secret":true,"temporary":true});
+    let mut bound = p.clone();
+    bound["variable_bindings"] = json!([binding]);
+    let admitted = compile(&s, bound.clone());
+    let ProposalOutcome::Admitted(variable_d) = &admitted[0] else {
+        panic!("{admitted:?}")
+    };
+    assert_eq!(
+        variable_d.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_eq!(variable_d.compiled().derivation.variable_bindings.len(), 1);
+    bound["variable_bindings"][0]["phase"] = json!("build");
+    assert!(matches!(
+        &compile(&s, bound)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_source_oci_variable_phase"))
+    ));
     s.frozen
         .policy
         .proposal
@@ -523,9 +564,12 @@ fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
             .candidate()
             .requirements
             .iter()
-            .map(|r| r.fact.as_str())
+            .map(|r| r.fact.clone())
             .collect::<Vec<_>>(),
-        vec!["runtime.oci"]
+        vec![
+            "runtime.oci".to_owned(),
+            format!("formation.oci.image.{}", "e".repeat(64))
+        ]
     );
     p["oci_image"] = json!("example/service:latest");
     assert!(matches!(
@@ -600,7 +644,23 @@ fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
     assert_eq!(d.steps.last().unwrap().root.as_deref(), Some("build"));
     assert!(d.steps.last().unwrap().argv.is_empty());
     assert_eq!(d.ports[0].guest_port, None);
+    assert_eq!(
+        candidate.candidate().requirements,
+        execution_requirements(false, true)
+    );
     let expected_d = candidate.compiled().derivation_ref.clone();
+    let mut configured = p.clone();
+    configured["variable_bindings"] = json!([{"name":"CLIENT_ORIGIN","kind":"configuration","purpose":"Public client build configuration","resource":"client.configuration","operation":"read","phase":"build","secret":false,"artifact_embedding":true}]);
+    let binding = compile(&s, configured.clone());
+    let ProposalOutcome::Admitted(binding) = &binding[0] else {
+        panic!("{binding:?}")
+    };
+    assert_eq!(binding.compiled().base_contract_ref, s.frozen.contract_ref);
+    configured["variable_bindings"][0]["phase"] = json!("runtime");
+    assert!(matches!(
+        &compile(&s, configured)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
+    ));
     p.as_object_mut().unwrap().remove("guest_port");
     let without_port = compile(&s, p.clone());
     let ProposalOutcome::Admitted(no_port) = &without_port[0] else {
@@ -999,6 +1059,7 @@ fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
     let ProposalOutcome::Admitted(d) = &result[0] else {
         panic!("{result:?}")
     };
+    assert!(d.compiled().capsule_toml.len() <= 65_536);
     assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
     let steps = &d.compiled().derivation.steps;
     assert_eq!(steps.len(), 10);
@@ -1017,6 +1078,12 @@ fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
             .iter()
             .any(|r| r.fact == "toolchain.gcc.13.3.0")
     );
+    let mut oversized = p.clone();
+    oversized["dependencies"] = json!(vec![p["dependencies"][0].clone(); 4]);
+    assert!(matches!(
+        &compile(&s, oversized)[0],
+        ProposalOutcome::Rejected(ProposalError("proposal_recipe_byte_limit"))
+    ));
     p["dependencies"][0]["toolchains"][0]["version"] = json!("14.1.0");
     assert!(matches!(
         &compile(&s, p.clone())[0],
@@ -1085,6 +1152,55 @@ fn source_owned_startup_script_keeps_k_and_cannot_select_an_unbound_manifest() {
             "8000"
         ]
     );
+    let mut empty_setup = p.clone();
+    empty_setup["setup_scripts"] = json!([]);
+    let empty = compile(&s, empty_setup);
+    let ProposalOutcome::Admitted(empty) = &empty[0] else {
+        panic!("{empty:?}")
+    };
+    assert_eq!(empty.compiled(), d.compiled());
+
+    let mut prepared = p.clone();
+    prepared["setup_scripts"] = json!(["initialize"]);
+    let compiled = compile(&s, prepared.clone());
+    let ProposalOutcome::Admitted(prepared_d) = &compiled[0] else {
+        panic!("{compiled:?}")
+    };
+    assert_eq!(
+        prepared_d.compiled().base_contract_ref,
+        s.frozen.contract_ref
+    );
+    let serve = prepared_d.compiled().derivation.steps.last().unwrap();
+    assert_eq!(serve.argv.len(), 4);
+    assert!(serve.argv[2].contains("source_runtime_setup_failed"));
+    let spec: serde_json::Value = serde_json::from_str(&serve.argv[3]).unwrap();
+    assert_eq!(spec["setup_scripts"], json!(["initialize"]));
+    assert_eq!(spec["argv"], p["argv"]);
+    assert!(
+        !prepared_d
+            .compiled()
+            .derivation
+            .steps
+            .iter()
+            .any(|step| step.id.starts_with("setup-") || step.id == "check-launch-script")
+    );
+    for names in [
+        json!(["initialize", "initialize"]),
+        json!(["run; shell"]),
+        json!(["a", "b", "c", "d", "e"]),
+    ] {
+        prepared["setup_scripts"] = names;
+        assert!(matches!(
+            &compile(&s, prepared.clone())[0],
+            ProposalOutcome::Rejected(ProposalError("unsupported_setup_scripts"))
+        ));
+    }
+    prepared["setup_scripts"] = json!(["initialize"]);
+    prepared.as_object_mut().unwrap().remove("launch_script");
+    assert!(matches!(
+        &compile(&s, prepared)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_setup_scripts"))
+    ));
     p["entrypoint"] = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
     assert!(matches!(
         &compile(&s, p)[0],
@@ -1119,13 +1235,15 @@ fn npm_acquisition_is_audited_and_rebuild_requires_a_preceding_frozen_lock() {
     }
     auth.toolchains.insert("node".into(), "22.14.0".into());
     auth.toolchains.insert("npm".into(), "10.9.2".into());
+    auth.toolchains.insert("gcc".into(), "13.3.0".into());
+    auth.toolchains.insert("make".into(), "4.3.0".into());
     let reference = |id| json!({"file_id":id,"digest":format!("sha256:{}","c".repeat(64))});
     let mut p = plan();
     p["runtime"] = json!({"name":"node","version":"22.14.0"});
     let ci =
         json!({"kind":"npm_ci","manifest":reference("manifest"),"lockfile":reference("lockfile")});
     let rebuild = json!({"kind":"npm_rebuild","manifest":reference("manifest"),"lockfile":reference("lockfile"),
-        "packages":["native-dependency"],"root_lifecycle":[],"toolchains":[],"network":"denied"});
+        "packages":["native-dependency"],"root_lifecycle":[],"toolchains":[{"name":"gcc","version":"13.3.0"},{"name":"make","version":"4.3.0"}],"network":"denied"});
     p["dependencies"] = json!([ci.clone()]);
     let result = compile(&s, p.clone());
     let ProposalOutcome::Admitted(d) = &result[0] else {
@@ -1151,6 +1269,14 @@ fn npm_acquisition_is_audited_and_rebuild_requires_a_preceding_frozen_lock() {
         panic!("{result:?}")
     };
     assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let tools = native_runtime_requirements(&d.compiled().derivation);
+    assert_eq!(
+        tools.iter().map(|r| r.fact.as_str()).collect::<Vec<_>>(),
+        ["toolchain.gcc.13.3.0", "toolchain.make.4.3.0"]
+    );
+    let mut expected = execution_requirements(true, true);
+    expected.extend(tools);
+    assert_eq!(d.candidate().requirements, expected);
     p["dependencies"] = json!([rebuild, ci]);
     assert!(matches!(
         &compile(&s, p)[0],
