@@ -955,7 +955,13 @@ fn default_next(
             return Ok(finish(if passed {
                 Termination::Submitted
             } else {
-                if round.diagnostics.iter().any(|d| d == "decline_needs_input") {
+                if round
+                    .diagnostics
+                    .iter()
+                    .any(|d| d == "decline_infrastructure_error")
+                {
+                    Termination::InfrastructureFailure
+                } else if round.diagnostics.iter().any(|d| d == "decline_needs_input") {
                     Termination::NeedsInput
                 } else if round
                     .diagnostics

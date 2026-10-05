@@ -477,7 +477,7 @@ pub fn probe_facts(browser_verifier: Option<&BrowserVerifierCommand>) -> BTreeMa
     );
     // A process candidate is realized only under containment (ADR-019).
     facts.insert("runtime.process".to_owned(), contained.to_string());
-    // This worker does not realize OCI routes.
+    // Binding-aware serve() replaces this conservative standalone probe.
     facts.insert("runtime.oci".to_owned(), "false".to_owned());
     // A browser verifier is a capability only when it runs contained: the
     // helper, its runtimes and the sandbox all present, and the sandbox
@@ -1507,7 +1507,7 @@ impl Client {
             .context("runtime_capabilities_invalid")?;
         let capabilities = rows.iter().filter(|v| match constraint { RuntimeConstraintWire::Any => true, RuntimeConstraintWire::Exact{runtime_id,..} => v["descriptor"]["runtime_id"] == runtime_id.as_str() }).take(16).map(|v| {
             let environments = v["descriptor"]["execution_environments"].as_array().into_iter().flatten().map(|e| {
-                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.")) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
+                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.") || k.starts_with("formation.source_oci.") || k.starts_with("formation.oci.image.")) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:/-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
                 serde_json::json!({"environment_id":e["environment_id"],"facts_ref":e["facts_ref"],"facts":facts})
             }).collect::<Vec<_>>();
             serde_json::json!({"runtime_id":v["descriptor"]["runtime_id"], "environments": environments, "availability": v["availability"]})
@@ -1778,7 +1778,58 @@ pub struct ServeConfig {
 /// tickets addressed to this Runtime, one at a time.
 pub fn serve(config: &ServeConfig) -> Result<()> {
     let client = Arc::new(Client::new(&config.api, &config.token)?);
-    let facts = probe_facts(config.browser_verifier.as_ref());
+    let mut facts = probe_facts(config.browser_verifier.as_ref());
+    let source_oci = config
+        .exploration
+        .as_ref()
+        .and_then(|e| e.source_oci.as_ref());
+    let oci_available = source_oci.is_some_and(|o| o.available());
+    facts.insert(
+        "formation.source_oci.bound".into(),
+        source_oci.is_some().to_string(),
+    );
+    facts.insert(
+        "formation.source_oci.available".into(),
+        oci_available.to_string(),
+    );
+    facts.insert(
+        "runtime.oci".into(),
+        source_oci
+            .is_some_and(|o| o.runtime_available())
+            .to_string(),
+    );
+    if let Some(oci) = source_oci {
+        let max = &oci.maximum_recipe;
+        facts.insert("formation.source_oci.platform".into(), max.platform.clone());
+        for (key, value) in [
+            ("build.memory_bytes", max.build.memory_bytes),
+            ("build.cpu_limit_millis", max.build.cpu_limit_millis),
+            ("build.pids_limit", max.build.pids_limit),
+            ("build_disk_bytes", max.build_disk_bytes),
+            ("runtime.memory_bytes", max.runtime.memory_bytes),
+            ("runtime.cpu_limit_millis", max.runtime.cpu_limit_millis),
+            ("runtime.pids_limit", max.runtime.pids_limit),
+            ("build_timeout_seconds", max.build_timeout_seconds),
+            ("max_archive_bytes", max.max_archive_bytes),
+        ] {
+            facts.insert(format!("formation.source_oci.{key}"), value.to_string());
+        }
+        for image in &oci.base_images {
+            if image.archive.is_file()
+                && max.base_images.iter().any(|b| {
+                    b.reference == image.reference && b.pinned_digest == image.pinned_digest
+                })
+            {
+                facts.insert(
+                    format!(
+                        "formation.oci.image.{}",
+                        image.pinned_digest.trim_start_matches("sha256:")
+                    ),
+                    "true".into(),
+                );
+            }
+        }
+    }
     let advertised = client.advertise(&RuntimeDescriptorAdvert {
         protocol: PROTOCOL.to_owned(),
         agent_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -2405,7 +2456,10 @@ fn execute_planned_ticket(
     let source_oci = ticket
         .exploration
         .as_ref()
-        .filter(|_| planned.derivation.source_oci.is_some())
+        .filter(|_| {
+            planned.derivation.source_oci.is_some()
+                || planned.derivation.runtimes.contains_key("oci.image")
+        })
         .map(|grant| source_oci_exploration::SourceOciRealizer {
             planned: &planned,
             archive: &source_oci_archive,
@@ -2574,6 +2628,7 @@ fn execute_planned_ticket(
     if let Some(publisher) = publisher
         && report.outcome == "pass"
         && planned.derivation.source_oci.is_none()
+        && !planned.derivation.runtimes.contains_key("oci.image")
     {
         let publication = (|| -> Result<String> {
             let executed = outcome

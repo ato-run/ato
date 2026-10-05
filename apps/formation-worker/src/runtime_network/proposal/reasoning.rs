@@ -41,6 +41,7 @@ impl ReasoningProviderConfig {
                                 | deepseek::PROMPT_VERSION_V6
                                 | deepseek::PROMPT_VERSION_V7
                                 | deepseek::PROMPT_VERSION_V8
+                                | deepseek::PROMPT_VERSION_V9
                         ),
                     "invalid session provider"
                 );
@@ -115,7 +116,8 @@ impl ReasoningInput {
     fn validate(&self, auth: &ato_formation::proposal::ProposalAuthorization) -> Result<()> {
         ensure!(
             self.lowering_capabilities.is_null()
-                || self.lowering_capabilities == lowering_capabilities(auth),
+                || self.lowering_capabilities
+                    == lowering_capabilities(auth, &self.runtime_capabilities),
             "lowering capability mismatch"
         );
         let mut request = self.request.clone();
@@ -149,7 +151,57 @@ impl ReasoningInput {
 }
 
 /// Public compiler constraints, independent of application source or known D.
-fn lowering_capabilities(auth: &ato_formation::proposal::ProposalAuthorization) -> Value {
+fn lowering_capabilities(
+    auth: &ato_formation::proposal::ProposalAuthorization,
+    runtimes: &[Value],
+) -> Value {
+    let recipe = auth
+        .execution_plan
+        .as_ref()
+        .and_then(|a| a.source_oci.as_ref());
+    let oci_bound = runtimes
+        .iter()
+        .filter(|r| r["availability"]["online"] == true && r["availability"]["health"] == "ok")
+        .any(|r| {
+            r["environments"].as_array().into_iter().flatten().any(|e| {
+                e["facts"]["formation.source_oci.available"] == "true"
+                    && e["facts"]["runtime.oci"] == "true"
+            })
+        });
+    let configured = runtimes.iter().any(|r| {
+        r["environments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|e| e["facts"]["formation.source_oci.bound"] == "true")
+    });
+    let images = recipe
+        .into_iter()
+        .flat_map(|r| r.base_images.iter())
+        .filter(|image| {
+            runtimes
+                .iter()
+                .filter(|r| {
+                    r["availability"]["online"] == true && r["availability"]["health"] == "ok"
+                })
+                .any(|r| {
+                    r["environments"].as_array().into_iter().flatten().any(|e| {
+                        e["facts"]["runtime.oci"] == "true"
+                            && e["facts"][format!(
+                                "formation.oci.image.{}",
+                                image.pinned_digest.trim_start_matches("sha256:")
+                            )] == "true"
+                    })
+                })
+        })
+        .map(|image| {
+            if image.reference.contains('@') {
+                image.reference.clone()
+            } else {
+                format!("{}@{}", image.reference, image.pinned_digest)
+            }
+        })
+        .collect::<Vec<_>>();
     let toolchains = auth.execution_plan.as_ref().map(|a| &a.toolchains);
     json!({"schema":"ato.formation-lowering-capabilities/1",
         "static_http":{
@@ -160,6 +212,13 @@ fn lowering_capabilities(auth: &ato_formation::proposal::ProposalAuthorization) 
             "omit_fields":["module","environment","state","variable_bindings"],
             "build_scripts":"source-owned npm script names; never commands or process argv"
         },
+        "oci_image":{"available":!images.is_empty(),"proposal_field":"oci_image","images":images,"platform":recipe.map(|r|&r.platform),"command":"image default","acquisition_network":"none; approved verified archive binding","runtime_network":"internal network; no egress"},
+        "source_oci":{"supported":true,"available":recipe.is_some() && oci_bound,"configured":configured,"builder_bound":oci_bound,
+            "unavailable_reason":if !configured {"source_oci_builder_unavailable"} else if !oci_bound {"runtime_unavailable"} else {"none"},
+            "selection":"root Dockerfile or literal reference from acquired root declarations",
+            "recipe":recipe,"single_service":true,"source_rewrite":false,
+            "build_network":"explicit HTTPS host/port allowance within frozen ceiling",
+            "runtime_network":"isolated internal network; no egress", "state":"explicit isolated writable VOLUME bindings", "variables":"not yet supported by source OCI lowering"},
         "http_process":{"guest_port":"1..65535","entrypoint":"actual supported source script reference","argv":"literal arguments after the interpreter and entrypoint"},
         "network":{"phases":["dependencies","build","runtime"],"inbound_HTTP_requires_egress":false,"within_frozen_ceiling":true},
         "HTTP_authority":{"protocol":"ato.http@1","operation":"bind","phase":"runtime","resource":"frozen K logical HTTP Port"},
@@ -184,7 +243,7 @@ fn scoped_inventory_with_feedback(
     let mut feedback = Vec::new();
     let mut allowed = BTreeMap::<String, Vec<SourceReference>>::new();
     for (id, file) in &domain.files {
-        if !file.path.contains('/') {
+        if ato_formation::proposal::is_discovery_root(&file.path) {
             allowed.insert(id.clone(), vec![]);
         }
     }
@@ -367,7 +426,7 @@ fn scoped_inventory_with_feedback(
             for (target, _) in matched {
                 // Root files were already in scope; do not duplicate their
                 // references as if another root file had widened the boundary.
-                if !domain.files[target].path.contains('/') {
+                if ato_formation::proposal::is_discovery_root(&domain.files[target].path) {
                     continue;
                 }
                 let basis = allowed.entry(target.clone()).or_default();
@@ -462,7 +521,7 @@ mod autonomous_tests {
             ceiling_usd_micros: 103224,
         })
         .unwrap();
-        let caps = lowering_capabilities(&auth);
+        let caps = lowering_capabilities(&auth, &[]);
         assert_eq!(caps["static_http"]["available"], true);
         assert_eq!(caps["static_http"]["guest_port"], 0);
         assert_eq!(caps["network"]["inbound_HTTP_requires_egress"], false);
@@ -477,8 +536,37 @@ mod autonomous_tests {
             source_oci: None,
         });
         assert_eq!(
-            lowering_capabilities(&auth)["static_http"]["available"],
+            lowering_capabilities(&auth, &[])["static_http"]["available"],
             false
+        );
+    }
+    #[test]
+    fn oci_capabilities_distinguish_unbound_unavailable_and_executable_images() {
+        let mut auth:ato_formation::proposal::ProposalAuthorization=serde_json::from_value(json!({
+            "execution_plan":{"files":{},"toolchains":{"oci":"1.0.0"}},"modifiable_derivation_refs":[],"source_domain":{"entrypoints":{},"modules":{}},
+            "policy":{"max_proposal_rounds":3,"max_proposals":1,"timeout_ms":30000,"allow_source_text":true,"max_source_bytes":16384}
+        })).unwrap();
+        assert_eq!(
+            lowering_capabilities(&auth, &[])["source_oci"]["available"],
+            false
+        );
+        auth.execution_plan.as_mut().unwrap().source_oci=Some(serde_json::from_value(json!({"schema":"ato.source-oci-recipe/1","dockerfile":"Dockerfile","platform":"linux/arm64","base_images":[{"reference":"example/app:1","pinned_digest":format!("sha256:{}","e".repeat(64))}],"build":{"memory_bytes":536870912,"cpu_limit_millis":1000,"pids_limit":128},"build_disk_bytes":536870912,"runtime":{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":128},"build_timeout_seconds":60,"max_archive_bytes":1048576})).unwrap());
+        let image_key = format!("formation.oci.image.{}", "e".repeat(64));
+        let mut runtime = json!({"availability":{"online":true,"health":"ok"},"environments":[{"facts":{"formation.source_oci.bound":"true","formation.source_oci.available":"false","runtime.oci":"false"}}]});
+        runtime["environments"][0]["facts"][&image_key] = json!("true");
+        let caps = lowering_capabilities(&auth, &[runtime.clone()]);
+        assert_eq!(
+            caps["source_oci"]["unavailable_reason"],
+            "runtime_unavailable"
+        );
+        assert_eq!(caps["oci_image"]["available"], false);
+        runtime["environments"][0]["facts"]["runtime.oci"] = json!("true");
+        let caps = lowering_capabilities(&auth, &[runtime]);
+        assert_eq!(caps["source_oci"]["available"], false);
+        assert_eq!(caps["oci_image"]["available"], true);
+        assert_eq!(
+            caps["oci_image"]["images"][0],
+            format!("example/app:1@sha256:{}", "e".repeat(64))
         );
     }
     #[test]
@@ -633,8 +721,23 @@ mod autonomous_tests {
             truncated: false,
             text: "from service import main\nimport os\n# other directory exists\n".into(),
         };
-        let inventory =
-            scoped_inventory(&domain, &BTreeMap::from([("main.py".into(), entry)])).unwrap();
+        assert_eq!(
+            scoped_inventory(&domain, &BTreeMap::new())
+                .unwrap()
+                .iter()
+                .map(|f| f.source_relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["README.md"]
+        );
+        let mut readme = entry.clone();
+        readme.logical_id = "README.md".into();
+        readme.source_id = "README.md".into();
+        readme.text = "Run python main.py".into();
+        let inventory = scoped_inventory(
+            &domain,
+            &BTreeMap::from([("README.md".into(), readme), ("main.py".into(), entry)]),
+        )
+        .unwrap();
         assert_eq!(inventory.len(), 3);
         let module = inventory
             .iter()
@@ -648,7 +751,7 @@ mod autonomous_tests {
         assert!(
             inventory
                 .iter()
-                .filter(|f| !f.source_relative_path.contains('/'))
+                .filter(|f| f.source_relative_path == "README.md")
                 .all(|f| f.discovered_from.is_empty())
         );
     }
@@ -1496,10 +1599,10 @@ impl ReasoningProducer {
             let mut effective_feedback = feedback.clone();
             effective_feedback.extend(scope_feedback);
             let mut input = ReasoningInput {
-                lowering_capabilities: if matches!(&self.config, ReasoningProviderConfig::Session(c) if c.prompt_version == deepseek::PROMPT_VERSION_V8)
-                    || matches!(&self.config, ReasoningProviderConfig::Api(c) if c.prompt_version == deepseek::PROMPT_VERSION_V8)
+                lowering_capabilities: if matches!(&self.config, ReasoningProviderConfig::Session(c) if matches!(c.prompt_version.as_str(),deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9))
+                    || matches!(&self.config, ReasoningProviderConfig::Api(c) if matches!(c.prompt_version.as_str(),deepseek::PROMPT_VERSION_V8 | deepseek::PROMPT_VERSION_V9))
                 {
-                    lowering_capabilities(auth)
+                    lowering_capabilities(auth, &local.runtime_capabilities)
                 } else {
                     Value::Null
                 },
