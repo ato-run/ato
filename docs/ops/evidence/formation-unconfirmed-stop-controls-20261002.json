@@ -1,0 +1,219 @@
+{
+  "schema": "ato.formation.control-regression-evidence/1",
+  "execution_pin": "7b8db6615f5df02798c4d49b00802f2dab950dee",
+  "Runtime_code_pin": "a1b4e93fb94bdc8f22990d953f2d478d6d7c2a6f",
+  "API_pin": "0b1540069e3bd2da7866c661bbcc83f4942ceb24",
+  "authority_source_pin": "b7c322e70d28a986581e6f60fb6d716309e5a6c8",
+  "authority_WASM_sha256": "f6067a2797c1b39098da67dcb695c25cb8e44dfd351f3c7cd4781bab74479af4",
+  "scope": "actual Coordinator/Runtime with fixed preregistered fixture exchanges; not autonomous app/provider success",
+  "cases": {
+    "success": {
+      "search_id": "search_575e676dee6e887932e3303a9cb92aa7",
+      "attempt_id": "01M3XEC7SEKWD8HNK0GVB24GDS",
+      "status": "satisfied",
+      "termination_reason": "submitted",
+      "contract_ref": "sha256:da6873969f25cd2b663bfeaafda2485a595cdf7a948d05b3600e14a46f3a96ce",
+      "derivation_ref": "sha256:69a8d6a4b46d93120891691de3ac6a916c7217aa5889cbb65a2e1f7b823b7972",
+      "candidate_stop": "confirmed",
+      "cleanup": "succeeded",
+      "failure_code": null,
+      "result_ACK": true,
+      "delivery_closed": true,
+      "report_dispatches": [
+        "result.dispatch0.json"
+      ],
+      "phase_timings": [
+        {
+          "phase": "source",
+          "started_at_ms": 1790915781062,
+          "elapsed_ms": 67
+        },
+        {
+          "phase": "source",
+          "started_at_ms": 1790915781129,
+          "elapsed_ms": 5
+        },
+        {
+          "phase": "source",
+          "started_at_ms": 1790915781142,
+          "elapsed_ms": 0
+        },
+        {
+          "phase": "build",
+          "started_at_ms": 1790915781143,
+          "elapsed_ms": 35
+        },
+        {
+          "phase": "dependencies",
+          "started_at_ms": 1790915781179,
+          "elapsed_ms": 21
+        },
+        {
+          "phase": "build",
+          "started_at_ms": 1790915781200,
+          "elapsed_ms": 0
+        },
+        {
+          "phase": "launch",
+          "started_at_ms": 1790915781200,
+          "elapsed_ms": 8467
+        },
+        {
+          "phase": "verification",
+          "started_at_ms": 1790915789667,
+          "elapsed_ms": 10
+        },
+        {
+          "phase": "cleanup",
+          "started_at_ms": 1790915789678,
+          "elapsed_ms": 14
+        },
+        {
+          "phase": "cleanup",
+          "started_at_ms": 1790915790108,
+          "elapsed_ms": 0
+        }
+      ],
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T04:36:19.445Z",
+        "deadline_at": "2026-10-02T04:37:19.445Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5632,
+          "reserved": 0,
+          "remaining": 1073736192
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 636,
+          "reserved": 0,
+          "remaining": 2147483012
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 5120,
+          "reserved": 0,
+          "remaining": 1073736704
+        }
+      },
+      "status_sha256": "4b9df75725cb47db0bad869f73fc9febc260aa7a658836e35cfcc690bf746389",
+      "saved_result_sha256": "4377018134d87057d1ce931620eda26176c8159ce110a6c2719d85c35d65baa0",
+      "requester_result_sha256": "fbab8c54ff76db4cf7b503138b61b56bf5221abe0945afa61898102a645e8b28"
+    },
+    "expired": {
+      "search_id": "search_940a6bc5d1743ad64957f6f39bf0993b",
+      "attempt_id": "01M3XE6P46GWJQQNQZK8DSBDAS",
+      "status": "unsatisfied",
+      "termination_reason": "deadline_exceeded",
+      "contract_ref": "sha256:da6873969f25cd2b663bfeaafda2485a595cdf7a948d05b3600e14a46f3a96ce",
+      "derivation_ref": "sha256:69a8d6a4b46d93120891691de3ac6a916c7217aa5889cbb65a2e1f7b823b7972",
+      "candidate_stop": "confirmed",
+      "cleanup": "succeeded",
+      "failure_code": "round_deadline_exceeded",
+      "result_ACK": true,
+      "delivery_closed": true,
+      "report_dispatches": [
+        "result.dispatch0.json"
+      ],
+      "phase_timings": [
+        {
+          "phase": "source",
+          "started_at_ms": 1790915599249,
+          "elapsed_ms": 98
+        },
+        {
+          "phase": "source",
+          "started_at_ms": 1790915599347,
+          "elapsed_ms": 5
+        },
+        {
+          "phase": "source",
+          "started_at_ms": 1790915599368,
+          "elapsed_ms": 1
+        },
+        {
+          "phase": "build",
+          "started_at_ms": 1790915599370,
+          "elapsed_ms": 49
+        },
+        {
+          "phase": "dependencies",
+          "started_at_ms": 1790915599419,
+          "elapsed_ms": 50
+        },
+        {
+          "phase": "build",
+          "started_at_ms": 1790915599469,
+          "elapsed_ms": 0
+        },
+        {
+          "phase": "launch",
+          "started_at_ms": 1790915599469,
+          "elapsed_ms": 3875
+        },
+        {
+          "phase": "cleanup",
+          "started_at_ms": 1790915603363,
+          "elapsed_ms": 1
+        }
+      ],
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T04:33:17.298Z",
+        "deadline_at": "2026-10-02T04:33:23.298Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5632,
+          "reserved": 0,
+          "remaining": 1073736192
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 636,
+          "reserved": 0,
+          "remaining": 2147483012
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "status_sha256": "bffc1ec867dab4168198b60da439fb99178fbb4af21a8761f31cde7280131070",
+      "saved_result_sha256": "1e41f5fc6143eade38127aa347ebce6290b586adc53aa0a85ae174189cc57c96",
+      "requester_result_sha256": "01b0d3b5c506493d46e1993986c4975ff9128fd5d6e7f8058c0a1a5c2522ffde"
+    }
+  },
+  "max_retries": 1,
+  "normal_Search_seconds": 60,
+  "expired_Search_seconds": 6,
+  "production_defaults_changed": false,
+  "paid_API_calls": 0,
+  "OSS_unique_success_added": 0,
+  "UNKNOWN_rerun": false,
+  "ordinary_Run_permission": false,
+  "deployment": false,
+  "remote_migration": false,
+  "preserved_failures": [
+    "both initial v4 controls stopped before Search at unchanged 20-GiB disk guard",
+    "normal trial2 failed known port contention while fixtures overlapped; no K receipt or submission",
+    "same Source/K/D normal trial3 ran serially without changing app or contract"
+  ],
+  "uncertain_disconnect": "new owned case separately awaiting original real 30-minute claimed-attempt timeout"
+}

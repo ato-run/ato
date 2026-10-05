@@ -1,0 +1,49 @@
+{
+  "at": "2026-10-02T04:32:53.221627+00:00",
+  "scope": "new owned fixed control fixture: disconnect actual Coordinator during source setup; wait real unchanged 30-minute claimed-attempt timeout",
+  "plan_sha256": "c6bb649383791c19018dbf3fcb9a41ff74d790454f0bd371b1eead517a18f009",
+  "controller_sha256": "8401973c9958cb939323448239c768cdf86f52c89ad429a2099daa909315f541",
+  "paid_API_calls": 0,
+  "inference_after_expiry": false,
+  "old_UNKNOWN_rerun": false,
+  "ordinary_Run_permission": false,
+  "deployment": false,
+  "remote_migration": false,
+  "OSS_unique_success": false,
+  "fault_cut_at": "2026-10-02T04:33:19.993478+00:00",
+  "claimed_at": "2026-10-02T04:33:19.308Z",
+  "unknown_at": "2026-10-02T05:03:23.452Z",
+  "search_id": "search_108ca6b4d1bee703d37d472018241316",
+  "attempt_id": "01M3XE6P6CSKZ6AV5X3V1XMS51",
+  "Coordinator_status": "unknown",
+  "unknown_reason": "result_not_received",
+  "actual_waited_seconds": 1804.144,
+  "report_dispatches": [
+    "result.dispatch0.json",
+    "result.dispatch1.json"
+  ],
+  "frozen_max_retries": 1,
+  "local_cleanup_confirmed": true,
+  "original_limits_unchanged": true,
+  "extra_inference": false,
+  "extra_execution": false,
+  "Runtime_restarted": false,
+  "attempt_count": 1,
+  "saved_result_sha256": "bf8b2e98df3dac5ed7f7f4a218654d978c3b13a34a3a2c17dd0ad4ba499d229d",
+  "status_sha256": "874beb64a5caef1bb4f8deb7c5488a8a5f8771a884a0d0b4f46359dd9766ea64",
+  "budget": {
+    "attempts_used": 1,
+    "attempts_reserved": 0,
+    "transfer_used": 5632,
+    "transfer_reserved": 0,
+    "expanded_used": 536870912,
+    "expanded_reserved": 0,
+    "stored_used": 536870912,
+    "stored_reserved": 0,
+    "decisions_used": 0
+  },
+  "limitations": [
+    "local known stop is not a Coordinator-delivered finding; no automatic UNKNOWN resolution",
+    "this is actual network disconnection, not injected physical termination failure"
+  ]
+}
