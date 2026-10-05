@@ -1160,6 +1160,7 @@ pub enum IsolationMode {
 /// the environment only: a command-line argument is visible to every user of
 /// the host through `/proc/<pid>/cmdline`.
 const ENROLLMENT_TOKEN_ENV: &str = "ATO_RUNNER_ENROLLMENT_TOKEN";
+#[cfg(unix)]
 const CREDENTIALS_FILE_ENV: &str = "ATO_RUNNER_CREDENTIALS_FILE";
 
 /// Exchange an enrollment token for this Runner's identity, then start over
