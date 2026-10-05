@@ -48,6 +48,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
             || planned.derivation.runtimes.contains_key("oci.image")
             || !planned.derivation.requirements.is_empty()
             || !planned.derivation.variable_bindings.is_empty()
+            || !planned.derivation.runtime_port_operations.is_empty()
             || planned.derivation.steps.iter().any(|s| {
                 matches!(
                     s.network,
@@ -157,7 +158,7 @@ impl CandidateLauncher<'_> {
         let _launch = control
             .map(|c| c.phase(crate::control::AttemptPhase::Launch))
             .transpose()?;
-        let (candidate, evidence, realization) = match &executed {
+        let (candidate, mut evidence, realization) = match &executed {
             ExecutedCandidate::Process { workspace_root } => {
                 let (candidate, evidence) = self.realize_process(
                     workspace_root,
@@ -185,6 +186,31 @@ impl CandidateLauncher<'_> {
                 (candidate, evidence, "static_web")
             }
         };
+        if let Err(error) = crate::port_operations::execute(
+            &self.planned.derivation,
+            candidate.endpoints(),
+            bindings.variables,
+            bindings.gate.is_some(),
+            control,
+            &mut evidence.port_operations,
+        ) {
+            let _cleanup = control.map(|c| c.cleanup());
+            let stopped = candidate.stop();
+            let class = crate::realize::StopClass::of(&stopped);
+            if let crate::realize::StopClass::Unconfirmed { reason, resources } = class {
+                return Err(RealizeFailure::Abandoned {
+                    error,
+                    cleanup: reason,
+                    resources,
+                });
+            }
+            evidence.destroyed = stopped.is_ok();
+            return Err(RealizeFailure::Stopped {
+                error,
+                evidence: Box::new(evidence),
+                stop: class,
+            });
+        }
         let endpoint = candidate
             .endpoints()
             .values()
@@ -231,6 +257,7 @@ impl CandidateLauncher<'_> {
         }
         let scratch = attempt_root.join("realization");
         let mut evidence = RealizationEvidence {
+            port_operations: vec![],
             executor: "runtime-process".to_owned(),
             containment: "bwrap+landlock".to_owned(),
             workspace: "disposable-copy, read-only at /app; /tmp is tmpfs".to_owned(),
@@ -343,6 +370,7 @@ fn realize_static(
     )?;
     let base = server.base_url();
     let mut evidence = RealizationEvidence {
+        port_operations: vec![],
         executor: "runtime-static-loopback".to_owned(),
         containment: "none; serves the produced bundle's files, runs nothing".to_owned(),
         workspace: "the produced static web bundle, read-only".to_owned(),
