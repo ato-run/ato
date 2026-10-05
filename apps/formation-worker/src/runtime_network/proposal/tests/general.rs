@@ -297,14 +297,11 @@ fn m0_through_m12_exact_raw_transport_and_validator_authority() {
             status: http_status,
             bytes: serde_json::to_vec(&reply).unwrap(),
             delay,
-            lost: false,
+            // A peer that accepts then closes gives a deterministic transport
+            // error. Windows can defer closed-port refusal past the timeout.
+            lost: case == 8,
         });
-        let mut cfg = config(&mock.endpoint);
-        if case == 8 {
-            let port = TcpListener::bind("127.0.0.1:0").unwrap();
-            cfg.endpoint = format!("http://{}", port.local_addr().unwrap());
-            drop(port);
-        }
+        let cfg = config(&mock.endpoint);
         let guard =
             Arc::new(CallBudget::create(&root.path().join("budget.jsonl"), plan()).unwrap());
         let producer = DeepSeekCandidateProducer::new_mock(cfg, guard).unwrap();

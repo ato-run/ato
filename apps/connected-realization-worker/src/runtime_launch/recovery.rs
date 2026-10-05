@@ -189,10 +189,8 @@ impl RunJournal {
             file.write_all(&serde_json::to_vec(entry)?)?;
             file.sync_all().context("sync a journal entry")?;
         }
-        fs::rename(&temporary, &path).context("publish a journal entry")?;
-        fs::File::open(&self.dir)
-            .and_then(|directory| directory.sync_all())
-            .context("sync the run journal directory")?;
+        ato_runtime_attempt::durability::rename(&temporary, &path)
+            .context("publish a journal entry")?;
         Ok(())
     }
 
@@ -406,10 +404,8 @@ pub fn write_lease_owner(lease_root: &Path, owner: &LeaseOwner) -> Result<()> {
         file.write_all(&serde_json::to_vec(owner)?)?;
         file.sync_all().context("sync the owner marker")?;
     }
-    fs::rename(&temporary, &target).context("publish the owner marker")?;
-    fs::File::open(lease_root)
-        .and_then(|directory| directory.sync_all())
-        .context("sync the lease directory")?;
+    ato_runtime_attempt::durability::rename(&temporary, &target)
+        .context("publish the owner marker")?;
     Ok(())
 }
 
@@ -462,11 +458,8 @@ fn preserve_lease_dir(leases_dir: &Path, lease_id: &str) -> Result<()> {
             .unwrap_or_default();
         target = resolved.join(format!("{lease_id}-{millis}"));
     }
-    fs::rename(&source, &target)
+    ato_runtime_attempt::durability::rename(&source, &target)
         .with_context(|| format!("preserve lease workspace {}", source.display()))?;
-    fs::File::open(&resolved)
-        .and_then(|directory| directory.sync_all())
-        .context("sync the resolved lease directory")?;
     Ok(())
 }
 
