@@ -5,10 +5,10 @@ No deployment, remote migration, feature flag or ordinary Run permission.
 
 Merged foundation: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`, API
 `9e0031900836090612b94e775e26f980a68f32d7`. Latest code candidate:
-Ato `7846b40b9c61fb32ef8823372f013b91dc58b6a0` (Node setup/launch deadlines,
-#1468, typed readiness classification, #1469), API
-`1626faa000018d6fcb26823ade31ac32e22c7725` (compiler #719 and owner phase
-evidence #720). Current authority source
+Ato `7b8db6615f5df02798c4d49b00802f2dab950dee` (Node deadlines #1468,
+typed readiness #1469, unconfirmed-stop preservation and ACK-wait harness
+#1470), API `0b1540069e3bd2da7866c661bbcc83f4942ceb24` (compiler #719,
+owner phase evidence #720, unconfirmed-stop hold #721). Current authority source
 `b7c322e70d28a986581e6f60fb6d716309e5a6c8`, WASM SHA-256
 `f6067a2797c1b39098da67dcb695c25cb8e44dfd351f3c7cd4781bab74479af4`,
 2,198,190 bytes. Documentation-only subsequent heads do not change that code.
@@ -336,6 +336,16 @@ execution/inference and unchanged original Search limits are verified. Numeric
 phase times are visible in owner status for both cases. These fixed fixture
 exchanges add zero autonomous app successes or paid API calls. Public metadata
 SHA-256 `cc84aeb2b30aab4970622d8f97faf249ee9160eece8e0486d5502d3b02a06497`.
+
+Subsequent [stop-preservation controls](formation-unconfirmed-stop-preservation-20261002.md)
+at `7b8db661` / API `0b154006` confirm normal same-K PASS and typed deadline
+failure with saved ACK, closed delivery, optional confirmed-stop attestation,
+phase timings and zero reservations. Metadata SHA-256
+`88c0258b3518b1c1b0bcae3027502c4881a22bcdf2c159ec11c9bc0eedc54fda`.
+Two pre-execution disk-guard failures and a known fixture port contention are
+preserved. Same Source/K/D passes serially. These fixed controls add no unique
+app or paid call. A new owned real Runtime disconnect awaits the unchanged
+30-minute timeout; it never restarts an old UNKNOWN or shortens that timeout.
 
 The explicit small-gate allowance is at most 24 additional API calls, within
 the original remaining $0.499285; it does not authorize 100-case measurement.
