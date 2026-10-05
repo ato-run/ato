@@ -197,7 +197,6 @@ httpd.serve_forever()
 "#;
     let mut child = Command::new("python3")
         .args(["-I", "-c", server, &port.to_string()])
-        .arg("--directory")
         .arg(root)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

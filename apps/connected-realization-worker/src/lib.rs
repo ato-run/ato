@@ -5527,6 +5527,8 @@ mod tests {
                     "/usr/bin/google-chrome",
                     "/usr/bin/chromium",
                     "/usr/bin/chromium-browser",
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
                 ]
                 .into_iter()
                 .map(PathBuf::from)
