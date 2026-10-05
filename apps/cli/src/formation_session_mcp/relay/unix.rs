@@ -151,12 +151,31 @@ impl UnixBroker {
         )
     }
 
+    #[cfg(test)]
     fn start_with_capability(
+        server: FormationSessionMcpServer,
+        descriptor_file: &Path,
+        capability_file: &Path,
+        socket_file: &Path,
+        expiry: Option<u64>,
+    ) -> Result<Self> {
+        Self::start_with_scope(
+            server,
+            descriptor_file,
+            capability_file,
+            socket_file,
+            expiry,
+            false,
+        )
+    }
+
+    fn start_with_scope(
         mut server: FormationSessionMcpServer,
         descriptor_file: &Path,
         capability_file: &Path,
         socket_file: &Path,
         expiry: Option<u64>,
+        read_only: bool,
     ) -> Result<Self> {
         validate_socket_path(socket_file)?;
         let status = server
@@ -170,14 +189,7 @@ impl UnixBroker {
                 && view["configuration_ref"] == server.binding.configuration_ref,
             "Session status rejected"
         );
-        let deadline = view["deadline_ms"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("Session deadline unavailable"))?;
-        let expires_at_ms = expiry.unwrap_or(deadline);
-        ensure!(
-            now_ms()? < expires_at_ms && expires_at_ms <= deadline,
-            "relay expiry rejected"
-        );
+        let expires_at_ms = relay_expiry(view, expiry, read_only, now_ms()?)?;
 
         // bind is atomic and never unlinks a conflicting file/socket/symlink.
         let listener = UnixListener::bind(socket_file)?;
@@ -198,6 +210,7 @@ impl UnixBroker {
                 configuration_ref: server.binding.configuration_ref.clone(),
                 agent: server.binding.agent.clone(),
                 expires_at_ms,
+                read_only,
             },
         };
         validate(&descriptor)?;
@@ -272,16 +285,28 @@ pub fn serve_owner_with_capability(
     socket: &Path,
     expiry: Option<u64>,
 ) -> Result<()> {
+    serve_owner_with_scope(connection, descriptor, capability, socket, expiry, false)
+}
+
+pub fn serve_owner_with_scope(
+    connection: &Path,
+    descriptor: &Path,
+    capability: &Path,
+    socket: &Path,
+    expiry: Option<u64>,
+    read_only: bool,
+) -> Result<()> {
     ensure!(
         descriptor != capability,
         "private capability destination rejected"
     );
-    let broker = UnixBroker::start_with_capability(
+    let broker = UnixBroker::start_with_scope(
         FormationSessionMcpServer::connect(connection)?,
         descriptor,
         capability,
         socket,
         expiry,
+        read_only,
     )?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&broker.stop))?;
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&broker.stop))?;
@@ -421,6 +446,38 @@ mod tests {
             return Ok(tempfile::Builder::new().prefix("u").tempdir_in(directory)?);
         }
         anyhow::bail!("short workspace .tmp directory required for Unix socket fixture")
+    }
+
+    #[test]
+    fn unix_expired_unknown_relay_enforces_read_only_at_dispatch() -> Result<()> {
+        let deadline = now_ms()?.saturating_sub(1);
+        let (root, bridge, server, _) = crate::formation_session_mcp::tests::fixture_at(deadline)?;
+        bridge.update(&json!({"status":"unknown","unresolved_attempts":1,
+            "attempts":[{"attempt_id":"attempt-original","status":"unknown"}]}))?;
+        let sockets = socket_root()?;
+        let path = root.path().join("readonly.json");
+        let socket = sockets.path().join("relay.sock");
+        let broker = UnixBroker::start_with_scope(
+            server,
+            &path,
+            &path.with_extension("capability"),
+            &socket,
+            Some(now_ms()? + 30_000),
+            true,
+        )?;
+        let status = forward(&broker.descriptor, &call("next", json!({})))?
+            .ok_or_else(|| anyhow!("missing status"))?;
+        assert_eq!(
+            status["result"]["structuredContent"]["deadline_ms"],
+            deadline
+        );
+        assert!(status["result"]["structuredContent"]["input"].is_null());
+        let denied = forward(&broker.descriptor, &call("submit", json!({})))?
+            .ok_or_else(|| anyhow!("missing refusal"))?;
+        assert_eq!(denied["error"]["code"], -32601);
+        drop(broker);
+        assert!(!socket.exists());
+        Ok(())
     }
 
     #[test]
