@@ -450,6 +450,7 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "clap",
+ "flate2",
  "fs2",
  "httpdate",
  "libc",
