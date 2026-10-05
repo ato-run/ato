@@ -53,8 +53,13 @@ Linux CLI/Worker and locked/offline helper builds PASS. The initial unpinned
 external helper check is preserved; the executed helper dependency versions
 match the repository lock, with only its own root package added.
 
-Required next evidence: control-plane
-current-owner/current-assignment and stale-writer refusal, initialized-state input
-for Kutt, same frozen K, migration/JWT, representative UI and retained state.
+Subsequent [Coordinator-backed gate](formation-coordinator-state-verification-20261002.md)
+passed actual authenticated assignment, stale-fence/other-Runner/unbound-lease
+refusal, revision commit/restore, unchanged-K fresh receipts and browser state
+persistence in an owned local instance. Proof SHA-256
+`d8ef5cc590d002cf25c93573ee3a8021a7fcd6ce056725c8bdc4228ca708eb52`.
+Required next work remains production source-exploration state provisioning and
+initialized-state input for Kutt, same frozen K, migration/JWT and its
+representative UI/persistence gate.
 The bindings neither authorize an ordinary Run nor publish/deploy the successful D.
 Zero paid API calls; old UNKNOWN/WBO and old source acceptance remain untouched.

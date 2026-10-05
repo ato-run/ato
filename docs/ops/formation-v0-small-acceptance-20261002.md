@@ -285,7 +285,7 @@ formatting and Runtime/Worker/CLI all-target clippy PASS. Existing API state
 tests are 39 PASS / 1 failure, identically reproduced at merged main `9e003190`.
 The recovery fixture reads an uncreated Run row; its failure is preserved.
 
-Current Linux retained functional trial reuses changedetection.io trial-14
+The earlier Linux retained functional trial reuses changedetection.io trial-14
 artifact without feeding it to the API provider. First and second actual
 contained launches at `e185f2d9` passed unchanged K. The first non-PTY helper
 received stdin EOF and confirmed cleanup before UI interaction; preserve that
@@ -301,6 +301,21 @@ state-binding fixture, not Coordinator state-assignment authentication. It does
 not complete Kutt, current-owner/current-assignment or stale-fence acceptance.
 The production Worker still has no borrowed state transport and does not
 advertise persistent state on that unbound path. No ordinary Run/deploy grant.
+
+Subsequent [Coordinator-backed verification](formation-coordinator-state-verification-20261002.md)
+uses helper `e7e75b52`, controller `26eb1fbc`, common Runtime `e185f2d9` and API
+`fa825a17`. Two distinct actual retained attempts pass unchanged K. Real
+`dispatchRuntimeLaunch`/exact lease binding issue fences 1 and 2; confirmed stop,
+authenticated revision commit/restore, fresh-browser title/pause persistence,
+owned-watch deletion and final cleanup PASS. Nine production state-route
+authorization/fence cases PASS. Two browser deletion harness failures and the
+initial pre-execution receiver startup failure remain recorded. Stored private
+state revisions total 55,296 bytes; active writers/quarantines zero; Runtime
+egress bytes zero. Dedicated Coordinator stopped. Public metadata proof SHA-256
+`d8ef5cc590d002cf25c93573ee3a8021a7fcd6ce056725c8bdc4228ca708eb52`.
+This adds no unique app or paid provider call and does not complete production
+source state provisioning, Kutt or the independent API arm. It supersedes the
+local-fixture-only limitation for this measured transport round trip.
 
 ## Accounting
 
