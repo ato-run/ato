@@ -3,8 +3,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('native_owner', ROOT / 'scripts/acceptance/coverage/native-session-owner.py')
@@ -50,6 +51,54 @@ class OwnerAdmissionTests(unittest.TestCase):
             return SimpleNamespace(pid=123)
         report = OWNER.guarded_start(self.plan, self.ledger, self.args, spawn)
         self.assertTrue(report['Search_process_started'])
+    def test_campaign_wall_clock_does_not_extend_Search_deadline(self):
+        self.args.deadline_seconds = 5
+        self.args.wall_clock_seconds = 10
+        def spawn(command, **kwargs):
+            ledger = OWNER.read_ledger(self.plan, self.ledger)
+            entry = ledger['entries'][0]
+            self.assertEqual(entry['reservation']['sequential_elapsed_seconds'], 10)
+            self.assertEqual(entry['Search_deadline_seconds'], 5)
+            self.assertEqual(command[command.index('--deadline-seconds') + 1], '5')
+            return SimpleNamespace(pid=124)
+        self.assertTrue(OWNER.guarded_start(self.plan, self.ledger, self.args, spawn)['admitted'])
+    def test_expired_unknown_observation_is_covered_only_by_campaign_time(self):
+        self.plan['aggregate_ceiling']['sequential_elapsed_seconds'] = 2400
+        ledger = OWNER.read_ledger({'schema': 'ato.native-acceptance-campaign/1', 'measurement_id': 'fixture',
+            'initial_campaign': True, 'aggregate_ceiling': {k: 10 for k in OWNER.KEYS}}, self.ledger)
+        entry = self.entry();entry['reservation']['sequential_elapsed_seconds'] = 2400
+        ledger['entries'] = [entry]
+        saved = view();saved['search_elapsed_ms'] = 1850000
+        report = OWNER.refresh(self.plan, ledger, Path('ato'), reader=lambda _: saved)
+        self.assertTrue(report['admitted'])
+        self.assertEqual(report['used']['sequential_elapsed_seconds'], 1850)
+        self.assertEqual(report['held']['sequential_elapsed_seconds'], 550)
+        self.assertEqual(entry['snapshots'][0]['deadline_ms'], 123)
+    def test_unsatisfied_Search_is_not_a_reusable_Search_slot(self):
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        ledger['entries'] = [self.entry()]
+        report = OWNER.refresh(self.plan, ledger, Path('ato'), reader=lambda _: view(state='unsatisfied'))
+        self.assertEqual(report['used']['searches'], 1)
+        self.assertEqual(report['held']['Runtime_attempts'], 0)
+    def test_reconcile_report_uses_owner_wall_clock_without_changing_Search(self):
+        self.plan['aggregate_ceiling']['sequential_elapsed_seconds'] = 2400
+        self.ledger = self.root / 'reconcile-ledger.json'
+        OWNER.initialize(self.plan, self.ledger)
+        ledger = OWNER.read_ledger(self.plan, self.ledger)
+        entry = self.entry();entry['Search_deadline_seconds'] = 1800
+        entry['reservation']['sequential_elapsed_seconds'] = 2400
+        ledger['entries'] = [entry];OWNER.publish(self.ledger, ledger)
+        original = int(time.time() * 1000) - 1000
+        saved = view(state='unknown');saved['deadline_ms'] = original
+        execute = Mock(return_value=SimpleNamespace(returncode=0))
+        args = SimpleNamespace(ato=Path('ato'), connection=self.args.connection,
+            native_launcher=Path('native-session.py'), native_args=['--', '--reconcile-only'])
+        real_refresh = OWNER.refresh
+        with patch.object(OWNER, 'refresh', side_effect=lambda p,l,a: real_refresh(p,l,a,reader=lambda _:saved)):
+            self.assertTrue(OWNER.guarded_native(self.plan, self.ledger, args, execute)['admitted'])
+        command = execute.call_args.args[0]
+        self.assertEqual(int(command[command.index('--owner-wall-clock-deadline-ms')+1]), original+600000)
+        self.assertEqual(OWNER.read_ledger(self.plan,self.ledger)['entries'][0]['snapshots'][0]['deadline_ms'],original)
     def test_old_overrun_is_not_reset_and_prevents_process_creation(self):
         ledger = OWNER.read_ledger(self.plan, self.ledger)
         ledger['historical_floor']['D_rounds'] = 13
