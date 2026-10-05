@@ -1099,22 +1099,40 @@ mod autonomous_tests {
             prompt_version: deepseek::PROMPT_VERSION_V13.into(),
         });
         let plan = budget::BudgetPlan {
-            max_calls: 6, input_token_cap: 49152, output_token_cap: 2048,
-            input_price: 300000, output_price: 1200000, ceiling_usd_micros: 103224,
+            max_calls: 6,
+            input_token_cap: 49152,
+            output_token_cap: 2048,
+            input_price: 300000,
+            output_price: 1200000,
+            ceiling_usd_micros: 103224,
         };
-        let producer = ReasoningProducer::new(config.clone(), plan.clone(), root.path().into(), None)?;
+        let producer =
+            ReasoningProducer::new(config.clone(), plan.clone(), root.path().into(), None)?;
         for exchange in 1..=6 {
             let path = root.path().join(format!("r001_s{exchange:03}.input.json"));
             assert_eq!(producer.check_exchange_budget(&path)?, exchange - 1);
             std::fs::write(path, b"saved input")?;
         }
         // Saved input recovery remains possible; creating another exchange does not.
-        assert_eq!(producer.check_exchange_budget(&root.path().join("r001_s006.input.json"))?, 6);
+        assert_eq!(
+            producer.check_exchange_budget(&root.path().join("r001_s006.input.json"))?,
+            6
+        );
         let next = root.path().join("r002_s001.input.json");
-        assert!(producer.check_exchange_budget(&next).unwrap_err().is::<ReasoningCallBudgetExhausted>());
+        assert!(
+            producer
+                .check_exchange_budget(&next)
+                .unwrap_err()
+                .is::<ReasoningCallBudgetExhausted>()
+        );
         drop(producer);
         let restored = ReasoningProducer::new(config, plan, root.path().into(), None)?;
-        assert!(restored.check_exchange_budget(&next).unwrap_err().is::<ReasoningCallBudgetExhausted>());
+        assert!(
+            restored
+                .check_exchange_budget(&next)
+                .unwrap_err()
+                .is::<ReasoningCallBudgetExhausted>()
+        );
         assert!(!next.exists());
         assert!(!root.path().join("r002_s001.dispatch.json").exists());
         Ok(())
@@ -1454,7 +1472,9 @@ impl ReasoningProducer {
             .iter()
             .filter(|name| name.to_string_lossy().ends_with(".input.json"))
             .count();
-        let provider_calls = self.api.as_ref()
+        let provider_calls = self
+            .api
+            .as_ref()
             .map(|api| api.accounting_snapshot())
             .transpose()?
             .map_or(0, |snapshot| snapshot.cells.len());

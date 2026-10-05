@@ -429,58 +429,7 @@ fn write_durably(path: &Path, record: &AttemptRecord) -> Result<()> {
         file.write_all(&serde_json::to_vec_pretty(record)?)?;
         file.sync_all().context("cannot sync the attempt record")?;
     }
-    publish_durably(&temporary, path)
-}
-
-#[cfg(not(windows))]
-fn publish_durably(temporary: &Path, path: &Path) -> Result<()> {
-    std::fs::rename(temporary, path)
-        .with_context(|| format!("cannot move the attempt record into {}", path.display()))?;
-    let dir = path.parent().context("record has no directory")?;
-    File::open(dir)
-        .and_then(|directory| directory.sync_all())
-        .context("cannot sync the attempt record directory")
-}
-
-#[cfg(windows)]
-fn publish_durably(temporary: &Path, path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    // COPY_ALLOWED and DELAY_UNTIL_REBOOT are deliberately absent: the synced
-    // temporary and destination must be replaced now on the same filesystem.
-    ensure!(
-        temporary.parent() == path.parent(),
-        "record move crosses directories"
-    );
-    let wide_path = |value: &Path| -> Result<Vec<u16>> {
-        let mut wide: Vec<u16> = value.as_os_str().encode_wide().collect();
-        ensure!(!wide.contains(&0), "record path contains a null character");
-        wide.push(0);
-        Ok(wide)
-    };
-    let temporary = wide_path(temporary)?;
-    let destination = wide_path(path)?;
-    // SAFETY: both owned UTF-16 buffers are null-terminated, contain no inner
-    // null, and remain alive throughout this synchronous Win32 call.
-    let moved = unsafe {
-        MoveFileExW(
-            temporary.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| {
-            format!(
-                "cannot durably move the attempt record into {}",
-                path.display()
-            )
-        });
-    }
-    Ok(())
+    crate::durability::rename(&temporary, path)
 }
 
 /// An exclusive advisory lock, released when the file is dropped.
