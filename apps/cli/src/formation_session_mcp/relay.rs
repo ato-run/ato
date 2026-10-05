@@ -1035,6 +1035,41 @@ mod tests {
     }
 
     #[test]
+    fn owner_bridge_accepts_a_fragmented_authenticated_frame_without_changing_scope() -> Result<()>
+    {
+        let (_root, _bridge, mut server, _digest) = fixture()?;
+        let before = server.handle(&call("status", json!({}))).unwrap();
+        let request = serde_json::to_vec(&json!({
+            "access_token":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9;32]),
+            "search_id":server.binding.search_id,
+            "configuration_ref":server.binding.configuration_ref,
+            "command":super::super::session::Command::Status,
+        }))?;
+        let mut stream = TcpStream::connect(server.binding.address)?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.write_all(&request[..1])?;
+        thread::sleep(Duration::from_millis(100));
+        stream.write_all(&request[1..])?;
+        stream.write_all(b"\n")?;
+        let mut response = String::new();
+        std::io::BufReader::new(stream).read_line(&mut response)?;
+        let after: Value = serde_json::from_str(&response)?;
+        assert_eq!(after["ok"], true, "fragmented owner frame must be accepted");
+        for key in [
+            "deadline_ms",
+            "exchanges_used",
+            "exchanges_remaining",
+            "progress",
+        ] {
+            assert_eq!(
+                before["result"]["structuredContent"][key],
+                after["view"][key]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dropped_reply_reconnection_and_duplicate_submit_keep_saved_response_and_budget() -> Result<()>
     {
         let (root, _bridge, server, digest) = fixture()?;
@@ -1075,7 +1110,15 @@ mod tests {
         assert!(canceled["result"]["isError"] == true);
         assert!(canceled["result"]["structuredContent"]["error"]["code"] == "unknown_tool");
         let status = rpc(&second, call("status", json!({})))?;
-        assert!(status["result"]["structuredContent"]["progress"]["status"] == "pending");
+        assert_eq!(
+            status["result"]["isError"], false,
+            "public MCP error: {}",
+            status["result"]["structuredContent"]["error"]["code"]
+        );
+        assert_eq!(
+            status["result"]["structuredContent"]["progress"]["status"],
+            "pending"
+        );
         Ok(())
     }
 
