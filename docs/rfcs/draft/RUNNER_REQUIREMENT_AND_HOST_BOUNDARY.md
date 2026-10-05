@@ -1,7 +1,7 @@
 # Runner Requirement and Host-Boundary Execution
 
-Status: draft implementation contract  
-Date: 2026-10-02 (aligned with the implementation 2026-10-03)  
+Status: accepted v0 implementation contract — staging acceptance complete
+Date: 2026-10-02 (staging v0 acceptance recorded 2026-10-05)
 Tracking: ato-api `docs/rfcs/draft/runner-provisioner.md`,
 `docs/rfcs/draft/managed-data-plane.md`
 
@@ -41,7 +41,7 @@ when absent. No new field is added to `BoundDerivation` itself.
   "host": {
     "os": "linux",
     "arch": "x86_64",
-    "accelerators": [{ "vendor": "nvidia", "count": 1, "min_vram_mib": 45000 }],
+    "accelerators": [{ "vendor": "nvidia", "count": 1, "min_vram_mib": 46000 }],
     "min_memory_mib": 65536,
     "min_scratch_mib": 102400
   }
@@ -238,7 +238,8 @@ In this mode a `process` realization is launched with:
 - `no_new_privs`;
 - a Landlock ruleset: read-only on the workspace, the toolchain root and the
   system library paths; read-write only on the declared state mount targets,
-  the Run's scratch directory and the model cache mount; no access to the
+  the Run's scratch directory; model/software trees are read-only to the
+  workload, and cache verification markers are Runner-only; no access to the
   Runner's work root, credentials file or environment file;
 - **no seccomp filter (not implemented).** The v0 baseline is uid separation +
   `no_new_privs` + Landlock + the machine boundary. A seccomp filter denying
@@ -306,9 +307,9 @@ file and ignores the token.
 The worker's `download(&str) -> Vec<u8>` is unsuitable for model weights. A
 second path is added, used only for Model Objects and Run input Assets:
 
-- request signed URLs from the lease's Data Grant endpoint;
-- download with range requests to a temporary file in the cache directory,
-  resuming on failure and re-requesting URLs that expired;
+- read granted object bytes through the authenticated lease Data Grant endpoints;
+- download bounded HTTP ranges to a temporary file in the cache directory,
+  resuming with the same granted digest after an interrupted range;
 - verify `sha256` and size; rename into the cache only on success;
 - expose the cache to the workload read-only at the path the Model Set
   manifest names.
@@ -322,10 +323,12 @@ through the grant endpoint before the Runner reports the Run finished.
 A Runner that cannot renew execution authorization tears its workload down
 (existing behaviour), deletes the Run's files, and stops polling. It holds no
 provider credential and does not know which provider it is on, so it cannot
-delete its own machine. Removing the machine is the Coordinator's job
-(reconcile, every minute), and a provider-side hard TTL set when the machine is
-created ends it even if the Coordinator is gone; see the Runner Provisioner RFC
-§4.6.
+delete its own machine. Removing the machine is the Coordinator's job (reconcile, every minute).
+A bootstrap dead-man timer also removes a started machine at its deadline or
+when the Runner exits. RunPod provider-side termination was not reliable in
+measurement; a machine whose container never starts has no timer and depends
+on reconcile and the account financial ceiling. See the Runner Provisioner
+RFC §4.6; provider TTL and orphan billing protection remain a separate task.
 
 ## 7. Compatibility
 
@@ -372,3 +375,22 @@ limit, then provider metadata, and `/proc/meminfo` only as a diagnostic (§2).
 Resolved 2026-10-03: authoring syntax is `[derivation.host]` (§1.1); RunPod
 does inject a pod-scoped key, which the start wrapper removes from the
 Runner's and the workload's environment (Runner Provisioner RFC §4.5).
+
+## 11. Accepted staging v0 boundary
+
+The integrated stack passed measured host admission, one-owner/one-slot
+host-boundary execution, cold/warm/fresh replacement, Run-scoped input and
+output I/O, save-only failure/recovery, and ordinary idle machine deletion.
+Wan Animation also passed actual owner Chrome preparation, input Asset
+upload, explicit launch, cold and warm generation/save/playback, and saved
+history playback with no GPU. Model and pinned software sets were delivered
+as two `ato.model-set@1` inputs; warm delivery transferred zero bytes.
+
+Acceptance evidence is in ato-api `docs/ops/wan-data-plane-resume-2026-10-04.md`
+and `docs/ops/wan-gui-staging-2026-10-05.md`. The bundle, K, D, workflow, software
+pins and GPU requirement are the accepted baseline and are not changed by GUI
+preparation. Saved completion requires an available Asset; a local generated
+file alone is insufficient. Final acceptance state was zero machines and
+$0/h. This acceptance is limited to single-owner curated Wan on staging;
+production, arbitrary user code, seccomp, smaller-VRAM profiles, private
+models and Formation staging Runtime remain separate work.
