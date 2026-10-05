@@ -1,0 +1,147 @@
+{
+  "schema": "ato.formation-native-supplemental-evidence/1",
+  "measurement_id": "formation-native-real-unknown-20261005-02",
+  "purpose": "real UNKNOWN recovery only",
+  "gate_passed": false,
+  "outcome": "real fresh PASS; fault injection missed workload",
+  "approved_ceiling": {
+    "D_rounds": 2,
+    "exchanges": 3,
+    "Runtime_attempts": 1,
+    "inspections": 2,
+    "sequential_elapsed_seconds": 2400,
+    "searches": 1
+  },
+  "consumption": {
+    "Searches": 1,
+    "D_rounds": 1,
+    "exchanges": 1,
+    "Runtime_attempts": 1,
+    "inspections": 0,
+    "elapsed_seconds": 58
+  },
+  "search_id": "search_36277e87df76feb9bb5e444fa116307a",
+  "satisfy_id": "01M45DV5GR6KWP7B0ZCWMN08PK",
+  "attempt_id": "01M45DWSE3GWKKDECQ3P3Q6VNY",
+  "Source": {
+    "archive_digest": "sha256:1aa30788d7cf082d2aa5697194d945830f77bb0c555f4374d0b593e376e4c0b4",
+    "closure_ref": "sha256:8fc8d179ae0ec3509ab7795461e6fd1e18c7aa1618ab995e55b5c5f8892d0c4b"
+  },
+  "K": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+  "D": "sha256:4c30c5300fc492fcd23ccd7487e39a9454e956c52d8e715b2dbdeba4f8c7bf13",
+  "requester_deadline_ms": 1791185455111,
+  "Coordinator_deadline_at": "2026-10-05T07:30:56.426Z",
+  "receipt": {
+    "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "derivation_ref": "sha256:4c30c5300fc492fcd23ccd7487e39a9454e956c52d8e715b2dbdeba4f8c7bf13",
+    "execution": {
+      "attempt_id": "01M45DWSE3GWKKDECQ3P3Q6VNY",
+      "endpoint": "http://127.0.0.1:3000/",
+      "platform": "linux/aarch64",
+      "realization": "process",
+      "request_id": "01M45DV5GR6KWP7B0ZCWMN08PK"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:7b357ffee26e63aa8035795a7eb1c909ed540901e7cacd011d8c6efe5a8fa6e5",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "result_sha256": "3406f2107129d536d8b6da11e440f18d4d36e8b50a4bc6daccc75593f304595f",
+  "ACK": {
+    "accepted": true
+  },
+  "closed": {
+    "closed": true
+  },
+  "runtime_cleanup": {
+    "state": "succeeded"
+  },
+  "candidate_stop": "confirmed",
+  "search_budget": {
+    "attempts_used": 1,
+    "attempts_reserved": 0,
+    "transfer_reserved": 0,
+    "expanded_reserved": 0,
+    "stored_reserved": 0,
+    "created_at": "2026-10-05T07:00:56.426Z",
+    "deadline_at": "2026-10-05T07:30:56.426Z"
+  },
+  "cleanup": {
+    "active_writers": 0,
+    "quarantined_slots": 0,
+    "temporary_variable_values": 0,
+    "live_variable_metadata": 0,
+    "new_UNKNOWN": 0
+  },
+  "private_cleanup": {
+    "owner_credential_or_capability_value_matches": 0,
+    "candidate_encoding_count": 14,
+    "scan_scope": "saved model-facing native events; private owner session/capability encodings",
+    "account_read_response_recorded": false,
+    "local_private_files_or_auth_links_removed": [
+      "owner/token",
+      "owner/connection.capability",
+      "native-initial/owner/relay.capability",
+      "native-initial/owner/native-home/auth.json"
+    ]
+  },
+  "owner_auth_cleanup": {
+    "owner_signout_HTTP": 200,
+    "temporary_owner_session_rows": 0,
+    "private_credential_copies_removed": 4
+  },
+  "services_stopped": {
+    "owned_processes_alive_after_stop": [],
+    "owned_process_count": 4
+  },
+  "SDK_reported_usage": {
+    "scope": "native context; SDK reported counters only",
+    "internal_LLM_calls": "unknown",
+    "account_charge_usd": "unknown",
+    "last_cumulative_tokens": {
+      "totalTokens": 69496,
+      "inputTokens": 68769,
+      "cachedInputTokens": 50816,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 727,
+      "reasoningOutputTokens": 0
+    },
+    "coverage": "last SDK update; update events are not LLM calls"
+  },
+  "Ato_direct_LLM_API_calls": 0,
+  "actual_LLM_calls": "unknown",
+  "actual_charge_usd": "unknown",
+  "old_13_12_audit_sha256": "91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197",
+  "old_campaign_changed": false,
+  "manual_DB_PASS_update": false,
+  "normal_Run_promotion": false,
+  "cloud_migration": false,
+  "deployment": false,
+  "product_pins": {
+    "Session": "d7c926f5d5e22fbb4dec30316c918729cf923cae",
+    "Skill": "e03b5b2f5f6ad0552e079c9d50ba5f4896b33f5a",
+    "acceptance_at_execution": "21db4dd75d27562d2532d3c6628c93f407948f4f",
+    "Runtime": "c5719f69ea2ef009f3f0d677518b843655b3e196",
+    "API": "34b44f842490279fbd10cca940b0768a10f52a2a"
+  },
+  "fault_observer_defect": "Observer required literal argv server-unknown.js; the Linux launcher supplies an /app/ path via sandbox_entrypoint_path. Proxy incorrectly forwarded result when marker was absent.",
+  "corrective_preflight": {
+    "fault_proxy_tests_Linux": 4,
+    "monitor_tests_Linux": 7,
+    "actual_Native_UNKNOWN_validation": false,
+    "no_Search_or_Runtime_attempt_consumed_by_fixture_tests": true
+  }
+}
