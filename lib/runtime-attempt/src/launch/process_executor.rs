@@ -394,8 +394,8 @@ fn launch_process_inner(
     let policy_path = host.runtime_root.join("sandbox-policy.json");
     if super::host_boundary::active().is_none() {
         ensure!(
-            context.read_only_inputs().is_empty(),
-            "delivered read-only inputs (Model Sets) run only on a host-boundary Runner in v0"
+            context.read_only_inputs().is_empty() && context.output_dir().is_none(),
+            "delivered inputs and saved outputs run only on a host-boundary Runner in v0"
         );
     }
     if let Some(boundary) = super::host_boundary::active() {
@@ -544,6 +544,14 @@ fn launch_host_boundary(
         .to_owned();
     environment.insert("TMPDIR".into(), scratch_text.clone());
     environment.insert("HOME".into(), scratch_text);
+    if let Some(dir) = context.output_dir() {
+        environment.insert(
+            "ATO_OUTPUT_DIR".into(),
+            dir.to_str()
+                .context("output path is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
     for input in context.read_only_inputs() {
         environment.insert(
             input.env_name.clone(),
@@ -630,7 +638,11 @@ fn resolve_python_from_root(
         output.status.success()
             && reported
                 .trim()
-                .starts_with(&format!("Python {}.", requirement.version)),
+                .strip_prefix("Python ")
+                .is_some_and(|version| {
+                    version == requirement.version
+                        || version.starts_with(&format!("{}.", requirement.version))
+                }),
         "provisioned Python does not satisfy {}: {}",
         requirement.version,
         reported.trim()
@@ -953,6 +965,29 @@ mod tests {
         };
         let error = resolve_python_from_root(&requirement, root.path()).unwrap_err();
         assert!(error.to_string().contains("is not provisioned"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_patch_pinned_python_runtime_is_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("3.11.11/bin/python3");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\necho 'Python 3.11.11'\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for version in ["3.11.11", "3.11"] {
+            let requirement = ato_ipc::runtime_launch::ExecutableRequirementV1 {
+                name: "python".to_owned(),
+                version: version.to_owned(),
+            };
+            assert_eq!(
+                resolve_python_from_root(&requirement, root.path())
+                    .unwrap()
+                    .1,
+                "Python 3.11.11"
+            );
+        }
     }
 
     #[cfg(unix)]
