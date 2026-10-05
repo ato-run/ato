@@ -14,6 +14,7 @@ use crate::authoring::{
     ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL,
     TCP_EGRESS_PROTOCOL, WORKSPACE_PROTOCOL,
 };
+use crate::requirements::HostRequirement;
 
 pub const CAPSULE_SCHEMA_V2: &str = "ato.capsule/2";
 pub const OCI_PROTOCOL: &str = "ato.oci@1";
@@ -87,6 +88,9 @@ pub struct PortableDerivationDraftV2 {
     pub guest_port: u16,
     /// Empty unless `kind` is [`PortableDerivationKindV2::OciServiceGroup`].
     pub services: Vec<PortableServiceDraftV2>,
+    /// The host this route must run on, bound as `requirements.host` of its
+    /// Derivation. Validated; absent means no host condition.
+    pub host: Option<HostRequirement>,
 }
 
 /// One serving step of an OCI service group. Authoring shorthand only: it
@@ -207,6 +211,8 @@ struct Derivation {
     guest_port: Option<u16>,
     #[serde(default)]
     service: Vec<Service>,
+    #[serde(default)]
+    host: Option<HostRequirement>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,11 +496,17 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
                     format!("duplicate id {:?}", derivation.id),
                 ));
             }
-            if derivation.service.is_empty() {
+            let host = derivation.host.clone();
+            if let Some(host) = &host {
+                host.validate()
+                    .map_err(|e| invalid("derivation.host", e.0))?;
+            }
+            let route = if derivation.service.is_empty() {
                 parse_single_route(derivation)
             } else {
                 parse_service_group(derivation, &state_ids, &binding_ids)
-            }
+            }?;
+            Ok(PortableDerivationDraftV2 { host, ..route })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -602,6 +614,7 @@ fn parse_single_route(
         env,
         guest_port,
         services: Vec::new(),
+        host: None,
     })
 }
 
@@ -765,6 +778,7 @@ fn parse_service_group(
         env: BTreeMap::new(),
         guest_port: 0,
         services,
+        host: None,
     })
 }
 
