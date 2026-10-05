@@ -56,9 +56,13 @@ struct Args {
     )]
     relay_socket: Option<PathBuf>,
 
-    /// Optional shorter expiry, never later than the saved Search deadline.
+    /// Expiry capped by Search deadline, or 120 seconds for reconcile-only reporting.
     #[arg(long, requires = "publish_relay", conflicts_with = "relay")]
     relay_expiry_ms: Option<u64>,
+
+    /// Publish status/next only for a saved UNKNOWN; never renew Search authority.
+    #[arg(long, requires_all = ["publish_relay", "relay_expiry_ms"], conflicts_with = "relay")]
+    reconcile_only: bool,
 }
 
 fn main() {
@@ -96,12 +100,13 @@ fn run(args: Args) -> Result<()> {
                 .unwrap_or_else(|| descriptor.with_extension("capability"));
             if let Some(socket) = args.relay_socket {
                 #[cfg(unix)]
-                return relay::serve_owner_unix_with_capability(
+                return relay::serve_owner_unix_with_scope(
                     &connection,
                     &descriptor,
                     &capability,
                     &socket,
                     args.relay_expiry_ms,
+                    args.reconcile_only,
                 );
                 #[cfg(not(unix))]
                 {
@@ -109,11 +114,12 @@ fn run(args: Args) -> Result<()> {
                     anyhow::bail!("Unix relay unavailable");
                 }
             }
-            relay::serve_owner_with_capability(
+            relay::serve_owner_with_scope(
                 &connection,
                 &descriptor,
                 &capability,
                 args.relay_expiry_ms,
+                args.reconcile_only,
             )
         }
         (Some(connection), None, None) => {
@@ -146,6 +152,15 @@ mod tests {
             vec!["mcp", "--connection", "owner", "--relay", "producer"],
             vec!["mcp", "--relay", "producer", "--publish-relay", "new"],
             vec!["mcp", "--relay", "producer", "--relay-expiry-ms", "1"],
+            vec!["mcp", "--relay", "producer", "--reconcile-only"],
+            vec![
+                "mcp",
+                "--connection",
+                "owner",
+                "--publish-relay",
+                "new",
+                "--reconcile-only",
+            ],
             vec!["mcp", "--connection", "owner", "--relay-socket", "socket"],
             vec!["mcp", "--relay", "producer", "--relay-socket", "socket"],
             vec![
@@ -192,6 +207,16 @@ mod tests {
                 "private",
             ],
             vec!["mcp", "--connection", "owner", "--publish-relay", "new"],
+            vec![
+                "mcp",
+                "--connection",
+                "owner",
+                "--publish-relay",
+                "new",
+                "--reconcile-only",
+                "--relay-expiry-ms",
+                "1000",
+            ],
             vec![
                 "mcp",
                 "--connection",

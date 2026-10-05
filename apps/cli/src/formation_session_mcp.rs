@@ -228,15 +228,22 @@ mod tests {
 
     pub(super) fn fixture() -> Result<(tempfile::TempDir, Bridge, FormationSessionMcpServer, String)>
     {
+        fixture_at(
+            u64::try_from(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)?
+                    .as_millis(),
+            )? + 60000,
+        )
+    }
+
+    pub(super) fn fixture_at(
+        deadline_ms: u64,
+    ) -> Result<(tempfile::TempDir, Bridge, FormationSessionMcpServer, String)> {
         std::fs::create_dir_all(".tmp")?;
         let root = tempfile::tempdir_in(".tmp")?;
         let directory = root.path().join("reasoning");
         let producer = producer(directory.clone())?;
-        let deadline_ms = u64::try_from(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_millis(),
-        )? + 60000;
         let input = json!({"schema":"ato.formation-reasoning-input/1","call_id":"search_test_r1_s1","goal":null,
             "frozen_contract_ref":format!("sha256:{}","a".repeat(64)),
             "source_identity":{"archive_digest":format!("sha256:{}","b".repeat(64)),"closure_ref":"closure-test"},
