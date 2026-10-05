@@ -1,0 +1,407 @@
+{
+  "schema": "ato.formation-v0-production-acceptance/1",
+  "measurement_id": "formation-v0-production-control-20261006-01",
+  "production_gate_passed": true,
+  "release_complete": false,
+  "pins": {
+    "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+    "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+    "PWA": "ddb0667619617b564375aff7334f2c3fdaa52799",
+    "API_Worker": "72bdf21b-f49c-499e-8306-367bd315f543",
+    "PWA_Worker": "6fae8032-f653-414c-a514-742e54935edf",
+    "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+    "authority_WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635"
+  },
+  "migration": {
+    "backup_at_rollout_bytes": 26556339,
+    "backup_at_rollout_sha256": "c16eaff74fa652107e5f0e9fb3fbd8d21e84e62c3f6d843239bf98d028695991",
+    "ordered_chain": "0298 through 0326 inclusive",
+    "migration_count_before": 297,
+    "migration_count_after": 326,
+    "unrelated_0194_excluded": true,
+    "original_SQL_unchanged": true,
+    "trigger_query_transport_failed_at": [
+      "0305",
+      "0308"
+    ],
+    "same_SQL_atomic_file_transport_and_actual_ledger_INSERT": true,
+    "all_original_rows_preserved": true,
+    "protected_tables": 17,
+    "foreign_key_violations": 0
+  },
+  "Source": {
+    "attempt_id": "01M46JTFGF3XW1S2J1K4C350BJ",
+    "capability_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc",
+    "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "derivation_ref": "sha256:f6003b2bdd352f3f655bad41dc2e8c0f82944d8b895333eb646f0d360eda932a",
+    "environment_id": "native",
+    "permission": "functional_verification_required",
+    "retained_ref": "sha256:89d129740b97a67e33b18945bc0621b770a7aa19c8454dca929effe444605a2f",
+    "runtime_id": "01M46JKKJN1HMDF5FGV2ZGT5KT",
+    "schema": "ato.formation-source-result-view/1",
+    "search_id": "search_4cacc8480fcfd7a16402cfd56dc73f1f",
+    "source_closure_ref": "sha256:b9db4119bba874e6777fc4fe0c5bb6d40e6b85d68d6a6d471f30227a704f12b5",
+    "source_result_ref": "sha256:faba34a45849091822e606acd87cd75777cd83cb0c83d8070def25f648e3d97e",
+    "target_triple": "aarch64-unknown-linux-gnu"
+  },
+  "functional": {
+    "A": {
+      "ack": "unknown",
+      "compute_instance_id": "cinst_01M46JXNKPEVXSYT843RD2QQPK",
+      "compute_schema_id": "csch_01M46JXNHDWQPJSZCK21XR1N02",
+      "lease_id": "flease_01M46JXP3C9NJ0DYW348YXJR4C",
+      "registration_id": "frreg_01M46JXNHD29JWJTF3P29C8QTP",
+      "run_id": "frun_01M46JXP3C60W5W9EZ03NKDKDY",
+      "satisfy_id": "01M46JXPKZRENKA8A4HC0REA82",
+      "search_id": "search_release_production_20261006_01_A",
+      "status": "running"
+    },
+    "B": {
+      "ack": "unknown",
+      "compute_instance_id": "cinst_01M46JXNKPEVXSYT843RD2QQPK",
+      "compute_schema_id": "csch_01M46JXNHDWQPJSZCK21XR1N02",
+      "lease_id": "flease_01M46K8ACYRPNJ7GADSF9X7HAX",
+      "registration_id": "frreg_01M46JXNHD29JWJTF3P29C8QTP",
+      "run_id": "frun_01M46K8ACY517QGMGYE3BD4A0A",
+      "satisfy_id": "01M46K8AZXTTS037G9PBVGA2G1",
+      "search_id": "search_release_production_20261006_01_B",
+      "status": "running"
+    },
+    "same_instance_and_registration": true,
+    "registration_replay_same_run": true,
+    "state_slot_id": "isslot_01M46JXP4CJRH2MBMWCXFX58MP",
+    "writer_fences": [
+      1,
+      2
+    ],
+    "B_parent_is_A_revision": true,
+    "fresh_same_K_receipts": true,
+    "saved_typed_HTTP_observations": true
+  },
+  "Runtime": {
+    "schema": "ato.formation-production-runtime-proof/1",
+    "attempts": [
+      {
+        "attempt_id": "01M46K8BECS1V4KC0ZD0YQXM0X",
+        "result_accepted": true,
+        "closed": true,
+        "outcome": "pass",
+        "fully_satisfied": true,
+        "candidate_stop": "confirmed",
+        "state": {
+          "kind": "functional_state_outcome",
+          "run_id": "frun_01M46K8ACY517QGMGYE3BD4A0A",
+          "states": [
+            {
+              "parent_revision_ref": "isrev_01M46K0GEDSHZ6XYJAZ5RKCDSZ",
+              "revision_ref": "isrev_01M46K8J2MR59HZ341EPKEYJMX",
+              "state_key": "data",
+              "writer_fence": 2
+            }
+          ],
+          "status": "committed"
+        },
+        "functional_http": {
+          "kind": "functional_http_observations",
+          "observations": [
+            {
+              "guard": false,
+              "observation": {
+                "kind": "request_template",
+                "template": {
+                  "json_bindings": {},
+                  "method": "GET",
+                  "path": "/items"
+                }
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "response_status",
+                "status": 200
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "check": {
+                  "binding": "CONTROL_ITEM",
+                  "json_pointer": "/items/0",
+                  "scalar": "string"
+                },
+                "kind": "response_check",
+                "matched": true
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "request_template",
+                "template": {
+                  "json_bindings": {},
+                  "method": "DELETE",
+                  "path": "/items"
+                }
+              },
+              "operation_index": 1,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "response_status",
+                "status": 200
+              },
+              "operation_index": 1,
+              "port": "app.http"
+            }
+          ]
+        },
+        "result_sha256": "320b93d1bdfee20bf9ba538ac21886083de267669b79c5618311a15a7abbf6cb"
+      },
+      {
+        "attempt_id": "01M46JXQ1NV6XY8Q2JQ6S83YGV",
+        "result_accepted": true,
+        "closed": true,
+        "outcome": "pass",
+        "fully_satisfied": true,
+        "candidate_stop": "confirmed",
+        "state": {
+          "kind": "functional_state_outcome",
+          "run_id": "frun_01M46JXP3C60W5W9EZ03NKDKDY",
+          "states": [
+            {
+              "parent_revision_ref": null,
+              "revision_ref": "isrev_01M46K0GEDSHZ6XYJAZ5RKCDSZ",
+              "state_key": "data",
+              "writer_fence": 1
+            }
+          ],
+          "status": "committed"
+        },
+        "functional_http": {
+          "kind": "functional_http_observations",
+          "observations": [
+            {
+              "guard": false,
+              "observation": {
+                "kind": "request_template",
+                "template": {
+                  "json_bindings": {
+                    "value": "CONTROL_ITEM"
+                  },
+                  "method": "POST",
+                  "path": "/items"
+                }
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "response_status",
+                "status": 201
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "check": {
+                  "binding": "EXPECTED_COUNT",
+                  "json_pointer": "/count",
+                  "scalar": "integer"
+                },
+                "kind": "response_check",
+                "matched": true
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "request_template",
+                "template": {
+                  "json_bindings": {},
+                  "method": "GET",
+                  "path": "/items"
+                }
+              },
+              "operation_index": 1,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "response_status",
+                "status": 200
+              },
+              "operation_index": 1,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "check": {
+                  "binding": "CONTROL_ITEM",
+                  "json_pointer": "/items/0",
+                  "scalar": "string"
+                },
+                "kind": "response_check",
+                "matched": true
+              },
+              "operation_index": 1,
+              "port": "app.http"
+            }
+          ]
+        },
+        "result_sha256": "436c210f253a0b82526b68453e7bcd6b4f4893173838b40606f2776526319360"
+      },
+      {
+        "attempt_id": "01M46JTFGF3XW1S2J1K4C350BJ",
+        "result_accepted": true,
+        "closed": true,
+        "outcome": "pass",
+        "fully_satisfied": true,
+        "candidate_stop": "confirmed",
+        "state": null,
+        "functional_http": null,
+        "result_sha256": "8ab3dd682dcc2c4565fecf95c8396e561acdfa42639d202b8927a546be0c1eb2"
+      }
+    ],
+    "workload_directories": 0
+  },
+  "Native": {
+    "agent": "codex",
+    "version": "0.160.0",
+    "Ato_direct_LLM_calls": 0,
+    "internal_LLM_calls": "unknown",
+    "token_usage": "unknown",
+    "cost": "unknown",
+    "SDK_reported_usage": {
+      "scope": "native context; SDK reported counters only",
+      "internal_LLM_calls": "unknown",
+      "account_charge_usd": "unknown",
+      "last_cumulative_tokens": {
+        "totalTokens": 202711,
+        "inputTokens": 201238,
+        "cachedInputTokens": 159872,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 1473,
+        "reasoningOutputTokens": 51
+      },
+      "coverage": "last SDK update; update events are not LLM calls"
+    }
+  },
+  "Source_consumption": {
+    "D_rounds": 2,
+    "exchanges": 2,
+    "inspections": 0,
+    "deadline_ms": 1791224114580,
+    "search_budget": {
+      "attempts": {
+        "max": 3,
+        "remaining": 2,
+        "reserved": 0,
+        "used": 1
+      },
+      "expanded_bytes": {
+        "max": 134217728,
+        "remaining": 134214870,
+        "reserved": 0,
+        "used": 2858
+      },
+      "stored_bytes": {
+        "max": 134217728,
+        "remaining": 134211584,
+        "reserved": 0,
+        "used": 6144
+      },
+      "transfer_bytes": {
+        "max": 67108864,
+        "remaining": 67102208,
+        "reserved": 0,
+        "used": 6656
+      }
+    }
+  },
+  "promotion_guards": {
+    "checks": [
+      {
+        "name": "ordinary_Run",
+        "status": 409,
+        "error": "source_result_functional_only"
+      },
+      {
+        "name": "public_shared_instance",
+        "status": 409,
+        "error": "source_result_functional_only"
+      },
+      {
+        "name": "public_separate_copy",
+        "status": 409,
+        "error": "source_result_functional_only"
+      },
+      {
+        "name": "install_shared_instance",
+        "status": 409,
+        "error": "source_result_functional_only"
+      },
+      {
+        "name": "install_separate_copy",
+        "status": 409,
+        "error": "source_result_functional_only"
+      }
+    ],
+    "passed": true,
+    "origin": "https://ato.run"
+  },
+  "cleanup": {
+    "encrypted_input_values": 0,
+    "active_or_quarantined_writer": 0,
+    "FK_violations": 0,
+    "platform_flags_count": 0,
+    "own_runtime_manager_stopped": true,
+    "owned_local_Native_Bridge_processes": 0,
+    "runtime_runner_revoked": true,
+    "temporary_private_values_deleted": true,
+    "all_three_results_ACK_closed": true,
+    "all_Search_reservations": 0,
+    "unresolved_UNKNOWN": 0,
+    "secret_scan": {
+      "kinds": 4,
+      "target_files": 22,
+      "hits": [],
+      "low_entropy_EXPECTED_COUNT_not_scannable": true,
+      "scope": "model public files, native events, saved public receipts/descriptors; private state snapshots intentionally contain the functional test item"
+    }
+  },
+  "historical_13_over_12_modified": false,
+  "historical_WBO_reexecuted": false,
+  "new_Source_Search_count": 1,
+  "normal_account_auth": true,
+  "synthetic_Source_Instance_or_private_dispatch_namespace": false,
+  "ordinary_Run_or_publication_promoted": false,
+  "flag_changes": 0,
+  "known_limitations": [
+    "Initial Native local socket path was rejected before inference/workload; same Search/input/deadline reconnected without resetting scope",
+    "Owner inspection tool output secrecy is not universally claimed",
+    "Old production binary is unsafe with Source Result-backed rows; stop new features and forward fix required",
+    "Native SDK reported tokens are not actual provider call counts or invoices"
+  ],
+  "pending": [
+    "new 100 OSS waves",
+    "independent API plans",
+    "final evidence/RFC merge"
+  ]
+}
