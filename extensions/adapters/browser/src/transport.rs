@@ -588,6 +588,10 @@ fn accept_bridge(
     stream: TcpStream,
     expected_origin: &str,
 ) -> Result<WebSocket<TcpStream>, AdapterError> {
+    // Accepted sockets can inherit the listener's nonblocking mode on BSD.
+    // The HTTP upgrade must wait for a fragmented request within its timeout;
+    // only the authenticated transport loop is nonblocking.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let expected_origin = expected_origin.to_owned();
@@ -919,6 +923,61 @@ pub(crate) fn wait_for_apply_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_upgrade_waits_for_a_fragmented_request_on_a_nonblocking_socket() {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).expect("connect fixture");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bound fixture response wait");
+            stream
+                .write_all(b"GET / HTTP/1.1\r\n")
+                .expect("write first header fragment");
+            ready_rx.recv().expect("server starts upgrade");
+            thread::sleep(Duration::from_millis(50));
+            stream
+                .write_all(b"Host: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: http://127.0.0.1:3000\r\n\r\n")
+                .expect("write remaining upgrade headers");
+            let mut response = Vec::new();
+            let mut byte = [0_u8];
+            while !response.ends_with(b"\r\n\r\n") {
+                if stream.read(&mut byte).expect("read upgrade response") == 0 {
+                    break;
+                }
+                response.push(byte[0]);
+                assert!(response.len() <= 4096, "bounded fixture response");
+            }
+            let _ = done_rx.recv();
+            response
+        });
+        let (stream, _) = listener.accept().expect("accept fixture");
+        // Make the inherited BSD mode explicit so the regression runs on all OSes.
+        stream.set_nonblocking(true).expect("nonblocking fixture");
+        ready_tx.send(()).expect("release second header fragment");
+        let result = accept_bridge(stream, "http://127.0.0.1:3000");
+        if let Ok(socket) = &result {
+            let mut byte = [0_u8];
+            assert_eq!(
+                socket
+                    .get_ref()
+                    .read(&mut byte)
+                    .expect_err("transport is nonblocking")
+                    .kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        let _ = done_tx.send(());
+        let response = client.join().expect("fixture client finished");
+        result.expect("fragmented upgrade succeeds");
+        assert!(response.starts_with(b"HTTP/1.1 101 "));
+    }
 
     fn config() -> TransportConfig {
         TransportConfig {
