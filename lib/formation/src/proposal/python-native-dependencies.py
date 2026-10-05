@@ -95,21 +95,21 @@ def execute(mode, plan):
                                      executable_sha256=digest(Path(sys.executable).resolve(strict=True))))
         write(root / 'toolchains.json', tool_evidence)
     elif mode == 'build-dependencies':
-        run([sys.executable, '-m', 'pip', 'download', '--no-input', '--only-binary=:all:', '--dest', str(build_deps),
+        run([sys.executable, '-I', '-m', 'pip', 'download', '--no-input', '--only-binary=:all:', '--dest', str(build_deps),
              *[f"{d['name']}=={d['version']}" for d in plan['build_dependencies']]])
-        run([sys.executable, '-c', plan['lock_operation'], str(build_deps)])
+        run([sys.executable, '-I', '-c', plan['lock_operation'], str(build_deps)])
     elif mode == 'prepare':
         # Bundled ensurepip is part of the pinned Python distribution. Installing
         # build backends then uses only the acquired, hash-locked wheel artifacts.
-        run([sys.executable, '-m', 'venv', str(root / 'build-env')])
-        run([python, '-m', 'pip', 'install', '--no-input', '--no-index', '--only-binary=:all:', '--require-hashes',
+        run([sys.executable, '-I', '-m', 'venv', str(root / 'build-env')])
+        run([python, '-I', '-m', 'pip', 'install', '--no-input', '--no-index', '--only-binary=:all:', '--require-hashes',
              '--find-links', str(build_deps), '-r', str(build_deps / 'requirements.lock')])
     elif mode == 'acquire':
         # Metadata hooks for an sdist also run in the contained dependency phase
         # with only the explicitly installed build backends and allowed network.
         _, native_environment = native_tools(plan['toolchains'])
         environment.update(native_environment)
-        run([python, '-m', 'pip', 'download', '--no-input', '--no-build-isolation', '--dest', str(acquired), '-r', str(requirements)])
+        run([python, '-I', '-m', 'pip', 'download', '--no-input', '--no-build-isolation', '--dest', str(acquired), '-r', str(requirements)])
         write(root / 'acquired.json', artifacts(acquired))
     elif mode == 'build':
         inputs = json.loads((root / 'acquired.json').read_text())
@@ -117,12 +117,12 @@ def execute(mode, plan):
         environment.update(native_environment)
         if artifacts(acquired) != inputs:
             raise ValueError('dependency_artifact_changed')
-        run([python, '-m', 'pip', 'wheel', '--no-input', '--no-index', '--no-deps', '--no-build-isolation',
+        run([python, '-I', '-m', 'pip', 'wheel', '--no-input', '--no-index', '--no-deps', '--no-build-isolation',
              '--wheel-dir', str(wheels), *[str(acquired / artifact['file']) for artifact in inputs]])
         if artifacts(acquired) != inputs:
             raise ValueError('dependency_artifact_changed')
     elif mode == 'seal':
-        run([sys.executable, '-c', plan['lock_operation'], str(wheels)])
+        run([sys.executable, '-I', '-c', plan['lock_operation'], str(wheels)])
         # Set-level lineage includes all resolution inputs, build dependencies
         # and toolchain bytes; output wheels additionally name version + hash.
         provenance = dict(schema='ato.python-wheel-build/1', requirements_sha256=plan['requirements_sha256'],
@@ -134,9 +134,36 @@ def execute(mode, plan):
                           wheels=json.loads((wheels / 'artifacts.json').read_text()))
         if artifacts(acquired) != provenance['acquired']:
             raise ValueError('dependency_artifact_changed')
+        # An acquired wheel is copied unchanged by pip wheel. Preserve its
+        # identity once, alongside the original sdists and completed wheels.
+        outputs = {a['file']: a for a in provenance['wheels']['artifacts']}
+        retained_inputs = []
+        for artifact in provenance['acquired']:
+            output = outputs.get(artifact['file'])
+            unchanged = (artifact['file'].endswith('.whl') and output
+                         and output['sha256'] == artifact['sha256']
+                         and output['bytes'] == artifact['bytes'])
+            retained_inputs.append(dict(artifact, retained_path=(
+                'wheels/' if unchanged else 'acquired/') + artifact['file']))
+        provenance['retained_inputs'] = retained_inputs
         write(root / 'provenance.json', provenance)
         print(json.dumps(dict(schema=provenance['schema'], wheel_count=len(provenance['wheels']['artifacts']))))
     elif mode == 'cleanup':
+        provenance = json.loads((root / 'provenance.json').read_text())
+        if artifacts(acquired) != provenance['acquired']:
+            raise ValueError('dependency_artifact_changed')
+        for artifact in provenance['retained_inputs']:
+            name = artifact['file']
+            if Path(name).name != name:
+                raise ValueError('dependency_artifact_path_invalid')
+            if artifact['retained_path'] == 'wheels/' + name:
+                original, completed = acquired / name, wheels / name
+                if (not name.endswith('.whl')
+                        or digest(original) != artifact['sha256']
+                        or digest(completed) != artifact['sha256']
+                        or original.stat().st_size != completed.stat().st_size):
+                    raise ValueError('dependency_artifact_changed')
+                original.unlink()
         # Generated build inputs and pinned wheels/provenance stay. A venv's
         # interpreter symlinks and transient pip cache are not retained output.
         for directory in (root / 'build-env', root / 'cache'):
