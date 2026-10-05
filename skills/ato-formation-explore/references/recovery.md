@@ -2,6 +2,8 @@
 
 ownerは保存済みUNKNOWNに対して、Native launcherの`--reconcile-only`を選べる。新しいNative文脈へ公開するのは`status / next`だけで、同じSearchの保存状態を報告して停止する。期限後も報告だけを最大120秒で行い、owner campaignのwall clockが先ならそこで止める。元Searchのdeadlineを変更せず、新しい探索入力・D・inspection・実行は取得できない。報告turnのSDK usageは追加の探索exchangeと混ぜず、内部call・実請求が不明なら不明とする。期限後のACK・result照合・cleanupはownerの既存経路で継続する。
 
+launcherはowner MCP brokerにも`--reconcile-only`と報告windowの`--relay-expiry-ms`を渡す。brokerは保存済みUNKNOWN・未解決attempt・`input: null`を確認し、署名対象のrelay bindingへ読み取り専用scopeを固定する。`submit`はtool一覧から除外し、直接呼び出されてもdispatch前に拒否する。通常relayの期限は元Search deadlineを超えられない。broker更新前のbinaryは期限後接続を拒否するため、その失敗を再探索で置き換えない。
+
 再接続時は`status`で保存済み応答、未ACK結果、実行中attempt、終端理由を確認し、その後`next`を取得する。結果の不明を新たな推論やRuntime attemptの理由にしない。どの段階でも元のdeadlineと消費枠を維持する。
 
 | 保存済み状態 | Producerの操作 |
