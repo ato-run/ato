@@ -1420,6 +1420,31 @@ fn shared_provider_infrastructure_failure_preserves_one_round_on_restart() {
 }
 
 #[test]
+fn pre_dispatch_call_exhaustion_is_budget_terminal_and_keeps_the_original_clock() {
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(serde_json::from_value(json!({
+        "round_timeout_ms":600000,"inspection_timeout_ms":30000,"inspection_source_bytes":32768
+    })).unwrap());
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms:100, expires_at_ms:60000,
+        outcome:Some(ProposalRoundOutcome::ProviderError), candidates:vec![], derivations:vec![],
+        diagnostics:vec!["reasoning_call_budget_exhausted".into()], inspection_requests:vec![],
+    });
+    let restored:SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    for now in [6000, 6001] {
+        assert_eq!(decide_next(&restored, &[], now).unwrap(), SearchAction::Finish {
+            reason:Termination::BudgetExhausted
+        });
+    }
+    assert_eq!(restored.budget, s.budget);
+    assert_eq!(restored.deadline_ms, s.deadline_ms);
+    assert!(restored.proposal_history.is_empty());
+    assert_eq!(decide_next(&restored, &[], 60000).unwrap(), SearchAction::Finish {
+        reason:Termination::DeadlineExceeded
+    });
+}
+
+#[test]
 fn validated_declines_have_distinct_terminal_reasons_without_changing_outcome_rows() {
     use ato_formation::exploration::ReasoningLimits;
     for (reason, terminal, evidence) in [
