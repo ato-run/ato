@@ -89,6 +89,26 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
         }
     }
 
+    // Existing-file writes are deliberately distinct from full read-write:
+    // CUDA names descendant threads through procfs, but needs no ability to
+    // create/remove files or execute them. Its O_TRUNC open also needs the
+    // separate Truncate right on ABI 3 and later.
+    for path in &policy.file_write_paths {
+        anyhow::ensure!(
+            path.exists(),
+            "required file-write path is absent: {}",
+            path.display()
+        );
+        for rule in path_beneath_rules([path], AccessFs::WriteFile | AccessFs::Truncate) {
+            created_ruleset = created_ruleset
+                .add_rule(rule.with_context(|| {
+                    format!("Cannot open required existing-file-write path {path:?}")
+                })?)
+                .with_context(|| format!("Cannot install existing-file-write rule for {path:?}"))?;
+        }
+        info!(path = %path.display(), access = "write_file,truncate", "explicit existing-file-write sandbox rule");
+    }
+
     // Add IPC socket paths (injected by ato-cli IPC Broker)
     for path in &policy.ipc_socket_paths {
         if path.exists() || path.parent().is_some_and(|p| p.exists()) {
