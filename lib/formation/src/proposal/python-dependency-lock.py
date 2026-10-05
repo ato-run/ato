@@ -4,6 +4,8 @@ No source edits, package import or arbitrary hook execution. Dependencies are
 resolved by pinned pip; this stdlib operation records and verifies their bytes.
 """
 import hashlib
+from email.parser import Parser
+from email.policy import compat32
 import json
 from pathlib import Path
 import re
@@ -31,13 +33,26 @@ for path in wheels:
                     and len(i.filename.split('/')) == 2]
         if len(metadata) != 1 or metadata[0].file_size > 1024**2:
             raise ValueError('dependency_wheel_metadata_invalid')
+        # Core metadata uses email headers; its description body can contain
+        # examples named Name/Version without declaring another identity.
+        headers = Parser(policy=compat32).parsestr(
+            wheel.read(metadata[0]).decode('utf-8'), headersonly=True)
+        if headers.defects:
+            raise ValueError('dependency_wheel_metadata_invalid')
         fields = {}
-        for line in wheel.read(metadata[0]).decode('utf-8').splitlines():
-            if line.startswith(('Name: ', 'Version: ')):
-                key, value = line.split(': ', 1)
-                if key in fields:
-                    raise ValueError('dependency_wheel_metadata_duplicate')
-                fields[key] = value
+        for key in ('Name', 'Version'):
+            values = headers.get_all(key, [])
+            if len(values) > 1:
+                with path.open('rb') as stream:
+                    artifact_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                # Identify refused bytes without reporting header/body values.
+                print(json.dumps(dict(schema='ato.python-wheel-metadata-failure/1',
+                                      artifact_sha256=artifact_digest,
+                                      field=key, count=len(values))), file=sys.stderr)
+                raise ValueError('dependency_wheel_metadata_duplicate')
+            if not values:
+                raise ValueError('dependency_wheel_metadata_invalid')
+            fields[key] = values[0].strip()
     name, version = fields['Name'], fields['Version']
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', name) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.+_-]*', version):
         raise ValueError('dependency_wheel_identity_invalid')
