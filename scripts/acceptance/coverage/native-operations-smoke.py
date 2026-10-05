@@ -32,6 +32,9 @@ def wheel(path, name, module, source, metadata=None):
 
 def python_case(root):
     source = root / 'python'; source.mkdir()
+    # Builtin hashing/install tooling must not import same-named source modules.
+    for module in ('hashlib', 'email', 'pip', 'base64'):
+        (source / (module + '.py')).write_text("raise RuntimeError('ambient_source_imported')\n")
     backend = source / 'ato_fixture_backend-1.0.0-py3-none-any.whl'
     # The fixture builds a real wheel through pip/PEP 517, using only stdlib.
     backend_code = '''import pathlib, zipfile
@@ -62,28 +65,47 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     with tarfile.open(sdist, 'w:gz') as archive:
         info = tarfile.TarInfo('ato_fixture_app-1.0.0/pyproject.toml'); info.size = len(pyproject)
         archive.addfile(info, io.BytesIO(pyproject))
-    requirements = source / 'requirements.txt'; requirements.write_text(sdist.as_uri() + '\n')
+    requirements = source / 'requirements.txt'; requirements.write_text(sdist.as_uri() + '\n' + backend.as_uri() + '\n')
     plan = dict(schema='ato.python-build-plan/1', python_version=sys.version.split()[0], root=str(source / 'operation'), requirements=str(requirements),
                 requirements_sha256=sha(requirements), build_dependencies=[dict(name='ato-fixture-backend', version='1.0.0')],
                 toolchains=[], build_network='denied', lock_operation=(HELPERS / 'python-lock-operation.py').read_text())
     environment = dict(os.environ, PIP_NO_INDEX='1', PIP_FIND_LINKS=str(source), TMPDIR=str(root / 'tmp'))
     helper = (HELPERS / 'python-native-operation.py').read_text()
     for mode in ('check', 'build-dependencies', 'prepare', 'acquire', 'build', 'seal'):
-        subprocess.run([sys.executable, '-c', helper, mode, json.dumps(plan)], env=environment, check=True, timeout=60)
+        subprocess.run([sys.executable, '-I', '-c', helper, mode, json.dumps(plan)],
+                       cwd=source, env=environment, check=True, timeout=60)
     provenance = json.loads((source / 'operation/provenance.json').read_text())
     assert provenance['acquired'][0]['sha256'] == sha(sdist).removeprefix('sha256:')
     assert provenance['wheels']['artifacts'][0]['version'] == '1.0.0'
     directory = source / 'operation/wheels'
     target = source / 'installed'
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--require-hashes', '--only-binary=:all:',
+    subprocess.run([sys.executable, '-I', '-m', 'pip', 'install', '--no-index', '--no-compile', '--require-hashes', '--only-binary=:all:',
                     '--find-links', str(directory), '--target', str(target), '-r', str(directory / 'requirements.lock')],
-                   env=environment, check=True, timeout=60)
+                   cwd=source, env=environment, check=True, timeout=60)
+    assert not list(target.glob('**/*.pyc'))
     subprocess.run([sys.executable, '-c', 'import ato_fixture_app; assert ato_fixture_app.VALUE == 42'],
-                   env=dict(environment, PYTHONPATH=str(target)), check=True, timeout=10)
-    subprocess.run([sys.executable, '-c', helper, 'cleanup', json.dumps(plan)], env=environment, check=True, timeout=10)
+                   env=dict(environment, PYTHONPATH=str(target), PYTHONDONTWRITEBYTECODE='1'), check=True, timeout=10)
+    completed = directory / backend.name
+    original_bytes = completed.read_bytes()
+    completed.write_bytes(original_bytes + b'altered-after-seal')
+    refused = subprocess.run([sys.executable, '-I', '-c', helper, 'cleanup', json.dumps(plan)],
+                             cwd=source, env=environment, capture_output=True, text=True, timeout=10)
+    assert refused.returncode != 0 and 'dependency_artifact_changed' in refused.stderr
+    assert (source / 'operation/acquired' / backend.name).exists()
+    completed.write_bytes(original_bytes)
+    subprocess.run([sys.executable, '-I', '-c', helper, 'cleanup', json.dumps(plan)],
+                   cwd=source, env=environment, check=True, timeout=10)
     assert not (source / 'operation/build-env').exists()
+    assert not (source / 'operation/acquired' / backend.name).exists()
+    assert (source / 'operation/acquired' / sdist.name).exists()
+    assert sha(source / 'operation/wheels' / backend.name) == sha(backend)
+    retained = next(a for a in provenance['retained_inputs'] if a['file'] == backend.name)
+    assert retained['retained_path'] == 'wheels/' + backend.name
     return dict(sdist_to_wheel=True, offline_hash_install=True, provenance=True,
-                description_not_an_identity=True)
+                description_not_an_identity=True, identical_acquired_wheel_retained_once=True,
+                original_sdist_retained=True, bytecode_not_captured=True,
+                changed_completed_wheel_refused_before_deduplication=True,
+                source_cannot_shadow_builtin_metadata_or_installer=True)
 
 
 def wheel_metadata_refusals(root):
