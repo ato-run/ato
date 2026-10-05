@@ -509,6 +509,10 @@ impl TemporaryRealization {
             if let Err(error) =
                 wait_until_ready(&per_endpoint, &context, launched, &controlled_probe)
             {
+                // The Runtime readiness trait carries strings. Recheck the
+                // original control before mapping this error, so deadline
+                // identity survives without parsing untrusted output/prose.
+                let error = readiness_failure(error, control);
                 // The port explanation first: the output tail is long, and
                 // a bounded report must not lose the actionable part.
                 let mut detail = String::new();
@@ -641,6 +645,14 @@ struct ControlledReadiness<'a> {
     control: Option<&'a ExecutionControl>,
     loopback: bool,
 }
+
+fn readiness_failure(error: anyhow::Error, control: Option<&ExecutionControl>) -> anyhow::Error {
+    match control.map(|c| c.remaining(AttemptPhase::Launch)) {
+        Some(Err(deadline)) => deadline.context(error),
+        _ => error,
+    }
+}
+
 impl ReadinessProbe for ControlledReadiness<'_> {
     fn probe(&self, host_port: u16, path: &str) -> std::result::Result<(), String> {
         let Some(control) = self.control else {
@@ -806,6 +818,29 @@ fn make_writable(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_readiness_preserves_typed_deadline_and_does_not_parse_output() {
+        use ato_formation::failure::FormationFailure;
+        let expired = ExecutionControl::new(crate::control::now_ms().saturating_sub(1));
+        let error = readiness_failure(anyhow::anyhow!("private readiness context"), Some(&expired));
+        let typed = error.downcast_ref::<FormationFailure>().unwrap();
+        assert_eq!(typed.code, "round_deadline_exceeded");
+        assert!(!typed.message.contains("private readiness context"));
+
+        let live = ExecutionControl::new(crate::control::now_ms() + 5_000);
+        for control in [Some(&live), None] {
+            let error = readiness_failure(
+                anyhow::anyhow!("untrusted output: round_deadline_exceeded"),
+                control,
+            );
+            assert!(error.downcast_ref::<FormationFailure>().is_none());
+            assert_eq!(
+                error.to_string(),
+                "untrusted output: round_deadline_exceeded"
+            );
+        }
+    }
 
     #[test]
     fn endpoint_names_follow_the_runtime_abi() {
