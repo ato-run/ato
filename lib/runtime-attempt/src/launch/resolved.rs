@@ -162,6 +162,15 @@ pub struct ResolvedRuntimeLaunchContext {
     secrets: Vec<ResolvedSecret>,
     state_attachments: Vec<ResolvedStateAttachment>,
     endpoints: Vec<ResolvedEndpoint>,
+    read_only_inputs: Vec<ResolvedReadOnlyInput>,
+}
+
+/// An immutable input the Runner delivered for this Run (a Model Set): a host
+/// path the workload may read and never write, named to it by `env_name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReadOnlyInput {
+    pub env_name: String,
+    pub path: PathBuf,
 }
 
 impl ResolvedRuntimeLaunchContext {
@@ -217,7 +226,19 @@ impl ResolvedRuntimeLaunchContext {
             secrets,
             state_attachments,
             endpoints,
+            read_only_inputs: Vec::new(),
         })
+    }
+
+    /// Delivered read-only inputs. Only a host-boundary launch can honour
+    /// them in v0; every other launch refuses a context that has any.
+    pub fn with_read_only_inputs(mut self, inputs: Vec<ResolvedReadOnlyInput>) -> Self {
+        self.read_only_inputs = inputs;
+        self
+    }
+
+    pub fn read_only_inputs(&self) -> &[ResolvedReadOnlyInput] {
+        &self.read_only_inputs
     }
 
     pub fn workspace_root(&self) -> &Path {
