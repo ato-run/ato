@@ -79,7 +79,9 @@
     73,
     74,
     75,
-    76
+    76,
+    77,
+    78
   ],
   "preregistered_plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
   "Runtime_builder_bound": false,
@@ -7742,14 +7744,194 @@
       },
       "ordinary_Run_authorized": false,
       "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 77,
+      "name": "Memos",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "a80576a6def3c241c7c73e07448c8d2d8cd582bd",
+      "source_closure_ref": "sha256:d78cfc2fcabb5bb9c80d249871387f8c54bbee2bd96912145cbd4d27d9463987",
+      "K_ref": "sha256:f789bc2459ebd22be4c222b562e237514e54131a27a9edf9d231f6872decf6d7",
+      "search_id": "search_1a7325d200ce08d4c11245004aeb3d94",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791242929554,
+      "authority_deadline_ms": 1791242956878,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 73204,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 259544,
+          "inputTokens": 258574,
+          "cachedInputTokens": 220800,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 970,
+          "reasoningOutputTokens": 32
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "go_toolchain_unavailable",
+              "detail": "The root go.mod declares module github.com/usememos/memos and Go 1.27.0. The frozen execution catalog has no Go toolchain or Go dependency/build operation.",
+              "source": {
+                "digest": "sha256:dfd247ec67ccedd455972e69065b213c56930ad594f938a5cf5381bb7cf69c18",
+                "file_id": "f_33ef32bf6c23acb95f5902d7"
+              }
+            },
+            {
+              "code": "oci_alternative_unavailable",
+              "detail": "The root README documents Docker deployment. Trusted capabilities report source_oci_builder_unavailable and no available approved OCI image; OCI Runtime is unavailable. No source breakage or Runtime PASS is established.",
+              "source": {
+                "digest": "sha256:d56e72cbf39489aca277001916fdff9d77b4db17e0ec122a19a18009291c1342",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        },
+        {
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 78,
+      "name": "Gatus",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "ae605f291928ed9b3bdbe60ae5528cc57631433b",
+      "source_closure_ref": "sha256:88be519b848e2a4e35e90c3a22eb2a10b26c7986e500943734e7998f25945376",
+      "K_ref": "sha256:085f168b780cbefeafe9f6221fd30f474a7d2f4257b3dece39a9d2ceeaeac46a",
+      "search_id": "search_1f83a322e88a455a9dee4166d9d524b8",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791243062847,
+      "authority_deadline_ms": 1791243082750,
+      "execution_pin": null,
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "stopped",
+      "category": "infrastructure_failure",
+      "termination_reason": "owner_stopped",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 108000,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {},
+        "SDK_cost_estimate_usd": 0,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": true,
+      "Native_turns_completed": 0,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
     }
   ],
   "category_counts": {
-    "unsupported_capability": 44,
+    "unsupported_capability": 45,
     "withheld_old_UNKNOWN": 1,
     "initial_PASS": 7,
     "no_progress": 15,
-    "infrastructure_failure": 4,
+    "infrastructure_failure": 5,
     "needs_input": 2,
     "repair_PASS": 2,
     "budget_exhausted": 1
@@ -10215,6 +10397,847 @@
     {
       "schema": "ato.formation-OSS100-wave-gate/1",
       "indices": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78
+      ],
+      "Source_admission_caps_without_Search": [
+        {
+          "schema": "ato.formation-Source-admission-cap/1",
+          "immutable_Source_Rust_verified": true,
+          "archive_sha256": "25545f2d19086cfb2820fd21738ab236f257369b5e2e6aed136a69faa0a17107",
+          "source_closure_ref": "sha256:4c2e6fd829ab62891f6d8241a3fc95e7acdba5d32bb2239a0c7589905017a338",
+          "K_ref": "sha256:1271198520bd777a4d7d2578c8d9c73095a6ff7f79205eb198d2cd37fc65ecb3",
+          "minimum_raw_archive_file_bytes": 270896094,
+          "physical_CLI_archive_cap_bytes": 268435456,
+          "eligible_regular_files": 11074,
+          "Source_unchanged": true,
+          "Source_programs_executed": 0,
+          "Search_created": false,
+          "Native_context_started": false,
+          "CLI_execution_not_attempted": true,
+          "product_pin": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+          "capture_module_sha256": "aedd93ee65b2b6127ad5865f0ac28b384db27aec5a4924f909ec75a464bb4dcf",
+          "transport_module_sha256": "9c349e16d90bfb842af06be0be0d5dee3cc0198d0f2354c01483d461447ed0a0",
+          "basis": "Pinned CLI ArchiveWriter emits uncompressed tar; regular file bytes alone exceed its cap"
+        }
+      ],
+      "authority_and_Runtime_checked_before_each_retirement": true,
+      "remote_checkpoint": {
+        "wave_gate_passed": true,
+        "cells": [
+          {
+            "index": 1,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 3,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 4,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 5,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 6,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 7,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 8,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 9,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 10,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 11,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 12,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 13,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 14,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 15,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 16,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 17,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 18,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 19,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 20,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 21,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 22,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 23,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 24,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 25,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 26,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 27,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 28,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 29,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 30,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 31,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 32,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 33,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 34,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 35,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 36,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 37,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 38,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 39,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 40,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 41,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 42,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 43,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 44,
+            "Source_admission_rejection_before_Search": {
+              "schema": "ato.formation-Source-provenance-admission/1",
+              "kind": "preregistered_license_digest_mismatch",
+              "archive_sha256": "e4a7a3a320de567061c7885a228e596d084a5c95e7aa46acc7e070a8af27cc24",
+              "source_closure_ref": "sha256:c7887c15d66b4f1fe92913776cef405160c97ac96bdec8c85a5b021bb269f44e",
+              "K_ref": "sha256:1445750f6ff2241c6b4b4af068bfea89008f85351f4dac93f76ae6c5fe31bb0d",
+              "license_file": "LICENSE",
+              "expected_license_sha256": "5e23bb98e12cf193c829d536ee73d165b73f393c2e78b5f6dbbda3607945423b",
+              "actual_license_sha256": "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9209a7c2a11399d6",
+              "archive_and_Source_closure_match_frozen_plan": true,
+              "Source_unchanged": true,
+              "Search_created": false,
+              "Native_context_started": false,
+              "Source_programs_executed": 0,
+              "CLI_execution_not_attempted": true
+            },
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 45,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 46,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 47,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 48,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 49,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 50,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 51,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 52,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 53,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 54,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 55,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 56,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 57,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 58,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 59,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 60,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 61,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 62,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 63,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 64,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 65,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 66,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 67,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 68,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 69,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 70,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 71,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 72,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 74,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 75,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 76,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 77,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 78,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          }
+        ],
+        "available_bytes": 30608637952,
+        "next_declared_expanded_stored_bytes": 3221225472,
+        "disk_floor_bytes": 21474836480
+      },
+      "aggregate_campaign_audit": {
+        "schema": "ato.native-acceptance-start-admission/1",
+        "measurement_id": "formation-v0-OSS100-native-20261006-01",
+        "used": {
+          "D_rounds": 80,
+          "exchanges": 132,
+          "Runtime_attempts": 19,
+          "inspections": 43,
+          "sequential_elapsed_seconds": 8596,
+          "searches": 75
+        },
+        "held": {
+          "D_rounds": 0,
+          "exchanges": 0,
+          "Runtime_attempts": 0,
+          "inspections": 0,
+          "sequential_elapsed_seconds": 0,
+          "searches": 0
+        },
+        "requested": {},
+        "exceeded": {},
+        "admitted": true,
+        "direct_API_ledger_modified": false
+      },
+      "secret_scan_hits": 0,
+      "SDK_counters_separate_from_actual_calls_and_invoice": true,
+      "historical_13_12_and_WBO_preserved": true,
+      "at_ms": 1791241465853
+    },
+    {
+      "schema": "ato.formation-OSS100-wave-gate/1",
+      "indices": [
         11,
         12,
         13,
@@ -10596,14 +11619,14 @@
     }
   ],
   "consumed": {
-    "new_Searches": 73,
-    "D_rounds": 78,
-    "exchanges": 129,
+    "new_Searches": 75,
+    "D_rounds": 80,
+    "exchanges": 132,
     "Runtime_attempts": 19,
     "inspections": 43,
-    "elapsed_ms": 8377281
+    "elapsed_ms": 8558485
   },
-  "Native_contexts_started": 65,
+  "Native_contexts_started": 67,
   "owner_cleanup_recovery_028": {
     "original_halt_retained": true,
     "halted_after_index": 28,
