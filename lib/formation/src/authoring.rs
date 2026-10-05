@@ -384,6 +384,20 @@ pub struct BoundContract {
     pub requirements: Vec<BoundRequirement>,
 }
 
+/// An immutable *logical* input reference of a route.
+///
+/// `content_ref` names exactly one immutable object; `protocol` decides how it
+/// is resolved and what it references in turn. It is not, in general, "an
+/// object inside the bundle":
+///
+/// - `ato.workspace@1` — the workspace tree; the tree and everything it
+///   references are in the bundle closure;
+/// - `ato.model-set@1` — a Model Set manifest
+///   ([`crate::model_set::ModelSetManifest`]); the manifest is in the bundle,
+///   the Model Objects it lists are resolved by digest through the data plane.
+///
+/// A consumer that does not know a protocol refuses the input rather than
+/// guessing how to resolve it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundInput {
