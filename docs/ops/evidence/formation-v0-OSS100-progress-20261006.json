@@ -1,0 +1,217 @@
+{
+  "schema": "ato.formation-OSS100-progress/1",
+  "measurement_id": "formation-v0-OSS100-native-20261006-01",
+  "complete": false,
+  "cohort_size": 100,
+  "completed_or_withheld_indices": [
+    1,
+    2,
+    3
+  ],
+  "preregistered_plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
+  "Runtime_builder_bound": false,
+  "historical_13_12_and_WBO_unchanged": true,
+  "unique_OSS_PASS": 1,
+  "Native_unique_OSS_PASS": {
+    "codex": 0,
+    "claude-code": 0
+  },
+  "preset_only_PASS": 1,
+  "final_cleanup_confirmed_for_completed_cells": true,
+  "actual_internal_calls_and_billing": "unknown",
+  "SDK_reported_tokens_are_not_call_count_or_invoice": true,
+  "results": [
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 1,
+      "name": "Excalidraw",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "source_closure_ref": "sha256:50d99706c2e690d4d5c0d4353d46a8666b25f74e148ff51def1181ab70943dfc",
+      "K_ref": "sha256:3bace44e436305e279fd23a5bfd8d25054d4a7c142e9c5f0a2f70394e5c28131",
+      "search_id": "search_601cf1e63049dce6879505ca8b1f706b",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791225878814,
+      "authority_deadline_ms": 1791225993872,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "inspections": 1,
+      "elapsed_ms": 190384,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 286667,
+          "inputTokens": 285510,
+          "cachedInputTokens": 238464,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1157,
+          "reasoningOutputTokens": 46
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "yarn_dependency_operation_unavailable",
+              "detail": "The root manifest declares yarn@1.22.22 and delegates app build/start scripts to Yarn. Acquired lockfile text identifies Yarn lockfile v1. Frozen Node dependency operations admit npm_ci and npm_rebuild, with no Yarn acquisition operation or lockfile conversion capability.",
+              "source": {
+                "digest": "sha256:7b7a3a1ac12b2a3d15ee280c02abce3fb4beafdd7156a05b4e9c5446aa66bb1c",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "dependency_network_outside_ceiling",
+              "detail": "Acquired Yarn lockfile entries resolve tarballs from registry.yarnpkg.com; this host is absent from the frozen dependency/build network ceiling."
+            },
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "The root Dockerfile offers a Yarn-based static build, but frozen source_oci capabilities report configured:false, builder_bound:false and available:false; no acquired OCI image is available.",
+              "source": {
+                "digest": "sha256:446e034f85b4383450d66da3cce14a0787bf37a9ba6db93c1630798bb79fdba4",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_dependency_operation"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 2,
+      "name": "WBO",
+      "assigned_agent": "claude-code",
+      "category": "withheld_old_UNKNOWN",
+      "Source_reexecuted": false,
+      "new_Searches": 0,
+      "D_rounds": 0,
+      "exchanges": 0,
+      "Runtime_attempts": 0,
+      "Native_context_started": false,
+      "unique_OSS_PASS": false,
+      "old_UNKNOWN_record_unchanged": true
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 3,
+      "name": "Uptime Kuma",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "b6adc19d00e4e6700f4b6ffc64a5c4e105e8004c",
+      "source_closure_ref": "sha256:ede8a1c9d2b2b5d90c6f11b7ccbe32329d4e391b1089d8709a1eb9628371d297",
+      "K_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+      "search_id": "search_5c2059fe3be7ad8b84237e2062971c76",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791226704349,
+      "authority_deadline_ms": 1791226726707,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "satisfied",
+      "category": "initial_PASS",
+      "termination_reason": "submitted",
+      "unique_OSS_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 0,
+      "exchanges": 0,
+      "Runtime_attempts": 1,
+      "inspections": 0,
+      "elapsed_ms": 30997,
+      "receipt": {
+        "attempt_id": "01M46N6MNNBGWCHAD0EK4HRG6N",
+        "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+        "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:5d597639311192a6a0f61c182166755486927f5d0cf6387f4871669aeb379f05",
+        "status": "k_reached_awaiting_assessment"
+      },
+      "SDK_reported_usage": null,
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": true,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": false,
+      "Native_turns_completed": 0,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    }
+  ]
+}

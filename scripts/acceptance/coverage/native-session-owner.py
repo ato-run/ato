@@ -30,6 +30,20 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def source_declaration_pass(view):
+    """A product preset may finish before any Native exchange is available."""
+    progress = view.get("progress", {})
+    receipt = progress.get("receipt")
+    attempts = progress.get("search_budget", {}).get("attempts", {})
+    return (progress.get("status") in ("satisfied", "k_reached_awaiting_assessment")
+            and progress.get("rounds_consumed") == 0 and view.get("exchanges_used") == 0
+            and isinstance(receipt, dict) and receipt.get("fully_satisfied") is True
+            and receipt.get("status") == "k_reached_awaiting_assessment"
+            and isinstance(receipt.get("attempt_id"), str) and bool(receipt["attempt_id"])
+            and receipt.get("contract_ref") == progress.get("contract_ref")
+            and type(attempts.get("used")) is int and attempts["used"] > 0)
+
+
 def load_plan(path):
     plan = json.loads(path.read_text())
     BUDGET.audit(plan, [])  # Strict ceiling/request types, including empty plans.
@@ -134,7 +148,9 @@ def refresh(plan, ledger, ato, requested=None, reader=None):
                     or len(entry["snapshots"]) != 1
                     or seal.get("snapshot_sha256") != fingerprint(entry["snapshots"][0])
                     or seal.get("descriptor_sha256") != fingerprint(json.loads(connection.read_text()))
-                    or type(entry.get("native_exit_code")) is not int):
+                    or not (type(entry.get("native_exit_code")) is int
+                            or (entry.get("native_not_required") == "source_declaration_PASS"
+                                and source_declaration_pass(entry["snapshots"][0])))):
                 raise ValueError("campaign_terminal_evidence_changed")
             view = entry["snapshots"][0]
             if view["progress"]["status"] not in TERMINAL or view.get("input") is not None:
@@ -276,8 +292,6 @@ def retire_search(plan, ledger_path, args, reader=None):
         entry = entries[0]
         if entry.get("terminal_retirement") is not None:
             raise ValueError("campaign_Search_retired")
-        if type(entry.get("native_exit_code")) is not int:
-            raise ValueError("campaign_Native_completion_required")
         # Read the actual live Bridge, not a previous terminal-looking cache.
         def terminal_reader(connection):
             if reader:
@@ -298,6 +312,12 @@ def retire_search(plan, ledger_path, args, reader=None):
                         or view["search_id"] != descriptor["search_id"]
                         or view["configuration_ref"] != descriptor["configuration_ref"]):
                     raise ValueError("campaign_terminal_reconciliation_required")
+                if type(entry.get("native_exit_code")) is not int:
+                    if not source_declaration_pass(view):
+                        raise ValueError("campaign_Native_completion_required")
+                    # A completed product preset has no agent input. Do not invent
+                    # a Native exit code or dispatch a reporting turn to retire it.
+                    entry["native_not_required"] = "source_declaration_PASS"
             return view
         report = refresh(plan, ledger, args.ato, reader=terminal_reader)
         if not report["admitted"]:
