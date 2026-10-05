@@ -61,6 +61,16 @@ Node lifecycle/native rebuilding is a typed operation with declared toolchains a
 conditions. Acquiring dependencies with scripts ignored is not a runnable build.
 Neither operation embeds application-specific commands in presets.
 
+Node `setup_scripts` names up to four distinct scripts from the frozen manifest.
+It requires the Node `launch_script` route and is unavailable for static, Python
+and OCI routes. The ordinary process adapter runs these scripts sequentially
+after state and private Runtime grants are attached, then runs the declared
+launch script. They share its containment, network, resource limits, process
+group and original execution deadline. Validate the manifest hash and every
+script key before any preparation effect; a preparation failure never launches
+the service. Empty preparation keeps earlier D bytes unchanged. This is a
+source-owned Adapter operation, not a new Core primitive or a remote migration.
+
 Variables use the existing encrypted owner store, metadata, assignment and Runtime
 grant. CLI/UI show needs-input metadata, acquisition guidance, reuse choice and
 scope. Stop explicitly on scope mismatch, ambiguity, revocation or expiry. Values

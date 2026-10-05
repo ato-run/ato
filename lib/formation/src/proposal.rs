@@ -3,6 +3,7 @@
 //! This core has no provider transport, durable storage or execution authority.
 mod execution_plan;
 mod native_dependencies;
+pub use native_dependencies::runtime_requirements as native_runtime_requirements;
 mod node_static_workspace;
 mod python_http;
 mod source_context;
@@ -686,6 +687,11 @@ fn compile_proposal(
             (compiled, base.clone())
         }
     };
+    // Match the existing Coordinator storage boundary before producing an
+    // admitted verdict. An oversized recipe is a typed refusal, never SQL 500.
+    if compiled.capsule_toml.len() > 65_536 {
+        return Err(ProposalError("proposal_recipe_byte_limit"));
+    }
     candidate.derivation_ref = compiled.derivation_ref.clone();
     // Content key ONLY within the frozen search domain (opaque IDs are local).
     // It is not a global semantic Ref; persistence must pair it with search_id.
@@ -718,21 +724,14 @@ pub fn validate_candidate_scope(
         return Err(ProposalError("proposal_registry_full"));
     }
     for candidate in generated {
-        let new_scope =
-            authorization.execution_plan.as_ref().is_some_and(|t| {
-                let ceiling = t.candidate(source, candidate.derivation_ref.clone());
-                let mut compared = candidate.clone();
-                compared.provisions = ceiling.provisions.clone();
-                compared == ceiling
-                    && (!candidate.provisions.is_empty() || t.source_oci.is_some())
-                    && candidate
-                        .provisions
-                        .iter()
-                        .all(|p| ceiling.provisions.contains(p))
-                    && candidate.provisions.windows(2).all(|p| p[0] < p[1])
-            }) || authorization.python_http_process.as_ref().is_some_and(|t| {
+        let new_scope = authorization
+            .execution_plan
+            .as_ref()
+            .is_some_and(|t| t.candidate_scope(source, candidate))
+            || authorization.python_http_process.as_ref().is_some_and(|t| {
                 t.candidate(source, candidate.derivation_ref.clone()) == *candidate
-            }) || authorization
+            })
+            || authorization
                 .node_static_workspace
                 .as_ref()
                 .is_some_and(|t| {

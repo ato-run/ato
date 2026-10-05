@@ -49,3 +49,39 @@ Old measurements and WBO UNKNOWN are retained.
 
 Operation semantics follow the primary [pip wheel documentation](https://pip.pypa.io/en/stable/cli/pip_wheel/)
 and [npm rebuild documentation](https://docs.npmjs.com/cli/v10/commands/npm-rebuild/).
+# 実Coordinatorで見つかったrecipe保存境界
+
+changedetection.ioのwheel-only解決失敗に続くsdist候補は、同じ登録済み
+Python helperとlock helperを各phaseへ展開したため、既存64 KiBの
+`capsule_toml`保存制約を超え、実行前にCoordinatorが500を返した。
+この実測は保全し、成功・source不具合として数えない。
+
+読みやすいhelper原本から固定loaderを生成し、同じPython標準libraryで
+原本のbyteを復元して実行する。network、phase、sandbox、toolchain、
+deadline、wheel hash検証は同じ経路のまま。Rust/WASMが同一loaderを使う。
+生成物は`generate-python-operations.py --check`で原本との一致を検証する。
+保存上限を超える候補はRust authorityが`proposal_recipe_byte_limit`として
+拒否し、SQLエラーになる前にtyped outcomeへ戻す。
+
+関連33 tests、compact loaderを使った実pip sdist→wheel・hash固定offline
+install・cleanup fixture、実npm lifecycle fixtureはPASS。fixtureは実
+Coordinator・Runtimeでのchangedetection.io受け入れ検証と区別する。
+
+## Subsequent real-application boundary findings
+
+The changedetection.io native attempt at Ato `3f07cd8e` / API `c7f990ce`
+failed before sdist building: setuptools 83.0.0 contains vendored nested
+`.dist-info/METADATA`, which the dependency-lock operation mistook for a second
+outer-wheel identity. Select only root wheel metadata; retain the digest of the
+entire wheel. The real pip fixture now includes vendored metadata and passes.
+This operation fixture does not establish changedetection.io Runtime acceptance.
+
+Prompt 12 / capability schema 4 adds `setup_scripts` for the source-owned Node
+launch route. Preparation runs inside the ordinary Runtime with its state and
+private variables already attached, before launch; the frozen manifest and all
+script names are checked before effects. Setup failure prevents launch, and the
+existing process-group teardown includes preparation children. Empty preparation
+preserves older D bytes and prompt/capability projections 1–11. The fixture
+verifies shared state/private environment, refusal after manifest change, and
+setup failure without launch. Relevant compiler tests: 33 PASS; Worker reasoning
+tests: 54 PASS. Real Kutt native/migration/state acceptance is still pending.

@@ -85,6 +85,10 @@ pub struct ExplorationContext {
     pub effective_max_rounds: u32,
     pub ceiling: crate::requirements::ExecutionRequirements,
     pub previous_derivations: Vec<crate::authoring::BoundDerivation>,
+    /// Canonical identities retained when generated helper bytes exceed the
+    /// provider context bound. The complete D remains in the owner ledger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omitted_derivation_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_plan: Option<super::ExecutionPlanProposal>,
     pub failures: Vec<ExplorationFailure>,
@@ -106,6 +110,11 @@ impl ExplorationContext {
                 .as_ref()
                 .is_some_and(|p| serde_json::to_vec(p).map_or(true, |b| b.len() > 8192))
             || self.previous_derivations.len() > 3
+            || self.omitted_derivation_refs.len() > 3
+            || self
+                .omitted_derivation_refs
+                .iter()
+                .any(|r| !crate::generation::is_sha256(r))
             || self.failures.len() > 4
             || self.proposal_diagnostics.len() > 4
             || self.failures.iter().any(|f| {

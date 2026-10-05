@@ -64,7 +64,17 @@ pub fn artifact_guard_values<'a>(
 /// Scan a process artifact before it can become reusable materialization.
 /// Values stay in private spawn context; bounds fail closed without printing bytes.
 pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
+    scan_artifact_controlled(root, secrets, None)
+}
+pub fn scan_artifact_controlled(
+    root: &std::path::Path,
+    secrets: &[&[u8]],
+    control: Option<&crate::control::ExecutionControl>,
+) -> Result<()> {
     use std::io::Read;
+    if let Some(c) = control {
+        c.remaining(crate::control::AttemptPhase::Build)?;
+    }
     if secrets.is_empty() {
         return Ok(());
     }
@@ -78,14 +88,45 @@ pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
     let mut entries = 0u64;
     let mut bytes = 0u64;
     while let Some(path) = pending.pop() {
+        if let Some(c) = control {
+            c.remaining(crate::control::AttemptPhase::Build)?;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(std::path::Path::new(""));
+        ensure!(
+            ato_materializer_static_web::blob_is_clean(
+                relative.as_os_str().as_encoded_bytes(),
+                secrets
+            ),
+            "secret_artifact_embedding_refused"
+        );
         let metadata = std::fs::symlink_metadata(&path)?;
         entries += 1;
-        ensure!(
-            entries <= 100_000 && !metadata.file_type().is_symlink(),
-            "variable_artifact_scan_bound"
-        );
+        ensure!(entries <= 100_000, "variable_artifact_scan_bound");
+        if metadata.is_symlink() {
+            // Reuse the source/retained archive's containment rule. Do not
+            // follow aliases: the ordinary tree walk scans every regular
+            // target, while checking link bytes also protects their identity.
+            let target = std::fs::read_link(&path)?;
+            let target_bytes = target.as_os_str().as_encoded_bytes();
+            ensure!(
+                ato_materializer_static_web::blob_is_clean(target_bytes, secrets),
+                "secret_artifact_embedding_refused"
+            );
+            ensure!(
+                ato_formation::containment::validate_contained_symlink_target(
+                    relative,
+                    target_bytes,
+                )
+                .is_ok(),
+                "variable_artifact_symlink_escape"
+            );
+            continue;
+        }
         if metadata.is_dir() {
             for entry in std::fs::read_dir(path)? {
+                if let Some(c) = control {
+                    c.remaining(crate::control::AttemptPhase::Build)?;
+                }
                 pending.push(entry?.path());
             }
         } else {
@@ -96,6 +137,9 @@ pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
             let mut buffer = vec![0u8; 65536 + overlap];
             let mut retained = 0;
             loop {
+                if let Some(c) = control {
+                    c.remaining(crate::control::AttemptPhase::Build)?;
+                }
                 let read = file.read(&mut buffer[retained..])?;
                 if read == 0 {
                     break;
@@ -116,6 +160,68 @@ pub fn scan_artifact(root: &std::path::Path, secrets: &[&[u8]]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn contained_npm_aliases_are_scanned_without_following_links() {
+        use std::os::unix::fs::symlink;
+        std::fs::create_dir_all(".tmp").unwrap();
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        let bin = root.path().join("node_modules/.bin");
+        let package = root.path().join("node_modules/knex/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&package).unwrap();
+        let cli = package.join("cli.js");
+        std::fs::write(&cli, b"public source script").unwrap();
+        symlink("../knex/bin/cli.js", bin.join("knex")).unwrap();
+        symlink(".", root.path().join("loop")).unwrap();
+        assert!(scan_artifact(root.path(), &[b"synthetic-private-value"]).is_ok());
+        std::fs::write(&cli, b"synthetic-private-value").unwrap();
+        assert!(scan_artifact(root.path(), &[b"synthetic-private-value"]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_links_refuse_escapes_and_protected_target_bytes() {
+        use std::os::unix::fs::symlink;
+        std::fs::create_dir_all(".tmp").unwrap();
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        for (target, expected) in [
+            ("/etc/passwd", "variable_artifact_symlink_escape"),
+            ("../outside", "variable_artifact_symlink_escape"),
+            ("s/s/../..", "variable_artifact_symlink_escape"),
+            (
+                "synthetic-private-value",
+                "secret_artifact_embedding_refused",
+            ),
+        ] {
+            let link = root.path().join("alias");
+            symlink(target, &link).unwrap();
+            let error = scan_artifact(root.path(), &[b"synthetic-private-value"])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            std::fs::remove_file(link).unwrap();
+        }
+    }
+
+    #[test]
+    fn expired_artifact_guard_stops_even_without_redeemed_values() {
+        let control =
+            crate::control::ExecutionControl::new(crate::control::now_ms().saturating_sub(1));
+        assert!(
+            scan_artifact_controlled(std::path::Path::new("unused"), &[], Some(&control)).is_err()
+        );
+    }
+    #[test]
+    fn protected_values_in_artifact_names_are_refused() {
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        std::fs::write(
+            root.path().join("synthetic-private-filename"),
+            b"public bytes",
+        )
+        .unwrap();
+        assert!(scan_artifact(root.path(), &[b"synthetic-private-filename"]).is_err());
+    }
     #[test]
     fn process_artifact_secret_is_refused_across_chunk_boundary() {
         let root = tempfile::tempdir().unwrap();
