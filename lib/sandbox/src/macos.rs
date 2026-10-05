@@ -71,6 +71,10 @@ mod ffi {
 /// * `Ok(SandboxResult::not_enforced(reason))` on dev-mode skip or kernel
 ///   rejection. The caller decides whether to abort the workload.
 pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
+    anyhow::ensure!(
+        policy.file_write_paths.is_empty(),
+        "existing-file-only write policies require Linux Landlock"
+    );
     debug!(
         "Applying Seatbelt sandbox (dynamic SBPL, ipc_paths={})",
         policy.ipc_socket_paths.len()
@@ -330,6 +334,11 @@ pub(crate) fn escape_path_for_sbpl(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn existing_file_writes_are_refused_before_entering_seatbelt() {
+        let policy = super::SandboxPolicy::new().allow_file_write(["/proc"]);
+        assert!(super::apply_seatbelt_sandbox(&policy).is_err());
+    }
     use super::*;
     use std::path::PathBuf;
 
