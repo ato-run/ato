@@ -144,6 +144,22 @@ impl Delivery {
         }
         anyhow::bail!("runtime {kind} retry limit; operation and attempt preserved")
     }
+    /// Evidence publication is reporting after execution. Each immutable RPC
+    /// keeps the same retry limit and consumed dispatches across restarts.
+    pub fn evidence<T: serde::Serialize + serde::de::DeserializeOwned>(
+        &self,
+        kind: &str,
+        retries: u32,
+        send: impl FnMut() -> Result<T>,
+    ) -> Result<T> {
+        ensure!(
+            !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+            "invalid evidence delivery identity"
+        );
+        let (_, dir) = self.operation()?;
+        self.dispatch(&dir, kind, retries, None, send)
+    }
+
     pub fn claim(&self, client: &Client) -> Result<Option<AttemptTicket>> {
         loop {
             let (id, dir) = self.operation()?;
@@ -259,6 +275,43 @@ impl Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn evidence_retry_and_acknowledgement_survive_restart_with_frozen_custom_limit() {
+        let root = tempfile::tempdir_in(".tmp").unwrap();
+        let delivery = Delivery::open(root.path()).unwrap();
+        assert!(
+            delivery
+                .evidence::<Value>("chunk-frozen", 0, || anyhow::bail!(
+                    "reply lost after immutable upload"
+                ))
+                .is_err()
+        );
+        let ack = delivery
+            .evidence("record-ready", 0, || Ok(json!({"status":"ready"})))
+            .unwrap();
+        drop(delivery);
+        let resumed = Delivery::open(root.path()).unwrap();
+        assert!(
+            resumed
+                .evidence::<Value>("chunk-frozen", 0, || panic!(
+                    "no new dispatch after consumed retry"
+                ))
+                .is_err()
+        );
+        assert!(
+            resumed
+                .evidence::<Value>("chunk-frozen", 3, || panic!("custom policy cannot reset"))
+                .is_err()
+        );
+        assert_eq!(
+            resumed
+                .evidence::<Value>("record-ready", 0, || panic!(
+                    "acknowledged publication is not repeated"
+                ))
+                .unwrap(),
+            ack
+        );
+    }
     #[test]
     fn grant_delivery_journal_never_contains_values_or_resets_lost_retry() {
         let root = tempfile::tempdir_in(".tmp").unwrap();

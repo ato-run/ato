@@ -147,6 +147,7 @@ fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
     (
         AttemptTicket {
             exploration: None,
+            build_record_retention: None,
             attempt_id: "att_test".to_owned(),
             fence: 1,
             satisfy_id: "sat_test".to_owned(),
@@ -1007,6 +1008,14 @@ fn a_finished_delivery_is_not_downgraded_by_a_new_source_error() {
     assert_eq!(
         report.attestation.attempt_record,
         AttemptRecordState::Finished
+    );
+    assert_eq!(
+        report.resource_usage.expanded_bytes,
+        ticket.resource_budget.expanded_bytes
+    );
+    assert_eq!(
+        report.resource_usage.stored_bytes,
+        ticket.resource_budget.stored_bytes
     );
 }
 
