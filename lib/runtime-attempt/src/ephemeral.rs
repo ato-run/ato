@@ -335,7 +335,7 @@ impl TemporaryRealization {
         let cwd_relative = ato_formation::projection::workspace_relative_cwd(&serve.cwd)
             .map_err(anyhow::Error::msg)?;
         let argv = serve.argv.clone();
-        let public_env = request.plan.process_environment(request.derivation);
+        let mut public_env = request.plan.process_environment(request.derivation);
         let mut state_attachments = Vec::new();
         let mut resolved_state = Vec::new();
         if let Some(state) = state {
@@ -417,6 +417,10 @@ impl TemporaryRealization {
             },
             lifecycle: LIFECYCLE,
         };
+        // The preparation wrapper receives the current frozen allowance only
+        // at spawn. It is not persisted in D or the logical launch spec, and
+        // cannot inherit a previous attempt's relative budget.
+        crate::control::apply_launch_deadline_environment(&mut public_env, control)?;
         let context = ResolvedRuntimeLaunchContext::new(
             workspace_root,
             &cwd_relative,
