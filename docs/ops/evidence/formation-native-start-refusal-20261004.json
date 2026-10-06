@@ -1,0 +1,61 @@
+{
+  "schema": "ato.native-acceptance-start-admission/1",
+  "measurement_id": "formation-native-followup-20261004",
+  "used": {
+    "D_rounds": 13,
+    "exchanges": 15,
+    "Runtime_attempts": 7,
+    "inspections": 0,
+    "sequential_elapsed_seconds": 1368,
+    "searches": 10
+  },
+  "held": {
+    "D_rounds": 0,
+    "exchanges": 0,
+    "Runtime_attempts": 0,
+    "inspections": 0,
+    "sequential_elapsed_seconds": 0,
+    "searches": 0
+  },
+  "requested": {
+    "searches": 1,
+    "D_rounds": 2,
+    "exchanges": 6,
+    "inspections": 4,
+    "Runtime_attempts": 4,
+    "sequential_elapsed_seconds": 1800
+  },
+  "exceeded": {
+    "D_rounds": {
+      "used": 13,
+      "held": 0,
+      "requested": 2,
+      "max": 12
+    },
+    "Runtime_attempts": {
+      "used": 7,
+      "held": 0,
+      "requested": 4,
+      "max": 8
+    },
+    "searches": {
+      "used": 10,
+      "held": 0,
+      "requested": 1,
+      "max": 10
+    }
+  },
+  "admitted": false,
+  "direct_API_ledger_modified": false,
+  "boundary": "owner_Search_start_before_subprocess",
+  "Search_process_started": false,
+  "Native_context_started": false,
+  "new_Searches": 0,
+  "new_Runtime_attempts": 0,
+  "unanswered_cancelled_history_preserved": true,
+  "ledger_initialized_from_verified_historical_floor": true,
+  "scope_source": "existing Codex Source owner config: 2 rounds, 6 exchanges, 4 inspections; owner CLI: 4 attempts, 1800 seconds",
+  "additional_Native_allocation": "awaiting explicit owner aggregate extension",
+  "agent_internal_LLM_calls": "unknown",
+  "agent_internal_cost": "unknown"
+}

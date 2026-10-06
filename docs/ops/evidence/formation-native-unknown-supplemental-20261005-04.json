@@ -1,0 +1,237 @@
+{
+  "schema": "ato.formation-supplemental-UNKNOWN-acceptance/1",
+  "measurement_id": "formation-native-real-unknown-20261005-04",
+  "purpose": "real UNKNOWN recovery only",
+  "bounds": {
+    "Search": 1,
+    "D_round": 2,
+    "exchange": 3,
+    "Runtime_attempt": 1,
+    "inspection": 2,
+    "wall_clock_seconds": 2400
+  },
+  "outcome": "recovery_semantics_passed_campaign_housekeeping_after_wall",
+  "gate_passed": false,
+  "reason": "Result reconciliation, same-attempt ACK/closed and reservation settlement completed within 40 minutes; final secret/process cleanup completed after the campaign wall. Do not claim a complete within-wall acceptance.",
+  "previous_campaign": {
+    "status": "ended_exceeded",
+    "D_rounds_used": 13,
+    "D_rounds_ceiling": 12,
+    "audit_sha256": "91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197",
+    "modified": false
+  },
+  "observed": {
+    "Search": 1,
+    "D_round": 1,
+    "exchange": 1,
+    "Runtime_attempt": 1,
+    "inspection": 0,
+    "initial_Native_SDK_turns": 1,
+    "reconciliation_Native_SDK_turns": 1
+  },
+  "Search": "search_8ccd15cf480183ebe8f366c56c30e93b",
+  "attempt_id": "01M45Q6M2Z3H47SGQSGSJT7XS1",
+  "deadline_ms": 1791195211080,
+  "wall_deadline_ms": 1791195811080,
+  "real_silence": {
+    "elapsed_since_claim_ms": 1808851,
+    "product_timeout_changed": false
+  },
+  "reconciliation": {
+    "schema": "ato.native-real-UNKNOWN-reconnect/1",
+    "measurement_id": "formation-native-real-unknown-20261005-04",
+    "passed": true,
+    "same_search": true,
+    "search_id": "search_8ccd15cf480183ebe8f366c56c30e93b",
+    "deadline_ms": 1791195211080,
+    "configuration_ref": "sha256:96aefe5236798160c71a385e903f38ebd869330b1e6ba71b5d303a9e68ac3b9c",
+    "new_inference_inputs": 0,
+    "new_runtime_attempts": 0,
+    "new_D_rounds": 0,
+    "new_exchanges": 0,
+    "rounds_consumed": 1,
+    "attempts_consumed": 1,
+    "exchanges_consumed": 1,
+    "actual_Native_tools": [
+      "status",
+      "next"
+    ],
+    "fresh_context_proven": true,
+    "native_thread_id_sha256": {
+      "native-initial": [
+        "3cb965869c2982777cac41dfccbc6aef9e7beb38a6340139aa8705b034c02130"
+      ],
+      "native-reconcile": [
+        "e084e649fb4860c8b534f1cf0cb29f8e627e5b5785987585b4f54b6d1d380f5d"
+      ]
+    },
+    "UNKNOWN_preserved": true,
+    "ordinary_Run_authorized": false,
+    "at_ms": 1791195556312,
+    "SDK_reported_usage": {
+      "scope": "native context; SDK reported counters only",
+      "internal_LLM_calls": "unknown",
+      "account_charge_usd": "unknown",
+      "last_cumulative_tokens": {
+        "totalTokens": 30362,
+        "inputTokens": 30081,
+        "cachedInputTokens": 9088,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 281,
+        "reasoningOutputTokens": 0
+      },
+      "coverage": "last SDK update; update events are not LLM calls"
+    },
+    "actual_LLM_calls": "unknown",
+    "actual_account_charge": "unknown",
+    "Ato_direct_LLM_calls": 0,
+    "guard_rejection_before_SDK_preserved": true
+  },
+  "settlement": {
+    "result_sha256": "dcb3e29a8a5a6a12bdaaf7e3ea1991e1d9cfc28e37e9f020a5373ce373999dff",
+    "ACK": {
+      "accepted": true
+    },
+    "closed": {
+      "closed": true
+    },
+    "Runtime_terminated": true,
+    "realization_destroyed": true,
+    "Runtime_cleanup": "succeeded",
+    "same_attempt": true,
+    "late_PASS_promoted": false,
+    "owner_resolution": "effect_reconciled",
+    "historical_UNKNOWN_preserved": true,
+    "Source_success": false,
+    "new_Runtime_attempt": false,
+    "budget_reset": false,
+    "deadline_extended": false
+  },
+  "final_cleanup": {
+    "counts": {
+      "owner_session_rows": 0,
+      "active_writer": 0,
+      "quarantined_writer": 0,
+      "temporary_values": 0,
+      "live_input_metadata": 0,
+      "new_unresolved_attempts": 0
+    },
+    "reservations": 0,
+    "owned_remote_processes": 0,
+    "owned_local_processes": 0,
+    "remote_secret_copies_removed": [
+      "owner-session-token",
+      "runtime-token",
+      "auth.key",
+      "formation-store.key"
+    ],
+    "local_secret_copies_removed": [
+      "owner/token",
+      "owner/connection.capability",
+      "native-initial/owner/relay.capability",
+      "native-reconcile/owner/relay.capability",
+      "native-initial/owner/native-home/auth.json",
+      "native-reconcile/owner/native-home/auth.json"
+    ],
+    "remote_cleanup_after_wall": true,
+    "local_cleanup_after_wall": true
+  },
+  "secret_scan": {
+    "local": {
+      "before_secret_deletion": true,
+      "covered_private_classes": [
+        "MCP_relay_capability",
+        "Native_provider_auth",
+        "Session_bridge_capability",
+        "owner_session"
+      ],
+      "files": 36,
+      "bytes": 510251,
+      "hits": []
+    },
+    "remote_raw": {
+      "before_secret_deletion": true,
+      "covered_private_classes": [
+        "Coordinator_auth_secret",
+        "Formation_variable_store_key",
+        "Runtime_credential",
+        "owner_identity",
+        "owner_session"
+      ],
+      "files": 80,
+      "bytes": 812399,
+      "hits": [
+        {
+          "file": "scan-inputs/native-initial/native-events.jsonl",
+          "private_class": "owner_identity"
+        }
+      ]
+    },
+    "adjudication": {
+      "schema": "ato.native-private-scan-adjudication/1",
+      "measurement_id": "formation-native-real-unknown-20261005-04",
+      "finding": "legacy fixture owner identifier coincides with a frozen public prompt vocabulary word",
+      "raw_scan_preserved": true,
+      "credential_hits": 0,
+      "owner_email_hits": 0,
+      "owner_metadata_fields_exported": false,
+      "credential_exception_created": false,
+      "canonical_prompt_sha256": "c2f85d1e0aa4d87eef4e4da6bda8d2ff0e6f70c9438923e440f817a502499901",
+      "canonical_prompt_git_object": "da2b0feddd84fbd106395362e93122b53697c396",
+      "Requester_and_Session_pins_share_identical_prompt": true,
+      "matches": [
+        {
+          "file": "scan-inputs/native-initial/native-events.jsonl",
+          "field": "/params/item/result/content/0/text/decoded_json/input/request/exploration_context",
+          "kind": "public_schema_key"
+        },
+        {
+          "file": "scan-inputs/native-initial/native-events.jsonl",
+          "field": "/params/item/result/content/0/text/decoded_json/instructions",
+          "kind": "frozen_public_prompt_vocabulary"
+        },
+        {
+          "file": "scan-inputs/native-initial/native-events.jsonl",
+          "field": "/params/item/result/structuredContent/input/request/exploration_context",
+          "kind": "public_schema_key"
+        },
+        {
+          "file": "scan-inputs/native-initial/native-events.jsonl",
+          "field": "/params/item/result/structuredContent/instructions",
+          "kind": "frozen_public_prompt_vocabulary"
+        }
+      ],
+      "limitation": "Exact owner-identifier-string absence is not claimed; the raw scanner matched a static public protocol word independently of owner identity."
+    },
+    "scope": "Only the explicitly scanned SDK events, tool/diagnostic outputs and public Native project. No blanket all-operation non-exposure claim."
+  },
+  "execution_pins": {
+    "Requester": "d7c926f5d5e22fbb4dec30316c918729cf923cae",
+    "Session": "438efd6a864a1edaba7a89ac8a78a9643f97eea6",
+    "Skill": "78c257fdd7d461984a72c1548a500761887b25a9",
+    "Runtime": "c5719f69ea2ef009f3f0d677518b843655b3e196",
+    "API": "34b44f842490279fbd10cca940b0768a10f52a2a",
+    "MCP_sha256": "83a1e07b0f1cca5db127e146fa1123f163c8e04866aa39ba8d9f19c41cb06614"
+  },
+  "initial_SDK_usage": {
+    "scope": "native context; SDK reported counters only",
+    "internal_LLM_calls": "unknown",
+    "account_charge_usd": "unknown",
+    "last_cumulative_tokens": {
+      "totalTokens": 69141,
+      "inputTokens": 68448,
+      "cachedInputTokens": 41472,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 693,
+      "reasoningOutputTokens": 0
+    },
+    "coverage": "last SDK update; update events are not LLM calls"
+  },
+  "actual_LLM_calls": "unknown",
+  "actual_account_charge_usd": "unknown",
+  "Ato_direct_LLM_calls": 0,
+  "direct_API_campaign_changed": false,
+  "old_WBO_rerun": false,
+  "cloud_deployment": false,
+  "cloud_migration": false
+}

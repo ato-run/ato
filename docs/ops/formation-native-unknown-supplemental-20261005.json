@@ -1,0 +1,39 @@
+{
+  "schema": "ato.native-acceptance-campaign/1",
+  "measurement_id": "formation-native-real-unknown-20261005-01",
+  "initial_campaign": true,
+  "purpose": "real UNKNOWN recovery only",
+  "aggregate_ceiling": {
+    "D_rounds": 2,
+    "exchanges": 3,
+    "Runtime_attempts": 1,
+    "inspections": 2,
+    "sequential_elapsed_seconds": 2400,
+    "searches": 1
+  },
+  "previous_campaign": {
+    "status": "ended_exceeded",
+    "D_rounds_used": 13,
+    "D_rounds_ceiling": 12,
+    "audit_sha256": "91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197"
+  },
+  "normal_Run_authorized": false,
+  "direct_API_budget_changed": false,
+  "execution_status": "ended_without_runtime_start",
+  "admission_guard": "native-session-owner.py before Search creation and Native launch",
+  "actual_admission_or_runtime_execution": true,
+  "gate": {
+    "completion_silence_unknown_timeout_seconds": 1800,
+    "approved_wall_clock_seconds": 2400,
+    "adjustment_approved": true,
+    "reason": "40 minute wall clock explicitly authorized; actual Native declined for absent owner isolation confirmation before Runtime. Search ceiling 1 consumed; no retry or reset authorized."
+  },
+  "actual_new_consumption": {
+    "Searches": 1,
+    "D_rounds": 1,
+    "exchanges": 1,
+    "Runtime_attempts": 0,
+    "inspections": 0
+  },
+  "old_campaign_unchanged": true
+}
