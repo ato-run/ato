@@ -81,7 +81,22 @@
     75,
     76,
     77,
-    78
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93
   ],
   "preregistered_plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
   "Runtime_builder_bound": false,
@@ -7924,14 +7939,1616 @@
       },
       "ordinary_Run_authorized": false,
       "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 79,
+      "name": "MinIO",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "7aac2a2c5b7c882e68c1ce017d8256be2feea27f",
+      "source_closure_ref": "sha256:55731d47df2dc740bc9e6d5945cbdbe24723837027230355057b821391d3a55d",
+      "K_ref": "sha256:a40756c8811d957330c936c0e808f201aa919c118209b3c022cac3af6c793a0c",
+      "search_id": "search_4241ce093d9acb981db0b167913042f4",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791244882892,
+      "authority_deadline_ms": 1791244951649,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 101816,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 84882,
+          "inputTokens": 84281,
+          "cachedInputTokens": 61312,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 601,
+          "reasoningOutputTokens": 0
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "Frozen lowering capabilities report source_oci available:false, configured:false, builder_bound:false; acquired OCI images are unavailable."
+            },
+            {
+              "code": "unsupported_toolchain",
+              "detail": "README requires Go >=1.24 to compile MinIO; the frozen operation catalog provides no Go toolchain or Go build operation.",
+              "source": {
+                "digest": "sha256:aae99b6e35489bb26bfba4290ac567861d123230d1831562b6aee8c1363aead3",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "source_container_route",
+              "detail": "Root Dockerfile uses minio/minio:latest and copies architecture/release-specific MinIO binaries. Its container route requires the unavailable bound OCI builder; no source rewrite or implicit image acquisition is authorized.",
+              "source": {
+                "digest": "sha256:1a442cc56fe7367a1663345a82d8abe92855573759835aea6cfbee738582f2ef",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "source_oci_builder_unavailable"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 80,
+      "name": "AdGuard Home",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "a308a7434284540625d14c5b9b53fa103ba82dcb",
+      "source_closure_ref": "sha256:add5ed95ed3dea72aa08fb3c72b96592f0d0e4654bd64a3e2c4c66558e5a340b",
+      "K_ref": "sha256:77d70ae700a71f717911897100150481ea892d7cc4adb6f264f01b2587655e65",
+      "search_id": "search_61e2edce31a268298d20e4e621c8357d",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791245078228,
+      "authority_deadline_ms": 1791245107267,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 53667,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 1922,
+            "cacheReadInputTokens": 64742,
+            "cacheCreationInputTokens": 25657,
+            "thinkingTokens": 517,
+            "costUSD": 0.25668440000000003
+          }
+        },
+        "SDK_cost_estimate_usd": 0.25668440000000003,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "source_language_go",
+              "detail": "Changelog repeatedly records 'Go version has been updated' for releases; the application is a Go DNS server binary.",
+              "source": {
+                "digest": "sha256:9d708720fd96d329eb410a5489ebe1e739c30c5240948324ce82f6b8c1c76458",
+                "file_id": "f_06572a96a58dc510037d5efa"
+              }
+            },
+            {
+              "code": "distribution_is_native_binary_or_docker",
+              "detail": "README directs installation via install.sh binary download, Docker Hub image, Snap, or build from source (Go Report Card badge); no Node/Python server entrypoint is declared.",
+              "source": {
+                "digest": "sha256:380a60a15069611a45a97f770c1441de8db71446cdb85f17bdd8c56df3dcb10a",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "no_go_toolchain_in_catalog",
+              "detail": "Frozen operation catalog binds only gcc, make, node, pkg-config, python (npm/oci unbound); no Go toolchain."
+            },
+            {
+              "code": "oci_routes_unavailable",
+              "detail": "lowering_capabilities.source_oci.available=false (source_oci_builder_unavailable) and oci_image.available=false with no images."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 81,
+      "name": "Beszel",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "e01e2a20e9d32e46ed5eaaa4cf48cf04f56d9a9f",
+      "source_closure_ref": "sha256:16d746bfaefceb04dd5f814a1d10e08dabca225c01bacb66445e3bb223c9481a",
+      "K_ref": "sha256:ea3cfeb74baf6581cc0318791890719571efee4247db33c6bf10106aadf18889",
+      "search_id": "search_eb514e454a64e62986bb090c42c4deed",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791245224692,
+      "authority_deadline_ms": 1791245238227,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 39850,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 91271,
+          "inputTokens": 90765,
+          "cachedInputTokens": 65792,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 506,
+          "reasoningOutputTokens": 0
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "unsupported_toolchain",
+              "detail": "The verified root go.mod requires Go 1.27.1. The frozen execution catalog and bound Runtime provide Node, Python, gcc, make and pkg-config, but no Go toolchain or Go dependency operation. No supported application entrypoint is evidenced.",
+              "source": {
+                "digest": "sha256:e1d853a3155494c57d7f858fb606da1ac396a2aaa6a10f84ba0e9329d23daecc",
+                "file_id": "f_33ef32bf6c23acb95f5902d7"
+              }
+            },
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "The alternative source OCI builder is explicitly unavailable and unbound; no acquired OCI image is available. Runtime itself is online. This is a capability limitation, not evidence of broken Source."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 82,
+      "name": "Sonic",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "a79837d88b91a3b97d9d0fe928281f618c3d8ad8",
+      "source_closure_ref": "sha256:36d28de509a189bcf5f04dcbca42787f69c6963c3e3a6585ded216c3f3b9cfc9",
+      "K_ref": "sha256:0fdaaa44c458d8f16dc916e4dfa7d9a9b4ff2b1600c3d62dba2ef78489183386",
+      "search_id": "search_1969f408fbd5793550a3c0e2429f0401",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791245310981,
+      "authority_deadline_ms": 1791245329142,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 41485,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 2138,
+            "cacheReadInputTokens": 60487,
+            "cacheCreationInputTokens": 23738,
+            "thinkingTokens": 462,
+            "costUSD": 0.24480139999999997
+          }
+        },
+        "SDK_cost_estimate_usd": 0.24480139999999997,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "rust_toolchain_required",
+              "detail": "Root Dockerfile builds with rust:1-slim-trixie and 'cargo build --locked --release' producing a native 'sonic' binary; frozen operation catalog binds only gcc, make, node, npm, oci, pkg-config, python. No rustc/cargo toolchain is available.",
+              "source": {
+                "digest": "sha256:f1c78afaee0566453ad2ffcd9f1c2b20344d2ed5f63aa2aa7b40192f2fc05350",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            },
+            {
+              "code": "readme_build_instructions",
+              "detail": "README states Sonic is built in Rust via cargo and requires clang/libclang for the RocksDB dependency.",
+              "source": {
+                "digest": "sha256:fc2dc323e6e6bda385939f523d5b9b0155c5b8a8b920a32978d51d3c39a47c3a",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "oci_alternative_unavailable",
+              "detail": "lowering_capabilities.source_oci.available=false (source_oci_builder_unavailable) and oci_image.images is empty, so the Dockerfile route cannot be lowered."
+            },
+            {
+              "code": "protocol_observation",
+              "detail": "Dockerfile EXPOSEs 1491 for the Sonic Channel TCP protocol; no HTTP route serving GET / is evidenced in inspected source."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 83,
+      "name": "RustDesk Server",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "a7736be5e40f85bfc141120dce587e836e5d4b80",
+      "source_closure_ref": "sha256:f89ff41bd4f6da7db4bd3eca61382b75adb23912f0761e0005a71b8b14f4aeec",
+      "K_ref": "sha256:93bc034e6aaa12ee9efbf1274fc722c4cb41a4f1df3779b7d4aa6882ff8bd2a8",
+      "search_id": "search_ffbc784e2397f5f228e3b837277fec46",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791245406343,
+      "authority_deadline_ms": 1791245420687,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 37192,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 85762,
+          "inputTokens": 85235,
+          "cachedInputTokens": 66176,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 527,
+          "reasoningOutputTokens": 10
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "unsupported_toolchain",
+              "detail": "The frozen Cargo manifest declares Rust package hbbs and a build.rs build script; README specifies cargo build --release. The admitted execution catalog and bound Runtime toolchains provide no Rust/cargo execution or dependency operation.",
+              "source": {
+                "digest": "sha256:19155f5babae62de0f6296cfa2fa04324c310cd9cb8ee9b8a2ec80587d8cac08",
+                "file_id": "f_2e9d962a08321605940b5a65"
+              }
+            },
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "The alternative source OCI builder is explicitly unavailable and unbound; OCI image execution is unavailable with no approved images. No supported build or launch route is evidenced. This is a capability limitation, not evidence of broken Source."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 84,
+      "name": "Atuin",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "c8d4d7b5d97c13a361dbfbdba9fa5c4d12c7b42a",
+      "source_closure_ref": "sha256:86baca576214a5b94b4341dd733a0009fc8cd47866ca16147cecb676f912d9e4",
+      "K_ref": "sha256:208641138d7d2c69c876258fb3d58003a58cb7fdbf04a24fe682919897e68610",
+      "search_id": "search_c04d0ce0b496f763edd1df7c9014a7b5",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791245504926,
+      "authority_deadline_ms": 1791245582058,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 103038,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 2071,
+            "cacheReadInputTokens": 66302,
+            "cacheCreationInputTokens": 26503,
+            "thinkingTokens": 456,
+            "costUSD": 0.2667444
+          }
+        },
+        "SDK_cost_estimate_usd": 0.2667444,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "dockerfile_only_http_route",
+              "detail": "Root Dockerfile is the only declared HTTP service route: multi-stage cargo build of atuin-server (Rust) with ENTRYPOINT /usr/local/bin/atuin-server. lowering_capabilities.source_oci.available=false, builder_bound=false, unavailable_reason=source_oci_builder_unavailable; oci_image has no acquired images.",
+              "source": {
+                "digest": "sha256:ab4f185a83b58e1d1c6a9f7881bc1f3078bec79ea88b5b59da81c98224ed1df4",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            },
+            {
+              "code": "native_rust_toolchain_absent",
+              "detail": "Native build requires the Rust toolchain pinned in rust-toolchain.toml; frozen operation catalog provides only gcc, make, node, npm, oci, pkg-config, python. No Node/Python manifest or static route is declared in root sources.",
+              "source": {
+                "digest": "sha256:8f6b8393117d142cdfc4837c001aa36b60656983699b237077af4da5c337cdbd",
+                "file_id": "f_2b1bde2cf3a858b7bf7424cb"
+              }
+            },
+            {
+              "code": "not_source_broken",
+              "detail": "No build was attempted; this is an unbound Runtime builder capability, not evidence of source breakage.",
+              "source": {
+                "digest": "sha256:709214cc8509df777c1c869fe6651bb70ea59b36e7ec069f4dfe0cf942aca1de",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "source_oci_builder_unavailable"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 85,
+      "name": "Redlib",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "a4d36e954cf1bd64f209cd8868c5a29edc81b374",
+      "source_closure_ref": "sha256:849558423077897974783e2fedda5f188684d81d12af5ec610c61ad8a464e815",
+      "K_ref": "sha256:1ef557740ce39909666b7764ec101ef6bff07e53282d7ebf0aa17f1b71820c10",
+      "search_id": "search_6371b881c2ba7af41805501c545d7ad9",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791245659132,
+      "authority_deadline_ms": 1791245669216,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 32363,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 85938,
+          "inputTokens": 85394,
+          "cachedInputTokens": 62080,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 544,
+          "reasoningOutputTokens": 13
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "Frozen lowering capabilities explicitly report source_oci available:false, configured:false, builder_bound:false; acquired OCI images are also unavailable. The root Dockerfile requires an image build and downloads a Redlib release binary.",
+              "source": {
+                "digest": "sha256:a990335e62c50244d62135b03aafb2b1e3008ccb05e3e332062ffc06c0cc7ee5",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            },
+            {
+              "code": "unsupported_toolchain",
+              "detail": "Verified README identifies the application as Rust and the supplied Cargo lock context confirms Rust dependencies. The frozen operation catalog exposes no Rust toolchain or Cargo dependency/build operation. No admitted native Rust fallback is evidenced."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "source_oci_builder_unavailable"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 86,
+      "name": "wallabag",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "a5be36bf74b6d77307bf923beb6cbc185c849d56",
+      "source_closure_ref": "sha256:58bd1cd4d81c8ab3fe160521be355cf6bcc3ba83dc0545d70f3d32c96c9417cb",
+      "K_ref": "sha256:6dab3b856691374bc206df8d39d5082d4cf63f005256bc1bdf0f7150481e46b8",
+      "search_id": "search_512f5b5aebf3d53b91c7a41baf446dda",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791245749412,
+      "authority_deadline_ms": 1791245768955,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 74441,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 20,
+            "outputTokens": 3905,
+            "cacheReadInputTokens": 293158,
+            "cacheCreationInputTokens": 58983,
+            "thinkingTokens": 864,
+            "costUSD": 0.6086756
+          }
+        },
+        "SDK_cost_estimate_usd": 0.6086756,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "http_service_requires_php",
+              "detail": "compose.yaml exposes port 8000 only from the 'php' service built from docker/php (PHP/Symfony app mounted at /var/www/html), depending on a redis service; no PHP toolchain exists in the frozen operation catalog or Runtime facts.",
+              "source": {
+                "digest": "sha256:8a46c5c0aac3a3be7e610a8e33dac6571a31b26b3abf2ff4bc52626b0ddae2f4",
+                "file_id": "f_facaded51b7d1c9656ae43b4"
+              }
+            },
+            {
+              "code": "node_scripts_build_assets_only",
+              "detail": "package.json scripts (build:dev/build:prod via Encore) and webpack.config.js only emit JS/CSS bundles to web/build with public path /build; no HTML index or Node HTTP server exists to satisfy GET / 200 via static_http or http_process.",
+              "source": {
+                "digest": "sha256:f43d0b642b285cbd63f378ab22666b3c38446cc11775ed9ae02c7bf9f2cbcc6e",
+                "file_id": "f_1fb26bc12ac780c7ad732573"
+              }
+            },
+            {
+              "code": "oci_route_unavailable",
+              "detail": "lowering_capabilities.source_oci available=false (source_oci_builder_unavailable) and oci_image has no images; compose multi-service (php+redis) is also outside single-service OCI.",
+              "source": {
+                "digest": "sha256:8a46c5c0aac3a3be7e610a8e33dac6571a31b26b3abf2ff4bc52626b0ddae2f4",
+                "file_id": "f_facaded51b7d1c9656ae43b4"
+              }
+            },
+            {
+              "code": "auxiliary_mismatches",
+              "detail": "Lockfile is yarn.lock (npm_ci needs an npm lockfile) and engines.node >=24 vs bound node 22.14.0; these do not alter the primary PHP blocker.",
+              "source": {
+                "digest": "sha256:eed7f83da7d251c6d3278dc2eec65341c0e89631489a41001ff02c2d3374d354",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 87,
+      "name": "Lychee",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "3796a35721b039bd2987357790c2c31eaf32cf06",
+      "source_closure_ref": "sha256:307edcd497ec122eabc30bb5fba27a10fb4f50f456b0e745aa235eef7171845f",
+      "K_ref": "sha256:79bb1f921d97d85b962d760c4078f79f48fdbc6690597b13ae5b7a462e13f297",
+      "search_id": "search_5edcd138ed42e3796405a847e19971e2",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791245912873,
+      "authority_deadline_ms": 1791245955152,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "no_progress",
+      "termination_reason": "no_progress",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 2,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 1,
+      "elapsed_ms": 102978,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 286487,
+          "inputTokens": 285421,
+          "cachedInputTokens": 238976,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1066,
+          "reasoningOutputTokens": 39
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 2,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "inspection_budget_exhausted",
+              "detail": "Saved input reports inspection_budget_exhausted following the requested inspection; README, Dockerfile, Compose and embed configuration contents remain absent from source_context."
+            },
+            {
+              "code": "route_not_established",
+              "detail": "Available manifest and Vite configuration do not establish a source-declared static output serving GET / with status 200. The local development rewrite requires VITE_LOCAL_DEV and VITE_HTTP_PROXY_TARGET; no binding metadata is available. Inventing an output directory or proxy target is not justified.",
+              "source": {
+                "digest": "sha256:c7821e8772c017e0bc754b5a85fddef5054e1875bb87b59e74a8682dcdb437c5",
+                "file_id": "f_6a3b01ba97829c9566ef2d8d"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "insufficient_source"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 88,
+      "name": "grocy",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "41206cb90154e0d17d3e108cc1f182b94fdb465d",
+      "source_closure_ref": "sha256:333f12c9c4d746cecce4f90c72f522efb7b753005a86ae3e7ed0cf79281948e8",
+      "K_ref": "sha256:854ff30d3d3b70c20eb73695ec2413c6dea99903984e38981d8695ea74ab58f1",
+      "search_id": "search_ac29bc6b0969a7f36d1ecec6e13ad8af",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791246073008,
+      "authority_deadline_ms": 1791246086455,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 40748,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 1720,
+            "cacheReadInputTokens": 72150,
+            "cacheCreationInputTokens": 29277,
+            "thinkingTokens": 270,
+            "costUSD": 0.283086
+          }
+        },
+        "SDK_cost_estimate_usd": 0.283086,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "required_runtime_php",
+              "detail": "README states Grocy is a PHP application requiring PHP 8.5 with SQLite and extensions pdo_sqlite, gd, intl, etc.; webserver root must be the public directory. No PHP toolchain exists in the frozen operation catalog (gcc, make, node, npm, oci, pkg-config, python only).",
+              "source": {
+                "digest": "sha256:afec4a26b8386bf628a531166d2c7cfc5887c89fd146b17f3838f5bcac4da33b",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "no_node_entrypoint",
+              "detail": "package.json declares only frontend browser dependencies and no scripts; there is no source-owned Node HTTP server or static build route.",
+              "source": {
+                "digest": "sha256:5ec3b9a268d111d8690a2ac000752db5af389198d31649c789ce8f01aec2f5d4",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "oci_unavailable",
+              "detail": "lowering_capabilities.oci_image.available=false with no images and source_oci unavailable (source_oci_builder_unavailable); no alternative route to a PHP runtime."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 89,
+      "name": "FOSSBilling",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "668fb8c687e6f36a892cfc82d45817c9206ee5cc",
+      "source_closure_ref": "sha256:690d4c4bed077cb753cf5f095211a9e68f2f26112a187807a172202bbfc59b43",
+      "K_ref": "sha256:ecafcc25a385b941429c004873f1eb1c8abd0a57e85cde4b2363f6cdbcb37bb9",
+      "search_id": "search_71fc46448330056095d7f26f9ce9a140",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791246202967,
+      "authority_deadline_ms": 1791246248371,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 73421,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 94162,
+          "inputTokens": 93664,
+          "cachedInputTokens": 67712,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 498,
+          "reasoningOutputTokens": 0
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "source_oci_builder_unavailable",
+              "detail": "The root Dockerfile declares a PHP/Apache application with Composer dependencies and a Node 24 frontend build. Trusted source_oci capabilities report configured:false, builder_bound:false and available:false; verified OCI images are also unavailable. The frozen process catalog has no PHP runtime, and the frontend assets are not an evidenced standalone application HTTP entrypoint.",
+              "source": {
+                "digest": "sha256:58fd4ab3dd5acb1d8d1f0c08cf28d9bd5acaa147e660118c864c88f1391b0730",
+                "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+              }
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "source_oci_builder_unavailable"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 90,
+      "name": "Discourse",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "2590ea9db1b7c38dcf80298aefd3e7cb3afe1f2b",
+      "source_closure_ref": "sha256:2de91160102437546da39bba7c3848170f3db7d72cdb0fa613c8365d8661a134",
+      "K_ref": "sha256:2a5e4df8d0117cac93a0590f50312618218b8694fb6dc30f908467807314c62d",
+      "search_id": "search_d2e4e41da7cd55f0bb9922921dd540a3",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791246615122,
+      "authority_deadline_ms": 1791246902522,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 320281,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 2239,
+            "cacheReadInputTokens": 66373,
+            "cacheCreationInputTokens": 26575,
+            "thinkingTokens": 544,
+            "costUSD": 0.2706946
+          }
+        },
+        "SDK_cost_estimate_usd": 0.2706946,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "backend_requires_ruby_rails",
+              "detail": "README states the back end is a Ruby on Rails app requiring Ruby 3.4+, PostgreSQL 15 and Redis 7; the frozen catalog binds only gcc, make, node, pkg-config, python (no Ruby) and no database services.",
+              "source": {
+                "digest": "sha256:784611a56172ef4a2f57f79946df034f2cde084dfef0f999f2c9f788b524b6b2",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "node_route_requires_pnpm",
+              "detail": "Root package.json declares packageManager pnpm@10.34.5 with engines npm 'please-use-pnpm'; build/start scripts invoke pnpm --dir=frontend/discourse. No pnpm toolchain or package-lock.json is available, so the only Node dependency operation npm_ci cannot be lowered; .pnpmfile.cjs confirms a pnpm workspace layout.",
+              "source": {
+                "digest": "sha256:3790b5a61f8ed266cdf4f6d7e6a5b1fbc0751cbe90d213ff8f8a5ed095f01249",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "source_oci_unavailable",
+              "detail": "lowering_capabilities.source_oci is unavailable (source_oci_builder_unavailable) and no OCI image is acquired, so a containerized Rails route cannot be proposed."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 91,
+      "name": "Huginn",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "86ac2818e0dc4983aaecf73f126740071c57158e",
+      "source_closure_ref": "sha256:234a19971c23c95c5fd3f39c52769f4d9f0f059d18bd51081bb154273086a42c",
+      "K_ref": "sha256:58bb5157233d4cf924443931907d0ec16684ecb17bfc18696484971db9f2705a",
+      "search_id": "search_ccc509f73ba306535c4d617bf44786ce",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791247004011,
+      "authority_deadline_ms": 1791247012741,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 40405,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 87665,
+          "inputTokens": 86967,
+          "cachedInputTokens": 53888,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 698,
+          "reasoningOutputTokens": 74
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "source_requires_ruby_bundle",
+              "detail": "The acquired root README specifies bundle dependency installation, bundle exec rake database setup and bundle exec foreman start for the HTTP application. The frozen operation catalog provides Node, Python and OCI but no Ruby/Bundler execution route.",
+              "source": {
+                "digest": "sha256:90dde64a17b65905953f8d292d93393b4490293389729ed579bf47aa0d50619f",
+                "file_id": "f_b335630551682c19a781afeb"
+              }
+            },
+            {
+              "code": "manifest_is_asset_build_only",
+              "detail": "The complete package.json declares only a build script producing tmp/build/url-polyfill.js; it declares neither an HTTP startup script nor a static application output directory.",
+              "source": {
+                "digest": "sha256:6f8f677a70759df7dbfaec2aeabd0ae7286ed93a1b80b13d8027974d72b6cc21",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "oci_alternative_unavailable",
+              "detail": "Frozen lowering capabilities report source OCI builder unbound and unavailable, OCI image execution unavailable, and no approved image bindings. No source breakage or Runtime PASS is established."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 92,
+      "name": "Redmine",
+      "assigned_agent": "claude-code",
+      "agent_version": "2.1.288",
+      "model": "claude-opus-5-5",
+      "Source_revision": "8d04e327e4c566777f01ee9e56fc657bc9fa19ea",
+      "source_closure_ref": "sha256:39f0f8c0e457a2261265afbf57af430f1b8071eac320845900d21c2decfdcd36",
+      "K_ref": "sha256:dee3d63409e9c7b1ed61630575418d111d166f6349bc99ca39794093da671486",
+      "search_id": "search_ad590aa5b938f98cca81108f7abf0a8c",
+      "configuration_ref": "sha256:4c6fe7218d34c5002a457df087113830e3e331a5d3b92b3e8d48e1177d370d9e",
+      "CLI_deadline_ms": 1791247118799,
+      "authority_deadline_ms": 1791247142256,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "unsatisfied",
+      "category": "unsupported_capability",
+      "termination_reason": "unsupported_capability",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 47467,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_model_usage": {
+          "claude-opus-5-5": {
+            "inputTokens": 10,
+            "outputTokens": 1900,
+            "cacheReadInputTokens": 74472,
+            "cacheCreationInputTokens": 30456,
+            "thinkingTokens": 285,
+            "costUSD": 0.2965824
+          }
+        },
+        "SDK_cost_estimate_usd": 0.2965824,
+        "cost_basis": "SDK estimate; not proof of account billing",
+        "coverage": "last SDK context result"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": false,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [
+        {
+          "evidence": [
+            {
+              "code": "ruby_rails_application",
+              "detail": "Root README states Redmine is a web application written using the Ruby on Rails framework; inventory is Ruby (app/, db/migrate/, lib/redmine, test/*.rb).",
+              "source": {
+                "digest": "sha256:65aa3c707807c39bdd3b3d8cca5423c4d26a6d6bddc43420006a204aff973694",
+                "file_id": "f_17cb038f5ec7ba4b723c40e1"
+              }
+            },
+            {
+              "code": "no_node_http_entrypoint",
+              "detail": "Root package.json declares no scripts and only a stylelint devDependency; it provides no Node HTTP server or static build route.",
+              "source": {
+                "digest": "sha256:1b93ad36e96aed05dd811ca10192ffa371d0d170a1dbeb7de4f25644d70e7153",
+                "file_id": "f_7ae45ad102eab3b6d7e7896a"
+              }
+            },
+            {
+              "code": "ruby_toolchain_absent",
+              "detail": "Frozen operation catalog and Runtime facts bind only gcc, make, node, pkg-config and python; no Ruby/Bundler toolchain is available. source_oci and oci_image are unavailable (source_oci_builder_unavailable), so no alternative route can serve the frozen GET / on app.http."
+            }
+          ],
+          "kind": "unsupported",
+          "reason": "unsupported_toolchain"
+        }
+      ],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
+    },
+    {
+      "schema": "ato.formation-OSS100-cell-result/1",
+      "measurement_id": "formation-v0-OSS100-native-20261006-01",
+      "index": 93,
+      "name": "Jenkins",
+      "assigned_agent": "codex",
+      "agent_version": "0.160.0",
+      "model": "gpt-6.1-sol",
+      "Source_revision": "a2c9bfcc931347b67bb45c120343f1fb8590c508",
+      "source_closure_ref": "sha256:104d50f3e82a457bcfa0fbfdd53fb62f3a9867c1a0473cef4f7f2f89913a51d6",
+      "K_ref": "sha256:ec20d935262557a228a757f26fb5489492fa9fc1e1d08bf9a80f01c609e9642b",
+      "search_id": "search_0209e63e3d0c14d71e0049278ff85fc1",
+      "configuration_ref": "sha256:43c4fb1609f5e05ffa9956c4b913db28ac786a7ccd2ab822a0f945fba81ce184",
+      "CLI_deadline_ms": 1791247270987,
+      "authority_deadline_ms": 1791247343641,
+      "execution_pin": null,
+      "pins": {
+        "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+        "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+      },
+      "status": "stopped",
+      "category": "infrastructure_failure",
+      "termination_reason": "owner_stopped",
+      "unique_OSS_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": false,
+      "new_Searches": 1,
+      "D_rounds": 1,
+      "exchanges": 1,
+      "Runtime_attempts": 0,
+      "Runtime_workload_started": 0,
+      "inspections": 0,
+      "elapsed_ms": 462171,
+      "receipt": null,
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown"
+      },
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "actual_invoice": "unknown",
+      "preset_only_PASS": false,
+      "agent_unique_OSS_PASS": false,
+      "Native_context_started": true,
+      "pre_Native_infrastructure_terminal": false,
+      "Native_quota_rejection": true,
+      "Native_turns_completed": 1,
+      "fresh_context": true,
+      "known_D_seeded": false,
+      "typed_declines": [],
+      "cleanup": {
+        "unresolved_UNKNOWN": 0,
+        "reservations": 0,
+        "active_writer": 0,
+        "temporary_inputs": 0,
+        "workload_directories": 0,
+        "Runtime_stopped": true,
+        "Coordinator_stopped": true,
+        "secret_scan_hits": 0
+      },
+      "ordinary_Run_authorized": false,
+      "source_programs_on_owner_host": 0
     }
   ],
   "category_counts": {
-    "unsupported_capability": 45,
+    "unsupported_capability": 58,
     "withheld_old_UNKNOWN": 1,
     "initial_PASS": 7,
-    "no_progress": 15,
-    "infrastructure_failure": 5,
+    "no_progress": 16,
+    "infrastructure_failure": 6,
     "needs_input": 2,
     "repair_PASS": 2,
     "budget_exhausted": 1
@@ -11202,7 +12819,7 @@
             "owned_processes_stopped": true
           }
         ],
-        "available_bytes": 30608637952,
+        "available_bytes": 29602766848,
         "next_declared_expanded_stored_bytes": 3221225472,
         "disk_floor_bytes": 21474836480
       },
@@ -11233,7 +12850,998 @@
       "secret_scan_hits": 0,
       "SDK_counters_separate_from_actual_calls_and_invoice": true,
       "historical_13_12_and_WBO_preserved": true,
-      "at_ms": 1791241465853
+      "at_ms": 1791243014566
+    },
+    {
+      "schema": "ato.formation-OSS100-wave-gate/1",
+      "indices": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93
+      ],
+      "Source_admission_caps_without_Search": [
+        {
+          "schema": "ato.formation-Source-admission-cap/1",
+          "immutable_Source_Rust_verified": true,
+          "archive_sha256": "25545f2d19086cfb2820fd21738ab236f257369b5e2e6aed136a69faa0a17107",
+          "source_closure_ref": "sha256:4c2e6fd829ab62891f6d8241a3fc95e7acdba5d32bb2239a0c7589905017a338",
+          "K_ref": "sha256:1271198520bd777a4d7d2578c8d9c73095a6ff7f79205eb198d2cd37fc65ecb3",
+          "minimum_raw_archive_file_bytes": 270896094,
+          "physical_CLI_archive_cap_bytes": 268435456,
+          "eligible_regular_files": 11074,
+          "Source_unchanged": true,
+          "Source_programs_executed": 0,
+          "Search_created": false,
+          "Native_context_started": false,
+          "CLI_execution_not_attempted": true,
+          "product_pin": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+          "capture_module_sha256": "aedd93ee65b2b6127ad5865f0ac28b384db27aec5a4924f909ec75a464bb4dcf",
+          "transport_module_sha256": "9c349e16d90bfb842af06be0be0d5dee3cc0198d0f2354c01483d461447ed0a0",
+          "basis": "Pinned CLI ArchiveWriter emits uncompressed tar; regular file bytes alone exceed its cap"
+        }
+      ],
+      "authority_and_Runtime_checked_before_each_retirement": true,
+      "remote_checkpoint": {
+        "wave_gate_passed": true,
+        "cells": [
+          {
+            "index": 1,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 3,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 4,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 5,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 6,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 7,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 8,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 9,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 10,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 11,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 12,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 13,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 14,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 15,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 16,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 17,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 18,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 19,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 20,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 21,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 22,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 23,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 24,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 25,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 26,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 27,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 28,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 29,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 30,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 31,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 32,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 33,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 34,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 35,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 36,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 37,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 38,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 39,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 40,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 41,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 42,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 43,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 44,
+            "Source_admission_rejection_before_Search": {
+              "schema": "ato.formation-Source-provenance-admission/1",
+              "kind": "preregistered_license_digest_mismatch",
+              "archive_sha256": "e4a7a3a320de567061c7885a228e596d084a5c95e7aa46acc7e070a8af27cc24",
+              "source_closure_ref": "sha256:c7887c15d66b4f1fe92913776cef405160c97ac96bdec8c85a5b021bb269f44e",
+              "K_ref": "sha256:1445750f6ff2241c6b4b4af068bfea89008f85351f4dac93f76ae6c5fe31bb0d",
+              "license_file": "LICENSE",
+              "expected_license_sha256": "5e23bb98e12cf193c829d536ee73d165b73f393c2e78b5f6dbbda3607945423b",
+              "actual_license_sha256": "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9209a7c2a11399d6",
+              "archive_and_Source_closure_match_frozen_plan": true,
+              "Source_unchanged": true,
+              "Search_created": false,
+              "Native_context_started": false,
+              "Source_programs_executed": 0,
+              "CLI_execution_not_attempted": true
+            },
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 45,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 46,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 47,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 48,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 49,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 50,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 51,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 52,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 53,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 54,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 55,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 56,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 57,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 58,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 59,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 60,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 61,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 62,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 63,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 64,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 65,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 66,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 67,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 68,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 69,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 70,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 71,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 72,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 74,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 75,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 76,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 77,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 78,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 79,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 80,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 81,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 82,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 83,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 84,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 85,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 86,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 87,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 88,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 89,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 90,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 91,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 92,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          },
+          {
+            "index": 93,
+            "reserved": 0,
+            "unresolved_UNKNOWN": 0,
+            "temporary_inputs": 0,
+            "active_or_quarantined_writer": 0,
+            "FK_violations": 0,
+            "owned_processes_stopped": true
+          }
+        ],
+        "available_bytes": 28737118208,
+        "next_declared_expanded_stored_bytes": 3221225472,
+        "disk_floor_bytes": 21474836480
+      },
+      "aggregate_campaign_audit": {
+        "schema": "ato.native-acceptance-start-admission/1",
+        "measurement_id": "formation-v0-OSS100-native-20261006-01",
+        "used": {
+          "D_rounds": 95,
+          "exchanges": 149,
+          "Runtime_attempts": 19,
+          "inspections": 45,
+          "sequential_elapsed_seconds": 10175,
+          "searches": 90
+        },
+        "held": {
+          "D_rounds": 0,
+          "exchanges": 0,
+          "Runtime_attempts": 0,
+          "inspections": 0,
+          "sequential_elapsed_seconds": 0,
+          "searches": 0
+        },
+        "requested": {},
+        "exceeded": {},
+        "admitted": true,
+        "direct_API_ledger_modified": false
+      },
+      "secret_scan_hits": 0,
+      "SDK_counters_separate_from_actual_calls_and_invoice": true,
+      "historical_13_12_and_WBO_preserved": true,
+      "at_ms": 1791246151627
     },
     {
       "schema": "ato.formation-OSS100-wave-gate/1",
@@ -11619,14 +14227,14 @@
     }
   ],
   "consumed": {
-    "new_Searches": 75,
-    "D_rounds": 80,
-    "exchanges": 132,
+    "new_Searches": 90,
+    "D_rounds": 95,
+    "exchanges": 149,
     "Runtime_attempts": 19,
-    "inspections": 43,
-    "elapsed_ms": 8558485
+    "inspections": 45,
+    "elapsed_ms": 10129808
   },
-  "Native_contexts_started": 67,
+  "Native_contexts_started": 82,
   "owner_cleanup_recovery_028": {
     "original_halt_retained": true,
     "halted_after_index": 28,
