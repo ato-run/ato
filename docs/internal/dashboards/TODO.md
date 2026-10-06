@@ -1,8 +1,30 @@
 # Implementation TODO
 
-**更新日:** 2026-04-25
+**更新日:** 2026-10-06
 
 > 進捗チェック用。完了済みは `[x]`、未着手は `[ ]`。
+
+---
+
+## Formation v0：受入後の残作業（2026-10-06）
+
+Session/Skill、実30分UNKNOWNの同attempt復旧、依存stackのmain merge、staging migration/E2E、productionの1回smoke、新100件の結果確定、独立API残3計画は完了。[受入PR #1485](https://github.com/ato-run/ato/pull/1485)の実mainは `17148875c89f2119fa71a320590ea963227b3d7f`。以下は次の改善・追加検証であり、完了済みgateを未完了へ戻す項目ではない。
+
+[実測範囲・運用記録](../../ops/formation-v0-release-progress-20261006.md)・[100件比較](../../ops/evidence/formation-v0-OSS100-final-comparison-20261006.json)・[独立API比較](../../ops/evidence/formation-v0-independent-API-final-20261006.json)を根拠にする。9/100 typed-K PASSはpreset7＋実Native修復2（Codex/Claude各1）、実Searchは91。9/77の対象分類は事後分類で、全機能の対応やpaired比較を保証しない。
+
+- [ ] **P1 / CLI・Session — `formation-cancel-status-reconciliation`**: owner取消後、authorityが `stopped` でも保存済みCLI viewが `cancellation_pending` に残る経路を修正する。同Searchのstatus/resultを照合し、再推論・別attempt・deadline延長・消費枠の初期化で復旧を代用しない。
+- [ ] **P1 / API・運用 — `formation-emergency-admission-stop`**: Source Result-backed Instanceを旧production binaryが公開できたrollback非互換を受け、検証済みの新規Formation admission停止手段とforward-fix手順を用意する。停止対象は新Source Search・新functional registrationであり、保存済みstatus/result/ACK/reconciliation/stop/cleanupは維持する。既存flagで停止できるとは未実証。binary downgrade・schema/証拠rowの巻戻しは使わない。
+- [ ] **P1 / 共通入力・Runtime — `formation-state-resource-binding`**: Sourceのstate resourceとRuntime ceilingの具体的なresource名を共通入力で照合する。制御Sourceの `data` とRuntimeの `app.data` が異なる場合は未bindを利用可能と表示しない。マージ後smokeの `exploration_authority_exceeded` はworkload開始前に拒否・ACK/closedした証拠として保持し、root Source・K・権限を自動で書き換えない。
+- [ ] **P1 / API producer — `formation-api-typed-plan-progress`**: changedetection.io/Kuttが独立APIで各3 response後に `no_progress`、attempt0で終了した原因を保存済みinspection/validation evidenceから切り分け、source-owned native依存・state/bindingを根拠あるtyped proposalへつなぐ。Source不具合とは断定しない。終了済みSearchの再開やNative成功Dのseedでは修復せず、追加受入は別measurementにする。
+- [ ] **P2 / Static Source — `formation-static-explicit-K`**: root HTMLのみ＋明示KでSource presetが選択されず、catalogに利用可能なD経路がないケースを整理する。既存Static Web経路とlogical Port契約を確認し、対応不足を明示するか既存登録operationへ接続する。Kを弱める・仮のmanifestを足す・Sourceを編集する方法は使わない。
+- [ ] **P2 / operation・Runtime — `formation-rooted-operation-coverage`**: 新100件の `unsupported_capability` 58件について、v0外の正当な辞退と、対象内のtoolchain/依存取得/build/state/OCI bind不足を分ける。root宣言と明示参照の範囲で共通operationと利用条件を改善し、app固有preset・未bind能力の利用可能表示を増やさない。Native100のOCI未bindという元条件は保全する。
+- [ ] **P2 / 小規模受入 — `formation-functional-coverage`**: typed-K PASSの代表Sourceについて、必要なUI操作・機能・保存・停止後の新Run復元を別証拠として追加する。OCI制御fixtureのPASSを実OSSや全OCI経路の成功へ加算しない。owner明示承認のfunctional verificationを使い、通常Run・公開・forkへ自動昇格させない。
+- [ ] **P2 / 測定 — `formation-native-availability-and-paired-measurement`**: quota/credential windowを満たした時点で、未実行・producer不在・infraで停止したSourceを新measurementとして検証する。必要な比較は同Source/K/初期情報から独立文脈で行い、元100件の割当や結果を後から変更しない。旧13/12超過・WBO UNKNOWN・過去pinを保全し、成功Dをseedせず、開始前aggregate auditを通す。
+- [ ] **P2 / 会計 — `formation-native-cost-observation`**: SDK報告token/estimate、Agent exchange、実LLM call、実請求を別に記録できる観測を補う。欠損usageや取得不能値はunknownを維持する。独立API台帳33/41・small16/24・未精算0・残予算見積$0.424563を引き継ぎ、再測定や再接続で枠をリセットしない。価格とcredentialは実行時にprivate側で確認する。
+- [ ] **P2 / CI — `formation-existing-CI-failures`**: Node等の条件を揃え、API full-serialのexact base/headで同名だった194失敗（Activity/CORS13件を含む）を根本原因ごとに解消する。Linux/Windows CDP起動timeoutとDesktop DMG失敗も元logと同head rerun PASSを保全して再現・原因調査する。最終mainの3OS CI PASSを根本原因解決の証明とせず、skip追加で隠さない。
+- [ ] **P2 / PWA・Browser bridge — `formation-legacy-window-identity`**: 既存Notes等の `invalid_window_identity` をPort/Surfaceのidentity契約と照合し、IAB/Chromeでの差を切り分ける。Notes追加回帰PASSと初回timeoutの証拠を両方維持し、browser-local保存をStateService受入へ読み替えない。
+
+Compose/multi-service、宣言のないmulti-repo探索、自動Source/Dockerfile書換え、Formationからの課金付き自動調達はv0外のまま。上記TODOの登録自体から配備・remote migration・機能昇格を開始しない。
 
 ---
 
