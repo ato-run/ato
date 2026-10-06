@@ -12,6 +12,8 @@ Session/Skill、実30分UNKNOWNの同attempt復旧、依存stackのmain merge、
 
 [実測範囲・運用記録](../../ops/formation-v0-release-progress-20261006.md)・[100件比較](../../ops/evidence/formation-v0-OSS100-final-comparison-20261006.json)・[独立API比較](../../ops/evidence/formation-v0-independent-API-final-20261006.json)を根拠にする。9/100 typed-K PASSはpreset7＋実Native修復2（Codex/Claude各1）、実Searchは91。9/77の対象分類は事後分類で、全機能の対応やpaired比較を保証しない。
 
+直近の実装は、取消statusの照合 → 緊急admission停止 → state resourceのbind照合 → 独立APIのtyped plan進捗、の順に進める。その後にP2の対応範囲・機能受入・測定・会計・CI・Browser bridgeを扱う。保存済み証拠の調査から始め、追加実行の条件と枠は既存台帳から引き継ぐ。
+
 - [ ] **P1 / CLI・Session — `formation-cancel-status-reconciliation`**: owner取消後、authorityが `stopped` でも保存済みCLI viewが `cancellation_pending` に残る経路を修正する。同Searchのstatus/resultを照合し、再推論・別attempt・deadline延長・消費枠の初期化で復旧を代用しない。
 - [ ] **P1 / API・運用 — `formation-emergency-admission-stop`**: Source Result-backed Instanceを旧production binaryが公開できたrollback非互換を受け、検証済みの新規Formation admission停止手段とforward-fix手順を用意する。停止対象は新Source Search・新functional registrationであり、保存済みstatus/result/ACK/reconciliation/stop/cleanupは維持する。既存flagで停止できるとは未実証。binary downgrade・schema/証拠rowの巻戻しは使わない。
 - [ ] **P1 / 共通入力・Runtime — `formation-state-resource-binding`**: Sourceのstate resourceとRuntime ceilingの具体的なresource名を共通入力で照合する。制御Sourceの `data` とRuntimeの `app.data` が異なる場合は未bindを利用可能と表示しない。マージ後smokeの `exploration_authority_exceeded` はworkload開始前に拒否・ACK/closedした証拠として保持し、root Source・K・権限を自動で書き換えない。
@@ -25,6 +27,13 @@ Session/Skill、実30分UNKNOWNの同attempt復旧、依存stackのmain merge、
 - [ ] **P2 / PWA・Browser bridge — `formation-legacy-window-identity`**: 既存Notes等の `invalid_window_identity` をPort/Surfaceのidentity契約と照合し、IAB/Chromeでの差を切り分ける。Notes追加回帰PASSと初回timeoutの証拠を両方維持し、browser-local保存をStateService受入へ読み替えない。
 
 Compose/multi-service、宣言のないmulti-repo探索、自動Source/Dockerfile書換え、Formationからの課金付き自動調達はv0外のまま。上記TODOの登録自体から配備・remote migration・機能昇格を開始しない。
+
+## Formation v0：セッション終了時の運用TODO（2026-10-06）
+
+実装・受入・TODO追記はマージ済み。完了した47 worktreeは削除し、受入記録・DBバックアップ・配布artifactをworkspace rootの `.tmp/formation-v0-records-20261006/` へ保管した。以下の未確認事項を引き継ぐ。
+
+- [ ] **P2 / 共有staging運用 — `formation-staging-lock-handoff`**: 共有lockの正本の場所・owner・lease期限と、Formation終了checkpointの関係を確認する。このセッションではlockの場所を特定できず、owner/leaseを変更していない。次の共有staging作業前に、既存の引継手順に沿って解放済みまたは新ownerへの引継済みを記録する。他タスクのleaseを上書きせず、未確認のcheckpointだけで環境が空いていると判定しない。保存済みclosureが示す最後のcleanup確認と、現在の共有環境確認は区別する。
+- [ ] **P2 / workspace整理 — `formation-retained-worktree-disposition`**: 保留した6 worktree（origin branch ref不明5件、APIのlocal-only commit17件を持つ1件）の保存・整理方針を確認する。対象はworkspace rootの `.tmp/formation-agent-session/` 以下の `ato`、`ato-session-relay`、`ato-windows-durability`、`api`、`review-api-state`、`integration-pwa`。remoteの履歴・PR・利用中タスクと照合し、ローカルcommitとignored記録を失わない保存を確認してから削除可否を判断する。詳細は保管記録の `cleanup/cleanup-final.json` と `cleanup/staging-handoff-checkpoint.json` にあり、他タスクの変更・stash28件・remote受入storeは清掃対象に含めない。
 
 ---
 
