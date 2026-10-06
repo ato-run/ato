@@ -1,0 +1,39 @@
+{
+  "schema": "ato.formation-native-platform-CI-evidence/1",
+  "measurement_id": "formation-native-CI-20261004",
+  "exact_head": "8bd2525046ed925eff862198d22fcf398f0ab8e3",
+  "dependency_base": "2043a9fdd",
+  "native_windows": {
+    "run_id": 37135367549,
+    "job_id": 111238699403,
+    "url": "https://github.com/ato-run/ato/actions/runs/37135367549/job/111238699403",
+    "result": "PASS",
+    "os": "windows-latest",
+    "target": "x86_64-pc-windows-msvc",
+    "rustc": "1.99.0 (b940084d7 2026-09-28)",
+    "Python": "3.12.10",
+    "journal_tests": 8,
+    "test_step": "cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+    "clippy": "cargo clippy -p ato-cli --all-targets -- -D warnings",
+    "log_sha256": "c5251c71272653a51bdf44abd939fb5161548b15587ee9b79a74756bc1fd7b8f"
+  },
+  "native_ubuntu": {
+    "job_id": 111238699503,
+    "result": "PASS"
+  },
+  "native_macos": {
+    "job_id": 111238699360,
+    "result": "PASS"
+  },
+  "release_plan_only": {
+    "run_id": 37135367540,
+    "result": "PASS",
+    "artifact_build_upload": "SKIPPED"
+  },
+  "exact_base_head_comparison": "Prior GNU compile comparison remains separate in formation-agent-ci-comparison-20261003.json. Native current head passing does not retrospectively identify original CI failures.",
+  "limitations": [
+    "Original Linux WebSocket failure has not been reproduced on native Linux at the exact base/head.",
+    "Original macOS worker failure and intermittent computation handoff EOF do not have proven causes.",
+    "Session acceptance OS/tool boundaries are not proof of hosted browser or PWA acceptance."
+  ]
+}

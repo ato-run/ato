@@ -1,7 +1,7 @@
 {
   "schema": "ato.formation-agent-session-acceptance-plan/1",
   "measurement_id": "formation-agent-session-20261004-a2",
-  "status": "authorized_pending_environment_gates",
+  "status": "both_native_Source_PASS_aggregate_round_overrun_recorded",
   "purpose": "Actual explicit Skill invocation by Codex and Claude Code, same frozen Source/K and no seeded D. Session acceptance is not independent API success.",
   "cells": [
     {
@@ -62,7 +62,7 @@
     }
   ],
   "aggregate_ceiling": {
-    "searches": 4,
+    "searches": 10,
     "exchanges": 28,
     "D_rounds": 12,
     "inspections": 16,
@@ -90,7 +90,7 @@
   "installed_versions_inventory": {
     "codex": "0.160.0 isolated official binary; Native loader and controlled provider tool fixture observed",
     "claude_code": "2.1.288; controlled provider Skill/tool fixture and OS auth-host status observed",
-    "observed_model_information": "gpt-6.1-sol in Codex protocol fixtures; actual provider model remains to be recorded"
+    "observed_model_information": "Actual provider Codex gpt-6.1-sol and Claude claude-opus-5-5 both produced independent repaired same-K Source PASS"
   },
   "required_evidence": [
     "inspection -> typed proposal -> contained Runtime -> fresh same-K Rust receipt for both agents",
@@ -118,10 +118,78 @@
     "model_Code_Mode_negative_fixture": true,
     "Claude_auth_host_status": true,
     "Codex_isolated_keyring_auth": false,
-    "final_native_model_region_and_provider_egress": false,
-    "frozen_final_Linux_binary_and_API_bundle": false,
-    "disk_recheck_after_binary_build": false
+    "final_native_model_region_and_provider_egress": true,
+    "frozen_final_Linux_binary_and_API_bundle": true,
+    "disk_recheck_after_binary_build": true,
+    "Codex_native_existing_file_auth": true
   },
-  "scope_note": "4 cells are the aggregate Session acceptance scope, not independent API call budgets; actual native model calls/tokens/cost remain separate from Session exchanges.",
-  "exclusion_note": "No deployment, remote migrations, shared flags, 100-app measurement, old UNKNOWN rerun or paid automatic procurement."
+  "scope_note": "Native Session acceptance reassigns unspent aggregate scope after preparation failures; historical Search identifiers and counters remain included. This does not allocate paid API calls.",
+  "exclusion_note": "No deployment, remote migrations, shared flags, 100-app measurement, old UNKNOWN rerun or paid automatic procurement.",
+  "allocation_amendment": {
+    "reason": "Closed infrastructure failures and a native account quota rejection consumed Search identifiers without a receipt. Reassign only unspent aggregate exchange/round/Runtime/time scope to one same-source pair. Preserve every original terminal Search and limit.",
+    "initial_Search_identifiers": 4,
+    "maximum_Search_identifiers_including_closed_failures": 10,
+    "aggregate_non_Search_limits_increased": false,
+    "same_source_pair": {
+      "source": "SVGOMG",
+      "D_rounds_per_Search": 2,
+      "exchanges_per_Search": 6,
+      "Runtime_attempts_per_Search": 2,
+      "max_retries": 1,
+      "search_deadline_seconds": 1800
+    },
+    "Kutt_native_acceptance": "not measured in this allocation; prior non-native Kutt result is separate",
+    "no_API_budget_change": true,
+    "stop_cases": {
+      "needs_input": {
+        "agent": "claude_code",
+        "source": "controlled dependency-free Node input Source; no successful D or input value seeded",
+        "D_rounds": 1,
+        "exchanges": 2,
+        "Runtime_attempts": 1,
+        "deadline_seconds": 900
+      },
+      "budget_exhausted": {
+        "agent": "codex",
+        "Source": "same frozen SVGOMG",
+        "max_expanded_bytes": 0,
+        "new_inference": false,
+        "Runtime_attempts": 0
+      },
+      "deadline_exceeded": {
+        "agent": "codex",
+        "Source": "same frozen SVGOMG",
+        "deadline_seconds": 10,
+        "entry_after_original_deadline": true,
+        "new_inference": false,
+        "Runtime_attempts": 0
+      },
+      "aggregate_other_limits_increased": false,
+      "old_Searches_reopened": false
+    },
+    "stop_case_preparation_failure": {
+      "local_identifier_without_Coordinator_Search": 1,
+      "http_status_read_only_reconciliation": 404,
+      "saved_transport_dispatches": 2,
+      "retry_reset": false,
+      "new_inference_or_execution": false,
+      "unspent_scope_reassigned_to_new_case_identifier": true,
+      "other_aggregate_limits_increased": false
+    },
+    "accounting_correction": "The earlier unspent-scope calculation omitted the unanswered cancelled quota round. The deadline case caused Coordinator allocated rounds 13 vs ceiling12. Keep the discrepancy; block further native starts; do not reclassify completed11 as total consumption or raise the old ceiling."
+  },
+  "aggregate_observed": {
+    "Coordinator_allocated_rounds": 13,
+    "completed_response_rounds": 11,
+    "unanswered_quota_or_deadline_rounds": 2,
+    "exchanges": 15,
+    "Runtime_attempts": 7,
+    "inspections": 0,
+    "sequential_elapsed_seconds": 1368,
+    "identifiers_including_uncreated_failures": 10,
+    "D_round_ceiling_exceeded_by": 1,
+    "further_native_Search_start_blocked": true,
+    "existing_round_ceiling_increased_or_reset": false,
+    "last_deadline_case_new_inference_or_Runtime": false
+  }
 }

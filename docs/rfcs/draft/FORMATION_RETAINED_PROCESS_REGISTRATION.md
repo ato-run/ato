@@ -1,7 +1,14 @@
 # Formation retained process registration
 
-Status: Draft; local implementation only. No deployment, migration application,
-feature enablement, production assessment or live acceptance is authorized.
+Status: implemented; product-path acceptance measured. The Source Result extension
+and owner-only `ato form-verify` path are merged and deployed. Saved Kutt acceptance
+and separately authorized staging/production controlled-Source Run A/B receipts
+are described in the [release gate record](../../ops/formation-v0-release-progress-20261006.md).
+These records do not grant ordinary Run, publication or fork permission, and the
+100-OSS/independent API outcomes are finalized in that record. The 100-case
+denominator includes producer-unavailable admission stops; no full functional
+support is inferred. Final merge/artifact impact evidence is attached to the
+acceptance PR.
 
 A fresh same-K exploration submission is evidence, not a normal Run grant.
 The new `project_retained_registration` operation checks the persisted
@@ -23,7 +30,7 @@ bindings, Runtime Port operations and Runtime network access fail closed because
 the existing ordinary process launcher cannot preserve their scoped authority.
 These exclusions are capability limits, not proof that those applications fail.
 
-The API owner-session entry accepts an explicit functional-verification request
+The legacy API owner-session entry accepts an explicit functional-verification request
 and an existing owned Source Instance. It must prove that the source namespace
 already refers to the same immutable closure, and that the caller's selected
 Linux target matches the creation attempt's immutable capability profile. It
@@ -39,7 +46,7 @@ new-Run restore retain their existing authority. The lease resolves retained
 bytes for its exact registered schema and workspace digest; the R2 key is never
 projected to the Producer. No app-specific mount or manual state grant is needed.
 
-This local bridge does not prove PWA resume or changedetection/Kutt functionality.
+The initial local bridge alone did not prove PWA resume or changedetection/Kutt functionality.
 In particular, a Kutt descriptor containing scoped private initialization cannot
 be silently downgraded into this process route. Live functionality, same artifact
 restart, private authentication, and final-pin PWA input/resume require separate
@@ -81,10 +88,44 @@ observations cannot support PASS. Captured values are not evidence fields. These
 synthetic checks do not prove Kutt/changedetection functionality; their actual
 same-artifact create/edit/stop/restart gates require approved execution.
 
-No remote migration, deployment, flag enablement or ordinary Run permission is
-part of this implementation. Actual functional execution requires the separately
-presented Source/artifact/K/D, Runtime, fresh input scope, operation/attempt limits
-and deadline to be approved before starting.
+Remote migration and deployment were later separately authorized and measured;
+they are not implied by this projection. Ordinary Run permission is still outside
+this implementation. Actual functional execution requires explicit approval of
+the Source/artifact/K/D, Runtime, fresh input scope, operation/attempt limits and
+deadline before starting.
+
+## Normal Source Search anchor
+
+A normal CLI Source Search does not require a pre-existing Source Instance.
+Rust validates the saved accepted PASS attempt, immutable Source closure, frozen
+K, accepted D, ready retained object and exact target/capability profile, then
+projects a canonical `ato.formation-source-result/1` evidence record. The API
+persists that projection with authenticated owner and Search/attempt provenance.
+This is neither a Capsule identity nor a state namespace. An interrupted save
+is repaired from the same PASS without creating a Search, attempt, inference or
+deadline. Conflicting records and unavailable provenance fail closed.
+
+The owner-only Source Result view selects the authority's accepted submission,
+not the latest retained artifact. `ato form-verify --source-search-id ...
+--owner-token-file ... --plan ... --authorize-functional-verification` fetches
+that anchor and invokes the existing retained-verification service. No dummy
+Source Instance or private dispatch namespace is created. Optional supplied
+Source/K/D/retained refs must agree with the saved anchor.
+
+An explicitly approved registration creates a functional-only schema/Instance
+with `source_result_ref` and NULL sealed Capsule revision. Registration replay
+returns the same Instance/Run/lease/deadline. State belongs to that functional
+Instance and slot: another Run of the same registration restores the same
+namespace with a new writer fence; another registration gets a separate
+namespace. Ordinary execution, publication/install/shared/fork paths reject this
+unassessed basis. Success never automatically becomes normal Run permission.
+
+The saved Kutt Search reached this product path without another Native Search.
+The separately measured staging and one production controlled-Source flow also
+performed Run A write/commit and Run B restore/delete with fence 1→2, followed by
+ACK/closed, writer/reservation/input zero. Their exact pins, functional observations
+and remaining browser limitations belong to the linked release records, not to
+the semantic identity or earlier private fixture results.
 
 ## Logical slot and StateService namespace
 

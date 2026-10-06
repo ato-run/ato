@@ -1,0 +1,39 @@
+{
+  "schema": "ato.native-acceptance-budget-audit/1",
+  "measurement_id": "formation-agent-session-20261004-a2",
+  "totals": {
+    "D_rounds": 13,
+    "exchanges": 15,
+    "Runtime_attempts": 7,
+    "inspections": 0,
+    "sequential_elapsed_seconds": 1368,
+    "searches": 10
+  },
+  "requested": {},
+  "limits": {
+    "D_rounds": 12,
+    "exchanges": 28,
+    "Runtime_attempts": 8,
+    "inspections": 16,
+    "sequential_elapsed_seconds": 7200,
+    "searches": 10
+  },
+  "exceeded": {
+    "D_rounds": {
+      "used": 13,
+      "requested": 0,
+      "max": 12
+    }
+  },
+  "admitted": false,
+  "round_basis": "Coordinator allocated rounds, including unanswered cancelled/deadline rounds",
+  "direct_API_ledger_modified": false,
+  "Search_started_or_reset": false,
+  "historical_Source_successes_or_counters_rewritten": false,
+  "completed_response_rounds": 11,
+  "unanswered_quota_or_deadline_rounds": 2,
+  "uncreated_identifiers": 2,
+  "extra_inference_or_Runtime_for_last_deadline_case": false,
+  "all_original_Search_limits_and_API_ledgers_preserved": true,
+  "further_native_Search_start_blocked": true
+}

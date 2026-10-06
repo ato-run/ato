@@ -1,0 +1,43 @@
+{
+  "schema": "ato.native-acceptance-campaign/1",
+  "measurement_id": "formation-native-real-unknown-20261005-02",
+  "initial_campaign": true,
+  "purpose": "real UNKNOWN recovery only",
+  "aggregate_ceiling": {
+    "D_rounds": 2,
+    "exchanges": 3,
+    "Runtime_attempts": 1,
+    "inspections": 2,
+    "sequential_elapsed_seconds": 2400,
+    "searches": 1
+  },
+  "previous_campaign": {
+    "status": "ended_exceeded",
+    "D_rounds_used": 13,
+    "D_rounds_ceiling": 12,
+    "audit_sha256": "91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197"
+  },
+  "normal_Run_authorized": false,
+  "direct_API_budget_changed": false,
+  "previous_supplemental": {
+    "measurement_id": "formation-native-real-unknown-20261005-01",
+    "status": "ended_before_Runtime",
+    "searches": 1,
+    "D_rounds": 1,
+    "exchanges": 1,
+    "Runtime_attempts": 0,
+    "inspections": 0,
+    "elapsed_seconds": 51
+  },
+  "execution_status": "ended_PASS_without_fault_injection",
+  "gate_passed": false,
+  "actual_new_consumption": {
+    "Searches": 1,
+    "D_rounds": 1,
+    "exchanges": 1,
+    "Runtime_attempts": 1,
+    "inspections": 0,
+    "elapsed_seconds": 58
+  },
+  "historical_measurements_preserved": true
+}
