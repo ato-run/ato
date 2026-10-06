@@ -1,11 +1,15 @@
 # Formation v0 execution completion
 
-Status: implemented; release acceptance in progress. Requested 2026-10-01.
-The product stack is merged, and staging/production controlled-Source acceptance
-is measured. The frozen 100-OSS campaign and independent API comparison are still
-in progress. See the [release gate record](../../ops/formation-v0-release-progress-20261006.md)
-for historical pins and measured limitations; no unimplemented capability is
-declared available and no completed receipt is reassigned to a later Git SHA.
+Status: implemented; measured v0 acceptance scope. Requested 2026-10-01.
+The product stack is merged and staging/production controlled-Source acceptance,
+real UNKNOWN recovery and integration validation are recorded. The new 100-case
+campaign has finalized its outcomes (9 typed-K PASS, 91 actual Searches), and
+separate 6/6/8-call API plans have finished (OCI control PASS; changedetection/Kutt
+no_progress). Do not read a completed measurement as full support or execution
+of every Source. See the [release gate record](../../ops/formation-v0-release-progress-20261006.md)
+for execution pins, functional evidence, accounting and measured limitations.
+Old receipts are never reassigned to a later Git SHA. Final Git-identified artifact
+impact evidence and merge revision are published on the acceptance PR.
 
 The implementation base is ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`
 and ato-api `9e0031900836090612b94e775e26f980a68f32d7`. Reuse the existing

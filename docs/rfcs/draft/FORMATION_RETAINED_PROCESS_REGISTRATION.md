@@ -5,7 +5,10 @@ and owner-only `ato form-verify` path are merged and deployed. Saved Kutt accept
 and separately authorized staging/production controlled-Source Run A/B receipts
 are described in the [release gate record](../../ops/formation-v0-release-progress-20261006.md).
 These records do not grant ordinary Run, publication or fork permission, and the
-100-OSS/independent API release gates remain in progress.
+100-OSS/independent API outcomes are finalized in that record. The 100-case
+denominator includes producer-unavailable admission stops; no full functional
+support is inferred. Final merge/artifact impact evidence is attached to the
+acceptance PR.
 
 A fresh same-K exploration submission is evidence, not a normal Run grant.
 The new `project_retained_registration` operation checks the persisted

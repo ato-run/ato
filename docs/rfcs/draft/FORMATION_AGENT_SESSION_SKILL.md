@@ -1,6 +1,6 @@
 # Formation Agent Sessionと運用Skill
 
-Status: implemented。共有Session入口とSkillはmainへマージ済み。実Codex/Claude Code受入、実UNKNOWN復旧、stagingとproductionの制御Source受入は保存済み証跡を参照する。100件再測定と独立API比較は進行中であり、この文書はrelease完了を宣言しない。
+Status: implemented。共有Session入口とSkillはmainへマージ済み。実Codex/Claude Code受入、実UNKNOWN復旧、stagingとproductionの制御Source受入は保存済み証跡を参照する。100件の結果は9 PASS・91実Searchとして確定し、独立API残3計画も実行済み。全Sourceの実行・全機能対応を意味しない。最終merge revisionとartifact影響smokeは受入PRの保存済み証跡を参照する。
 
 ## 目的と責務
 
@@ -58,7 +58,7 @@ Single Static Web、Node/Python process、単一OCIの現行catalog内で扱う�
 
 ## 参照
 
-- [Release gate記録](../../ops/formation-v0-release-progress-20261006.md): 実行pin、実Agent/UNKNOWN、staging/production、進行中の100件測定を区別する。旧13/12と過去のpinは保持する。
+- [Release gate記録](../../ops/formation-v0-release-progress-20261006.md): 実行pin、実Agent/UNKNOWN、staging/production、確定した100件の結果と実行率を区別する。旧13/12と過去のpinは保持する。
 - [Shared reasoning prototype](FORMATION_SHARED_REASONING.md): 既存の共通入力・Session応答・予算/履歴境界。
 - [DecisionProvider is not CandidateProducer](ADR-041-formation-provider-split.md): providerと共通Ato authorityの分担。
 - [Codex Skill資料](https://developers.openai.com/codex/skills): local Skill/symlink/明示呼び出し設定。
