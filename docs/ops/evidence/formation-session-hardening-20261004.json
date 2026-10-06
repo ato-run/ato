@@ -1,0 +1,68 @@
+{
+  "schema": "ato.formation-session-hardening-evidence/1",
+  "session_head": "d7c926f5d5e22fbb4dec30316c918729cf923cae",
+  "skill_head": "45926a272d0cd5686afd28fe900f8253fe749d9b",
+  "model_tools": [
+    "status",
+    "next",
+    "submit"
+  ],
+  "model_cancel_authority": false,
+  "owner_CLI_cancel": true,
+  "public_descriptors": {
+    "Session": "ato.formation-session-connection/2",
+    "TCP_relay": "ato.formation-session-relay/2",
+    "Unix_relay": "ato.formation-session-unix-relay/2",
+    "raw_token_or_private_path_serialized": false
+  },
+  "private_capability_storage": "bounded scope-bound owner file; trusted MCP transport client can read; model tool/OS profile cannot",
+  "FD_or_memory_only_transport": false,
+  "0600_alone_is_not_isolation_proof": true,
+  "local_tests": {
+    "MCP_relay": 25,
+    "worker_Session": 18,
+    "binary_args": 1,
+    "CLI_library": 54,
+    "Native_Skill": 41,
+    "campaign_start_guard": 13
+  },
+  "clippy_cli_worker_all_targets_all_features": "PASS",
+  "latest_CI": {
+    "head": "d7c926f5d5e22fbb4dec30316c918729cf923cae",
+    "run_id": 37177678101,
+    "url": "https://github.com/ato-run/ato/actions/runs/37177678101",
+    "windows": {
+      "job_id": 111363621718,
+      "result": "PASS"
+    },
+    "macOS": {
+      "job_id": 111363621808,
+      "result": "PASS"
+    },
+    "Ubuntu": {
+      "job_id": 111363621833,
+      "result": "PASS"
+    }
+  },
+  "prior_failure_preserved": {
+    "head": "8677a3cd125123ef4708d4e0cf5a2757807b85f2",
+    "run_id": 37176528359,
+    "url": "https://github.com/ato-run/ato/actions/runs/37176528359",
+    "macOS_job_id": 111360165153,
+    "test": "formation_session_mcp::relay::tests::public_descriptor_alone_and_mismatched_private_component_cannot_authorize",
+    "failure": "nested RPC status returned isError=true; detailed code was not logged at that head",
+    "reproduced_locally": false,
+    "next_change": "redacted error-code assertion only, no runtime implementation change",
+    "cause": "unclassified"
+  },
+  "OS_fixture": "formation-session-private-capability-os-20261004.json",
+  "actual_Native_after_Runtime_started_UNKNOWN": "NOT RUN",
+  "new_inference_or_Runtime_execution": 0,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "deployment_or_remote_migration": false,
+  "limitations": [
+    "OS fixture uses real kernel with synthetic same-uid canaries, not a new Native Source/Runtime acceptance.",
+    "Prior successful Native Source pins and v1 descriptors are historical; no success is repinned to current v2 code.",
+    "Actual UNKNOWN transport interruption and Kutt product-path acceptance await approved campaign capacity."
+  ]
+}

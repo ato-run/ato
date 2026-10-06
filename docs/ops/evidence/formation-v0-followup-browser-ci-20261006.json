@@ -1,0 +1,45 @@
+{
+  "base": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+  "head": "d526d23fb8a0dff2fa9b196563f41f60cb64f336",
+  "failed_run": 37380242787,
+  "failed_job": 112000054302,
+  "failure_name": "tests::cdp_main_world_native_consumer_probe_keeps_registry_generation_stable",
+  "error": "timed out waiting for loopback CDP",
+  "failed_stage": "Test workspace",
+  "new_Formation_code_changes": 0,
+  "checked_source_and_conditions": [
+    {
+      "path": "extensions/browser-host/src/lib.rs",
+      "base_head_byte_identical": true,
+      "sha256": "709de02855ffc5639be65276e27e186c7cfeade25778f0b54305e4103cf21fac"
+    },
+    {
+      "path": "extensions/browser-host/Cargo.toml",
+      "base_head_byte_identical": true,
+      "sha256": "32f2c6f9ec465cdd9d6dc98024dbf1547823d741927a2c9c7263da4112ed6844"
+    },
+    {
+      "path": "Cargo.lock",
+      "base_head_byte_identical": true,
+      "sha256": "7a99b7f9e6a679f0bc27e4064e8f6eba1e3ece41ceb3bf807ed35c0fa67bcf82"
+    },
+    {
+      "path": ".github/workflows/rust-ci.yml",
+      "base_head_byte_identical": true,
+      "sha256": "b753d60676c97c3320fa9acca5bafe3218ad1a00aa003e765b6d825eec0341f5"
+    }
+  ],
+  "base_reference_run": 37325424479,
+  "same_source_does_not_prove_flakiness_or_GHA_environment_equivalence": true,
+  "exact_new_GHA_environment_not_reproduced": true,
+  "remote_arm64_browser_absent_so_no_false_skip_as_PASS": true,
+  "base_test_observation": "same failure-name test PASS in base GHA job 111814815928",
+  "one_targeted_ubuntu_rerun_requested": true,
+  "original_failure_preserved": true,
+  "rerun_attempt": 2,
+  "rerun_ubuntu_job": 112007146876,
+  "rerun_ubuntu_conclusion": "success",
+  "product_code_changed_between_attempts": false,
+  "root_cause_not_proven": true,
+  "observed_outcome": "same head CDP startup timeout in attempt 1; target job PASS in attempt 2"
+}

@@ -1,13 +1,25 @@
 # Formation v0 execution completion
 
-Status: draft. Requested 2026-10-01. Implementation and acceptance are recorded
-separately; this document does not declare unimplemented capabilities available.
+Status: implemented; measured v0 acceptance scope. Requested 2026-10-01.
+The product stack is merged and staging/production controlled-Source acceptance,
+real UNKNOWN recovery and integration validation are recorded. The new 100-case
+campaign has finalized its outcomes (9 typed-K PASS, 91 actual Searches), and
+separate 6/6/8-call API plans have finished (OCI control PASS; changedetection/Kutt
+no_progress). Do not read a completed measurement as full support or execution
+of every Source. See the [release gate record](../../ops/formation-v0-release-progress-20261006.md)
+for execution pins, functional evidence, accounting and measured limitations.
+Old receipts are never reassigned to a later Git SHA. Final Git-identified artifact
+impact evidence and merge revision are published on the acceptance PR.
 
 The implementation base is ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`
 and ato-api `9e0031900836090612b94e775e26f980a68f32d7`. Reuse the existing
 Coordinator, immutable K/D, Runtime attempt journal, contained build/launch,
 source-OCI builder, encrypted variable store and assignment/grant services.
-No deployment, remote migration or feature enablement is authorized by this work.
+Those are the original implementation bases, not current execution pins. The
+separately authorized release applied the ordered migration chain and deployed
+the measured integration revision. Ordinary Run/publication/fork promotion and
+managed procurement remain disabled; Source success requires explicit owner
+functional-verification authorization before a functional Instance is created.
 
 ## Search control
 

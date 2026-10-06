@@ -1,0 +1,105 @@
+{
+  "schema": "ato.formation-native-unknown-supplemental-evidence/1",
+  "measurement_id": "formation-native-real-unknown-20261005-01",
+  "status": "ended_without_runtime_start",
+  "purpose": "real UNKNOWN recovery only",
+  "aggregate_ceiling": {
+    "D_rounds": 2,
+    "exchanges": 3,
+    "Runtime_attempts": 1,
+    "inspections": 2,
+    "sequential_elapsed_seconds": 2400,
+    "searches": 1
+  },
+  "search_id": "search_36ebcf9479b6c5b359d9df8e685c3da4",
+  "satisfy_id": "01M44S4HP7VV6ZD88XCZBV62HX",
+  "termination_reason": "needs_input",
+  "failure_boundary": "Native owner isolation confirmation absent from launcher prompt",
+  "Source_revision": {
+    "README.md": "f2bfb18e8b401d3bdfb797ed9c5adfb16066be1d7161c35d9e03c5b229e3cf0e",
+    "package.json": "5d1eb6f9b90ed5e2fa61857df1dc9d52649176edf1c0dbe2c0a68f80970ffd5d",
+    "server-unknown.js": "350ab691106a083de6f754b67dff6f2b522fd338a5d06cc0a18356973e159607"
+  },
+  "frozen_K_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+  "original_requester_deadline_ms": 1791163742475,
+  "Coordinator_created_at": "2026-10-05T00:59:03.701Z",
+  "Coordinator_deadline_at": "2026-10-05T01:29:03.701Z",
+  "pins": {
+    "Requester_Session": "d7c926f5d5e22fbb4dec30316c918729cf923cae",
+    "Runtime": "c5719f69ea2ef009f3f0d677518b843655b3e196",
+    "API_product_code": "34b44f842490279fbd10cca940b0768a10f52a2a",
+    "Native_Skill": "45926a272d0cd5686afd28fe900f8253fe749d9b",
+    "acceptance": "7149634444172e90c4ecf239f9f8f13b25a577c4"
+  },
+  "agent": {
+    "kind": "codex",
+    "version": "0.160.0",
+    "model": "gpt-6.1-sol"
+  },
+  "consumption": {
+    "D_rounds": 1,
+    "exchanges": 1,
+    "Runtime_attempts": 0,
+    "inspections": 0,
+    "sequential_elapsed_seconds": 51,
+    "searches": 1
+  },
+  "held_campaign_scope": {
+    "D_rounds": 0,
+    "exchanges": 0,
+    "Runtime_attempts": 0,
+    "inspections": 0,
+    "sequential_elapsed_seconds": 0,
+    "searches": 0
+  },
+  "Runtime_attempts": 0,
+  "workload_started": false,
+  "transport_cut": false,
+  "real_30_minute_expiry_observed": false,
+  "UNKNOWN_observed": false,
+  "fresh_receipts": 0,
+  "closed_Runtime_deliveries": 0,
+  "ACK": "not_applicable_no_attempt",
+  "reservations": {
+    "attempts": 0,
+    "transfer": 0,
+    "expanded": 0,
+    "stored": 0
+  },
+  "active_writers": 0,
+  "quarantined_slots": 0,
+  "temporary_Source_inputs_created": 0,
+  "owned_services_remaining": [],
+  "native_client_stopped": true,
+  "SDK_reported_usage": {
+    "scope": "native context; SDK reported counters only",
+    "internal_LLM_calls": "unknown",
+    "account_charge_usd": "unknown",
+    "last_cumulative_tokens": {
+      "totalTokens": 67735,
+      "inputTokens": 67215,
+      "cachedInputTokens": 49920,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 520,
+      "reasoningOutputTokens": 38
+    },
+    "coverage": "last SDK update; update events are not LLM calls"
+  },
+  "direct_LLM_API_calls": 0,
+  "internal_LLM_calls": "unknown",
+  "actual_account_charge_usd": "unknown",
+  "previous_campaign": {
+    "status": "ended_exceeded",
+    "D_rounds_used": 13,
+    "D_rounds_ceiling": 12,
+    "audit_sha256": "91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197",
+    "unchanged": true
+  },
+  "normal_Run_authorized": false,
+  "cloud_migration": false,
+  "deployed": false,
+  "new_Search_for_retry_authorized": false,
+  "local_private_components_removed": 4,
+  "temporary_owner_session_revoked": true,
+  "owner_signout_HTTP": 200
+}

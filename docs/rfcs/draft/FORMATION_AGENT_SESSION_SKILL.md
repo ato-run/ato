@@ -1,6 +1,6 @@
 # Formation Agent Sessionと運用Skill
 
-Status: draft。共有Session入口とSkillの変更契約。実エージェント受入・マージ・配備の成功記録ではない。
+Status: implemented。共有Session入口とSkillはmainへマージ済み。実Codex/Claude Code受入、実UNKNOWN復旧、stagingとproductionの制御Source受入は保存済み証跡を参照する。100件の結果は9 PASS・91実Searchとして確定し、独立API残3計画も実行済み。全Sourceの実行・全機能対応を意味しない。最終merge revisionとartifact影響smokeは受入PRの保存済み証跡を参照する。
 
 ## 目的と責務
 
@@ -22,7 +22,7 @@ Status: draft。共有Session入口とSkillの変更契約。実エージェン�
 
 配置時にはSkill treeだけが読めることを確認する。Owner credentialを同じエージェント実行環境から読めるまま0600へ変更しても非露出の保証にはならない。実受入は許可されたBridge通信以外のSource書換え、直接起動、DB変更、receipt作成を環境側でも拒否する。Skillの指示だけを隔離・認可として扱わない。
 
-shellを必要としない入口は`ato-formation-session-mcp --connection PATH`。既存Session transportへ`status`・`next`・`submit`・`cancel`だけを転送する。起動時のpath、Search/config/agent/capabilityを固定し、所有者の同じBridge再接続では同じfileからloopback addressだけを更新する。modelのtool引数に任意path/URL/Searchを許可せず、Source内容からdynamic toolを追加しない。`submit.output_json`は原文のRawValueとして共通Rust validatorへ渡し、duplicate field拒否を維持する。MCPは独自のbudget/receipt/Contract判定を持たない。
+shellを必要としない入口は`ato-formation-session-mcp --connection PATH`。既存Session transportへ`status`・`next`・`submit`だけを転送する。Search取消はowner CLIの権限であり、model-facing MCPへ`cancel`を公開しない。進めないAgentはtyped declineを提出する。公開descriptorはaddress、Search、configuration、agentだけを持ち、private capabilityやそのpathをserializeしない。固定transportは公開領域外のprivate componentを読む。0600だけでは隔離を証明せず、memory-only/FD方式の完成も主張しない。起動時のpath、Search/config/agent/capabilityを固定し、所有者の同じBridge再接続では同じfileからloopback addressだけを更新する。modelのtool引数に任意path/URL/Searchを許可せず、Source内容からdynamic toolを追加しない。`submit.output_json`は原文のRawValueとして共通Rust validatorへ渡し、duplicate field拒否を維持する。MCPは独自のbudget/receipt/Contract判定を持たない。
 
 MCPの固定tool inventoryはwhole-process隔離の代わりにはならない。native agent認証とmodel向けfile/process toolの境界を別途検証し、実計画の前にSkill discovery、tool inventory、禁止読取・書込・実行・ネットワーク・接続先変更の負例gateを通す。
 
@@ -58,6 +58,7 @@ Single Static Web、Node/Python process、単一OCIの現行catalog内で扱う�
 
 ## 参照
 
+- [Release gate記録](../../ops/formation-v0-release-progress-20261006.md): 実行pin、実Agent/UNKNOWN、staging/production、確定した100件の結果と実行率を区別する。旧13/12と過去のpinは保持する。
 - [Shared reasoning prototype](FORMATION_SHARED_REASONING.md): 既存の共通入力・Session応答・予算/履歴境界。
 - [DecisionProvider is not CandidateProducer](ADR-041-formation-provider-split.md): providerと共通Ato authorityの分担。
 - [Codex Skill資料](https://developers.openai.com/codex/skills): local Skill/symlink/明示呼び出し設定。
