@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sys
 import socketserver
 import tempfile
 import threading
@@ -11,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
 
 spec = importlib.util.spec_from_file_location("gpu_chat", Path(__file__).parents[1] / "app.py")
 app = importlib.util.module_from_spec(spec)
