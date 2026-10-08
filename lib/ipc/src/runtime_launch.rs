@@ -145,6 +145,30 @@ pub struct ProcessRealizationV1 {
     pub argv: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<ExecutableRequirementV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_abi: Option<ProcessAbiRequirementV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessAbiRequirementV1 {
+    pub glibc_min: String,
+    pub glibcxx_min: String,
+}
+
+impl ProcessAbiRequirementV1 {
+    pub fn valid(&self) -> bool {
+        [&self.glibc_min, &self.glibcxx_min].iter().all(|value| {
+            let parts: Vec<_> = value.split('.').collect();
+            value.len() <= 32
+                && (2..=3).contains(&parts.len())
+                && parts.iter().all(|p| {
+                    !p.is_empty()
+                        && p.bytes().all(|b| b.is_ascii_digit())
+                        && p.parse::<u16>().is_ok()
+                })
+        })
+    }
 }
 
 /// A logical executable requirement. Resolution to a host path is admission
@@ -380,6 +404,15 @@ impl RuntimeLaunchSpecV1 {
 
         match &self.realization {
             LaunchRealizationV1::Process(process) => {
+                if process
+                    .required_abi
+                    .as_ref()
+                    .is_some_and(|abi| !abi.valid())
+                {
+                    return Err(RuntimeLaunchSpecError::ForbiddenField {
+                        field: "realization.required_abi".to_owned(),
+                    });
+                }
                 if process.argv.is_empty() || process.argv[0].is_empty() {
                     return Err(RuntimeLaunchSpecError::EmptyArgv);
                 }

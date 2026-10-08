@@ -275,6 +275,7 @@ mod tests {
         )
         .unwrap();
         let ceiling = ExecutionRequirements {
+            startup: None,
             network: vec![],
             authority: required_isolated_authority(&d),
             host: None,

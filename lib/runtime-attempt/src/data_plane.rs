@@ -868,6 +868,43 @@ fn output_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     Ok(found)
 }
 
+/// Copy bounded Runner-owned evidence into the existing output grant after
+/// confirmed stop. Never overwrite a workload file or follow an output symlink.
+pub fn stage_runtime_diagnostics(runtime_root: &Path, dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let metadata = fs::symlink_metadata(dir)?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "diagnostic output directory is not a directory"
+    );
+    for (name, limit) in [
+        ("process-startup.json", 16 * 1024),
+        ("runtime-start-failure.json", 16 * 1024),
+        ("process.log", 512 * 1024),
+    ] {
+        let source = runtime_root.join(name);
+        if !source.exists() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&source)?;
+        ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= limit,
+            "invalid runtime diagnostic {name}"
+        );
+        if metadata.len() == 0 {
+            continue;
+        }
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(format!("runner-{name}")))?;
+        let mut source = File::open(source)?;
+        std::io::copy(&mut source, &mut target)?;
+        target.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Save what the workload left in its output directory, after the Run has
 /// stopped (the files are final). Each file is recorded as generated (size,
 /// SHA-256, mtime) before any byte is uploaded; a failure after that is
@@ -1413,5 +1450,111 @@ mod portable_tests {
             server.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+    #[test]
+    fn stopped_runtime_diagnostics_are_bounded_and_do_not_overwrite_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime");
+        let outputs = root.path().join("outputs");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&outputs).unwrap();
+        fs::write(
+            runtime.join("process-startup.json"),
+            br#"{"phase":"failed","last_http_status":503}"#,
+        )
+        .unwrap();
+        fs::write(runtime.join("process.log"), b"engine exited 7").unwrap();
+        stage_runtime_diagnostics(&runtime, &outputs).unwrap();
+        assert_eq!(
+            fs::read(outputs.join("runner-process.log")).unwrap(),
+            b"engine exited 7"
+        );
+        assert_eq!(output_files(&outputs).unwrap().len(), 2);
+        assert!(stage_runtime_diagnostics(&runtime, &outputs).is_err());
+        fs::remove_file(outputs.join("runner-process-startup.json")).unwrap();
+        fs::remove_file(outputs.join("runner-process.log")).unwrap();
+        fs::write(runtime.join("process.log"), vec![b'x'; 512 * 1024 + 1]).unwrap();
+        assert!(stage_runtime_diagnostics(&runtime, &outputs).is_err());
+    }
+    #[test]
+    fn failed_start_diagnostic_uses_the_existing_asset_upload_and_commit_protocol() {
+        use std::io::{BufRead, BufReader};
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime");
+        let outputs = root.path().join("outputs");
+        fs::create_dir(&runtime).unwrap();
+        let diagnostic = br#"{"phase":"failed","process_exit_code":7,"last_http_status":503}"#;
+        fs::write(runtime.join("process-startup.json"), diagnostic).unwrap();
+        stage_runtime_diagnostics(&runtime, &outputs).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for step in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let method_path = line.trim().to_owned();
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                drop(reader);
+                requests.push((method_path, body));
+                let response = match step {
+                    0 => r#"{"output_id":"out_fixture","part_bytes":65536}"#,
+                    1 => r#"{"part_number":1,"etag":"fixture"}"#,
+                    _ => r#"{"asset_id":"ast_diagnostic"}"#,
+                };
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+            }
+            requests
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let data = LeaseData {
+            client: &client,
+            base: &base,
+            token: "fixture-token",
+            lease_id: "lease_failed_start",
+        };
+        let saved = save_outputs(
+            &data,
+            &outputs,
+            &GrantedOutputs {
+                max_count: 8,
+                max_bytes_each: 32768,
+            },
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].save_status, "saved");
+        assert_eq!(saved[0].asset_id.as_deref(), Some("ast_diagnostic"));
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /v1/runner-leases/lease_failed_start/data/outputs ")
+        );
+        let generated: serde_json::Value = serde_json::from_slice(&requests[0].1).unwrap();
+        assert_eq!(generated["output_key"], "runner-process-startup.json");
+        assert_eq!(generated["checksum_sha256"], sha256_ref(diagnostic));
+        assert_eq!(requests[1].1, diagnostic);
+        assert!(requests[2].0.contains("/complete "));
     }
 }
