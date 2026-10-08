@@ -2564,6 +2564,18 @@ struct PortableStateMount {
     guest_path: String,
 }
 
+#[derive(Debug, Clone)]
+struct PortableInputMount {
+    env_name: String,
+    host_path: PathBuf,
+    guest_path: String,
+}
+
+struct PortableProcessMounts<'a> {
+    state: &'a [PortableStateMount],
+    inputs: &'a [PortableInputMount],
+}
+
 #[derive(Default)]
 struct PortableRuntimeState<'a> {
     restored_snapshot_ref: Option<&'a str>,
@@ -2688,7 +2700,7 @@ fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        if output.status.success() && reported.trim().starts_with(&format!("Python {version}.")) {
+        if output.status.success() && python_version_matches(&reported, version) {
             let selected = executable_path(executable)
                 .unwrap_or_else(|| PathBuf::from(executable))
                 .display()
@@ -2713,6 +2725,13 @@ fn executable_path(executable: &str) -> Option<PathBuf> {
     })
 }
 
+fn python_version_matches(reported: &str, required: &str) -> bool {
+    reported
+        .trim()
+        .strip_prefix("Python ")
+        .is_some_and(|actual| actual == required || actual.starts_with(&format!("{required}.")))
+}
+
 fn verified_python(executable: &str, version: &str) -> Result<(String, String)> {
     let output = Command::new(executable)
         .arg("--version")
@@ -2723,7 +2742,7 @@ fn verified_python(executable: &str, version: &str) -> Result<(String, String)> 
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if !output.status.success() || !reported.trim().starts_with(&format!("Python {version}.")) {
+    if !output.status.success() || !python_version_matches(&reported, version) {
         bail!(
             "selected Python executable {executable} does not satisfy {version}: {}",
             reported.trim()
@@ -2798,8 +2817,10 @@ fn portable_process_sandbox_command(
     workload: &[String],
     host_port: u16,
     working_dir: &str,
-    state_mounts: &[PortableStateMount],
+    mounts: PortableProcessMounts<'_>,
 ) -> Result<Vec<String>> {
+    let state_mounts = mounts.state;
+    let input_mounts = mounts.inputs;
     #[cfg(not(target_os = "linux"))]
     let _ = working_dir;
     let workspace = workspace
@@ -2826,7 +2847,7 @@ fn portable_process_sandbox_command(
                 workload,
                 host_port,
                 working_dir,
-                state_mounts,
+                mounts,
             );
         }
         #[cfg(not(target_os = "linux"))]
@@ -2858,7 +2879,8 @@ fn portable_process_sandbox_command(
         .allow_read_only(
             [workspace, interpreter_root]
                 .into_iter()
-                .chain(system_roots),
+                .chain(system_roots)
+                .chain(input_mounts.iter().map(|input| input.host_path.clone())),
         )
         .with_network(false)
         .allow_tcp_bind([host_port]);
@@ -2888,8 +2910,10 @@ fn portable_process_bwrap_command(
     workload: &[String],
     host_port: u16,
     working_dir: &str,
-    state_mounts: &[PortableStateMount],
+    mounts: PortableProcessMounts<'_>,
 ) -> Result<Vec<String>> {
+    let state_mounts = mounts.state;
+    let input_mounts = mounts.inputs;
     let bwrap = executable_path("bwrap")
         .context("local process runtime admission failed: `bwrap` is not on PATH")?;
     let shim = std::env::current_exe()
@@ -2908,19 +2932,27 @@ fn portable_process_bwrap_command(
                 .map(|state| PathBuf::from(&state.guest_path))
                 .chain([PathBuf::from("/tmp")]),
         )
-        .allow_read_only([
-            PathBuf::from("/app"),
-            PathBuf::from("/.ato"),
-            interpreter_root.to_path_buf(),
-            PathBuf::from("/usr"),
-            PathBuf::from("/bin"),
-            PathBuf::from("/sbin"),
-            PathBuf::from("/lib"),
-            PathBuf::from("/lib64"),
-            PathBuf::from("/etc"),
-            PathBuf::from("/dev"),
-            PathBuf::from("/proc"),
-        ])
+        .allow_read_only(
+            [
+                PathBuf::from("/app"),
+                PathBuf::from("/.ato"),
+                interpreter_root.to_path_buf(),
+                PathBuf::from("/usr"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/sbin"),
+                PathBuf::from("/lib"),
+                PathBuf::from("/lib64"),
+                PathBuf::from("/etc"),
+                PathBuf::from("/dev"),
+                PathBuf::from("/proc"),
+            ]
+            .into_iter()
+            .chain(
+                input_mounts
+                    .iter()
+                    .map(|input| PathBuf::from(&input.guest_path)),
+            ),
+        )
         .with_network(false)
         .allow_tcp_bind([host_port]);
     let policy_path = runtime_root.join("sandbox-policy.json");
@@ -2978,6 +3010,16 @@ fn portable_process_bwrap_command(
             "--bind".to_owned(),
             state.host_path.display().to_string(),
             state.guest_path.clone(),
+        ]);
+    }
+    if !input_mounts.is_empty() {
+        command.extend(["--dir".to_owned(), "/ato-inputs".to_owned()]);
+    }
+    for input in input_mounts {
+        command.extend([
+            "--ro-bind".to_owned(),
+            input.host_path.display().to_string(),
+            input.guest_path.clone(),
         ]);
     }
     command.extend([
