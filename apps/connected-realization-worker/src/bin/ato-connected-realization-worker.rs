@@ -5,6 +5,13 @@ use clap::Parser;
 
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).is_some_and(|arg| arg == "doctor") {
+        return ato_connected_realization_worker::diagnostics::doctor(
+            ato_connected_realization_worker::diagnostics::DoctorArgs::parse_from(
+                std::iter::once(args[0].clone()).chain(args[2..].iter().cloned()),
+            ),
+        );
+    }
     if args
         .get(1)
         .is_some_and(|arg| arg == "__netns-surface-relay")
