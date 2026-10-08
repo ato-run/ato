@@ -9,7 +9,8 @@
 
 mod activity_controller;
 mod data_plane;
-mod host_resources;
+pub mod diagnostics;
+pub mod host_resources;
 pub mod runtime_launch;
 mod slot_state;
 
@@ -1200,6 +1201,7 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
                 "enrollment_token": token,
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
+                "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
             }))
             .send()
             .context("enrollment request failed")?
@@ -1220,6 +1222,7 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
                 "api_base": api_base,
                 "runner_id": field("/runner/id")?,
                 "runner_token": field("/runner_token")?,
+                "management_kind": response.pointer("/runner/management_kind").and_then(serde_json::Value::as_str),
             }))?,
         )?;
     }
@@ -4384,6 +4387,13 @@ impl HttpRunnerApi {
     }
 
     fn heartbeat(&self, config: &WorkerConfig, active_slots: u32) -> Result<()> {
+        let mut resources =
+            serde_json::to_value(host_resources::HostResources::probe(&config.work_root))?;
+        if let Some(connection) =
+            diagnostics::connection_capabilities(config, self.persistent_volumes)
+        {
+            resources["connection"] = connection;
+        }
         self.authorized(self.client.post(format!(
             "{}/v1/runners/{}/heartbeat",
             self.base, self.runner_id
@@ -4398,7 +4408,7 @@ impl HttpRunnerApi {
                     !config.fixed_tcp_allowlist.trim().is_empty(),
                 ),
                 runtime_launch::host_boundary::active().is_some(),
-                !host_resources::cached(&config.work_root).accelerators.is_empty(),
+                resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
             ),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": [{
@@ -4417,9 +4427,8 @@ impl HttpRunnerApi {
             // unrecovered slot claims nothing, so the control plane can tell
             // "alive but quarantined" apart from "alive and ready".
             "slot_recovered": runtime_launch::recovery::slot_recovered(),
-            // Measured once at start. The control plane admits a Derivation's
-            // host requirement against these, never against a host total.
-            "host_resources": host_resources::cached(&config.work_root),
+            // Refresh mutable capacity and device visibility on every heartbeat.
+            "host_resources": resources,
         }))
         .send()?
         .error_for_status()?;
