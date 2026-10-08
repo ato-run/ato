@@ -38,6 +38,7 @@ pub mod plan;
 pub mod realize;
 pub mod retained;
 pub mod spec;
+pub mod startup;
 pub mod state_bindings;
 pub mod static_lane;
 pub mod static_server;

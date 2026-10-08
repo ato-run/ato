@@ -104,6 +104,7 @@ pub struct PortableDerivationDraftV2 {
     /// The host this route must run on, bound as `requirements.host` of its
     /// Derivation. Validated; absent means no host condition.
     pub host: Option<HostRequirement>,
+    pub startup: Option<crate::requirements::StartupRequirement>,
 }
 
 /// One serving step of an OCI service group. Authoring shorthand only: it
@@ -229,6 +230,8 @@ struct Derivation {
     service: Vec<Service>,
     #[serde(default)]
     host: Option<HostRequirement>,
+    #[serde(default)]
+    startup: Option<crate::requirements::StartupRequirement>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -574,6 +577,24 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
                 ));
             }
             let host = derivation.host.clone();
+            let startup = derivation.startup.clone();
+            if let Some(startup) = &startup {
+                startup
+                    .validate()
+                    .map_err(|e| invalid("derivation.startup", e.0))?;
+                if derivation.protocol != PROCESS_PROTOCOL {
+                    return Err(invalid(
+                        "derivation.startup",
+                        "startup is supported only by a process route",
+                    ));
+                }
+                if startup.port != "app.http" {
+                    return Err(invalid(
+                        "derivation.startup.port",
+                        "startup must name the process route's app.http Port",
+                    ));
+                }
+            }
             if let Some(host) = &host {
                 host.validate()
                     .map_err(|e| invalid("derivation.host", e.0))?;
@@ -583,7 +604,11 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             } else {
                 parse_service_group(derivation, &state_ids, &binding_ids)
             }?;
-            Ok(PortableDerivationDraftV2 { host, ..route })
+            Ok(PortableDerivationDraftV2 {
+                host,
+                startup,
+                ..route
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -693,6 +718,7 @@ fn parse_single_route(
         guest_port,
         services: Vec::new(),
         host: None,
+        startup: None,
     })
 }
 
@@ -857,6 +883,7 @@ fn parse_service_group(
         guest_port: 0,
         services,
         host: None,
+        startup: None,
     })
 }
 

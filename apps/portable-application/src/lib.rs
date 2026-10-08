@@ -357,6 +357,7 @@ pub struct PortableDynamicRouteSpec {
     /// Bound as the route's `requirements.host`. A placement condition the
     /// Runner that runs this route is admitted against; it grants nothing.
     pub host: Option<ato_formation::requirements::HostRequirement>,
+    pub startup: Option<ato_formation::requirements::StartupRequirement>,
 }
 
 /// One serving step of an OCI service group.
@@ -1155,6 +1156,7 @@ pub fn build_dynamic_process_oci_bundle(
                     guest_port: spec.guest_port,
                     services: Vec::new(),
                     host: None,
+                    startup: None,
                 },
                 PortableDynamicRouteSpec {
                     realization: PortableRealizationKind::OciContainer,
@@ -1162,6 +1164,7 @@ pub fn build_dynamic_process_oci_bundle(
                     guest_port: spec.guest_port,
                     services: Vec::new(),
                     host: None,
+                    startup: None,
                 },
             ],
             filesystem_state: spec.filesystem_state.clone(),
@@ -1228,6 +1231,7 @@ pub fn build_authored_bundle_v2(
                 })
                 .collect(),
             host: derivation.host,
+            startup: derivation.startup,
         })
         .collect();
     build_dynamic_routes_bundle(
@@ -1338,6 +1342,7 @@ pub fn build_dynamic_routes_bundle(
         variable_bindings: vec![],
         requirements: ato_formation::requirements::ExecutionRequirements {
             host: route.host.clone(),
+            startup: route.startup.clone(),
             ..Default::default()
         },
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
@@ -1570,6 +1575,13 @@ fn validate_initial_route(
     {
         return Err(profile("invalid portable Application object"));
     }
+    if derivation.requirements.startup.is_some()
+        && (derivation.steps.len() != 1 || derivation.steps[0].protocol != PROCESS_PROTOCOL)
+    {
+        return Err(profile(
+            "startup is supported only on a single process derivation",
+        ));
+    }
     if derivation.steps.len() > 1 {
         let surface_port = validate_oci_service_group(application, derivation)?;
         let input = workspace_input(derivation)
@@ -1660,6 +1672,12 @@ fn validate_initial_route(
             PortableRealizationKind::StaticWeb
         }
         PROCESS_PROTOCOL => {
+            if let Some(startup) = &derivation.requirements.startup {
+                startup.validate().map_err(|error| profile(error.0))?;
+                if startup.port != port.id {
+                    return Err(profile("startup names an undeclared process Port"));
+                }
+            }
             if application.schema == APPLICATION_V2_SCHEMA {
                 validate_dynamic_surface(surface)?;
             }
@@ -2957,6 +2975,11 @@ default = "pure"
         assert_eq!(route.realization, PortableRealizationKind::LocalProcess);
         assert_eq!(route.model_sets.len(), 2);
         assert!(route.derivation.requirements.host.is_some());
+        let startup = route.derivation.requirements.startup.as_ref().unwrap();
+        assert_eq!(startup.path, "/health");
+        assert_eq!(startup.timeout_ms, 180_000);
+        assert_eq!(startup.abi.as_ref().unwrap().glibc_min, "2.38");
+        assert_eq!(startup.abi.as_ref().unwrap().glibcxx_min, "3.4.32");
         assert_eq!(
             route
                 .derivation
@@ -4539,5 +4562,22 @@ default = "pure"
                 .to_string()
                 .contains("closure is incomplete")
         );
+    }
+    #[test]
+    fn canonical_startup_cannot_name_another_port_or_be_ignored_by_another_adapter() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-gpu-llm");
+        let (_, bundle) = build_authored_bundle_v2(&source).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        let mut derivation = route.derivation.clone();
+        derivation.requirements.startup.as_mut().unwrap().port = "other.http".into();
+        assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
+        derivation = route.derivation.clone();
+        derivation.steps[0].protocol = OCI_PROTOCOL.into();
+        assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
+        derivation = route.derivation.clone();
+        derivation.requirements.startup.as_mut().unwrap().timeout_ms = 0;
+        assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
+        assert_eq!(route.contract.requirements[0].status, Some(200));
+        assert!(route.contract.requirements[0].body_digest.is_some());
     }
 }
