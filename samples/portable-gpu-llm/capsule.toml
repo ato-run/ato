@@ -1,0 +1,56 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Qwen Chat"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[input]]
+id = "models"
+use = "ato.model-set@1"
+path = "models/models.model-set.json"
+ref = "sha256:0dc11e83d60a1c49ce1451af81cfa5a639fcc174e2639619297aef0a00e2eebc"
+
+[[input]]
+id = "software"
+use = "ato.model-set@1"
+path = "models/software.model-set.json"
+ref = "sha256:b6f5cd2523caafc1720282ef036e507cd2c87c6ee8f71b90d1cc7c2c7af07842"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "gpu-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+status = 200
+body_digest = "sha256:86fb789fc275f130a63f3a44e8de8073df8d0aa76658873133cd00764fa8193b"
+
+[[derivation]]
+id = "cuda"
+use = "ato.process@1"
+argv = ["python3", "-B", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.11.11" }
+
+[derivation.host]
+os = "linux"
+arch = "x86_64"
+min_memory_mib = 16384
+min_scratch_mib = 8192
+
+[[derivation.host.accelerators]]
+vendor = "nvidia"
+count = 1
+min_vram_mib = 4096
+
+[effects]
+default = "pure"
