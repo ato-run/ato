@@ -404,6 +404,24 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 }
 
 impl ModelCache {
+    /// Open an already populated cache without creating or changing directories.
+    pub fn open_existing(work_root: &Path) -> Result<Self> {
+        require_cache_platform()?;
+        let root = work_root.join("model-cache");
+        let cache = Self {
+            objects: root.join("objects"),
+            markers: root.join("markers"),
+            root,
+        };
+        for dir in [&cache.root, &cache.objects, &cache.markers] {
+            ensure!(
+                fs::symlink_metadata(dir)?.is_dir(),
+                "model cache directory is unavailable"
+            );
+        }
+        Ok(cache)
+    }
+
     /// Under the Runner's work root, outside every lease directory.
     pub fn open(work_root: &Path) -> Result<Self> {
         require_cache_platform()?;
@@ -424,6 +442,47 @@ impl ModelCache {
 
     pub fn object_path(&self, digest: &str) -> Result<PathBuf> {
         Ok(self.objects.join(hex_of(digest)?))
+    }
+
+    /// Verify an existing object without fetching, repairing or removing it.
+    /// Local Run admission cannot mutate another Run's model cache on refusal.
+    pub fn verify_cached(&self, entry: &ModelSetEntry) -> Result<()> {
+        let _mutation = self.mutation_lock(false)?;
+        let _object_lock = self.object_lock(&entry.digest, false)?;
+        let object = self.object_path(&entry.digest)?;
+        let meta = fs::symlink_metadata(&object)
+            .context("model object is unavailable in the offline cache")?;
+        ensure!(
+            meta.is_file() && meta.len() == entry.bytes,
+            "cached model object type/size differs from its manifest"
+        );
+        if !self.marker_matches(entry, &object) {
+            let (digest, size) = hash_file(&object)?;
+            ensure!(
+                digest == entry.digest && size == entry.bytes,
+                "cached model object failed verification"
+            );
+        }
+        Ok(())
+    }
+
+    fn object_lock(&self, digest: &str, exclusive: bool) -> Result<File> {
+        let lock_path = self.markers.join(format!("{}.lock", hex_of(digest)?));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let lock = options.open(lock_path)?;
+        if exclusive {
+            FileExt::try_lock_exclusive(&lock)
+        } else {
+            FileExt::try_lock_shared(&lock)
+        }
+        .context("model_cache_busy: object hydration is active")?;
+        Ok(lock)
     }
 
     fn mutation_lock(&self, exclusive: bool) -> Result<File> {
@@ -561,19 +620,7 @@ impl ModelCache {
         let _mutation = self.mutation_lock(false)?;
         // Multiple Model Sets can name the same object. The digest lock keeps
         // its partial transfer/marker single-writer without serializing others.
-        let lock_path = self
-            .markers
-            .join(format!("{}.lock", hex_of(&entry.digest)?));
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let lock = options.open(lock_path)?;
-        FileExt::try_lock_exclusive(&lock)
-            .context("model_cache_busy: object hydration is active")?;
+        let _lock = self.object_lock(&entry.digest, true)?;
         self.ensure_unlocked(entry, fetch, keepalive)
     }
 
@@ -1225,6 +1272,30 @@ mod tests {
             assert_eq!(fs::read(&outside).unwrap(), b"secret");
             assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
         }
+    }
+
+    #[test]
+    fn cached_admission_rejects_corruption_or_wrong_size_without_repairing_or_deleting() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = ModelCache::open(root.path()).unwrap();
+        let original = entry(b"weights");
+        cache
+            .ensure(
+                &original,
+                |_, _| Ok(Box::new(Cursor::new(b"weights".to_vec()))),
+                || Ok(()),
+            )
+            .unwrap();
+        let mut wrong = original.clone();
+        wrong.bytes += 1;
+        assert!(cache.verify_cached(&wrong).is_err());
+        let path = cache.object_path(&original.digest).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"weights");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&path, b"corrupt").unwrap();
+        fs::remove_file(cache.marker_path(&original.digest).unwrap()).unwrap();
+        assert!(cache.verify_cached(&original).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"corrupt");
     }
 
     #[test]

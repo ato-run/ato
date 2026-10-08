@@ -84,7 +84,7 @@ resources remain unconfirmed; restarting is not a way to bypass that refusal.
 
 The protocol never provisions or deletes an attached machine or Notebook.
 Registration is distinct from GPU/isolation/storage admission. GPU LLM/Wan,
-Docker backup/restore, local Model Set execution and a server management UI still
+Docker backup/restore and a server management UI still
 need their roadmap acceptance. No Kaggle/Colab or real GPU support is certified
 by the read-only diagnostic or the API fixture tests alone.
 
@@ -116,3 +116,16 @@ concurrent mutations with `model_cache_quota_exceeded` or `model_cache_busy`;
 stop the competing import/download and retry. It never removes existing model
 objects or Instance data to make space. Importing weights alone grants no GPU,
 workload execution or cloud-provider authority.
+
+Local `ato run <reviewed.capsule>` process routes resolve their declared Model
+Sets only from `$ATO_HOME/cache`. Every declared object must already be present
+and verified; no upstream download or replacement Model Set is inferred. The
+runtime supplies `ATO_INPUT_PATH_<INPUT_ID>` and read-only input mounts outside
+writable process scratch. Stopping removes the delivery tree and keeps cached
+objects. State-capable Linux routes also bind these input trees read-only in
+bubblewrap. Missing objects refuse admission before the process starts.
+
+This path still refuses GPU/other host-conditioned routes until local measured
+host admission and device assignment are implemented. A successful CPU fixture
+does not establish GPU compatibility. RunPod continues to use the existing
+managed Worker, host admission and Data Grant delivery.

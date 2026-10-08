@@ -15,11 +15,11 @@
 //! confirmed per container before the runtime scratch is removed.
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
 };
@@ -33,6 +33,7 @@ use ato_portable_application::{
     OCI_WORKSPACE_MOUNT_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationServer,
     StaticApplicationServerExt, StaticApplicationState, ValidatedPortableApplication,
 };
+use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry, ModelSetManifest, env_name};
 use ato_runtime_attempt::launch::oci::{
     LaunchedOci, OciCandidate, ServiceStart, start_service_group,
 };
@@ -66,7 +67,27 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
 }
 
 impl CandidateRealizer for PortableBundleExecutor<'_> {
+    fn delivers_model_sets(&self) -> bool {
+        self.validated.realization == PortableRealizationKind::LocalProcess
+    }
+
     fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
+        if !self.validated.model_sets.is_empty() {
+            let checked = super::ato_home().and_then(|home| {
+                resolve_model_inputs(
+                    &self.validated.model_sets,
+                    &home.join("cache"),
+                    self.runtime_root,
+                    false,
+                )
+            });
+            if let Err(error) = checked {
+                return refused(
+                    "model_set_unavailable",
+                    format!("local Model Set admission failed: {error:#}"),
+                );
+            }
+        }
         match self.validated.realization {
             PortableRealizationKind::StaticWeb => None,
             PortableRealizationKind::LocalProcess => {
@@ -109,13 +130,23 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         }
         let state_mounts =
             resolve_portable_state_mounts(route, self.runtime_root, self.filesystem_state)?;
+        let input_mounts = if route.model_sets.is_empty() {
+            Vec::new()
+        } else {
+            resolve_model_inputs(
+                &route.model_sets,
+                &super::ato_home()?.join("cache"),
+                self.runtime_root,
+                true,
+            )?
+        };
         let workspace = self.runtime_root.join("workspace");
         ato_portable_application::materialize_tree(&hydrated, route, &workspace)
             .map_err(anyhow::Error::from)?;
         let mut realized = match route.realization {
             PortableRealizationKind::StaticWeb => self.start_static(workspace)?,
             PortableRealizationKind::LocalProcess => {
-                self.start_process(workspace, &state_mounts)?
+                self.start_process(workspace, &state_mounts, &input_mounts)?
             }
             PortableRealizationKind::OciContainer => {
                 self.start_container(&hydrated, workspace, &state_mounts)?
@@ -127,6 +158,60 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         realized.execution.dependency_fetches = dependency_fetches;
         Ok(realized)
     }
+}
+
+/// Resolves only the declared cached objects. No upstream fetch or alternate
+/// Model Set is considered; absence is an admission refusal before execution.
+fn resolve_model_inputs(
+    sets: &[ato_portable_application::ValidatedModelSet],
+    cache_root: &Path,
+    runtime_root: &Path,
+    materialize: bool,
+) -> Result<Vec<super::PortableInputMount>> {
+    let mut names = BTreeSet::from([env_name("workspace"), env_name("assets")]);
+    for set in sets {
+        ensure!(
+            names.insert(env_name(&set.input_id)),
+            "Model Set input environment names collide or use a reserved name"
+        );
+    }
+    let cache = ModelCache::open_existing(cache_root)
+        .context("import declared Model Sets with ato model-set import first")?;
+    let manifests: Vec<ModelSetManifest> = sets
+        .iter()
+        .map(|set| ModelSetManifest {
+            schema: set.manifest.schema.clone(),
+            objects: set
+                .manifest
+                .objects
+                .iter()
+                .map(|entry| ModelSetEntry {
+                    path: entry.path.clone(),
+                    digest: entry.digest.clone(),
+                    bytes: entry.bytes,
+                })
+                .collect(),
+        })
+        .collect();
+    // Check the entire closure before constructing any delivery tree.
+    for manifest in &manifests {
+        for entry in &manifest.objects {
+            cache.verify_cached(entry)?;
+        }
+    }
+    let mut inputs = Vec::new();
+    for (index, (set, manifest)) in sets.iter().zip(&manifests).enumerate() {
+        let host_path = runtime_root.join("inputs").join(index.to_string());
+        if materialize {
+            cache.materialize(manifest, &host_path)?;
+        }
+        inputs.push(super::PortableInputMount {
+            env_name: env_name(&set.input_id),
+            host_path,
+            guest_path: format!("/ato-inputs/{index}"),
+        });
+    }
+    Ok(inputs)
 }
 
 impl PortableBundleExecutor<'_> {
@@ -163,6 +248,7 @@ impl PortableBundleExecutor<'_> {
         &self,
         workspace: PathBuf,
         state_mounts: &[super::PortableStateMount],
+        input_mounts: &[super::PortableInputMount],
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let step = &route.derivation.steps[0];
@@ -206,6 +292,21 @@ impl PortableBundleExecutor<'_> {
         for state in state_mounts {
             environment.insert(state_path_env_name(&state.id), state.guest_path.clone());
         }
+        for input in input_mounts {
+            environment.insert(
+                input.env_name.clone(),
+                if state_mounts.is_empty() {
+                    input
+                        .host_path
+                        .canonicalize()
+                        .context("canonicalize delivered Model Set")?
+                        .display()
+                        .to_string()
+                } else {
+                    input.guest_path.clone()
+                },
+            );
+        }
         let process_runtime = self.runtime_root.join("process");
         fs::create_dir_all(&process_runtime).with_context(|| {
             format!(
@@ -243,7 +344,10 @@ impl PortableBundleExecutor<'_> {
             &command,
             host_port.parse().context("host port")?,
             &step.cwd,
-            state_mounts,
+            super::PortableProcessMounts {
+                state: state_mounts,
+                inputs: input_mounts,
+            },
         )?;
         let adapter = ProcessAdapter::new(ProcessSpec {
             id: step.id.clone(),
@@ -262,7 +366,10 @@ impl PortableBundleExecutor<'_> {
             candidate: Box::new(PortableProcessCandidate {
                 handle: Some(handle),
                 endpoints: BTreeMap::from([(route.derivation.ports[0].id.clone(), base.clone())]),
-                owned: vec![workspace, process_runtime],
+                owned: vec![workspace, process_runtime]
+                    .into_iter()
+                    .chain(input_mounts.iter().map(|input| input.host_path.clone()))
+                    .collect(),
             }),
             evidence: None,
             execution: evidence("process", Some(executable), Some(version), Some(pid), &base),
@@ -749,5 +856,102 @@ impl Drop for PortableStaticCandidate {
         if let Err(error) = remove_owned(std::slice::from_ref(&self.workspace)) {
             eprintln!("[ato run] {error:#}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod model_input_tests {
+    use super::*;
+    use ato_formation::model_set::{
+        MODEL_SET_SCHEMA, ModelSetEntry as ManifestEntry, ModelSetManifest as Manifest,
+    };
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+
+    fn model_set(id: &str, data: &[u8]) -> ato_portable_application::ValidatedModelSet {
+        let manifest = Manifest {
+            schema: MODEL_SET_SCHEMA.to_owned(),
+            objects: vec![ManifestEntry {
+                path: "weights.bin".to_owned(),
+                digest: format!("sha256:{:x}", Sha256::digest(data)),
+                bytes: data.len() as u64,
+            }],
+        };
+        ato_portable_application::ValidatedModelSet {
+            input_id: id.to_owned(),
+            reference: manifest.reference().unwrap(),
+            manifest,
+        }
+    }
+
+    fn populate(root: &Path, set: &ato_portable_application::ValidatedModelSet, data: &[u8]) {
+        let cache = ModelCache::open(root).unwrap();
+        let e = &set.manifest.objects[0];
+        cache
+            .ensure(
+                &ModelSetEntry {
+                    path: e.path.clone(),
+                    digest: e.digest.clone(),
+                    bytes: e.bytes,
+                },
+                |_, _| Ok(Box::new(Cursor::new(data.to_vec()))),
+                || Ok(()),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn offline_delivery_uses_readonly_links_outside_writable_process_scratch() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        let runtime_root = root.path().join("run");
+        let set = model_set("models", b"weights");
+        populate(&cache_root, &set, b"weights");
+        let mounts = resolve_model_inputs(&[set], &cache_root, &runtime_root, true).unwrap();
+        assert_eq!(mounts[0].env_name, "ATO_INPUT_PATH_MODELS");
+        assert!(
+            !mounts[0]
+                .host_path
+                .starts_with(runtime_root.join("process"))
+        );
+        assert_eq!(
+            fs::read(mounts[0].host_path.join("weights.bin")).unwrap(),
+            b"weights"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(mounts[0].host_path.join("weights.bin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
+        fs::remove_dir_all(&runtime_root).unwrap();
+        assert_eq!(
+            ModelCache::open_existing(&cache_root)
+                .unwrap()
+                .usage_bytes()
+                .unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn missing_closure_and_colliding_input_names_refuse_before_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        let runtime_root = root.path().join("run");
+        let first = model_set("one", b"one");
+        populate(&cache_root, &first, b"one");
+        let missing = model_set("two", b"absent");
+        assert!(resolve_model_inputs(&[first, missing], &cache_root, &runtime_root, true).is_err());
+        assert!(!runtime_root.exists());
+        let reserved = [model_set("assets", b"one")];
+        assert!(resolve_model_inputs(&reserved, &cache_root, &runtime_root, true).is_err());
+        let sets = [model_set("a-b", b"one"), model_set("a_b", b"one")];
+        let error = resolve_model_inputs(&sets, &cache_root, &runtime_root, true).unwrap_err();
+        assert!(error.to_string().contains("environment names collide"));
+        assert!(!runtime_root.exists());
     }
 }
