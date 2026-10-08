@@ -90,6 +90,12 @@ impl From<anyhow::Error> for RealizeFailure {
 /// Makes a candidate runnable and starts it — the executor side of an
 /// attempt.
 pub trait CandidateRealizer {
+    /// This executor explicitly delivers declared Model Sets as immutable
+    /// inputs. Other attempt entries retain the common fail-closed refusal.
+    fn delivers_model_sets(&self) -> bool {
+        false
+    }
+
     /// Whether this realizer can run the candidate on this Runtime
     /// (containment, toolchains, build network). `None` when it can. Asked
     /// before the start record, so a refusal runs nothing.
