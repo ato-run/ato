@@ -8,6 +8,7 @@ mod formation_input;
 mod formation_session;
 mod formation_verify;
 mod mcp_stdio;
+mod model_cache;
 mod object_transport;
 mod portable_attempt;
 mod portable_dependency;
@@ -113,6 +114,11 @@ enum Commands {
     Pack(PackArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Import immutable model objects into this host's verified cache.
+    ModelSet {
+        #[command(subcommand)]
+        command: model_cache::ModelSetCommands,
+    },
     /// Import and operate a durable local portable Application Instance.
     App {
         #[command(subcommand)]
@@ -599,6 +605,7 @@ pub fn run() -> Result<()> {
         Commands::Encap(args) => encap(args),
         Commands::Pack(args) => pack(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::ModelSet { command } => model_cache::execute(command),
         Commands::App { command } => match command {
             AppCommands::Import(args) => import_local_application(args),
             AppCommands::Start(args) => start_local_instance(args),
