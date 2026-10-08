@@ -3,15 +3,14 @@ import http.client
 import json
 import os
 from pathlib import Path
-import re
+import signal
 import socket
-import subprocess
-import tarfile
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from engine_startup import EngineStartup
 
 TERMINAL = {"completed", "cancelled", "failed", "interrupted"}
 MAX_HISTORY_BYTES = 1024 * 1024
@@ -20,8 +19,8 @@ MAX_TEXT = 32768
 
 
 class UnixConnection(http.client.HTTPConnection):
-    def __init__(self, path):
-        super().__init__("localhost", timeout=120)
+    def __init__(self, path, timeout=120):
+        super().__init__("localhost", timeout=timeout)
         self.path = str(path)
 
     def connect(self):
@@ -211,61 +210,16 @@ class Chat:
             return next((dict(job) for job in self.jobs if job["request_id"] == request_id), None)
 
 
-def prepare(chat, scratch, software, models):
+def engine_health(socket_path, timeout):
+    connection = UnixConnection(socket_path, timeout)
     try:
-        scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for name in ["llama-cuda.tar.gz", "cuda-runtime.tar.gz"]:
-            with tarfile.open(software / name) as package:
-                package.extractall(scratch, filter="data")
-        engines = list(scratch.rglob("llama-server"))
-        if len(engines) != 1:
-            raise RuntimeError("Pinned engine archive must contain one llama-server")
-        engine = engines[0]
-        libraries = sorted({str(path.parent) for path in scratch.rglob("*.so*")})
-        environment = dict(os.environ, LD_LIBRARY_PATH=":".join(libraries), HF_HUB_OFFLINE="1")
-        devices = subprocess.run([str(engine), "--list-devices"], env=environment, capture_output=True, text=True, check=True, timeout=30)
-        if not re.search(r"(?m)^\s*CUDA0:", devices.stdout + devices.stderr):
-            raise RuntimeError("CUDA GPU is unavailable; CPU fallback is refused")
-        socket_path = Path(chat.socket_path)
-        if len(os.fsencode(socket_path)) > 100:
-            raise RuntimeError("Private inference socket path exceeds the Unix socket limit")
-        log_path = scratch / "engine.log"
-        with log_path.open("wb") as log:
-            child = subprocess.Popen([str(engine), "--model", str(models / "qwen.gguf"), "--offline", "--device", "CUDA0",
-                                      "--gpu-layers", "all", "--fit", "off", "--split-mode", "none", "--ctx-size", "4096",
-                                      "--parallel", "1", "--host", str(socket_path), "--no-webui"],
-                                     env=environment, stdout=log, stderr=log)
-        deadline = time.monotonic() + 180
-        while time.monotonic() < deadline:
-            if child.poll() is not None:
-                raise RuntimeError(f"GPU engine exited ({child.returncode})")
-            try:
-                connection = UnixConnection(socket_path)
-                connection.request("GET", "/health")
-                response = connection.getresponse()
-                healthy = response.status == 200
-                response.read()
-            except OSError:
-                healthy = False
-            finally:
-                connection.close()
-            offload = re.search(r"offloaded (\d+)/(\d+) layers to GPU", log_path.read_text(errors="replace"))
-            if healthy and offload and int(offload[1]) > 0 and offload[1] == offload[2]:
-                with chat.lock:
-                    chat.phase = "ready"
-                child.wait()
-                raise RuntimeError(f"GPU engine exited ({child.returncode})")
-            time.sleep(0.2)
-        child.terminate()
-        try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
-        raise RuntimeError("GPU load deadline or complete layer-offload evidence was not satisfied")
-    except Exception as error:
-        with chat.lock:
-            chat.phase, chat.error = "failed", str(error)[:500]
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        return response.status
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
 
 
 def handler(chat):
@@ -289,7 +243,7 @@ def handler(chat):
                     self.send_bytes(200 if chat.phase == "ready" else 503, b"gpu-llm-ready\n" if chat.phase == "ready" else b"not-ready\n", "text/plain")
             elif self.path == "/api/status":
                 with chat.lock:
-                    self.send_json(200, {"phase": chat.phase, "error": chat.error})
+                    self.send_json(200, {"phase": chat.phase, "error": chat.error, "preparation": chat.startup.status() if hasattr(chat, "startup") else None})
             elif self.path == "/api/history":
                 self.send_json(200, chat.history())
             elif self.path.startswith("/api/events/"):
@@ -356,8 +310,25 @@ def main():
     history = json.loads(restored[0].read_text()) if restored else None
     chat = Chat(os.environ["ATO_OUTPUT_DIR"], socket_path, history)
     server = ThreadingHTTPServer((os.environ.get("APP_LISTEN_HOST", "127.0.0.1"), int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), handler(chat))
-    threading.Thread(target=prepare, args=(chat, scratch, Path(os.environ["ATO_INPUT_PATH_SOFTWARE"]), Path(os.environ["ATO_INPUT_PATH_MODELS"])), daemon=True).start()
-    server.serve_forever()
+    chat.startup = EngineStartup(chat, scratch, Path(os.environ["ATO_INPUT_PATH_SOFTWARE"]), Path(os.environ["ATO_INPUT_PATH_MODELS"]), engine_health)
+    worker = threading.Thread(target=chat.startup.run)
+    signal.signal(signal.SIGTERM, lambda *_: chat.startup.stop.set())
+    signal.signal(signal.SIGINT, lambda *_: chat.startup.stop.set())
+    server.timeout = 0.1
+    server.daemon_threads = True
+    worker.start()
+    try:
+        while not chat.startup.stop.is_set() and not chat.startup.finished.is_set():
+            server.handle_request()
+    finally:
+        chat.startup.stop.set()
+        if chat.active:
+            chat.cancel(chat.active["job"]["request_id"])
+        worker.join(timeout=5)
+        server.server_close()
+        chat.persist()
+    if chat.phase == "failed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

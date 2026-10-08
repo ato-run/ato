@@ -75,3 +75,43 @@ and readiness gating. It does not perform inference or prove CUDA compatibility.
 The real acceptance still requires an authorized RunPod GPU, cost ceiling,
 model registration, full readiness receipt, nonempty generated text, live
 stream/cancel, history save/restore and confirmed owned-Pod deletion.
+
+## 2026-10-09: 準備・ABI・診断
+
+初回RunPod試験では固定Contractの`/health`が503となり、LLM起動は未達だった。
+空の履歴保存と停止・Pod削除は確認したが、engine logがscratchにだけ存在し、
+CUDA認識・モデル読込の実測結果は残らなかった。
+
+現在のDは`derivation.startup`で`/health`・180秒を明示する。共通runtimeは
+process開始、HTTP応答可能、準備完了を区別し、準備完了後に固定Kを観測する。
+Kのstatus 200とbody digestは維持し、不成立を成功まで繰り返さない。
+180秒はengine起動後だけでなく、sampleの展開・loader/CUDA照会・モデル準備全体に適用する。
+
+b11429の配布物はGLIBC 2.38 / GLIBCXX 3.4.32を必要とする。
+DのABI下限、APIのimmutable image profile照合、Runnerの実環境検査、
+sampleのlibrary/`--help` loader検査で起動前に拒否できる。
+RunPodで明示選択する対応imageは
+`runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35`。
+元のUbuntu22.04 digestでは新sampleのcreateを拒否する。自動image切替はない。
+旧試験bundleはimmutableでこの新要件を持たないため再利用せず、新しいbundleをpack・検証する。
+新Runnerの`runtime_feature=process_startup_v1`も必須であり、旧Runner配備のまま動作済みとは扱わない。
+
+停止後の出力は`chat-history.json`、`startup-diagnostics.json`と存在する
+`engine-stdout.log` / `engine-stderr.log`。ログは各256KiBの末尾に制限し、
+診断はCUDA照会結果、loader結果、準備フェーズ、HTTP状態、全layer offload数、
+engine終了コード、capture完了/失敗を記録する。管理キーやenv全体は保存しない。
+共通Runnerの`runner-process-startup.json` / `runner-process.log`と、起動失敗時の
+`runner-runtime-start-failure.json`も同じAsset保存経路へ渡す（最大7ファイル、grant上限8）。
+保存は停止確認後、terminal failure報告前に行う。保存できなかった出力は保存済みとしない。
+
+```sh
+mkdir -p .tmp/gpu-llm-tests
+TMPDIR="$PWD/.tmp/gpu-llm-tests" python3 -B -m unittest discover -s samples/portable-gpu-llm/tests -v
+```
+
+Unix socket pathが100byteを超える長いworktreeでは、workspaceの短い`.tmp/`配下に
+専用TMPDIRを作る。`test_startup.py`はCPU fixture processと実HTTP/Unix socketで
+遅延503→200、異常終了、準備timeout、取消、ABI拒否、bounded logを確認する。
+fixtureのCUDA表示/offload文は模擬であり、実CUDA検証ではない。
+生成文の実Asset保存、時間制限による自動停止、保存猶予切れは引き続き実GPU未検証。
+追加のPod作成は別途承認が必要。
