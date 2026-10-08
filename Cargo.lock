@@ -740,6 +740,7 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "fs2",
+ "hex",
  "libc",
  "rand 0.8.6",
  "reqwest",
@@ -751,6 +752,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "windows-sys 0.61.2",
 ]
