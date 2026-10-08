@@ -2948,6 +2948,37 @@ default = "pure"
     }
 
     #[test]
+    fn gpu_chat_declares_a_fixed_process_route_with_external_model_and_software_objects() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-gpu-llm");
+        let (bytes, bundle) = build_authored_bundle_v2(&source).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(routes.len(), 1);
+        let route = &routes[0];
+        assert_eq!(route.realization, PortableRealizationKind::LocalProcess);
+        assert_eq!(route.model_sets.len(), 2);
+        assert!(route.derivation.requirements.host.is_some());
+        assert_eq!(
+            route
+                .derivation
+                .runtimes
+                .get(PYTHON_RUNTIME)
+                .map(String::as_str),
+            Some("3.11.11")
+        );
+        for set in &route.model_sets {
+            assert_eq!(set.reference, set.manifest.reference().unwrap());
+            for object in &set.manifest.objects {
+                assert!(
+                    bundle
+                        .descriptor(&ContentRef::parse(object.digest.clone()).unwrap())
+                        .is_none()
+                );
+            }
+        }
+        assert!(bytes.len() < 128 * 1024);
+    }
+
+    #[test]
     fn a_derivation_naming_a_non_manifest_object_as_its_model_set_is_refused() {
         let root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");

@@ -1,5 +1,10 @@
 # local-llm-chat
 
+For the current portable application GPU/Data Grant implementation sample,
+see [portable-gpu-llm](../portable-gpu-llm/README.md). That sample is not yet
+real-GPU accepted or published. This directory retains the existing legacy
+native-inference profile and its separate commands.
+
 Run a **local LLM** with one command — **no Docker, no Python setup, no manual
 model downloads**. Ato fetches a pinned [llama.cpp](https://github.com/ggml-org/llama.cpp)
 engine *and* the GGUF model, verifies them, caches them, and runs `llama-server`
