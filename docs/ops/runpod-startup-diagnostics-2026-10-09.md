@@ -55,7 +55,7 @@ engine異常終了ではアプリ自身も非zeroで終了する。準備中SIGT
 
 最初の全体検査はこの作業のbuild cacheでディスクが満杯になり、Rust書込とWorker SQLiteが失敗した。自分のdebug buildだけをcargo cleanし、CARGO_INCREMENTAL=0で回復した。API一括実行ではdispatch DB初期化が10秒timeoutとなったが、同じ10秒制限の単独実行で9件成功。Rust初回workspaceではCLI computation_architectureのJSON EOFが1件出たが、同条件の再実行で全体成功。変更前`bacbffff`の独立worktreeでも該当suite 13件成功し、EOFの原因は未確定の一過性失敗として記録する。新skipやtest timeout延長は加えていない。
 
-fixtureのCUDA表示とoffload文は模擬。実生成・実CUDAのAcceptanceではない。今回は新headのGitHub Actions実行を抑止して追加CI課金を避ける（[GitHub公式手順](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)）。ローカル成功をCI成功とは報告しない。
+fixtureのCUDA表示とoffload文は模擬。実生成・実CUDAのAcceptanceではない。追加CI課金を避けるため通常のpush/pull_request workflowは`[skip ci]`で省略した（[GitHub公式手順](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)）。APIの新headはcheck/runなし。RustではGitHubの自動CodeQLが`dynamic` eventで起動し、この指定の対象外だったため停止した。ローカル成功を全CI成功とは報告せず、repository/workflow設定は変更していない。
 
 ## 残る実機範囲・費用
 
