@@ -84,6 +84,35 @@ resources remain unconfirmed; restarting is not a way to bypass that refusal.
 
 The protocol never provisions or deletes an attached machine or Notebook.
 Registration is distinct from GPU/isolation/storage admission. GPU LLM/Wan,
-Docker backup/restore, local offline Model Sets and a server management UI still
+Docker backup/restore, local Model Set execution and a server management UI still
 need their roadmap acceptance. No Kaggle/Colab or real GPU support is certified
 by the read-only diagnostic or the API fixture tests alone.
+
+## Import an existing Model Set offline
+
+The current CLI can verify a canonical `ato.model-set/1` manifest and import
+its objects from an existing directory. Use the manifest and SHA-256 reference
+declared by the reviewed Capsule, rather than reconstructing its identity:
+
+```sh
+ato model-set import \
+  --manifest ./models/model-set.json \
+  --digest 'sha256:<declared-manifest-digest>' \
+  --source /path/to/existing/model-files \
+  --max-cache-bytes 68719476736
+```
+
+`--source` paths follow the manifest's relative object paths. The default
+cache is `$ATO_HOME/cache/model-cache` (`ATO_HOME` defaults to the existing CLI
+home); `--cache-root /path/to/runner-work-root` explicitly uses that Worker's
+existing cache. Files are size-checked, fully SHA-256 verified and published
+read-only. An interrupted copy resumes from verified final hash checks; a
+verified cache hit requires no source-file read. The JSON report records the
+Model Set reference, transferred bytes and logical cache usage.
+
+The limit counts cached objects and partial transfers, excluding Instance
+input/output and cache control files. An import refuses over-capacity and
+concurrent mutations with `model_cache_quota_exceeded` or `model_cache_busy`;
+stop the competing import/download and retry. It never removes existing model
+objects or Instance data to make space. Importing weights alone grants no GPU,
+workload execution or cloud-provider authority.
