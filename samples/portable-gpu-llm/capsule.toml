@@ -41,6 +41,15 @@ cwd = "."
 guest_port = 8000
 runtimes = { python = "3.11.11" }
 
+[derivation.startup]
+port = "app.http"
+path = "/health"
+timeout_ms = 180000
+
+[derivation.startup.abi]
+glibc_min = "2.38"
+glibcxx_min = "3.4.32"
+
 [derivation.host]
 os = "linux"
 arch = "x86_64"

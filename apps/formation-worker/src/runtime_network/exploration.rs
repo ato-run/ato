@@ -165,6 +165,7 @@ impl ScopedGates {
             })
             .find(|requirement| {
                 ExecutionRequirements {
+                    startup: None,
                     network: vec![requirement.clone()],
                     authority: vec![],
                     host: None,

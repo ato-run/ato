@@ -121,6 +121,15 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
 
     fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
+        if let Some(abi) = route
+            .derivation
+            .requirements
+            .startup
+            .as_ref()
+            .and_then(|s| s.abi.as_ref())
+        {
+            ato_runtime_attempt::launch::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)?;
+        }
         fs::create_dir_all(self.runtime_root)
             .with_context(|| format!("create {}", self.runtime_root.display()))?;
         let (hydrated, dependency_fetches) =

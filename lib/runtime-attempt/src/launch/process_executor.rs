@@ -151,6 +151,7 @@ pub struct LaunchedProcess {
     runtime_executable: String,
     runtime_version: Option<String>,
     stopped: bool,
+    startup_record: PathBuf,
 }
 
 impl LaunchedProcess {
@@ -366,6 +367,11 @@ fn launch_process_inner(
     host: &ProcessLaunchHost,
     scoped: Option<(&Path, &Path)>,
 ) -> Result<LaunchedProcess> {
+    if let LaunchRealizationV1::Process(process) = &spec.realization
+        && let Some(abi) = &process.required_abi
+    {
+        super::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)?;
+    }
     let process_spec = process_spec_for(spec, context)?;
     let (runtime_executable, runtime_version) = match &spec.realization {
         LaunchRealizationV1::Process(process) => match &process.executable {
@@ -500,6 +506,7 @@ fn launch_process_inner(
         runtime_executable,
         runtime_version,
         stopped: false,
+        startup_record: host.runtime_root.join("process-startup.json"),
     })
 }
 
@@ -586,6 +593,7 @@ fn launch_host_boundary(
         runtime_executable,
         runtime_version,
         stopped: false,
+        startup_record: host.runtime_root.join("process-startup.json"),
     })
 }
 
@@ -693,37 +701,32 @@ pub fn wait_until_ready(
         ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
     };
 
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     // A `process` readiness has nothing to poll: the workload is ready because
     // it is up, which is already true here.
     let Some((port, path)) = target else {
         return Ok(());
     };
-    loop {
-        // Checked BEFORE the probe: a workload that exited has failed, and
-        // waiting out the timeout would report a timeout instead of the real
-        // cause.
-        if let Some(status) = launched.exited()? {
-            bail!(
-                "workload for run {} exited before becoming ready ({status})",
-                launched.run_id()
-            );
-        }
-        match probe.probe(port, &path) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                if Instant::now() >= deadline {
-                    // Carry the last failure: "not ready" without a reason is
-                    // the least useful diagnostic there is.
-                    bail!(
-                        "workload for run {} did not become ready within {timeout_ms}ms: {error}",
-                        launched.run_id()
-                    );
+    let record = launched.startup_record.clone();
+    crate::startup::wait_for_readiness(
+        Duration::from_millis(timeout_ms),
+        |budget| {
+            probe
+                .observe(port, &path, budget)
+                .map_err(anyhow::Error::msg)
+        },
+        || {
+            probe.check_control()?;
+            if let Some(status) = launched.exited()? {
+                return Err(crate::startup::StartupProcessExited {
+                    exit_code: status.code(),
                 }
+                .into());
             }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+            Ok(())
+        },
+        |progress| crate::startup::write_progress(&record, progress),
+    )?;
+    Ok(())
 }
 
 fn host_port_for(context: &ResolvedRuntimeLaunchContext, endpoint_name: &str) -> Result<u16> {
@@ -741,6 +744,61 @@ fn host_port_for(context: &ResolvedRuntimeLaunchContext, endpoint_name: &str) ->
 /// listening socket.
 pub trait ReadinessProbe {
     fn probe(&self, host_port: u16, path: &str) -> Result<(), String>;
+    fn check_control(&self) -> Result<()> {
+        Ok(())
+    }
+    fn observe(
+        &self,
+        host_port: u16,
+        path: &str,
+        _budget: Duration,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        match self.probe(host_port, path) {
+            Ok(()) => Ok(crate::startup::ReadinessObservation {
+                ready: true,
+                http_status: None,
+                detail: None,
+            }),
+            Err(detail) => Ok(crate::startup::ReadinessObservation {
+                ready: false,
+                http_status: None,
+                detail: Some(detail),
+            }),
+        }
+    }
+}
+
+/// Keeps preparation inside the caller's existing stop/authorization fence.
+pub struct ControlledReadinessProbe<'a> {
+    inner: &'a dyn ReadinessProbe,
+    control: std::cell::RefCell<&'a mut dyn FnMut() -> Result<()>>,
+}
+
+impl<'a> ControlledReadinessProbe<'a> {
+    pub fn new(inner: &'a dyn ReadinessProbe, control: &'a mut dyn FnMut() -> Result<()>) -> Self {
+        Self {
+            inner,
+            control: std::cell::RefCell::new(control),
+        }
+    }
+}
+
+impl ReadinessProbe for ControlledReadinessProbe<'_> {
+    fn probe(&self, port: u16, path: &str) -> Result<(), String> {
+        self.check_control().map_err(|e| e.to_string())?;
+        self.inner.probe(port, path)
+    }
+    fn check_control(&self) -> Result<()> {
+        (self.control.borrow_mut())()
+    }
+    fn observe(
+        &self,
+        port: u16,
+        path: &str,
+        budget: Duration,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        self.inner.observe(port, path, budget)
+    }
 }
 
 /// The real probe: a loopback request to the port the Runner allocated.
@@ -755,6 +813,27 @@ impl LoopbackReadinessProbe {
 }
 
 impl ReadinessProbe for LoopbackReadinessProbe {
+    fn observe(
+        &self,
+        host_port: u16,
+        path: &str,
+        budget: Duration,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        if path.is_empty() {
+            let target = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
+            return Ok(crate::startup::ReadinessObservation {
+                ready: std::net::TcpStream::connect_timeout(&target, budget).is_ok(),
+                http_status: None,
+                detail: None,
+            });
+        }
+        crate::startup::http_probe(
+            &self.client,
+            &format!("http://127.0.0.1:{host_port}{path}"),
+            budget,
+        )
+        .map_err(|e| e.to_string())
+    }
     fn probe(&self, host_port: u16, path: &str) -> Result<(), String> {
         if path.is_empty() {
             return std::net::TcpStream::connect(("127.0.0.1", host_port))
@@ -940,6 +1019,7 @@ mod tests {
             runtime_executable: "/bin/true".to_owned(),
             runtime_version: None,
             stopped: false,
+            startup_record: fixture._workspace.path().join("process-startup.json"),
         };
         struct NeverProbed;
         impl ReadinessProbe for NeverProbed {
@@ -1029,6 +1109,7 @@ mod tests {
             runtime_executable: "/bin/sleep".to_owned(),
             runtime_version: None,
             stopped: false,
+            startup_record: fixture._workspace.path().join("process-startup.json"),
         };
         struct AlwaysRefused;
         impl ReadinessProbe for AlwaysRefused {
@@ -1092,6 +1173,7 @@ mod tests {
             runtime_executable: "/bin/sh".into(),
             runtime_version: None,
             stopped: false,
+            startup_record: root.path().join("process-startup.json"),
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !root.path().join("ready").exists() {
@@ -1154,5 +1236,48 @@ mod tests {
 
     fn spawn_sleep() -> ProcessHandle {
         spawn_true()
+    }
+    #[test]
+    fn preparation_cancellation_is_recorded_and_the_process_is_reaped() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let mut spec = spec(PROCESS_FIXTURE);
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "web".into(),
+            path: "/health".into(),
+            timeout_ms: 180000,
+        };
+        let mut launched = LaunchedProcess {
+            handle: spawn_sleep(),
+            run_id: spec.context.run_id.clone(),
+            runtime_executable: "/bin/sleep".into(),
+            runtime_version: None,
+            stopped: false,
+            startup_record: fixture._workspace.path().join("startup.json"),
+        };
+        struct NeverReady;
+        impl ReadinessProbe for NeverReady {
+            fn probe(&self, _: u16, _: &str) -> Result<(), String> {
+                Err("HTTP 503".into())
+            }
+        }
+        let mut cancel = || Err(crate::startup::StartupCancelled.into());
+        let probe = ControlledReadinessProbe::new(&NeverReady, &mut cancel);
+        assert!(
+            wait_until_ready(&spec, &fixture.context, &mut launched, &probe)
+                .unwrap_err()
+                .is::<crate::startup::StartupCancelled>()
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&launched.startup_record).unwrap()).unwrap();
+        assert_eq!(record["phase"], "cancelled");
+        let pid = launched.pid();
+        let stopped = launched
+            .stop(&LifecycleV1 {
+                graceful_shutdown_ms: 500,
+                force_kill_after_ms: 1000,
+            })
+            .unwrap();
+        assert!(stopped.exit_status.is_some());
+        assert!(!process_group_is_alive(pid));
     }
 }
