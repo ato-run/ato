@@ -51,7 +51,7 @@ def validate_history(raw):
         if type(job["sequence"]) is not int or job["sequence"] < 0 or not isinstance(job["created_at"], str):
             raise ValueError("invalid_history")
         datetime.fromisoformat(job["created_at"])
-    if len(json.dumps(raw).encode()) > MAX_HISTORY_BYTES:
+    if len(json.dumps(raw, ensure_ascii=False).encode()) > MAX_HISTORY_BYTES:
         raise ValueError("history_capacity_exceeded")
     return raw["jobs"]
 
