@@ -95,6 +95,9 @@ const RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     "isolation=untrusted-v1",
+    // runtime_launch's direct process executor shares the host network.
+    // Its filesystem namespace is not a multi-tenant network boundary.
+    "isolation:runtime_launch=host-boundary-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
 ];
@@ -4454,6 +4457,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
         assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+        assert!(RUNNER_CAPABILITIES.contains(&"isolation:runtime_launch=host-boundary-v1"));
+        assert!(!RUNNER_CAPABILITIES.contains(&"isolation:runtime_launch=untrusted-v1"));
     }
 
     #[test]
