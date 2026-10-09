@@ -33,6 +33,8 @@ class ChatTests(unittest.TestCase):
         self.started = threading.Event()
         self.disconnected = threading.Event()
         self.hold = False
+        self.prefix = b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+        self.tail = b'data: {"choices":[{"delta":{"content":" GPU"}}]}\n\ndata: [DONE]\n\n'
         owner = self
 
         class Engine(BaseHTTPRequestHandler):
@@ -41,7 +43,7 @@ class ChatTests(unittest.TestCase):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                self.wfile.write(b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n')
+                self.wfile.write(owner.prefix)
                 self.wfile.flush()
                 owner.started.set()
                 if owner.hold:
@@ -49,7 +51,7 @@ class ChatTests(unittest.TestCase):
                     if self.connection.recv(1) == b"":
                         owner.disconnected.set()
                 else:
-                    self.wfile.write(b'data: {"choices":[{"delta":{"content":" GPU"}}]}\n\ndata: [DONE]\n\n')
+                    self.wfile.write(owner.tail)
 
             def log_message(self, *_):
                 pass
@@ -104,6 +106,49 @@ class ChatTests(unittest.TestCase):
         self.assertTrue(self.disconnected.wait(2))
         self.assertIsNone(self.chat.active)
         self.assertEqual(json.loads((self.chat.output / "chat-history.json").read_text())["jobs"][0]["phase"], "cancelled")
+
+    def actual_b11429_prefix(self):
+        fixture = Path(__file__).parents[3] / "tests/fixtures/portable-gpu-llm/b11429/runpod-trial3-first-chunk.jsonl"
+        record = json.loads(fixture.read_text())
+        self.assertEqual(record["type"], "log")
+        self.assertIn('"role":"assistant","content":null', record["msg"])
+        return record["msg"].split("http: streamed chunk: ", 1)[1].encode()
+
+    def test_actual_b11429_null_role_delta_allows_following_text_and_persistence(self):
+        self.prefix = self.actual_b11429_prefix()
+        # The captured prefix is real; DONE is simulated, not GPU completion evidence.
+        self.tail = b"data: [DONE]\n\n"
+        request_id = str(uuid.uuid4())
+        self.chat.start(request_id, "fixture prefix")
+        value = self.completed(request_id)
+        self.assertEqual((value["phase"], value["text"], value["error"]), ("completed", "The", None))
+        self.assertEqual(json.loads((self.chat.output / "chat-history.json").read_text())["jobs"][0], value)
+        self.assertFalse(self.chat.start(request_id, "fixture prefix")[1])
+        self.assertEqual(len(self.requests), 1)
+
+    def test_actual_b11429_prefix_can_be_cancelled_without_losing_text(self):
+        self.prefix = self.actual_b11429_prefix()
+        self.hold = True
+        request_id = str(uuid.uuid4())
+        self.chat.start(request_id, "cancel fixture prefix")
+        self.assertTrue(self.started.wait(2))
+        deadline = time.monotonic() + 2
+        while not self.chat.snapshot(request_id)["text"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.chat.cancel(request_id)
+        value = self.completed(request_id)
+        self.assertEqual((value["phase"], value["text"]), ("cancelled", "The"))
+        self.assertTrue(self.disconnected.wait(2))
+        self.assertEqual(json.loads((self.chat.output / "chat-history.json").read_text())["jobs"][0], value)
+
+    def test_unexpected_non_string_inference_content_remains_rejected(self):
+        self.prefix = b'data: {"choices":[{"delta":{"content":123}}]}\n\n'
+        self.tail = b"data: [DONE]\n\n"
+        request_id = str(uuid.uuid4())
+        self.chat.start(request_id, "invalid content")
+        value = self.completed(request_id)
+        self.assertEqual((value["phase"], value["text"], value["error"]),
+                         ("failed", "", "Invalid inference stream"))
 
     def test_restart_marks_incomplete_generation_interrupted_without_execution(self):
         raw = {"schema": "ato.gpu-chat-history/1", "jobs": [{"request_id": str(uuid.uuid4()), "prompt": "pending", "text": "part",

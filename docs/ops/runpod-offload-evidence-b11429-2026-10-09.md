@@ -137,3 +137,36 @@ workspace8ファイルには新しい`offload_evidence.py`が存在し、実ロ�
 保存猶予切れ、次Runへのrestoreも未検証。
 今回の修正はまだstagingへ反映していない。旧bundleの再利用はしない。
 次回承認前に新sourceのbundleと実験対象digestを固定し、共有設定と期限・累計費用を計画へ反映する必要がある。
+
+## 3回目の実機結果とstream parser修正
+
+承認後の3回目は固定Rust HEAD947f7fc1 / bundleb9f859a9 / Df7e43c16で実行した。
+GPU RTX A2000×1、CUDA認識、glibc2.39/GLIBCXX3.4.33、28モデル層+出力層の
+全29CUDA0配置、29/29 summary、fallbackなし、Rust receipt fully_satisfiedを確認。
+前回のoffload証拠欠落に対する修正はこの実機で成立した。
+
+最初の生成だけを実行したが、appは`Invalid inference stream`でfailed/text空。
+保存した実engine stdoutのJSONLはrole-only delta (`content:null`) と次の
+`content:"The"`を同じstreamed-chunk recordに含む。app.pyはnullable contentを
+文字列以外として拒否していた。CUDA認識や配置不足によるstartup失敗ではない。
+ログのfixtureは実Asset e34b028d...からそのrecordをそのまま抽出し、provenanceを残した。
+
+Pod消滅・共有設定復元後のローカル修正はnullable contentを非textフレームとして読み飛ばす。
+数値等の不正contentは引き続き拒否する。実prefixからテキスト受信・保存・冪等再送と取消、
+不正型拒否を追加した。captured prefixにはDONEがなく、unit fixtureで明示的に補ったもので、
+新修正の実GPU完了を証明しない。元947f7fc1で同じ回帰試験を実行すると期待どおり
+`Invalid inference stream`/空textになることも確認した。
+
+Python3.11.14 (local) 32 tests成功、Python3.14.4でも32成功。
+最初の実行は深いworktree内TMPDIRがAF_UNIX path制限を超え、19件失敗した。
+ログを残し、既存workspace内の短い `.tmp/t3`へTMPDIRを変えた同じtest suiteで成功した。
+これは試験環境のpath差であり、workloadのソケット制限を緩めていない。
+変更はPython sampleとfixture/docsのみ。Rust全workspace1958/9ignoredは947f7fc1時点の
+前回ローカル結果、今回の再実行ではない。今回のRust bundle sample回帰は別途1件成功。
+
+3回目は失敗を検知してmanual stopし、canonical stopped ACKと失敗job履歴/診断5件の
+Asset保存・削除後SHA/size/同Run-lease対応を確認した。normal RunTTL、自動停止による
+保存、非空の生成履歴、SSE逐次生成、実生成キャンセル、実request-ID再送は未達/未実施。
+Pod1台だけ作成し、再作成なし、APIのdeletion_confirmed/provider_goneを確認。
+今回の試験に使ったbundle/K/Dは途中変更していない。nullable修正はtrial後であり、
+新しいbundle/別途承認済み試験で検証する必要がある。マージ・本番反映なし、Draft維持。
