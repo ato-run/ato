@@ -337,8 +337,14 @@ impl Server {
         let root = self
             .work_root
             .canonicalize()
-            .unwrap_or_else(|_| self.work_root.clone());
-        let resolved_canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+            .context("resolving the work root")?;
+        // A lexical prefix is not a confinement check. In particular,
+        // root/../../missing still starts with root when canonicalization fails.
+        // Projects must already exist (start subsequently loads capsule.toml);
+        // refuse missing/unresolvable paths before opening or creating a repository.
+        let resolved_canonical = resolved
+            .canonicalize()
+            .context("resolving an existing project directory")?;
         anyhow::ensure!(
             resolved_canonical.starts_with(&root),
             "project path escapes the work root"
@@ -518,6 +524,59 @@ mod tests {
         assert!(server.resolve("inside").is_ok());
         assert!(server.resolve("../../etc").is_err());
         assert!(server.resolve("/etc").is_err());
+    }
+
+    #[test]
+    fn missing_project_paths_fail_before_repository_creation() {
+        std::fs::create_dir_all(".tmp").unwrap();
+        let root = tempfile::tempdir_in(".tmp").expect("test root");
+        let work = root.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let server = Server::bind(work.clone(), "x".repeat(64)).unwrap();
+        // Both a nonexistent in-root path and a nonexistent escape must fail.
+        // The fallback must not be restored just to allow one of them.
+        assert!(server.resolve("missing").is_err());
+        assert!(server.resolve("../outside/missing").is_err());
+        assert!(server.start(r#"{"project":"missing"}"#).is_err());
+        assert!(server.start(r#"{"project":"../outside/missing"}"#).is_err());
+        assert!(
+            server
+                .resolve(
+                    root.path()
+                        .canonicalize()
+                        .unwrap()
+                        .join("outside")
+                        .to_str()
+                        .unwrap()
+                )
+                .is_err()
+        );
+        assert!(!work.join("missing").exists());
+        assert!(!root.path().join("outside").exists());
+        // Existing absolute projects inside the work root remain compatible.
+        let inside = work.join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        assert_eq!(
+            server
+                .resolve(inside.canonicalize().unwrap().to_str().unwrap())
+                .unwrap(),
+            inside.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_symlink_cannot_escape_the_work_root() {
+        std::fs::create_dir_all(".tmp").unwrap();
+        let root = tempfile::tempdir_in(".tmp").expect("test root");
+        let work = root.path().join("work");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(outside.canonicalize().unwrap(), work.join("escape")).unwrap();
+        let server = Server::bind(work, "x".repeat(64)).unwrap();
+        assert!(server.resolve("escape").is_err());
+        assert!(server.resolve("escape/missing").is_err());
     }
 
     #[test]
