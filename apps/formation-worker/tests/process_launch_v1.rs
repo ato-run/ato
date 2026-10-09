@@ -82,6 +82,7 @@ fn a_launched_workload_actually_runs_and_stops() {
     let marker = format!("ato-launch-test-{}", std::process::id());
     let mut spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture spec");
     spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+        required_abi: None,
         // `$0` carries the marker, so every process of this launch — bwrap,
         // the shim, the shell — can be found by it.
         argv: vec![

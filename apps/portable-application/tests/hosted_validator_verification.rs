@@ -121,6 +121,7 @@ fn start_process(root: &Path) -> Candidate {
         ))
         .unwrap();
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+            required_abi: None,
             argv: vec![
                 "python3".into(),
                 "-m".into(),

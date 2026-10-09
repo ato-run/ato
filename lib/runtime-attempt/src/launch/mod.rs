@@ -8,6 +8,7 @@
 
 pub mod host_boundary;
 pub mod oci;
+pub mod process_abi;
 pub mod process_executor;
 pub mod resolved;
 pub mod sandbox;

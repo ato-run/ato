@@ -277,6 +277,7 @@ while True:
                 cwd_relative: String::new(),
             },
             realization: LaunchRealizationV1::Process(ProcessRealizationV1 {
+                required_abi: None,
                 argv: vec![
                     "python3".to_owned(),
                     "-c".to_owned(),
@@ -503,6 +504,7 @@ while True:
         let context = context_for(workspace.path(), 39_105);
         let mut spec = spec_for("run_noop", Some(2), "unused", 39_105);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+            required_abi: None,
             argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "true".to_owned()],
             executable: None,
         });
@@ -560,6 +562,7 @@ while True:
         let context = context_for(workspace.path(), 39_106);
         let mut spec = spec_for("run_nonexistent", Some(1), "unused", 39_106);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+            required_abi: None,
             argv: Vec::new(),
             executable: None,
         });
@@ -577,6 +580,7 @@ while True:
         let context = context_for(workspace.path(), 39_107);
         let mut spec = spec_for("run_doomed", Some(1), "unused", 39_107);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+            required_abi: None,
             argv: Vec::new(),
             executable: None,
         });

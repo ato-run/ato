@@ -93,6 +93,15 @@ pub fn admit(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
 ) -> Option<AttemptFailure> {
+    admit_with_model_delivery(spec, authorization, browser, false)
+}
+
+pub(crate) fn admit_with_model_delivery(
+    spec: &AttemptSpec<'_>,
+    authorization: EffectAuthorization<'_>,
+    browser: Option<&BrowserVerification>,
+    delivers_model_sets: bool,
+) -> Option<AttemptFailure> {
     // No entry into this attempt path measures its host against a route's
     // host condition, so none may run such a route. The route is not wrong;
     // it is unverified here, and only a Runner admitted against the condition
@@ -103,11 +112,12 @@ pub fn admit(
             "D states a host condition this runtime does not admit against",
         );
     }
-    if spec
-        .derivation
-        .inputs
-        .iter()
-        .any(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+    if !delivers_model_sets
+        && spec
+            .derivation
+            .inputs
+            .iter()
+            .any(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
     {
         return refused(
             MODEL_SET_UNAVAILABLE,
@@ -329,6 +339,7 @@ mod tests {
                 admit(&spec, authorization, None).map(|f| f.code).as_deref(),
                 Some(MODEL_SET_UNAVAILABLE)
             );
+            assert!(admit_with_model_delivery(&spec, authorization, None, true).is_none());
         }
     }
 
@@ -370,6 +381,12 @@ mod tests {
         ] {
             assert_eq!(
                 admit(&spec, authorization, None).map(|f| f.code).as_deref(),
+                Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
+            );
+            assert_eq!(
+                admit_with_model_delivery(&spec, authorization, None, true)
+                    .map(|f| f.code)
+                    .as_deref(),
                 Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
             );
         }
