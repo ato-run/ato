@@ -15,6 +15,26 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  process-isolation:
+    name: Linux process isolation canaries
+    # This dedicated test needs unprivileged user namespaces. Pin the image
+    # instead of disabling AppArmor globally on newer Ubuntu images.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      ATO_RUNNER_ISOLATION_TEST_HOST: "1"
+      ATO_TEST_PARENT_CREDENTIAL: synthetic-parent-credential-canary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap python3
+      - name: Check actual namespaces, mounts, credential exclusion and host network positive control
+        run: |
+          mkdir -p .tmp
+          export TMPDIR="$PWD/.tmp"
+          cargo test --locked -p ato-connected-realization-worker --test process_isolation -- --ignored --test-threads=1 --nocapture
+
   workspace:
     name: workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
