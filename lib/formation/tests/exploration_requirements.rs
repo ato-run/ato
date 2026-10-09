@@ -40,12 +40,14 @@ fn max_rounds_defaults_to_three_and_rejects_nonpositive_or_fractional_values() {
 #[test]
 fn authority_ceiling_is_exact_and_phase_scoped() {
     let ceiling = ExecutionRequirements {
+        startup: None,
         network: vec![endpoint(ExecutionPhase::Dependencies, "pypi.org")],
         authority: vec![],
         host: None,
     };
     assert!(ceiling.within(&ceiling).is_ok());
     let runtime = ExecutionRequirements {
+        startup: None,
         network: vec![endpoint(ExecutionPhase::Runtime, "pypi.org")],
         authority: vec![],
         host: None,
@@ -96,6 +98,7 @@ fn unsafe_or_ambiguous_endpoint_forms_are_not_requirements() {
         "user:secret@pypi.org",
     ] {
         let requirements = ExecutionRequirements {
+            startup: None,
             network: vec![endpoint(ExecutionPhase::Build, host)],
             authority: vec![],
             host: None,

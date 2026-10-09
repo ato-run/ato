@@ -224,6 +224,140 @@ fn explicitly_selected_process_route_satisfies_the_same_contract_at_runtime() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_local_process_reads_an_offline_model_set_but_cannot_change_it() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let models = root.path().join("model-source");
+    let home = root.path().join("home");
+    fs::create_dir_all(source.join("models")).unwrap();
+    fs::create_dir(&models).unwrap();
+    let python = std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(python.status.success());
+    let version = String::from_utf8(python.stdout).unwrap();
+    let version = version.trim().strip_prefix("Python ").unwrap();
+    let manifest = ato_formation::model_set::ModelSetManifest {
+        schema: ato_formation::model_set::MODEL_SET_SCHEMA.to_owned(),
+        objects: vec![ato_formation::model_set::ModelSetEntry {
+            path: "weights.bin".to_owned(),
+            digest: bundle_sha256(b"weights"),
+            bytes: 7,
+        }],
+    };
+    let manifest_path = source.join("models/model-set.json");
+    fs::write(&manifest_path, manifest.canonical_bytes().unwrap()).unwrap();
+    fs::write(models.join("weights.bin"), b"weights").unwrap();
+    fs::write(
+        source.join("app.py"),
+        r#"import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+model = os.path.join(os.environ['ATO_INPUT_PATH_MODELS'], 'weights.bin')
+with open(model, 'rb') as f:
+    weights = f.read()
+denied = False
+try:
+    with open(model, 'wb') as f:
+        f.write(b'changed')
+except PermissionError:
+    denied = True
+body = weights + (b'|denied\n' if denied else b'|writable\n')
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+HTTPServer(('127.0.0.1', int(os.environ['ATO_ENDPOINT_APP_HTTP_PORT'])), H).serve_forever()
+"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("capsule.toml"),
+        format!(
+            r#"schema = "ato.capsule/2"
+[application]
+title = "Offline model read boundary fixture"
+surface_path = "/"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[[input]]
+id = "models"
+use = "ato.model-set@1"
+path = "models/model-set.json"
+ref = "{}"
+[contract]
+mode = "all"
+[[contract.observation]]
+id = "proof"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "{}"
+[[derivation]]
+id = "cpu-fixture"
+use = "ato.process@1"
+argv = ["python3", "-B", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = {{ python = "{}" }}
+[effects]
+default = "pure"
+"#,
+            manifest.reference().unwrap(),
+            bundle_sha256(b"weights|denied\n"),
+            version
+        ),
+    )
+    .unwrap();
+    let (bytes, bundle) = ato_portable_application::build_authored_bundle_v2(&source).unwrap();
+    let capsule = root.path().join("offline.capsule");
+    fs::write(&capsule, bytes).unwrap();
+    ato_with_home(&home)
+        .args(["model-set", "import", "--manifest"])
+        .arg(manifest_path)
+        .arg("--digest")
+        .arg(manifest.reference().unwrap())
+        .arg("--source")
+        .arg(&models)
+        .args(["--max-cache-bytes", "7"])
+        .assert()
+        .success();
+    fs::remove_dir_all(models).unwrap();
+    let receipt_path = root.path().join("receipt.json");
+    let run = ato_with_home(&home)
+        .arg("run")
+        .arg(capsule)
+        .arg("--no-open")
+        .arg("--verification-receipt")
+        .arg(&receipt_path)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["contract_ref"], bundle.index.root_contract_ref);
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert_eq!(
+        fs::read(
+            home.join("cache/model-cache/objects")
+                .join(&manifest.objects[0].digest[7..])
+        )
+        .unwrap(),
+        b"weights"
+    );
+}
+
 #[test]
 fn a_multi_route_bundle_never_selects_a_derivation_implicitly() {
     ato()

@@ -271,6 +271,7 @@ fn an_unsupported_protocol_is_refused_rather_than_guessed() {
 fn empty_argv_is_refused() {
     let mut spec = process_spec();
     spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+        required_abi: None,
         argv: vec![],
         executable: None,
     });
@@ -410,4 +411,22 @@ fn the_logical_spec_carries_no_secret_and_no_host_path() {
     assert!(!rendered.contains("/var/lib"));
     // What it DOES carry is references, which are safe to persist.
     assert!(rendered.contains("grant_01M1J0SECRET000000000000"));
+}
+
+#[test]
+fn process_startup_abi_golden_is_canonical_and_refuses_unknown_versions() {
+    let raw = include_str!("../../tests/fixtures/runtime-launch-spec-v1/process-startup-abi.json");
+    let mut spec = RuntimeLaunchSpecV1::parse(raw).unwrap();
+    assert_eq!(
+        String::from_utf8(spec.canonical_bytes().unwrap()).unwrap(),
+        raw.trim_end()
+    );
+    let LaunchRealizationV1::Process(process) = &mut spec.realization else {
+        panic!("fixture");
+    };
+    process.required_abi.as_mut().unwrap().glibc_min = "unknown".into();
+    assert!(matches!(
+        spec.validate(),
+        Err(RuntimeLaunchSpecError::ForbiddenField { .. })
+    ));
 }

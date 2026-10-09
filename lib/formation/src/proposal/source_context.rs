@@ -127,6 +127,7 @@ impl ExplorationContext {
                     || f.network_denials.len() > 16
                     || f.authority_denials.len() > 16
                     || (crate::requirements::ExecutionRequirements {
+                        startup: None,
                         network: f.network_denials.clone(),
                         authority: f.authority_denials.clone(),
                         host: None,

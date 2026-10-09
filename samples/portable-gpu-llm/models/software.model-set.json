@@ -1,0 +1,1 @@
+{"objects":[{"bytes":594377569,"digest":"sha256:f4ab593e31507320b121f2cb21791f4c72420a2483d3df8bf2ca1a97d04e6845","path":"cuda-runtime.tar.gz"},{"bytes":171651873,"digest":"sha256:b13c64b9224d3c89d9993945d70cc21177ad00178c21b8d34237e3bc139834f1","path":"llama-cuda.tar.gz"}],"schema":"ato.model-set/1"}
