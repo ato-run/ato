@@ -163,3 +163,20 @@ shared runtime crate; it is not a skipped-test change in this PR. Earlier
 platform CI is retained as historical evidence, not claimed for this integration.
 Merge uses `[skip ci]` to avoid push-triggered publication; production deployment
 and the remaining end-to-end performance acceptance remain separate.
+
+### Full-CI integration findings and test repair
+
+The first integrated CI run `37901492674` failed Linux Formation assertions
+that still expected the old readiness error wording. Tests now check the shared
+`StartupTimeout` type and `StartupProcessExited` type plus exit code 3, retaining
+output, duration and process-cleanup assertions. The same CI run exposed a macOS
+WouldBlock panic in the new preparation HTTP fixture. Both local HTTP fixtures
+now explicitly make accepted streams blocking while keeping bounded read
+timeouts and nonblocking listener shutdown. These changes are test-only; no
+production error handling, timeout or socket policy changed.
+
+Local repair validation: formatting passed; runtime-attempt library 161 passed;
+temporary-realization suite 14 passed; Clippy for runtime-attempt and
+formation-worker with all targets/features passed. This Mac's temporary
+realization suite uses its existing containment-refusal path; Linux startup and
+cleanup execution still need the new CI run. No test was skipped or weakened.

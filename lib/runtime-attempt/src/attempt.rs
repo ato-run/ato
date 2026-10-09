@@ -1219,6 +1219,7 @@ mod tests {
                         }
                         Err(_) => return,
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(1)))
                         .unwrap();
@@ -1742,6 +1743,8 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 };
+                // macOS can inherit the listener's nonblocking mode on accept.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();

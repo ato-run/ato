@@ -551,7 +551,10 @@ fn a_candidate_that_never_listens_times_out_and_is_gone() {
         .launch()
         .err()
         .expect("a candidate that never becomes ready is an error");
-    assert!(format!("{error:#}").contains("ready"), "{error:#}");
+    assert!(
+        error.is::<ato_runtime_attempt::startup::StartupTimeout>(),
+        "{error:#}"
+    );
     assert!(started.elapsed() >= Duration::from_secs(25));
     assert!(!launch.realization_scratch().exists());
     assert_gone(&marker);
@@ -578,7 +581,14 @@ fn a_candidate_that_exits_during_startup_is_reported_with_its_output() {
         .err()
         .expect("an exiting candidate is an error");
     let text = format!("{error:#}");
-    assert!(text.contains("exited before becoming ready"), "{text}");
+    assert_eq!(
+        error
+            .downcast_ref::<ato_runtime_attempt::startup::StartupProcessExited>()
+            .expect("startup process exit error")
+            .exit_code,
+        Some(3),
+        "{text}"
+    );
     assert!(text.contains("boom from the candidate"), "{text}");
     assert!(!launch.realization_scratch().exists());
     assert_gone(&marker);
