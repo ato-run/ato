@@ -6,6 +6,11 @@ ordinary unit suite and explicitly executed by the Linux process-isolation CI
 job. It fails if the sandbox cannot start; absence of Bubblewrap or namespace
 support is not counted as a passing result.
 
+CI pins the dedicated namespace test to Ubuntu 22.04. Newer Ubuntu images can
+restrict unprivileged user namespaces with AppArmor, preventing Bubblewrap
+from starting. The job does not disable that protection globally or turn a
+sandbox startup failure into a skip.
+
 Use a dedicated Linux test host with Bubblewrap, Python 3 and the repository's
 pinned Rust toolchain:
 
