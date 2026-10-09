@@ -17,7 +17,9 @@ env:
 jobs:
   process-isolation:
     name: Linux process isolation canaries
-    runs-on: ubuntu-latest
+    # This dedicated test needs unprivileged user namespaces. Pin the image
+    # instead of disabling AppArmor globally on newer Ubuntu images.
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
       ATO_RUNNER_ISOLATION_TEST_HOST: "1"
