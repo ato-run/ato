@@ -47,8 +47,10 @@ admission remains refused until its device-allocation gate is implemented.
 The pinned Python process extracts verified software into Run scratch, requires
 a CUDA device, starts one engine over a private Unix socket and requests all
 layers on that GPU with automatic fitting disabled. `/health` returns the
-declared ready body only after the engine answers and its log confirms complete
-GPU layer offload. Unknown/missing CUDA or partial offload fails closed. There
+declared ready body only after engine HTTP200 and pinned JSONL evidence confirm
+28 repeating layers plus the output layer assigned to CUDA0, matching model
+metadata and 29/29 summary, without tensor-buffer fallback/override. Input
+embedding remains on CPU as designed by b11429. Unknown/missing CUDA or partial offload fails closed. There
 is no CPU D or fallback. No workload opens a second TCP listener or downloads
 models. The Runner owns hardware admission, isolation, Run stop and Pod cleanup.
 
@@ -112,6 +114,27 @@ TMPDIR="$PWD/.tmp/gpu-llm-tests" python3 -B -m unittest discover -s samples/port
 Unix socket pathが100byteを超える長いworktreeでは、workspaceの短い`.tmp/`配下に
 専用TMPDIRを作る。`test_startup.py`はCPU fixture processと実HTTP/Unix socketで
 遅延503→200、異常終了、準備timeout、取消、ABI拒否、bounded logを確認する。
-fixtureのCUDA表示/offload文は模擬であり、実CUDA検証ではない。
+fixtureのCUDA表示・GPU配置入力は模擬であり、実CUDA検証ではない。
 生成文の実Asset保存、時間制限による自動停止、保存猶予切れは引き続き実GPU未検証。
 追加のPod作成は別途承認が必要。
+
+## 2026-10-09: b11429の配置証拠
+
+2回目はengine HTTP200に到達したが、回収stderr 1164 bytesに全offloadの証拠がなく失敗した。
+b11429はlibrary INFOをverbosity 4としてfilterするため、既定3では集計が出ない。
+固定版の配布loggerでも同じ抑制を再現した。現在は`--log-verbosity 5 --log-jsonl`で
+JSONLをstdoutへ出し、層別device割り当て・model層数・集計を照合する。
+`--no-host --no-repack`でCPU input bufferの期待される変更を避け、
+tensor buffer fallbackやoverrideが出た場合も準備成功を拒否する。
+`/props`には層配置情報がない。HTTP200、CUDA認識、argv、メモリ量だけではreadyにしない。
+
+`offload_evidence.py`はraw logの末尾を切る前にboundedな配置証拠を抽出し、
+診断の`offload_evidence`へ残す。未証明のまま期限に達した場合、
+`error=startup_timeout`と`failure_reason=offload_evidence_missing`を併記する。
+engine未起動、HTTP準備中、部分配置、証拠矛盾は別の理由として記録する。
+
+[fixtureの出所](../../tests/fixtures/portable-gpu-llm/b11429/README.md)には、前回の実ログ、固定ソースの形式を
+配布libraryで出力したcallback、実QwenモデルのCPU配置ログ、SHA-256を記録した。
+正規表現だけに合わせた模擬ログを互換性の根拠にはしない。
+実GPUで29/29配置と生成を確認する検証、通常Run期限のcanonical停止ACK、
+生成履歴のAsset保存は依然未検証。3回目のPod作成は未承認。
