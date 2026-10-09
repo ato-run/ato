@@ -104,7 +104,10 @@ Rust format・Clippy（all-targets/all-features）は成功。
 これらの失敗ログはlocal記録へ保持した。
 最終workspace直列試験は1958 passed / 0 failed / 9既存ignored（161 targets）。
 未証明配置数のnull整理後もPython全29試験、Rust sample bundle試験1件、新pack/validator確認が成功。
-CIは追加課金を避けるためcommitの`[skip ci]`で起動しない。CI成功済みとは扱わない。
+通常のCI workflowsはcommitの`[skip ci]`で起動を抑止した。
+GitHub自動CodeQL（dynamic）はこの指定とは別にPR作成時に起動したため、停止要求を出し、
+run `37912650310`のcompleted/cancelledを確認した。CI成功済みとは扱わない。
+本記録更新後に自動analysisが再起動する場合も取消し、PR側に実際のCI状態を記載する。
 core/runtimeのRust実装・試験を変更して成功させる修正は行っていない。
 実GPU結果、ローカル結果、未実行CIを混同しない。
 実ログfixtureはsampleの外に置き、実行bundleへ診断証跡を混入させない。
