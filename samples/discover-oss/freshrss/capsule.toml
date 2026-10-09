@@ -1,0 +1,41 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "FreshRSS"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/var/www/FreshRSS/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+# /i/ answers 200 both before install (setup page) and after (login page).
+[[contract.observation]]
+id = "app-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/i/"
+status = 200
+
+# Staging only: the image is built from ./image and preloaded on the dedicated
+# direct-egress Runner; it is not published to a registry.
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["apache2", "-D", "FOREGROUND"]
+cwd = "."
+guest_port = 8080
+runtimes = { "oci.image" = "localhost:5000/ato-freshrss@sha256:ed913c7b6af24793b89442787e869556df365d1eed9e85c3d95a21b8cdbd8305", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/usr/local/bin/ato-freshrss-entrypoint", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+
+[effects]
+default = "pure"
