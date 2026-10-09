@@ -1,0 +1,10 @@
+{
+  "fixture": "tests/fixtures/portable-gpu-llm/b11429/runpod-trial3-first-chunk.jsonl",
+  "fixture_sha256": "db1ef1c5bf0111a0e92c1833626d757dafd02ee1806adda974221d400f3cff53",
+  "source_asset": "ast_01M4G2274FHCH8S7YQ5YCGXQQ5",
+  "source_asset_sha256": "e34b028d61d0f9244c8f75087d0aad09f35e5ad72156ca4dcea1131f74a84277",
+  "source_bytes": 262144,
+  "record": "actual b11429 JSONL streamed-chunk record from trial3 retained stdout tail; exact envelope retained",
+  "gpu_trial_product_result": "failed Invalid inference stream, no generated text saved",
+  "fixture_end": "captured prefix has no DONE; unit test adds simulated DONE explicitly"
+}

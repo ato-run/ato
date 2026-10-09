@@ -60,3 +60,15 @@ Tests replay raw fixture bytes in split chunks, reject summary-only and
 partial/contradictory evidence, and retain extracted facts after log-tail
 truncation. GPU execution, normal RunTTL/canonical ACK and nonempty Asset
 history remain unverified until a separately authorized trial.
+
+Trial 3 (2026-10-09) verified actual CUDA0 assignments0..28, metadata28,
+summary29/29, no fallback, and the fixed Contract. The app's first chat failed
+because b11429 sends `delta:{role:"assistant",content:null}` before text.
+`runpod-trial3-first-chunk.jsonl` is the exact retained engine log envelope;
+it includes the role delta and subsequent `content:"The"`. Provenance gives
+the retrieved Asset SHA/size. Its prefix has no DONE marker. Chat unit tests
+add simulated DONE or hold the Unix socket for cancellation; these tests
+prove parser/persistence behavior, not GPU generation completion. The real
+trial saved a failed job with empty product text, diagnostics and manual-stop
+canonical ACK, then deleted the Pod. Normal RunTTL and nonempty history
+acceptance remain unverified.
