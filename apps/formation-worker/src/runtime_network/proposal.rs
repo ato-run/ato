@@ -1662,6 +1662,7 @@ fn denied_network(attempt: &Value) -> Vec<ato_formation::requirements::NetworkRe
                 port,
             };
             if (ExecutionRequirements {
+                startup: None,
                 network: vec![n.clone()],
                 authority: vec![],
                 host: None,
@@ -1687,6 +1688,7 @@ fn denied_authority(attempt: &Value) -> Vec<ato_formation::requirements::Authori
     {
         if let Ok(a) = serde_json::from_value::<AuthorityRequirement>(requirement.clone())
             && (ExecutionRequirements {
+                startup: None,
                 network: vec![],
                 authority: vec![a.clone()],
                 host: None,

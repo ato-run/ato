@@ -131,6 +131,59 @@ pub struct ExecutionRequirements {
     /// their exact bytes and `DerivationRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostRequirement>,
+    /// Physical startup gate on the selected D, independent of K's verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<StartupRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupRequirement {
+    pub port: String,
+    pub path: String,
+    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi: Option<ProcessAbiRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessAbiRequirement {
+    pub glibc_min: String,
+    pub glibcxx_min: String,
+}
+
+pub fn valid_abi_version(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    version.len() <= 32
+        && (2..=3).contains(&parts.len())
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && part.parse::<u16>().is_ok()
+        })
+}
+
+impl StartupRequirement {
+    pub fn validate(&self) -> Result<(), RequirementError> {
+        if self.port.is_empty()
+            || self.port.len() > 160
+            || !self.path.starts_with('/')
+            || self.path.starts_with("//")
+            || self.path.len() > 1024
+            || self
+                .path
+                .bytes()
+                .any(|b| b.is_ascii_control() || b == b'\\' || b == b'#')
+            || !(1..=300_000).contains(&self.timeout_ms)
+            || self.abi.as_ref().is_some_and(|abi| {
+                !valid_abi_version(&abi.glibc_min) || !valid_abi_version(&abi.glibcxx_min)
+            })
+        {
+            return Err(RequirementError("startup_requirement_invalid"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -156,10 +209,16 @@ fn hostname(host: &str) -> bool {
 
 impl ExecutionRequirements {
     pub fn is_empty(&self) -> bool {
-        self.network.is_empty() && self.authority.is_empty() && self.host.is_none()
+        self.network.is_empty()
+            && self.authority.is_empty()
+            && self.host.is_none()
+            && self.startup.is_none()
     }
 
     pub fn validate(&self) -> Result<(), RequirementError> {
+        if let Some(startup) = &self.startup {
+            startup.validate()?;
+        }
         if self.network.len() > 64 || self.authority.len() > 64 {
             return Err(RequirementError("execution_requirements_bounds"));
         }
@@ -210,7 +269,7 @@ impl ExecutionRequirements {
 
     /// Exact subset only. Neither wildcard matching nor inferred grants.
     ///
-    /// `host` is not compared: it is a placement condition, and a grant can
+    /// `host` and `startup` are not compared: it is a placement condition, and a grant can
     /// neither widen nor narrow it. Runtimes that cannot honour a host
     /// condition refuse it at admission instead.
     pub fn within(&self, ceiling: &Self) -> Result<(), RequirementError> {
