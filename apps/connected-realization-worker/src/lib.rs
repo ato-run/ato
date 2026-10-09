@@ -9,7 +9,8 @@
 
 mod activity_controller;
 mod data_plane;
-mod host_resources;
+pub mod diagnostics;
+pub mod host_resources;
 pub mod runtime_launch;
 mod slot_state;
 
@@ -103,6 +104,7 @@ const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0
 /// routing a VM-snapshot Capsule to a Runner that cannot restore one.
 const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
+    ato_runtime_attempt::startup::PROCESS_STARTUP_RUNTIME_FEATURE,
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     NAMESPACE_ISOLATION_CAPABILITY,
 ];
@@ -1200,6 +1202,7 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
                 "enrollment_token": token,
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
+                "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
             }))
             .send()
             .context("enrollment request failed")?
@@ -1220,6 +1223,7 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
                 "api_base": api_base,
                 "runner_id": field("/runner/id")?,
                 "runner_token": field("/runner_token")?,
+                "management_kind": response.pointer("/runner/management_kind").and_then(serde_json::Value::as_str),
             }))?,
         )?;
     }
@@ -2019,7 +2023,7 @@ impl ConnectedWorker {
                 Err(error) => return not_started(Err(error.into())),
             },
             runtime_root: lease_root.join("process-runtime"),
-            output: None,
+            output: Some((lease_root.join("process-runtime/process.log"), 512 * 1024)),
         };
         // Data Plane: deliver the Run's granted Model Sets before anything of
         // the Run is acquired. No grant, no data plane. The download keeps the
@@ -2100,13 +2104,50 @@ impl ConnectedWorker {
             runtime_launch::session::abort_run(&state, &resolved.prepared);
             return not_started(Err(error));
         }
-        let probe =
-            runtime_launch::process_executor::LoopbackReadinessProbe::new(self.api.client.clone());
+        let loopback_client = match reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_millis(500))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                runtime_launch::session::abort_run(&state, &resolved.prepared);
+                return not_started(Err(error.into()));
+            }
+        };
+        let probe = runtime_launch::process_executor::LoopbackReadinessProbe::new(loopback_client);
+        let mut last_control = None;
+        let mut check_startup = || {
+            ensure!(
+                hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
+                "runtime launch maximum lifetime elapsed during startup"
+            );
+            if last_control.is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(1)) {
+                if poll_runtime_launch_control(
+                    || self.control_stop_requested(&lease.id),
+                    || {
+                        self.refresh_execution_authorization(
+                            &lease.id,
+                            execution_authorization.as_mut(),
+                        )
+                    },
+                )? {
+                    return Err(ato_runtime_attempt::startup::StartupCancelled.into());
+                }
+                last_control = Some(Instant::now());
+            }
+            Ok(())
+        };
+        let controlled_probe = runtime_launch::process_executor::ControlledReadinessProbe::new(
+            &probe,
+            &mut check_startup,
+        );
         let active = match runtime_launch::lease::start(
             spec,
             resolved,
             &state,
-            &probe,
+            &controlled_probe,
             owner,
             network_authorization,
             &process_host,
@@ -2114,6 +2155,47 @@ impl ConnectedWorker {
             Ok(active) => active,
             Err(mut failure) => {
                 entry.process = failure.process.take();
+                // The failed process has already been stopped by start(). Save
+                // its final evidence while the lease's grant is still live,
+                // before the terminal failure can revoke that grant.
+                if failure.stop.is_confirmed() {
+                    let failure_record = (|| -> Result<()> {
+                        std::fs::create_dir_all(&process_host.runtime_root)?;
+                        let error_code = if failure
+                            .error
+                            .is::<ato_runtime_attempt::startup::StartupCancelled>()
+                        {
+                            "startup_cancelled"
+                        } else if failure
+                            .error
+                            .is::<ato_runtime_attempt::startup::StartupTimeout>()
+                        {
+                            "startup_timeout"
+                        } else {
+                            "startup_failed"
+                        };
+                        std::fs::write(
+                            process_host.runtime_root.join("runtime-start-failure.json"),
+                            serde_json::to_vec(
+                                &serde_json::json!({"schema":"ato.runtime-start-failure/1",
+                                "stop_confirmed":true, "stop":&failure.stop, "error_code":error_code}),
+                            )?,
+                        )?;
+                        Ok(())
+                    })();
+                    if let Err(error) = failure_record {
+                        eprintln!(
+                            "[runtime-launch] start failure evidence not saved run={}: {error:#}",
+                            lease.run_id
+                        );
+                    }
+                    self.save_runtime_outputs(
+                        lease,
+                        &data,
+                        &process_host.runtime_root,
+                        output_plan.as_ref(),
+                    );
+                }
                 return RuntimeLaunchOutcome {
                     stop_confirmed: failure.stop.is_confirmed(),
                     result: Err(anyhow::Error::new(failure)),
@@ -2175,16 +2257,13 @@ impl ConnectedWorker {
         // Outputs are saved only after the workload is confirmed gone: its
         // files are final. Generated and saved are reported separately; a save
         // that fails leaves the generation recorded and the output unsaved.
-        if stop_confirmed && let Some((dir, limits)) = &output_plan {
-            for saved in data_plane::save_outputs(&data, dir, limits) {
-                eprintln!(
-                    "[data-plane] run={} output={} {}{}",
-                    lease.run_id,
-                    saved.output_key,
-                    saved.save_status,
-                    saved.error.map(|e| format!(" ({e})")).unwrap_or_default()
-                );
-            }
+        if stop_confirmed {
+            self.save_runtime_outputs(
+                lease,
+                &data,
+                &process_host.runtime_root,
+                output_plan.as_ref(),
+            );
         }
         let result = serving.and_then(|execution_id| {
             let committed = committed?;
@@ -2203,6 +2282,33 @@ impl ConnectedWorker {
         RuntimeLaunchOutcome {
             result,
             stop_confirmed,
+        }
+    }
+
+    fn save_runtime_outputs(
+        &self,
+        lease: &ClaimedLease,
+        data: &data_plane::LeaseData<'_>,
+        runtime_root: &Path,
+        output_plan: Option<&(PathBuf, data_plane::GrantedOutputs)>,
+    ) {
+        let Some((dir, limits)) = output_plan else {
+            return;
+        };
+        if let Err(error) = data_plane::stage_runtime_diagnostics(runtime_root, dir) {
+            eprintln!(
+                "[data-plane] runtime diagnostics not staged run={}: {error:#}",
+                lease.run_id
+            );
+        }
+        for saved in data_plane::save_outputs(data, dir, limits) {
+            eprintln!(
+                "[data-plane] run={} output={} {}{}",
+                lease.run_id,
+                saved.output_key,
+                saved.save_status,
+                saved.error.map(|e| format!(" ({e})")).unwrap_or_default()
+            );
         }
     }
 
@@ -4394,6 +4500,13 @@ impl HttpRunnerApi {
     }
 
     fn heartbeat(&self, config: &WorkerConfig, active_slots: u32) -> Result<()> {
+        let mut resources =
+            serde_json::to_value(host_resources::HostResources::probe(&config.work_root))?;
+        if let Some(connection) =
+            diagnostics::connection_capabilities(config, self.persistent_volumes)
+        {
+            resources["connection"] = connection;
+        }
         self.authorized(self.client.post(format!(
             "{}/v1/runners/{}/heartbeat",
             self.base, self.runner_id
@@ -4408,7 +4521,7 @@ impl HttpRunnerApi {
                     !config.fixed_tcp_allowlist.trim().is_empty(),
                 ),
                 runtime_launch::host_boundary::active().is_some(),
-                !host_resources::cached(&config.work_root).accelerators.is_empty(),
+                resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
             ),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": [{
@@ -4427,9 +4540,8 @@ impl HttpRunnerApi {
             // unrecovered slot claims nothing, so the control plane can tell
             // "alive but quarantined" apart from "alive and ready".
             "slot_recovered": runtime_launch::recovery::slot_recovered(),
-            // Measured once at start. The control plane admits a Derivation's
-            // host requirement against these, never against a host total.
-            "host_resources": host_resources::cached(&config.work_root),
+            // Refresh mutable capacity and device visibility on every heartbeat.
+            "host_resources": resources,
         }))
         .send()?
         .error_for_status()?;

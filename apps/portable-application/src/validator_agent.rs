@@ -384,6 +384,8 @@ pub struct PortableRouteReport {
     /// Coordinator reads placement from this and never infers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<ato_formation::requirements::HostRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<ato_formation::requirements::StartupRequirement>,
     /// The route's `ato.model-set@1` inputs, projected from the verified
     /// manifests. The Coordinator reads what a Run must be granted from here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -726,6 +728,7 @@ fn validated_routes(
                     port: surface.id.clone(),
                     guest_port: None,
                     host: route.derivation.requirements.host.clone(),
+                    startup: route.derivation.requirements.startup.clone(),
                     model_sets: model_set_reports(route),
                     state,
                     services: route
@@ -793,6 +796,7 @@ fn validated_routes(
                 state,
                 services: Vec::new(),
                 host: route.derivation.requirements.host.clone(),
+                startup: route.derivation.requirements.startup.clone(),
                 model_sets: model_set_reports(route),
             })
         })

@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ato_formation::browser::{BrowserTarget, BrowserVerdict, BrowserVerificationReceipt};
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::request::{
@@ -30,7 +30,7 @@ use ato_formation::request::{
 };
 use ato_formation::verify::{ContractVerification, RuntimeHttpObservation};
 
-use crate::admission::{EffectAuthorization, admit, effects_name};
+use crate::admission::{EffectAuthorization, admit_with_model_delivery, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
 use crate::build_sandbox::NetworkPolicy;
 use crate::executor::ExecutedCandidate;
@@ -208,8 +208,13 @@ pub fn run_reserved_attempt(
         }
     };
 
-    if let Some(failure) = admit(spec, request.authorization, request.browser)
-        .or_else(|| realizer.admit(request.profile))
+    if let Some(failure) = admit_with_model_delivery(
+        spec,
+        request.authorization,
+        request.browser,
+        realizer.delivers_model_sets(),
+    )
+    .or_else(|| realizer.admit(request.profile))
     {
         attempt.failure = Some(failure);
         return not_run(attempt, AttemptRecordState::NotStarted);
@@ -387,12 +392,26 @@ fn realize_and_verify(
     attempt.realization = realized.evidence;
     let mut candidate = realized.candidate;
 
-    // ── observe ─────────────────────────────────────────────────────────────
-    let (verification_timing, observed) = match request
-        .control
-        .map(|c| c.phase(crate::control::AttemptPhase::Verification))
-        .transpose()
-    {
+    // Preparation is a Launch phase, separate from observing immutable K.
+    let preparation = (|| {
+        let _timing = request
+            .control
+            .map(|c| c.phase(crate::control::AttemptPhase::Launch))
+            .transpose()?;
+        wait_for_startup(
+            candidate.as_mut(),
+            spec.derivation.requirements.startup.as_ref(),
+            &request.attempt_root.join("process-startup.json"),
+            request.interrupt,
+            request.control,
+        )
+    })();
+    let (verification_timing, observed) = match preparation.and_then(|()| {
+        request
+            .control
+            .map(|c| c.phase(crate::control::AttemptPhase::Verification))
+            .transpose()
+    }) {
         Ok(timing) => (
             timing,
             observe_http(
@@ -556,11 +575,55 @@ fn not_observable(
     }
 }
 
-/// GET every required path through the endpoint its logical port answers
-/// on, waiting for the candidate to accept connections — and giving up as
-/// soon as it exits, the caller is interrupted, or the deadline passes. A
-/// port the candidate did not realize is not observed; the verifier fails
-/// that observation as missing.
+/// Wait only on D's preparation signal, before any fixed K observation.
+/// Exit, stop and the immutable deadline override a late readiness response.
+fn wait_for_startup(
+    candidate: &mut dyn RunningCandidate,
+    startup: Option<&ato_formation::requirements::StartupRequirement>,
+    record: &Path,
+    interrupt: Option<&AtomicBool>,
+    control: Option<&crate::control::ExecutionControl>,
+) -> Result<()> {
+    if let Some(startup) = startup {
+        startup.validate().map_err(anyhow::Error::new)?;
+        let base = candidate
+            .endpoints()
+            .get(&startup.port)
+            .context("startup Port was not realized")?
+            .clone();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let timeout = Duration::from_millis(startup.timeout_ms);
+        let timeout = control.map_or(Ok(timeout), |c| {
+            c.cap(crate::control::AttemptPhase::Launch, timeout)
+        })?;
+        crate::startup::wait_for_readiness(
+            timeout,
+            |budget| {
+                crate::startup::http_probe(&client, &format!("{base}{}", startup.path), budget)
+            },
+            || {
+                if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                    return Err(crate::startup::StartupCancelled.into());
+                }
+                if let Some(control) = control {
+                    control.remaining(crate::control::AttemptPhase::Launch)?;
+                }
+                if let Some(exit) = candidate.exited()? {
+                    bail!("candidate exited during startup: {exit}");
+                }
+                Ok(())
+            },
+            |progress| crate::startup::write_progress(record, progress),
+        )?;
+    }
+    Ok(())
+}
+
+/// Observe every declared K path. A received HTTP status is evidence, including
+/// failure statuses; only connection failures wait within the bounded deadline.
 fn observe_http(
     candidate: &mut dyn RunningCandidate,
     required: &[RequiredObservation],
@@ -1660,5 +1723,107 @@ mod tests {
             repeated.attempt.failure.unwrap().code,
             "attempt_already_started"
         );
+    }
+    #[test]
+    fn preparation_503s_do_not_observe_contract_and_a_failed_contract_is_not_retried() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let server_stop = stopped.clone();
+        let server_paths = paths.clone();
+        let thread = std::thread::spawn(move || {
+            let mut probes = 0;
+            while !server_stop.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut bytes = [0_u8; 2048];
+                let count = stream.read(&mut bytes).unwrap();
+                let request = String::from_utf8_lossy(&bytes[..count]);
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_owned();
+                server_paths.lock().unwrap().push(path.clone());
+                let status = if path == "/preparation" {
+                    probes += 1;
+                    if probes < 3 { 503 } else { 200 }
+                } else {
+                    503
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} status\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                )
+                .unwrap();
+            }
+        });
+        let mut candidate = Answering {
+            endpoints: BTreeMap::from([("app.http".into(), base)]),
+            stopped,
+            thread: Some(thread),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let startup = ato_formation::requirements::StartupRequirement {
+            port: "app.http".into(),
+            path: "/preparation".into(),
+            timeout_ms: 2000,
+            abi: None,
+        };
+        wait_for_startup(
+            &mut candidate,
+            Some(&startup),
+            &root.path().join("startup.json"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            *paths.lock().unwrap(),
+            ["/preparation", "/preparation", "/preparation"]
+        );
+        let observed = observe_http(
+            &mut candidate,
+            &[RequiredObservation {
+                port_id: "app.http".into(),
+                path: "/contract".into(),
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].status, 503);
+        assert_eq!(
+            paths
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == "/contract")
+                .count(),
+            1
+        );
+        let (mut contract, _) = served_route(200);
+        contract.requirements[0].path = Some("/contract".into());
+        let frozen = contract.clone();
+        let verdict = verify_runtime(
+            &contract,
+            &RuntimeObservation {
+                input_refs: BTreeMap::new(),
+                http: observed,
+                instance_snapshot_ref: None,
+            },
+        );
+        assert!(!verdict.fully_satisfied());
+        assert_eq!(contract, frozen);
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.path().join("startup.json")).unwrap())
+                .unwrap();
+        assert_eq!(record["phase"], "ready");
     }
 }
