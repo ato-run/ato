@@ -148,3 +148,18 @@ it. Actual cold/warm Hosted startup and user-interaction p95 still need measurem
 The fix branch is based on `origin/main` (`db59a58dd`) because the
 deployed worker belongs to that history and `origin/dev` has no connected worker
 package. No main merge or production rollout is implied.
+
+## Merge-time integration validation
+
+At the user's October 9 request, integrated main `ff5265485544b512f5aba86488fac5c717cd20f1`
+into this PR without conflicts. On the combined code, formatting, worker-library
+tests (148 passed, 3 existing ignored, serial execution), all-target/all-feature
+package Clippy and worker build passed. The real worker/fake HTTP control-plane
+regression measured a 2 ms post-long-poll idle gap, a 1,010 ms immediate-empty
+interval, and one claim in one-shot mode. Each case used a fresh local work root.
+
+The smaller package test count reflects main moving data-plane tests into the
+shared runtime crate; it is not a skipped-test change in this PR. Earlier
+platform CI is retained as historical evidence, not claimed for this integration.
+Merge uses `[skip ci]` to avoid push-triggered publication; production deployment
+and the remaining end-to-end performance acceptance remain separate.
