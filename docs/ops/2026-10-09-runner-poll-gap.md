@@ -91,7 +91,7 @@ switched to `/usr/local/bin/ato-connected-realization-worker-eb944f68`:
 
 Scheduling was re-enabled after all six services were active and the expected
 heartbeat capabilities were present, including `runtime_launch`, OCI service
-groups, and Runner persistent volumes. At 01:10 UTC, all six still ran the new
+groups, and Runner persistent volumes. At 01:19 UTC, all six still ran the new
 binary with zero restarts and no recovery-blocked or control-plane error
 messages. Scheduling was enabled and there were zero open workloads,
 Runner-labelled containers, journal files, or lease directories.
@@ -101,21 +101,38 @@ or production changes in this rollout.
 
 ## Hosted smoke results
 
-Both existing Library fixtures were started through the staging PWA and
+Three existing Library applications were started through the staging PWA and
 stopped through the admin UI's normal graceful-stop action. Their existing
-volumes were preserved; no application data was written.
+volumes were preserved; no setup, note, or test-data writes were submitted.
 
 | Fixture | Lease | Created → claimed | Created → ready | Stop request → stopped |
 | --- | --- | ---: | ---: | ---: |
 | OCI service group | `01M4F2XBRKBB3C8CANGY116XEY` | 136 ms | 2,368 ms | 1,570 ms |
-| Single OCI | `01M4F34QH6AB5DMH6XJ9DH3XEB` | 176 ms | 2,653 ms | 1,485 ms |
+| OCI persistent volume proof (two-service group) | `01M4F34QH6AB5DMH6XJ9DH3XEB` | 176 ms | 2,653 ms | 1,485 ms |
+| OCI service group, repeat | `01M4F3HHR17R6F6S7R1M5E86D2` | 112 ms | 1,715 ms | 1,733 ms |
+| Trilium Notes (single OCI) | `01M4F3PHPGWSN7223XFRHH1FKJ` | 126 ms | 3,605 ms | 2,924 ms |
 
-The single-OCI Surface rendered its endpoint instructions in Chrome. The
-service group reached backend readiness but Chrome displayed
-`ERR_BLOCKED_BY_CLIENT` both directly and inside the PWA. This remains a
-separate unresolved display failure, not a passed browser smoke. The final
-lease statuses were `stopped`, with no error code. Host inspection confirmed
-no containers or journal entries remained for either Run.
+The persistent-volume fixture rendered its endpoint instructions in the PWA.
+Its launch spec and worker logs identify **two services**, despite the initial
+report incorrectly counting it as a single-OCI smoke. The separate Trilium
+launch spec has `realization.kind = "oci"`; Chrome rendered its language setup
+screen at the direct Surface URL, while PWA embedding was refused. Setup was
+not advanced.
+
+The whoami/nginx service-group fixture reached backend readiness but Chrome
+displayed `ERR_BLOCKED_BY_CLIENT` both directly and inside the PWA. DevTools
+showed an HTTP **200**, `Content-Type: text/plain; charset=utf-8`, followed by
+`(blocked:devtools)` for the document. DevTools request blocking was already
+disabled; no blocking or security settings were changed. The origin of the
+client-side interception remains unconfirmed. The successful volume fixture
+shows that service-group rendering is not universally broken.
+
+All four leases finished `stopped`, with no error code. Worker stop evidence:
+Trilium's container and both volume-fixture services reported graceful exit 0;
+the whoami group in slots 6 and 5 reported graceful web exit 0 and backend exit
+2, with teardown confirmed. Final host inspection found no labelled containers,
+journal files, or lease directories. The two refused embedding paths remain
+unresolved and are not counted as successful PWA browser acceptance.
 
 These are individual warm-image, stopped-workload starts, not application
 interaction p95 or Contract verification receipts. They do not meet the
