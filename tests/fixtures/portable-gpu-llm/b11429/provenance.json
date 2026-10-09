@@ -1,0 +1,32 @@
+{
+  "upstream_revision": "d81235049384534c167caea52b85a694f6103d14",
+  "engine_archive_sha256": "b13c64b9224d3c89d9993945d70cc21177ad00178c21b8d34237e3bc139834f1",
+  "callback_binary_digests": {
+    "libllama-common.so.0.6.0": "c79ed370d6fbd9b027c04887565f946145ad17b2067e8b300f123cd0f326bbea",
+    "llama-server": "5a2b208943ca04915d380824f3fcf79f1708b22d8157e4db3cb18b3e52b8b8cc",
+    "callback.cpp": "7b2813e2fbc97eec7a0d7fc49c4f3903647d826f220f4cfa21287c079fad98a9"
+  },
+  "callback_inputs": "actual shipped logger; GPU assignment inputs are synthetic, not real GPU execution",
+  "fixtures": {
+    "callback.cpp": "7b2813e2fbc97eec7a0d7fc49c4f3903647d826f220f4cfa21287c079fad98a9",
+    "partial.callback.jsonl": "c71c9b21bf182aee06a6a76121527a338587c87fd6b31e3612ac87eecbc6faff",
+    "trial2.diagnostics.json": "dfbb6d3bec82b5033151e5531ac455b6046e07a16ba8ad9bcae7d80d021c1338",
+    "trial2.stderr.txt": "e69c2c6d60693e098fb9c7b62fab734528838aced0992a5b71b4054a0afd15a2",
+    "placement-v5.callback.txt": "f785480177935dfbc35783f6311a3ca6ab4759f2bd8be958b9d95921aa41f83b",
+    "full.callback.jsonl": "24440a61bd2a646f4e4a642f8b12e184b91f98c3270c1bbbf72b2b699c4f4b10",
+    "summary-v4.callback.txt": "b1543b1baf1a13fc782a33892d4760a23f3dd96d17956527bb4fc72465d9f8ab",
+    "suppressed-v3.callback.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cpu-negative.jsonl": "d711460f1ab9e3db1f09f7c8f3660c537c5f3a30cf99e7f6d2e02cc9a700a475",
+    "cpu-negative.audit.json": "ce9c6021fc883340eeab034c6d4b7df9a663acc360ee91943f0d2cd5bfc27310",
+    "fallback.callback.jsonl": "a90847675b27e802503d66d592174142d8dde2f4c5a704ba21bfdbdcdc1f7c6a",
+    "callback-fallback.cpp": "54cdc83f0c211e505dd4bf584df8315fdd9e0dd28f1f05fefe120cd5e147187f"
+  },
+  "base_image": "ubuntu@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90",
+  "source_formats": {
+    "model_metadata": "src/llama-model.cpp:2083",
+    "layer_assignment": "src/llama-model.cpp:1596",
+    "offload_summary": "src/llama-model.cpp:1926",
+    "tensor_buffer_fallback": "src/llama-model-loader.cpp:1404"
+  },
+  "cpu_negative": "real fixed Qwen model load by the shipped b11429 CUDA package, CPU-only, no GPU execution"
+}
