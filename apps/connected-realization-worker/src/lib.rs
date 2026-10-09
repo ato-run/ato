@@ -1339,6 +1339,7 @@ impl ConnectedWorker {
                 thread::sleep(RECOVERY_POLL_INTERVAL);
                 continue;
             }
+            let claim_started = Instant::now();
             let claim = match self.api.claim_next() {
                 Ok(claim) => {
                     claim_backoff.reset();
@@ -1367,7 +1368,10 @@ impl ConnectedWorker {
                 if self.config.once {
                     return Ok(());
                 }
-                thread::sleep(Duration::from_secs(claim.next_poll_seconds.clamp(1, 30)));
+                thread::sleep(empty_claim_delay(
+                    claim.next_poll_seconds,
+                    claim_started.elapsed(),
+                ));
                 self.heartbeat_with_retry(0)?;
                 continue;
             };
@@ -3758,6 +3762,12 @@ fn default_poll_seconds() -> u64 {
     2
 }
 
+fn empty_claim_delay(next_poll_seconds: u64, claim_elapsed: Duration) -> Duration {
+    // A completed long poll already paced this slot. Renew it immediately;
+    // fast empty responses (capacity/drain/legacy servers) still need pacing.
+    Duration::from_secs(next_poll_seconds.clamp(1, 30)).saturating_sub(claim_elapsed)
+}
+
 #[derive(Debug, Deserialize)]
 struct ClaimedLease {
     id: String,
@@ -4952,6 +4962,40 @@ mod tests {
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn an_empty_long_poll_can_be_renewed_without_an_extra_idle_gap() {
+        assert_eq!(
+            empty_claim_delay(5, Duration::from_secs(20)),
+            Duration::ZERO
+        );
+        assert_eq!(empty_claim_delay(5, Duration::from_secs(5)), Duration::ZERO);
+    }
+
+    #[test]
+    fn fast_empty_claims_keep_the_remaining_poll_interval() {
+        // Capacity/drain responses and servers without long polling can
+        // return immediately. Keep their rate limit, including elapsed IO.
+        assert_eq!(empty_claim_delay(5, Duration::ZERO), Duration::from_secs(5));
+        assert_eq!(
+            empty_claim_delay(5, Duration::from_millis(400)),
+            Duration::from_millis(4_600)
+        );
+    }
+
+    #[test]
+    fn empty_claim_intervals_remain_bounded_for_untrusted_server_values() {
+        assert_eq!(empty_claim_delay(0, Duration::ZERO), Duration::from_secs(1));
+        assert_eq!(
+            empty_claim_delay(u64::MAX, Duration::ZERO),
+            Duration::from_secs(30)
+        );
+        assert_eq!(empty_claim_delay(0, Duration::from_secs(2)), Duration::ZERO);
+        assert_eq!(
+            empty_claim_delay(u64::MAX, Duration::from_secs(60)),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn journal_entry_is_dropped_only_once_the_terminal_report_is_delivered() {
