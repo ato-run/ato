@@ -282,15 +282,20 @@ impl RetainedCandidateV1 {
                 }
                 // No source-controlled host paths or arbitrary toolchain family.
                 for (name, version) in &binding.toolchains {
-                    if !matches!(name.as_str(), "node" | "python")
-                        || semver::Version::parse(version).is_err()
+                    if !matches!(
+                        name.as_str(),
+                        "node" | "python" | "rust" | "trunk" | "wasm-bindgen" | "binaryen"
+                    ) || (semver::Version::parse(version).is_err()
+                        && !(name == "binaryen" && version == "123"))
                     {
                         return Err(RetainedError("toolchain_binding"));
                     }
                 }
                 for (name, requirement) in &self.derivation.runtimes {
                     let resolved = match name.as_str() {
-                        "node" | "python" => binding.toolchains.get(name),
+                        "node" | "python" | "rust" | "trunk" | "wasm-bindgen" | "binaryen" => {
+                            binding.toolchains.get(name)
+                        }
                         "pnpm" | "yarn" => binding
                             .package_manager
                             .as_ref()

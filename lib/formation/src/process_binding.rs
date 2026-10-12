@@ -21,6 +21,11 @@ pub fn toolchain_bin_dirs(
     if let Some((name, version)) = manager {
         dirs.push(format!("{}/bin", package_manager_home(name, version)));
     }
+    for name in ["binaryen", "wasm-bindgen", "trunk", "rust"] {
+        if let Some(version) = runtime.get(name) {
+            dirs.push(format!("{}/bin", package_manager_home(name, version)));
+        }
+    }
     if let Some(version) = runtime.get("node") {
         dirs.push(format!("{}/bin", node_home(version)));
     }
@@ -57,6 +62,12 @@ pub fn environment(
                 .join(":"),
         );
         env.insert("HOME".into(), "/tmp".into());
+        if toolchains.contains_key("rust") {
+            env.insert(
+                "CARGO_HOME".into(),
+                format!("{}/.ato-cargo", guest_root.trim_end_matches('/')),
+            );
+        }
         if toolchains.contains_key("node") {
             env.insert("npm_config_cache".into(), "/tmp/.npm".into());
             env.insert("npm_config_update_notifier".into(), "false".into());

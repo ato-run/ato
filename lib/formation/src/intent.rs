@@ -1025,6 +1025,9 @@ fn compile_static(
 ///
 /// Exact, not a ladder: the Derivation names the Node it runs on, and a
 /// route that ran on another one would be a different route.
+pub const SUPPORTED_RUST_RUNTIME: &[&str] = &["1.90.0", "1.96.0"];
+pub const SUPPORTED_TRUNK_RUNTIME: &[&str] = &["0.21.14"];
+
 pub const SUPPORTED_NODE_RUNTIME: &[&str] = &["20.20.2", "22.14.0"];
 
 /// Where a pinned package manager is provisioned, shared by every build and
@@ -1085,6 +1088,10 @@ pub fn resolve_toolchains(
         let supported: &[&str] = match name {
             "python" => SUPPORTED_PYTHON,
             "node" => SUPPORTED_NODE_RUNTIME,
+            "rust" => SUPPORTED_RUST_RUNTIME,
+            "trunk" => SUPPORTED_TRUNK_RUNTIME,
+            "wasm-bindgen" => &["0.2.129"],
+            "binaryen" => &["123"],
             "pnpm" | "yarn" => {
                 if !is_exact_version(version) {
                     return Err(IntentError::PackageManagerVersionUnresolved {
@@ -1116,6 +1123,12 @@ pub fn resolve_toolchains(
         runtime.insert(name.to_owned(), version.to_owned());
     }
 
+    if runtime.contains_key("trunk") && !runtime.contains_key("rust") {
+        return Err(IntentError::Malformed {
+            field: "runtime",
+            detail: "Trunk requires an exact declared Rust runtime".into(),
+        });
+    }
     if !runtime.contains_key("node") {
         if let Some(manager) = declared_manager {
             return Err(IntentError::Malformed {
@@ -1702,6 +1715,17 @@ pub fn provision_steps(
                 steps.push(provision_package_manager_step(manager, version));
             }
         }
+        if let Some(version) = binding.runtime.get("rust") {
+            steps.push(provision_rust_web_step(version, target_triple));
+        }
+        if let Some(version) = binding.runtime.get("trunk") {
+            steps.push(provision_trunk_step(version, target_triple));
+        }
+        for name in ["wasm-bindgen", "binaryen"] {
+            if let Some(version) = binding.runtime.get(name) {
+                steps.push(provision_wasm_tool_step(name, version, target_triple));
+            }
+        }
         toolchain_path = toolchain_bin_dirs(binding.runtime, binding.package_manager);
     }
 
@@ -2031,4 +2055,141 @@ fn python_triple(target_triple: &str) -> String {
         "aarch64-linux-gnu" => "aarch64-unknown-linux-gnu".to_owned(),
         other => other.to_owned(),
     }
+}
+
+// Trusted toolchain materialization; authored workload steps retain read-only
+// toolchain mounts and their independently declared network policy.
+fn provision_rust_web_step(version: &str, target: &str) -> BuildStepV1 {
+    let target = rust_web_target(target);
+    let home = package_manager_home("rust", version);
+    let script = format!(
+        "set -eu; mkdir -p {home}; cd {home}; \
+         if [ ! -x bin/rustc ] || [ ! -x bin/cargo ]; then \
+         curl -fsSLO https://static.rust-lang.org/dist/rust-{version}-{target}.tar.xz; \
+         curl -fsSLO https://static.rust-lang.org/dist/rust-{version}-{target}.tar.xz.sha256; \
+         shasum -a 256 -c rust-{version}-{target}.tar.xz.sha256; \
+         tar -xf rust-{version}-{target}.tar.xz; \
+         sh rust-{version}-{target}/install.sh --prefix={home} --disable-ldconfig --components=rustc,cargo,rust-std-{target}; fi; \
+         if [ ! -d lib/rustlib/wasm32-unknown-unknown ]; then \
+         curl -fsSLO https://static.rust-lang.org/dist/rust-std-{version}-wasm32-unknown-unknown.tar.xz; \
+         curl -fsSLO https://static.rust-lang.org/dist/rust-std-{version}-wasm32-unknown-unknown.tar.xz.sha256; \
+         shasum -a 256 -c rust-std-{version}-wasm32-unknown-unknown.tar.xz.sha256; \
+         tar -xf rust-std-{version}-wasm32-unknown-unknown.tar.xz; \
+         sh rust-std-{version}-wasm32-unknown-unknown/install.sh --prefix={home} --disable-ldconfig; fi; \
+         test \"$({home}/bin/rustc --version | cut -d ' ' -f 2)\" = {version}; test \"$({home}/bin/cargo --version | cut -d ' ' -f 2)\" = {version}"
+    );
+    trusted_web_toolchain_step("provision-rust-web", script)
+}
+fn provision_trunk_step(version: &str, target: &str) -> BuildStepV1 {
+    let target = rust_web_target(target);
+    let home = package_manager_home("trunk", version);
+    let script = format!(
+        "set -eu; mkdir -p {home}/bin; cd {home}; \
+         if [ ! -x bin/trunk ]; then \
+         curl -fsSLO https://github.com/trunk-rs/trunk/releases/download/v{version}/trunk-{target}.tar.gz; \
+         curl -fsSLO https://github.com/trunk-rs/trunk/releases/download/v{version}/trunk-{target}.tar.gz.sha256; \
+         test \"$(shasum -a 256 trunk-{target}.tar.gz | cut -d ' ' -f 1)\" = \"$(cut -d ' ' -f 1 trunk-{target}.tar.gz.sha256)\"; \
+         tar -xf trunk-{target}.tar.gz -C bin; fi; \
+         test \"$({home}/bin/trunk --version | cut -d ' ' -f 2)\" = {version}"
+    );
+    trusted_web_toolchain_step("provision-trunk", script)
+}
+fn trusted_web_toolchain_step(name: &str, script: String) -> BuildStepV1 {
+    BuildStepV1 {
+        name: name.into(),
+        argv: vec!["/bin/sh".into(), "-euc".into(), script],
+        needs_network: true,
+        network_phase: None,
+        cwd_relative: String::new(),
+        env: BTreeMap::new(),
+        toolchain_access: ToolchainAccess::Provision,
+    }
+}
+
+fn rust_web_target(target: &str) -> &str {
+    match target {
+        "x86_64-linux-gnu" => "x86_64-unknown-linux-gnu",
+        "aarch64-linux-gnu" => "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu"
+        | "aarch64-unknown-linux-gnu"
+        | "x86_64-apple-darwin"
+        | "aarch64-apple-darwin" => target,
+        _ => "unsupported-target",
+    }
+}
+#[cfg(test)]
+mod rust_web_toolchain_tests {
+    use super::*;
+    #[test]
+    fn exact_catalog_and_rust_prerequisite() {
+        let declared = BTreeMap::from([
+            ("rust".into(), "1.90.0".into()),
+            ("trunk".into(), "0.21.14".into()),
+        ]);
+        let (runtime, manager) = resolve_toolchains(None, &declared).unwrap();
+        assert!(manager.is_none());
+        assert_eq!(runtime, declared);
+        assert!(
+            resolve_toolchains(None, &BTreeMap::from([("trunk".into(), "0.21.14".into())]))
+                .is_err()
+        );
+        assert!(
+            resolve_toolchains(None, &BTreeMap::from([("rust".into(), "latest".into())])).is_err()
+        );
+    }
+    #[test]
+    fn provision_cannot_interpolate_untrusted_target_and_is_separate_from_workload() {
+        for step in [
+            provision_rust_web_step("1.90.0", "x86_64-unknown-linux-gnu"),
+            provision_trunk_step("0.21.14", "x86_64-unknown-linux-gnu"),
+        ] {
+            assert_eq!(step.toolchain_access, ToolchainAccess::Provision);
+            assert!(step.argv[2].contains("shasum -a 256"));
+            assert!(step.needs_network);
+        }
+        assert!(
+            !provision_trunk_step("0.21.14", "x; touch /outside").argv[2]
+                .contains("touch /outside")
+        );
+    }
+}
+
+fn provision_wasm_tool_step(name: &str, version: &str, target: &str) -> BuildStepV1 {
+    // This pinned release catalog currently has an x86_64 Linux admission.
+    // Other targets fail, rather than selecting a different tool or host binary.
+    if rust_web_target(target) != "x86_64-unknown-linux-gnu" {
+        return trusted_web_toolchain_step("unsupported-wasm-tool-target", "exit 1".into());
+    }
+    let home = package_manager_home(name, version);
+    let (url, digest, program, expected) = match (name, version) {
+        ("wasm-bindgen", "0.2.129") => (
+            "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz",
+            "82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e",
+            "wasm-bindgen",
+            "0.2.129",
+        ),
+        ("binaryen", "123") => (
+            "https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz",
+            "e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe",
+            "wasm-opt",
+            "123",
+        ),
+        _ => return trusted_web_toolchain_step("unsupported-wasm-tool", "exit 1".into()),
+    };
+    let move_binary = if name == "wasm-bindgen" {
+        "mv extracted/wasm-bindgen bin/wasm-bindgen"
+    } else {
+        "cp -R extracted/. ."
+    };
+    let version_field = if name == "wasm-bindgen" { 2 } else { 3 };
+    trusted_web_toolchain_step(
+        &format!("provision-{name}"),
+        format!(
+            "set -eu; mkdir -p {home}/bin; cd {home}; if [ ! -x bin/{program} ]; then \
+         curl -fsSL '{url}' -o release.tar.gz; \
+         echo '{digest}  release.tar.gz' | shasum -a 256 -c -; \
+         mkdir -p extracted; tar -xf release.tar.gz --strip-components=1 -C extracted; \
+         {move_binary}; fi; test \"$({home}/bin/{program} --version | cut -d ' ' -f {version_field})\" = '{expected}'"
+        ),
+    )
 }

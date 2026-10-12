@@ -17,6 +17,82 @@ use ato_formation_worker::job::PlannedCandidate;
 mod compiler_plan;
 use compiler_plan::plan_candidate;
 
+#[test]
+fn rust_web_locked_build_keeps_authored_network_and_worker_target_binding() {
+    let route = r#"
+schema = "ato.capsule/1"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[[runtime]]
+name = "rust"
+version = "1.96.0"
+[[runtime]]
+name = "trunk"
+version = "0.21.14"
+[[runtime]]
+name = "wasm-bindgen"
+version = "0.2.129"
+[[runtime]]
+name = "binaryen"
+version = "123"
+[[derive.step]]
+id = "dependencies"
+use = "ato.process@1"
+op = "exec"
+argv = ["cargo", "fetch", "--locked"]
+network = "dependency-resolution"
+[[derive.step]]
+id = "build"
+use = "ato.process@1"
+op = "exec"
+argv = ["trunk", "build", "--release"]
+cwd = "apps/web"
+network = "denied"
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+root = "dist/web"
+entry = "index.html"
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+[[contract.require]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+[contract.require.expect]
+status = 200
+"#;
+    let planned = plan(
+        route,
+        &[
+            ("Cargo.toml", "[workspace]\n"),
+            ("Cargo.lock", "version = 4\n"),
+        ],
+    )
+    .expect("Rust route plans");
+    let steps = planned.plan.steps(&planned.derivation).unwrap();
+    assert_eq!(steps.len(), 6);
+    for step in &steps[..4] {
+        assert!(step.needs_network);
+        assert!(!step.argv[2].contains("unsupported-target"));
+        assert_ne!(step.argv[2], "exit 1");
+    }
+    assert!(steps[0].argv[2].contains("x86_64-unknown-linux-gnu"));
+    assert_eq!(steps[4].argv, ["cargo", "fetch", "--locked"]);
+    assert!(steps[4].needs_network);
+    assert_eq!(steps[5].argv, ["trunk", "build", "--release"]);
+    assert!(!steps[5].needs_network);
+    assert_eq!(steps[5].cwd_relative, "apps/web");
+}
+
 fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     for (name, contents) in files {

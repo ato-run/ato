@@ -48,7 +48,16 @@ use crate::authoring::{
 use crate::intent::{AuthoredOverrides, BuildStepV1};
 
 /// The runtimes a Derivation may declare for this worker to provision.
-pub const PROVISIONED_RUNTIMES: &[&str] = &["python", "node", "pnpm", "yarn"];
+pub const PROVISIONED_RUNTIMES: &[&str] = &[
+    "python",
+    "node",
+    "pnpm",
+    "yarn",
+    "rust",
+    "trunk",
+    "wasm-bindgen",
+    "binaryen",
+];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProjectionError {
