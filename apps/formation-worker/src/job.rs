@@ -628,12 +628,18 @@ fn compose_result(
     let plan = &planned.plan;
     let serve = plan.serving(&planned.derivation);
     let public_env = plan.process_environment(&planned.derivation);
-    let readiness = planned
-        .contract
-        .requirements
-        .iter()
-        .find(|r| r.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER)
-        .and_then(|r| r.path.as_ref());
+    let readiness = plan
+        .lane
+        .is_process()
+        .then(|| {
+            planned
+                .contract
+                .requirements
+                .iter()
+                .find(|r| r.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER)
+                .and_then(|r| r.path.as_ref())
+        })
+        .flatten();
     let (kind, candidate) = match plan.lane {
         Lane::PythonProcess | Lane::Process => (
             "process_workspace",

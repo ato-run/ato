@@ -407,6 +407,14 @@ status = 200
                 .starts_with("v2:sha256:")
         );
         assert_eq!(result["verification_receipt"], record["attempt"]["receipt"]);
+        if process.is_none() {
+            assert_eq!(result["exported_ports"], json!([]));
+            assert_eq!(
+                result["readiness_contracts"],
+                json!([]),
+                "static materialization must not advertise an unexported server Port"
+            );
+        }
         if let Ok(dir) = std::env::var("HOSTED_RESULT_FIXTURES") {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
