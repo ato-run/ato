@@ -2117,42 +2117,6 @@ fn rust_web_target(target: &str) -> &str {
         _ => "unsupported-target",
     }
 }
-#[cfg(test)]
-mod rust_web_toolchain_tests {
-    use super::*;
-    #[test]
-    fn exact_catalog_and_rust_prerequisite() {
-        let declared = BTreeMap::from([
-            ("rust".into(), "1.90.0".into()),
-            ("trunk".into(), "0.21.14".into()),
-        ]);
-        let (runtime, manager) = resolve_toolchains(None, &declared).unwrap();
-        assert!(manager.is_none());
-        assert_eq!(runtime, declared);
-        assert!(
-            resolve_toolchains(None, &BTreeMap::from([("trunk".into(), "0.21.14".into())]))
-                .is_err()
-        );
-        assert!(
-            resolve_toolchains(None, &BTreeMap::from([("rust".into(), "latest".into())])).is_err()
-        );
-    }
-    #[test]
-    fn provision_cannot_interpolate_untrusted_target_and_is_separate_from_workload() {
-        for step in [
-            provision_rust_web_step("1.90.0", "x86_64-unknown-linux-gnu"),
-            provision_trunk_step("0.21.14", "x86_64-unknown-linux-gnu"),
-        ] {
-            assert_eq!(step.toolchain_access, ToolchainAccess::Provision);
-            assert!(step.argv[2].contains("shasum -a 256"));
-            assert!(step.needs_network);
-        }
-        assert!(
-            !provision_trunk_step("0.21.14", "x; touch /outside").argv[2]
-                .contains("touch /outside")
-        );
-    }
-}
 
 fn provision_wasm_tool_step(name: &str, version: &str, target: &str) -> BuildStepV1 {
     // This pinned release catalog currently has an x86_64 Linux admission.
@@ -2192,4 +2156,41 @@ fn provision_wasm_tool_step(name: &str, version: &str, target: &str) -> BuildSte
          {move_binary}; fi; test \"$({home}/bin/{program} --version | cut -d ' ' -f {version_field})\" = '{expected}'"
         ),
     )
+}
+
+#[cfg(test)]
+mod rust_web_toolchain_tests {
+    use super::*;
+    #[test]
+    fn exact_catalog_and_rust_prerequisite() {
+        let declared = BTreeMap::from([
+            ("rust".into(), "1.90.0".into()),
+            ("trunk".into(), "0.21.14".into()),
+        ]);
+        let (runtime, manager) = resolve_toolchains(None, &declared).unwrap();
+        assert!(manager.is_none());
+        assert_eq!(runtime, declared);
+        assert!(
+            resolve_toolchains(None, &BTreeMap::from([("trunk".into(), "0.21.14".into())]))
+                .is_err()
+        );
+        assert!(
+            resolve_toolchains(None, &BTreeMap::from([("rust".into(), "latest".into())])).is_err()
+        );
+    }
+    #[test]
+    fn provision_cannot_interpolate_untrusted_target_and_is_separate_from_workload() {
+        for step in [
+            provision_rust_web_step("1.90.0", "x86_64-unknown-linux-gnu"),
+            provision_trunk_step("0.21.14", "x86_64-unknown-linux-gnu"),
+        ] {
+            assert_eq!(step.toolchain_access, ToolchainAccess::Provision);
+            assert!(step.argv[2].contains("shasum -a 256"));
+            assert!(step.needs_network);
+        }
+        assert!(
+            !provision_trunk_step("0.21.14", "x; touch /outside").argv[2]
+                .contains("touch /outside")
+        );
+    }
 }
