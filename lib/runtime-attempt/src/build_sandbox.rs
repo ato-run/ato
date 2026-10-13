@@ -461,6 +461,10 @@ fn landlock_policy(with_cache: bool, toolchain: ToolchainAccess) -> SandboxPolic
     SandboxPolicy::new()
         .allow_read_write(read_write)
         .allow_read_only(read_only)
+        // bwrap creates this sink in the private /dev. Shell redirection and
+        // official installers need to open it for writing; no other device
+        // or device-directory write permission is required.
+        .allow_file_write(["/dev/null"])
 }
 
 fn path_str(path: &Path, what: &str) -> Result<String> {
@@ -482,4 +486,19 @@ pub fn require_containment() -> Result<()> {
         "this Formation worker cannot contain a build: bubblewrap is unavailable or the host \
          rejects the required namespaces. Refusing to run submitted code unconfined."
     )
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn build_output_sink_does_not_grant_device_directory_writes() {
+        for access in [ToolchainAccess::ReadOnly, ToolchainAccess::Provision] {
+            let policy = landlock_policy(false, access);
+            assert_eq!(policy.file_write_paths, [PathBuf::from("/dev/null")]);
+            assert!(!policy.read_write_paths.contains(&PathBuf::from("/dev")));
+            assert!(!policy.read_write_paths.contains(&PathBuf::from("/proc")));
+        }
+    }
 }
