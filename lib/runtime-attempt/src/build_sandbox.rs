@@ -67,6 +67,10 @@ const SYSTEM_READ_ONLY: &[&str] = &[
 /// Binding less of `/etc` is also simply better: a build has no business
 /// reading the host's user database or its service configuration.
 const SYSTEM_CONFIG_FILES: &[&str] = &[
+    // Debian-family compiler entry points resolve through alternatives.
+    // Preserve their symlinks so GCC locates cc1 relative to its real binary.
+    // Targets outside already-readable system paths remain denied by Landlock.
+    "/etc/alternatives",
     "/etc/resolv.conf",
     "/etc/hosts",
     "/etc/ssl",
@@ -499,6 +503,12 @@ mod policy_tests {
             assert_eq!(policy.file_write_paths, [PathBuf::from("/dev/null")]);
             assert!(!policy.read_write_paths.contains(&PathBuf::from("/dev")));
             assert!(!policy.read_write_paths.contains(&PathBuf::from("/proc")));
+            assert!(
+                policy
+                    .read_only_paths
+                    .contains(&PathBuf::from("/etc/alternatives"))
+            );
+            assert!(!policy.read_only_paths.contains(&PathBuf::from("/etc")));
         }
     }
 }
