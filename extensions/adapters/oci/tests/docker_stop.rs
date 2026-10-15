@@ -32,6 +32,7 @@ fn spec(lease: &str, script: &str) -> OciSpec {
         image: IMAGE.to_owned(),
         platform: "linux/amd64".to_owned(),
         entrypoint: Some("/bin/sh".to_owned()),
+        user: None,
         argv: vec!["-c".to_owned(), script.to_owned()],
         working_dir: "/app".to_owned(),
         workspace_mount_path: "/app".to_owned(),

@@ -130,6 +130,7 @@ fn runner_capabilities(
     }
     if oci_available {
         capabilities.push("execution_abi=oci");
+        capabilities.push(ato_ipc::runtime_launch::OCI_USER_RUNTIME_FEATURE);
         // A group is a capability of the OCI evaluator, not a separate ABI:
         // it is offered exactly where single-container OCI is, by a build that
         // understands ato.runtime-launch-spec.v2.
@@ -6672,6 +6673,11 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 .contains(&"runtime_feature=oci_service_group_v1")
         );
         assert!(!process_only.contains(&"runtime_feature=oci_service_group_v1"));
+        assert!(
+            runner_capabilities(false, true, false, false, false)
+                .contains(&ato_ipc::runtime_launch::OCI_USER_RUNTIME_FEATURE)
+        );
+        assert!(!process_only.contains(&ato_ipc::runtime_launch::OCI_USER_RUNTIME_FEATURE));
         // Volumes are advertised only with OCI AND a usable store.
         let volume = "runtime_feature=runner_persistent_volume_v1";
         assert!(runner_capabilities(false, true, true, false, false).contains(&volume));
