@@ -1,0 +1,33 @@
+{
+  "checked_at": "2026-10-15T10:39:20.004750+00:00",
+  "scope": "native_linux_readonly_kernel_reader_component_smoke",
+  "binary_sha256": "c774bb69a7448e7a80072b9c0decabab2396c76567f272d6df62f5ab5f545a4f",
+  "source_files_sha256": {
+    "extensions/adapters/oci/src/principal.rs": "6d5b4eff1f669908ac50e4a40d03835ab10292b04bee99fa706c569e41a00324",
+    "extensions/adapters/oci/src/lib.rs": "1d00b8d82f7712bf0bc18058a2043b4d10fe004e72b3cfa523bdda8fd0ed587b",
+    "apps/connected-realization-worker/src/runtime_launch/lease.rs": "87816ecc3470a43b9cee36b4984c84492d58c206d47b37995bec6226f12f5aa1"
+  },
+  "test": "principal::tests::selected_existing_container_kernel_reader",
+  "result": "passed",
+  "observed_uids": [
+    1000,
+    1000,
+    1000,
+    1000
+  ],
+  "observed_gids": [
+    1000,
+    1000,
+    1000,
+    1000
+  ],
+  "supplementary_groups": [
+    1000
+  ],
+  "existing_container_modified": false,
+  "container_created_or_stopped": false,
+  "runner_binary_deployed": false,
+  "new_app_run_started": false,
+  "application_acceptance": false,
+  "note": "An existing managed container was read. This is neither a startup receipt for that application nor acceptance of Memos/Mealie."
+}

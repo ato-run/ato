@@ -21,7 +21,10 @@ use anyhow::{Context, Result, bail, ensure};
 
 pub mod command_control;
 mod ownership;
+mod principal;
 mod stop;
+
+pub use principal::OciExecutionPrincipal;
 
 pub use ownership::{
     LABEL_INCARNATION, LABEL_LEASE_ID, LABEL_MANAGED, LABEL_RUN_ID, LABEL_RUNNER_ID, LABEL_SERVICE,
@@ -611,10 +614,11 @@ impl DockerOciAdapter {
                 anyhow::anyhow!("Docker returned no container id"),
             ));
         };
-        let container_address = match inspect_container_address(&self.docker, &container_id) {
-            Ok(address) => address,
-            Err(error) => return Err(failed_launch(&self.docker, &container_id, error)),
-        };
+        let (container_address, execution_principal) =
+            match inspect_container_address(&self.docker, &container_id) {
+                Ok(observation) => observation,
+                Err(error) => return Err(failed_launch(&self.docker, &container_id, error)),
+            };
         let mut forwarders = Vec::with_capacity(self.spec.endpoints.len());
         for endpoint in &self.spec.endpoints {
             match PortForwarder::start(endpoint.host_port, container_address, endpoint.guest_port) {
@@ -633,6 +637,7 @@ impl DockerOciAdapter {
             docker: self.docker.clone(),
             container_id,
             container_address,
+            execution_principal: execution_principal.map(Box::new),
             container_name,
             network: None,
             image: self.spec.image.clone(),
@@ -1118,6 +1123,7 @@ pub struct OciHandle {
     docker: DockerClient,
     container_id: String,
     container_address: IpAddr,
+    execution_principal: Option<Box<OciExecutionPrincipal>>,
     container_name: String,
     /// Owned only by a single-container route; a group owns its network.
     network: Option<OciNetwork>,
@@ -1130,6 +1136,10 @@ pub struct OciHandle {
 }
 
 impl OciHandle {
+    pub fn execution_principal(&self) -> Option<&OciExecutionPrincipal> {
+        self.execution_principal.as_deref()
+    }
+
     pub fn network_name(&self) -> Option<&str> {
         self.network.as_ref().map(OciNetwork::name)
     }
@@ -1309,19 +1319,29 @@ fn forward_connection(client: TcpStream, target: SocketAddr) {
     let _ = upload.join();
 }
 
-fn inspect_container_address(docker: &DockerClient, container_id: &str) -> Result<IpAddr> {
+fn inspect_container_address(
+    docker: &DockerClient,
+    container_id: &str,
+) -> Result<(IpAddr, Option<OciExecutionPrincipal>)> {
     let value = run_checked(
         docker,
         [
             "inspect",
             "--format",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}|{{.Id}}|{{.State.Pid}}",
             container_id,
         ],
         "inspect OCI container network address",
     )?;
-    if let Ok(address) = value.trim().parse() {
-        return Ok(address);
+    let mut fields = value.trim().split('|');
+    if let Some(address) = fields.next().and_then(|field| field.parse().ok()) {
+        let execution_principal = match (fields.next(), fields.next(), fields.next()) {
+            (Some(observed_id), Some(pid), None) if observed_id == container_id => {
+                principal::observe(container_id, pid)
+            }
+            _ => None,
+        };
+        return Ok((address, execution_principal));
     }
     // No address usually means the process already exited (e.g. exec was
     // refused). Report the container's own state; its output is not copied
