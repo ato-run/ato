@@ -1,0 +1,24 @@
+{
+  "checked_at": "2026-10-15T11:08:00.530091+00:00",
+  "binary_sha256": "cb03c34a344fb350d5a0f8bd777a70b276652b406f7862fd9eefb17e8e980c20",
+  "source_sha256": "24a9740d7b041a3c5d93a5407a302eab25ac719fa3f4e7647daed93e2c8f0bc4",
+  "read_only": true,
+  "filesystem_written": false,
+  "container_started": false,
+  "runner_reconfigured": false,
+  "results": [
+    {
+      "filesystem_class": "runner_workroot",
+      "exit_code": 2,
+      "observation": "code=runner_workroot_insufficient_space required=1 available=0",
+      "stderr": ""
+    },
+    {
+      "filesystem_class": "existing_data_mount",
+      "exit_code": 0,
+      "observation": "capacity_observation_available; no reservation or workload",
+      "stderr": ""
+    }
+  ],
+  "application_acceptance": false
+}
