@@ -273,3 +273,30 @@ fn a_group_payload_never_carries_a_secret_value() {
         "ATO_ERR_RUNTIME_LAUNCH_SPEC_FORBIDDEN_FIELD"
     );
 }
+
+#[test]
+fn each_service_may_declare_only_a_nonroot_numeric_user() {
+    let mut spec = group();
+    assert!(!serde_json::to_string(&spec).unwrap().contains("\"user\""));
+    for service in services(&mut spec) {
+        service.user = Some(OciUserV1 { uid: 911, gid: 911 });
+    }
+    spec.validate().unwrap();
+    assert_eq!(
+        RuntimeLaunchSpecV2::parse(&serde_json::to_string(&spec).unwrap()).unwrap(),
+        spec
+    );
+    services(&mut spec)[1].user = Some(OciUserV1 { uid: 0, gid: 911 });
+    assert!(spec.validate().is_err());
+}
+
+#[test]
+fn explicit_user_golden_fixture_has_stable_canonical_bytes_and_digest() {
+    let raw = include_str!("../../tests/fixtures/runtime-launch-spec-v2/service-group-users.json");
+    let spec = RuntimeLaunchSpecV2::parse(raw).unwrap();
+    assert_eq!(spec.canonical_bytes().unwrap(), raw.trim_end().as_bytes());
+    assert_eq!(
+        spec.canonical_digest().unwrap(),
+        "sha256:600851a1424991898e9c46786d7fbeedce86e47379eb8ffa0eab09a6c3c2a733"
+    );
+}

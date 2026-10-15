@@ -129,6 +129,7 @@ fn runner_capabilities(
     }
     if oci_available {
         capabilities.push("execution_abi=oci");
+        capabilities.push(ato_ipc::runtime_launch::OCI_USER_RUNTIME_FEATURE);
         // A group is a capability of the OCI evaluator, not a separate ABI:
         // it is offered exactly where single-container OCI is, by a build that
         // understands ato.runtime-launch-spec.v2.
@@ -1673,7 +1674,9 @@ impl ConnectedWorker {
             self.heartbeat_best_effort(1);
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
-                let code = if message.contains("execution authorization") {
+                let code = if error.downcast_ref::<ato_runtime_attempt::launch::storage_capacity::InsufficientStorageSpace>().is_some() {
+                    ato_runtime_attempt::launch::storage_capacity::STORAGE_INSUFFICIENT_SPACE
+                } else if message.contains("execution authorization") {
                     "execution_authorization_ended"
                 } else {
                     "realization_failed"
@@ -1710,6 +1713,9 @@ impl ConnectedWorker {
 
     fn execute_lease(&self, lease: &ClaimedLease) -> Result<()> {
         validate_lease(lease, SystemTime::now())?;
+        // Refuse a full filesystem before any lease directory, journal,
+        // workspace download, state writer or workload can be created.
+        ato_runtime_attempt::launch::storage_capacity::require_capacity(&self.config.work_root, 1)?;
         self.api.report_status(&lease.id, "preparing")?;
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
@@ -6664,6 +6670,11 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 .contains(&"runtime_feature=oci_service_group_v1")
         );
         assert!(!process_only.contains(&"runtime_feature=oci_service_group_v1"));
+        assert!(
+            runner_capabilities(false, true, false, false, false)
+                .contains(&ato_ipc::runtime_launch::OCI_USER_RUNTIME_FEATURE)
+        );
+        assert!(!process_only.contains(&ato_ipc::runtime_launch::OCI_USER_RUNTIME_FEATURE));
         // Volumes are advertised only with OCI AND a usable store.
         let volume = "runtime_feature=runner_persistent_volume_v1";
         assert!(runner_capabilities(false, true, true, false, false).contains(&volume));

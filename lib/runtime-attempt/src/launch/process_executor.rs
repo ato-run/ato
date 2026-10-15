@@ -1144,6 +1144,7 @@ mod tests {
             platform: None,
             resource_limits: None,
             entrypoint: None,
+            user: None,
             argv: None,
             working_dir: None,
             workspace_mount_path: None,

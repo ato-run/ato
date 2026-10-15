@@ -16,4 +16,5 @@ pub mod sandbox_exec;
 
 pub mod session;
 pub mod state_artifact;
+pub mod storage_capacity;
 pub mod volume;

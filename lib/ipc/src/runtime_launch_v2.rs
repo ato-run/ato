@@ -20,7 +20,7 @@ use crate::oci_service_group::{
     group_totals, is_service_name,
 };
 use crate::runtime_launch::{
-    LaunchContextV1, LaunchWorkspaceV1, LifecycleV1, OciResourceLimitsV1, PublicEnvV1,
+    LaunchContextV1, LaunchWorkspaceV1, LifecycleV1, OciResourceLimitsV1, OciUserV1, PublicEnvV1,
     RUNTIME_LAUNCH_SPEC_V1_PROTOCOL, RuntimeLaunchSpecError, RuntimeLaunchSpecV1, SecretGrantV1,
     StateAttachmentV1, is_content_addressed_digest, is_guest_path, validate_mount_target,
 };
@@ -84,6 +84,8 @@ pub struct OciServiceV2 {
     pub image_reference: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<OciUserV1>,
     pub argv: Vec<String>,
     /// Absolute guest path.
     pub working_dir: String,
@@ -234,6 +236,12 @@ impl RuntimeLaunchSpecV2 {
         let mut surfaces = 0usize;
         let mut endpoint_count = 0usize;
         for service in &group.services {
+            if service.user.is_some_and(|user| !user.valid()) {
+                return Err(group_error(format!(
+                    "realization.services[{}].user",
+                    service.name
+                )));
+            }
             let field = |suffix: &str| format!("realization.services[{}].{suffix}", service.name);
             if !is_service_name(&service.name) || !names.insert(service.name.as_str()) {
                 return Err(group_error(format!(

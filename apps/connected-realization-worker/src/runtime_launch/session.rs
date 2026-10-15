@@ -1004,6 +1004,7 @@ while True:
                 pids_limit: 64,
             }),
             entrypoint: None,
+            user: None,
             argv: Some(vec!["--port".to_owned(), "8000".to_owned()]),
             working_dir: None,
             workspace_mount_path: None,
