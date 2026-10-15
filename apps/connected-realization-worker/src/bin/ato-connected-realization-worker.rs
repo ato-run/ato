@@ -25,6 +25,18 @@ fn main() -> Result<()> {
     //
     //   ato-connected-realization-worker sandbox-exec --policy <file> -- <argv...>
     if args.get(1).is_some_and(|arg| arg == "sandbox-exec") {
+        let head = args
+            .iter()
+            .take_while(|arg| *arg != "--")
+            .collect::<Vec<_>>();
+        if head.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--scoped-network" | "--network-relay" | "--ingress-relay"
+            )
+        }) {
+            return ato_runtime_attempt::build_sandbox_exec::sandbox_exec(&args[2..]);
+        }
         let policy = args
             .iter()
             .position(|arg| arg == "--policy")
