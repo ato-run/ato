@@ -1742,6 +1742,10 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 };
+                // Accepted sockets may inherit the listener's nonblocking
+                // flag on BSD/macOS. The request fixture expects a blocking
+                // read with its timeout, even when the client writes later.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();
