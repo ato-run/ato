@@ -35,3 +35,27 @@ No shared Runner binary/service, Docker storage, flag or live application change
 Base00d6834862df65d1ef6a10b21c04ce8d4ec6bdf2 contains5 inherited commits ahead
 of cached origin/main. Review this fix against that pinned input, not the unrelated
 nightly ancestry. Those build-toolchain changes remain integration dependencies.
+
+
+## Numeric principal observations
+
+The existing container startup network inspection now also returns its exact ID
+and init PID, without an extra Docker call. Bounded Linux procfs reads verify the
+container cgroup, identity UID/GID maps and consistent process start ticks, then
+cache optional startup credentials. Remote daemons, remapping, non-Linux and missing
+or contradictory reads yield unknown evidence. Connected Runner reports the same
+object per container in existing lease execution metadata. Root may be reported
+as a fact; the observer does not grant execution or judge K/D. Design constraints
+are in draft/OCI_EXECUTION_PRINCIPAL_EVIDENCE.md. No runtime permission or storage
+ownership is changed.
+
+OCI35 tests passed on macOS; the updated full workspace passed1966 tests with0
+failures and9 existing environment-dependent ignores. Workspace all-feature/
+all-target clippy passed after boxing the optional cached observation to preserve
+the existing handle/enum size. Native Linux code was cross-compiled offline and
+its read-only kernel reader passed against one explicitly selected already running
+managed container. Its1000:1000 observation is not Memos10001 or Mealie911 acceptance.
+No container or shared Runner was created, stopped, modified or deployed for it.
+The bounded public smoke record omits the existing container ID/PID; those remain
+in the private operational artifact. Actual startup collection on a new approved
+curation Run and startup performance still require staging acceptance.
