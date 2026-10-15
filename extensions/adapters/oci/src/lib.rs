@@ -194,12 +194,52 @@ pub struct OciMount {
     pub writable: bool,
 }
 
+/// An explicitly requested numeric identity inside the OCI sandbox. This does
+/// not grant host ownership or authorize initialization of a state directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OciUser {
+    pub uid: u32,
+    pub gid: u32,
+}
+impl OciUser {
+    pub fn validate(self) -> Result<Self> {
+        ensure!(
+            (1..u32::MAX).contains(&self.uid) && (1..u32::MAX).contains(&self.gid),
+            "oci_user_unauthorized: OCI execution identity must have nonzero mapped UID and GID"
+        );
+        Ok(self)
+    }
+}
+impl std::str::FromStr for OciUser {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self> {
+        let (uid, gid) = value
+            .split_once(':')
+            .context("oci_user_invalid: use numeric UID:GID")?;
+        ensure!(
+            !uid.is_empty()
+                && !gid.is_empty()
+                && uid
+                    .bytes()
+                    .chain(gid.bytes())
+                    .all(|byte| byte.is_ascii_digit()),
+            "oci_user_invalid: use numeric UID:GID"
+        );
+        Self {
+            uid: uid.parse()?,
+            gid: gid.parse()?,
+        }
+        .validate()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciSpec {
     pub id: String,
     pub image: String,
     pub platform: String,
     pub entrypoint: Option<String>,
+    pub user: Option<OciUser>,
     pub argv: Vec<String>,
     pub working_dir: String,
     pub workspace_mount_path: String,
@@ -410,7 +450,7 @@ impl DockerOciAdapter {
     fn admit_image(&self) -> Result<(OciAdmission, String)> {
         // Check the state binding before an image pull or any container can
         // be created. The run-argument projection checks it again at launch.
-        writable_mount_user(&self.spec)?;
+        execution_user(&self.spec)?;
         let version = run_checked(
             &self.docker,
             ["version", "--format", "{{.Server.Version}}"],
@@ -1375,6 +1415,9 @@ pub fn validate_oci_spec(spec: &OciSpec) -> Result<()> {
 }
 
 fn validate_spec(spec: &OciSpec) -> Result<()> {
+    if let Some(user) = spec.user {
+        user.validate()?;
+    }
     ensure!(!spec.id.trim().is_empty(), "OCI id is empty");
     let (repository, digest) = spec
         .image
@@ -1533,7 +1576,7 @@ fn docker_run_arguments(
     let env_file = env_file
         .canonicalize()
         .context("canonicalize OCI environment file")?;
-    let writable_mount_user = writable_mount_user(spec)?;
+    let selected_user = execution_user(spec)?;
     let mut argv = vec![
         "run".to_owned(),
         "--detach".to_owned(),
@@ -1576,7 +1619,7 @@ fn docker_run_arguments(
     if let Some(alias) = alias {
         argv.extend(["--network-alias".to_owned(), alias.to_owned()]);
     }
-    if let Some(user) = writable_mount_user {
+    if let Some(user) = selected_user {
         argv.extend(["--user".to_owned(), user]);
     }
     if let Some(entrypoint) = &spec.entrypoint {
@@ -1606,6 +1649,20 @@ fn docker_run_arguments(
     argv.push(image_reference.to_owned());
     argv.extend(spec.argv.iter().cloned());
     Ok(argv)
+}
+
+fn execution_user(spec: &OciSpec) -> Result<Option<String>> {
+    let owner = writable_mount_user(spec)?;
+    let Some(user) = spec.user else {
+        return Ok(owner);
+    };
+    user.validate()?;
+    let requested = format!("{}:{}", user.uid, user.gid);
+    ensure!(
+        owner.as_ref().is_none_or(|actual| actual == &requested),
+        "oci_user_state_owner_mismatch: requested {requested} does not own every writable state mount"
+    );
+    Ok(Some(requested))
 }
 
 #[cfg(unix)]
@@ -1759,6 +1816,7 @@ mod tests {
             image: format!("docker.io/example/app@sha256:{}", "a".repeat(64)),
             platform: "linux/amd64".to_owned(),
             entrypoint: None,
+            user: None,
             argv: vec!["--serve".to_owned()],
             working_dir: "/app".to_owned(),
             workspace_mount_path: "/app".to_owned(),
@@ -1945,6 +2003,91 @@ mod tests {
             offline_image_reference_candidates(&image, &config).unwrap(),
             [config.as_str(), manifest.as_str()]
         );
+    }
+
+    #[test]
+    fn an_explicit_user_is_numeric_nonroot_and_applies_to_a_stateless_container() {
+        for invalid in [
+            "root",
+            "node:node",
+            "0:1000",
+            "1000:0",
+            "4294967295:1",
+            "1:4294967295",
+            "-1:1",
+            "+1:1",
+            "1:1:1",
+            " 1:1",
+        ] {
+            assert!(invalid.parse::<OciUser>().is_err(), "{invalid}");
+        }
+        let mut value = spec();
+        assert_eq!(execution_user(&value).unwrap(), None);
+        value.user = Some("10001:10001".parse().unwrap());
+        assert_eq!(
+            execution_user(&value).unwrap(),
+            Some("10001:10001".to_owned())
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let env_file = workspace.path().join("environment.list");
+        fs::write(&env_file, "").unwrap();
+        let args = docker_run_arguments(
+            &value,
+            workspace.path(),
+            &env_file,
+            "test",
+            "network",
+            None,
+            "verified-image",
+        )
+        .unwrap();
+        let position = args.iter().position(|arg| arg == "--user").unwrap();
+        assert_eq!(args[position + 1], "10001:10001");
+        assert!(args.iter().any(|arg| arg == "--cap-drop=ALL"));
+        value.user = Some(OciUser { uid: 0, gid: 10001 });
+        assert!(validate_spec(&value).is_err());
+        assert!(execution_user(&value).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_requested_user_never_changes_or_ignores_the_writable_state_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let state = tempfile::tempdir().unwrap();
+        let metadata = fs::metadata(state.path()).unwrap();
+        let mut value = spec();
+        value.endpoints.clear();
+        value.mounts.push(OciMount {
+            host_path: state.path().to_path_buf(),
+            guest_path: "/data".to_owned(),
+            writable: true,
+        });
+        value.user = Some(OciUser {
+            uid: metadata.uid().saturating_add(1),
+            gid: metadata.gid().max(1),
+        });
+        let (_directory, client) = fake_docker("#!/bin/sh\nexit 99\n");
+        let adapter =
+            DockerOciAdapter::new_at(value.clone(), client.executable.as_ref().clone()).unwrap();
+        assert!(adapter.admit().is_err());
+        let after = fs::metadata(state.path()).unwrap();
+        assert_eq!((after.uid(), after.gid()), (metadata.uid(), metadata.gid()));
+        if metadata.uid() > 0 && metadata.gid() > 0 {
+            assert!(
+                execution_user(&value)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("oci_user_state_owner_mismatch")
+            );
+            value.user = Some(OciUser {
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+            });
+            assert_eq!(
+                execution_user(&value).unwrap(),
+                Some(format!("{}:{}", metadata.uid(), metadata.gid()))
+            );
+        }
     }
 
     #[test]
