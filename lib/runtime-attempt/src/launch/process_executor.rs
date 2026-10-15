@@ -1304,6 +1304,7 @@ HTTPServer(('127.0.0.1', 34567), H).serve_forever()
             platform: None,
             resource_limits: None,
             entrypoint: None,
+            user: None,
             argv: None,
             working_dir: None,
             workspace_mount_path: None,

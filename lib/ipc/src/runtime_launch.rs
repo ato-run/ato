@@ -180,6 +180,21 @@ pub struct ExecutableRequirementV1 {
     pub version: String,
 }
 
+/// Optional nonroot numeric OCI execution identity. Absence retains existing
+/// input bytes; a selecting control plane requires the explicit Runner feature.
+pub const OCI_USER_RUNTIME_FEATURE: &str = "runtime_feature=oci_user_v1";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciUserV1 {
+    pub uid: u32,
+    pub gid: u32,
+}
+impl OciUserV1 {
+    pub fn valid(self) -> bool {
+        (1..u32::MAX).contains(&self.uid) && (1..u32::MAX).contains(&self.gid)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OciRealizationV1 {
@@ -202,6 +217,8 @@ pub struct OciRealizationV1 {
     /// the image's configured ENTRYPOINT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<OciUserV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -423,6 +440,11 @@ impl RuntimeLaunchSpecV1 {
                 }
             }
             LaunchRealizationV1::Oci(oci) => {
+                if oci.user.is_some_and(|user| !user.valid()) {
+                    return Err(RuntimeLaunchSpecError::ForbiddenField {
+                        field: "realization.user".to_owned(),
+                    });
+                }
                 if !is_content_addressed_digest(&oci.image_digest_ref) {
                     return Err(RuntimeLaunchSpecError::InvalidImageDigest {
                         reference: oci.image_digest_ref.clone(),
