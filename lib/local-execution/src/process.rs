@@ -54,6 +54,13 @@ pub fn configure_detached_process(command: &mut Command) {
 /// Terminate only the still-matching process tree represented by `identity`.
 pub fn terminate_owned_process(identity: &OwnedProcessIdentity) -> Result<()> {
     if !identity.matches_live_process()? {
+        // A worker may exit after its cleanup ACK and the caller's live
+        // check. Confirm disappearance of the whole owned group, without
+        // signalling a reused PID. EPERM/unknown probes remain fail closed.
+        #[cfg(unix)]
+        if !ato_adapter_process::process_group_is_alive(identity.process_group) {
+            return Ok(());
+        }
         bail!(
             "owned process identity no longer matches; refusing to stop PID {}",
             identity.pid
@@ -174,5 +181,39 @@ mod tests {
         let mut stale = identity;
         stale.process_start_time.push_str("-stale");
         assert!(!stale.matches_live_process().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_is_idempotent_when_the_owned_worker_exits_between_checks() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 600"]);
+        configure_detached_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        let identity = OwnedProcessIdentity {
+            pid: child.id(),
+            process_start_time: process_start_time(child.id()).unwrap(),
+            process_group: child.id(),
+            boot_session: boot_session_identity().unwrap(),
+        };
+        assert!(identity.matches_live_process().unwrap());
+        // The CLI observed a live worker after cleanup ACK, but the worker
+        // exits before the termination helper repeats that identity check.
+        child.kill().unwrap();
+        child.wait().unwrap();
+        terminate_owned_process(&identity).unwrap();
+    }
+
+    #[test]
+    fn stopping_a_live_process_with_a_stale_identity_is_refused() {
+        let mut identity = OwnedProcessIdentity::current().unwrap();
+        identity.process_start_time.push_str("-stale");
+        assert!(terminate_owned_process(&identity).is_err());
+        assert!(
+            OwnedProcessIdentity::current()
+                .unwrap()
+                .matches_live_process()
+                .unwrap()
+        );
     }
 }
