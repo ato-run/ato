@@ -258,6 +258,16 @@ pub struct HostBridge {
 #[cfg(unix)]
 impl HostBridge {
     pub fn start(socket: &std::path::Path, target: std::net::SocketAddr) -> Result<Self> {
+        Self::start_inner(socket, Some(target))
+    }
+
+    /// An owner-only endpoint with no network destination. Runtime process
+    /// launches without an egress grant must never reach a host service.
+    pub fn deny(socket: &std::path::Path) -> Result<Self> {
+        Self::start_inner(socket, None)
+    }
+
+    fn start_inner(socket: &std::path::Path, target: Option<std::net::SocketAddr>) -> Result<Self> {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener;
         use std::sync::{
@@ -265,7 +275,7 @@ impl HostBridge {
             atomic::{AtomicBool, Ordering},
         };
         ensure!(
-            target.ip().is_loopback(),
+            target.is_none_or(|target| target.ip().is_loopback()),
             "bridge peer must be an owner-local gate"
         );
         let parent = socket
@@ -292,7 +302,14 @@ impl HostBridge {
             while !stop.load(Ordering::Acquire) {
                 children.retain(|t| !t.is_finished());
                 match listener.accept() {
-                    Ok((stream, _)) if children.len() < 16 => {
+                    Ok((mut stream, _)) if children.len() < 16 => {
+                        let Some(target) = target else {
+                            use std::io::Write;
+                            let _ = stream
+                                .set_write_timeout(Some(std::time::Duration::from_millis(100)));
+                            let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            continue;
+                        };
                         let Ok(peer) = std::net::TcpStream::connect_timeout(
                             &target,
                             std::time::Duration::from_secs(2),
@@ -419,5 +436,30 @@ pub fn start_namespace_relay(shim: &str) -> Result<std::process::Child> {
             let _ = child.wait();
             anyhow::bail!("namespace proxy failed readiness")
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod deny_bridge_tests {
+    #[test]
+    fn denies_egress_without_any_host_destination_and_removes_its_socket() {
+        use std::io::Read;
+        std::fs::create_dir_all(".tmp").unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("n")
+            .rand_bytes(2)
+            .tempdir_in(".tmp")
+            .unwrap();
+        let socket = root.path().join("e");
+        let bridge = super::HostBridge::deny(&socket).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        drop(bridge);
+        assert!(!socket.exists());
     }
 }
