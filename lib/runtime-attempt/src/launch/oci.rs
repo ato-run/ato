@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciNetwork, OciOwner, OciResourceLimits,
-    OciServiceGroup, OciSpec, SpawnCleanupUnconfirmed, StopBudget, StopOutcome,
+    OciServiceGroup, OciSpec, OciUser, SpawnCleanupUnconfirmed, StopBudget, StopOutcome,
 };
 use ato_ipc::runtime_launch::{OciRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1};
 use ato_ipc::runtime_launch_v2::{
@@ -220,6 +220,10 @@ pub fn container_oci_spec(
         image,
         platform,
         entrypoint: oci.entrypoint.clone(),
+        user: oci.user.map(|user| OciUser {
+            uid: user.uid,
+            gid: user.gid,
+        }),
         argv: oci.argv.clone().unwrap_or_default(),
         working_dir: oci.working_dir.clone().unwrap_or_else(|| "/app".to_owned()),
         workspace_mount_path: oci
@@ -562,6 +566,10 @@ pub fn service_oci_spec(
         image: service.image_reference.clone(),
         platform: group.platform.clone(),
         entrypoint: service.entrypoint.clone(),
+        user: service.user.map(|user| OciUser {
+            uid: user.uid,
+            gid: user.gid,
+        }),
         argv: service.argv.clone(),
         working_dir: service.working_dir.clone(),
         workspace_mount_path: service.workspace_mount_path.clone(),
@@ -804,6 +812,20 @@ mod tests {
         assert!(adapter_spec.mounts[0].writable);
         ato_adapter_oci::validate_oci_spec(&adapter_spec).expect("the Adapter accepts it");
 
+        let mut explicit = oci.clone();
+        explicit.user = Some(ato_ipc::runtime_launch::OciUserV1 {
+            uid: 10001,
+            gid: 10001,
+        });
+        let projected = container_oci_spec(&spec, &explicit, &context, BTreeMap::new())
+            .expect("explicit user projection");
+        assert_eq!(
+            projected.user,
+            Some(OciUser {
+                uid: 10001,
+                gid: 10001
+            })
+        );
         // Without the fact, the pre-existing /app working directory.
         let mut legacy = oci.clone();
         legacy.working_dir = None;
@@ -832,6 +854,7 @@ mod tests {
                     id: name.to_owned(),
                     image: "docker.io/traefik/whoami@sha256:4f90b33ddca9c4d4f06527070d6e503b16d71016edea036842be2a84e60c91cb".to_owned(),
                     platform: "linux/amd64".to_owned(), entrypoint: None,
+                    user: None,
                     argv: vec!["--port".to_owned(), "8000".to_owned()],
                     working_dir: "/app".to_owned(), workspace_mount_path: "/app".to_owned(),
                     environment: BTreeMap::new(), endpoints: vec![], mounts: vec![],

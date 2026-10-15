@@ -58,6 +58,7 @@ pub const OCI_PROTOCOL: &str = "ato.oci@1";
 pub const PYTHON_RUNTIME: &str = "python";
 pub const OCI_IMAGE_RUNTIME: &str = "oci.image";
 pub const OCI_PLATFORM_RUNTIME: &str = "oci.platform";
+pub const OCI_USER_RUNTIME: &str = "oci.user";
 pub const OCI_MEMORY_BYTES_RUNTIME: &str = "oci.memory_bytes";
 pub const OCI_CPU_MILLIS_RUNTIME: &str = "oci.cpu_limit_millis";
 pub const OCI_PIDS_LIMIT_RUNTIME: &str = "oci.pids_limit";
@@ -1724,6 +1725,10 @@ fn validate_initial_route(
             validate_immutable_oci_image(image)?;
             validate_oci_platform(platform)?;
             oci_resource_limits(&derivation.runtimes)?;
+            if let Some(user) = derivation.runtimes.get(OCI_USER_RUNTIME) {
+                user.parse::<ato_adapter_oci::OciUser>()
+                    .map_err(|error| profile(error.to_string()))?;
+            }
             if let Some(entrypoint) = derivation.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
                 validate_oci_entrypoint(entrypoint)?;
             }
@@ -1741,6 +1746,7 @@ fn validate_initial_route(
                             .contains_key(OCI_WORKSPACE_MOUNT_RUNTIME),
                     )
                     + usize::from(derivation.runtimes.contains_key(OCI_WORKING_DIR_RUNTIME))
+                    + usize::from(derivation.runtimes.contains_key(OCI_USER_RUNTIME))
                 || step.op != "serve"
                 || step.argv.is_empty()
                 || step.argv.iter().any(|value| value.contains('\0'))
@@ -2043,6 +2049,10 @@ fn validate_oci_service_group<'a>(
             .ok_or_else(|| profile(format!("service `{}` omitted oci.image", step.id)))?;
         validate_immutable_oci_image(image)?;
         limits.push(oci_resource_limits(&step.runtimes)?);
+        if let Some(user) = step.runtimes.get(OCI_USER_RUNTIME) {
+            user.parse::<ato_adapter_oci::OciUser>()
+                .map_err(|error| profile(error.to_string()))?;
+        }
         if let Some(entrypoint) = step.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
             validate_oci_entrypoint(entrypoint)?;
         }
@@ -2056,6 +2066,7 @@ fn validate_oci_service_group<'a>(
         if step.runtimes.len()
             != 4 + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
+                + usize::from(step.runtimes.contains_key(OCI_USER_RUNTIME))
         {
             return Err(profile(format!(
                 "service `{}` declares a runtime fact this profile does not model",
@@ -4390,6 +4401,45 @@ default = "pure"
         assert_eq!(broken_oci.index.root_contract_ref, contract_ref);
         validate_bundle_for_derivation(&broken_oci, &process_ref).unwrap();
         assert!(validate_bundle_for_derivation(&broken_oci, &broken_oci_ref).is_err());
+    }
+
+    #[test]
+    fn oci_numeric_user_is_part_of_d_not_k_and_never_selects_root() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let mut declared = datasette_spec();
+        declared
+            .oci
+            .runtimes
+            .insert(OCI_USER_RUNTIME.to_owned(), "10001:10001".to_owned());
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &declared).unwrap();
+        assert_eq!(
+            original.index.root_contract_ref,
+            bundle.index.root_contract_ref
+        );
+        assert_ne!(
+            route_ref(&original, PortableRealizationKind::OciContainer),
+            route_ref(&bundle, PortableRealizationKind::OciContainer)
+        );
+        let selected = route_ref(&bundle, PortableRealizationKind::OciContainer);
+        validate_bundle_for_derivation(&bundle, &selected).unwrap();
+        for user in [
+            "root",
+            "0:1000",
+            "1000:0",
+            "4294967295:1000",
+            "1000:1000:1000",
+        ] {
+            declared
+                .oci
+                .runtimes
+                .insert(OCI_USER_RUNTIME.to_owned(), user.to_owned());
+            assert!(
+                build_dynamic_process_oci_bundle(&datasette_fixture_root(), &declared).is_err(),
+                "{user}"
+            );
+        }
     }
 
     #[test]

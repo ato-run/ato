@@ -89,3 +89,38 @@ The unchanged runtime-attempt target then passed all163 tests in a fresh hermeti
 environment. Thus1969 tests passed across the run plus that target rerun; the first
 whole-workspace command itself exited101 and is not reported as a clean run. No
 assertion, retry limit or ignore was changed. Shared Runner rollout remains pending.
+
+## Explicit numeric user continuation
+
+An optional oci.user runtime fact now reaches the shared Adapter from both CLI
+and Hosted launch, including each service of a group. It accepts only numeric
+nonroot mapped UID:GID. The requested identity must match every writable mount's
+existing nonroot owner; it cannot turn host1000 into Memos10001 or Mealie911. A
+stateless route can explicitly request a nonroot user without creating a dummy
+state mount or altering the upstream image. No chown/chmod/capability/privileged
+initializer is added. An absent option preserves existing serialized inputs and
+legacy image-user behavior. Publication still needs actual nonroot observations.
+
+The portable fixture confirms that the new runtime fact changes D and preserves
+K. New v1/v2 golden fixtures pin the same canonical bytes and digest in Rust and
+API tests. Runner capability runtime_feature=oci_user_v1 is advertised only by
+the new OCI-capable binary; API selection refuses legacy Runners for this option.
+No shared Runner has received that binary, and no existing Memos input/bundle or
+prepared import has been rewritten or replaced.
+
+Focused Rust validation passed37 Adapter,74 IPC and104 portable tests; the two
+subsequently added canonical golden cases also passed. All-workspace/all-target
+check and all-feature clippy passed. The first new Adapter fixture initially hit
+macOS's existing native-HTTP-endpoint refusal; clearing endpoints in this argument/
+ownership-only test corrected its setup. No production behavior was relaxed.
+The previous intermittent preparation HTTP fixture now explicitly makes accepted
+sockets blocking before its timeout read (ccf4449df), because macOS may inherit
+nonblocking from the listener. Its assertions and retry policy are unchanged.
+The updated complete workspace is being verified separately.
+
+The updated complete workspace command passed1976 tests with0 failures and9
+existing environment-dependent ignores in a fresh short hermetic workspace root.
+No test was skipped or expectation relaxed. The accepted-socket harness correction
+allowed the previously intermittent HTTP preparation target to finish normally.
+All-feature/all-target workspace clippy, check and fmt also passed. These checks
+verify code/fixtures, not a shared Runner/validator rollout or an upstream app.
