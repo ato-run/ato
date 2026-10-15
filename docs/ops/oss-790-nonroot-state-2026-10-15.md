@@ -59,3 +59,33 @@ No container or shared Runner was created, stopped, modified or deployed for it.
 The bounded public smoke record omits the existing container ID/PID; those remain
 in the private operational artifact. Actual startup collection on a new approved
 curation Run and startup performance still require staging acceptance.
+
+
+## Physical capacity and bounded workspace intake
+
+The worker observes its work-root filesystem before creating a lease directory,
+journal, state writer or downloading a workspace. Zero available bytes produces
+the typed `runner_workroot_insufficient_space` failure. Workspace delivery now
+bounds both the declared HTTP length and the actual stream to the existing1GiB
+limit, including missing or dishonest Content-Length. After the archive SHA check,
+the uncompressed tar length supplies a preliminary data-space check before atomic
+unpack. Existing expansion/path/file limits and VolumeStore reserve are unchanged.
+The shared filesystem observer is reused by VolumeStore. This does not reserve
+space, estimate filesystem metadata, establish a quota, or admit Docker's image
+store. A concurrent writer can still consume space after the check.
+
+An offline-cross-built read-only Linux probe importing the exact shared module
+confirmed0 available bytes at the existing Runner work root and returned the new
+error before any workload or application filesystem write. The separate data mount
+was observable; no Runner path, Docker daemon, service, cache or volume was changed.
+See oss-790-storage-reader-linux-2026-10-15.json. This is infrastructure evidence,
+not an application acceptance receipt.
+
+Validation: the two new worker workspace cases and the shared capacity case passed;
+workspace all-feature/all-target clippy and fmt passed. The entire workspace run
+passed1806 tests across the other targets with9 existing ignores, but the existing
+nonblocking loopback HTTP fixture aborted the runtime-attempt target (WouldBlock).
+The unchanged runtime-attempt target then passed all163 tests in a fresh hermetic
+environment. Thus1969 tests passed across the run plus that target rerun; the first
+whole-workspace command itself exited101 and is not reported as a clean run. No
+assertion, retry limit or ignore was changed. Shared Runner rollout remains pending.
