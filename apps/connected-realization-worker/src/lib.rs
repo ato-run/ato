@@ -1673,7 +1673,9 @@ impl ConnectedWorker {
             self.heartbeat_best_effort(1);
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
-                let code = if message.contains("execution authorization") {
+                let code = if error.downcast_ref::<ato_runtime_attempt::launch::storage_capacity::InsufficientStorageSpace>().is_some() {
+                    ato_runtime_attempt::launch::storage_capacity::STORAGE_INSUFFICIENT_SPACE
+                } else if message.contains("execution authorization") {
                     "execution_authorization_ended"
                 } else {
                     "realization_failed"
@@ -1710,6 +1712,9 @@ impl ConnectedWorker {
 
     fn execute_lease(&self, lease: &ClaimedLease) -> Result<()> {
         validate_lease(lease, SystemTime::now())?;
+        // Refuse a full filesystem before any lease directory, journal,
+        // workspace download, state writer or workload can be created.
+        ato_runtime_attempt::launch::storage_capacity::require_capacity(&self.config.work_root, 1)?;
         self.api.report_status(&lease.id, "preparing")?;
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
