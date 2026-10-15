@@ -81,6 +81,26 @@ impl std::fmt::Display for OciVolumeUnauthorized {
 
 impl std::error::Error for OciVolumeUnauthorized {}
 
+/// A writable state binding cannot select root inside the container merely
+/// because the host directory was initialized by a privileged operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciWritableUserUnauthorized {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl std::fmt::Display for OciWritableUserUnauthorized {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "oci_writable_user_unauthorized: writable OCI state requires a non-root owner; observed {}:{}",
+            self.uid, self.gid
+        )
+    }
+}
+
+impl std::error::Error for OciWritableUserUnauthorized {}
+
 /// Remove a container a failed launch may have left, and confirm it is gone.
 fn discard_failed_launch(
     docker: &DockerClient,
@@ -385,6 +405,9 @@ impl DockerOciAdapter {
     }
 
     fn admit_image(&self) -> Result<(OciAdmission, String)> {
+        // Check the state binding before an image pull or any container can
+        // be created. The run-argument projection checks it again at launch.
+        writable_mount_user(&self.spec)?;
         let version = run_checked(
             &self.docker,
             ["version", "--format", "{{.Server.Version}}"],
@@ -1575,14 +1598,22 @@ fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
             .with_context(|| format!("inspect OCI mount source {}", mount.host_path.display()))?;
         owners.insert((metadata.uid(), metadata.gid()));
     }
+    writable_owner_user(owners)
+}
+
+#[cfg(unix)]
+fn writable_owner_user(owners: BTreeSet<(u32, u32)>) -> Result<Option<String>> {
     ensure!(
         owners.len() <= 1,
         "writable OCI mount sources must have one host owner"
     );
-    Ok(owners
-        .into_iter()
-        .next()
-        .map(|(uid, gid)| format!("{uid}:{gid}")))
+    let Some((uid, gid)) = owners.into_iter().next() else {
+        return Ok(None);
+    };
+    if uid == 0 || gid == 0 {
+        return Err(anyhow::Error::new(OciWritableUserUnauthorized { uid, gid }));
+    }
+    Ok(Some(format!("{uid}:{gid}")))
 }
 
 #[cfg(not(unix))]
@@ -2043,7 +2074,7 @@ mod tests {
                 writable: false,
             },
         ];
-        let args = docker_run_arguments(
+        let result = docker_run_arguments(
             &value,
             workspace.path(),
             &env_file,
@@ -2051,8 +2082,18 @@ mod tests {
             "ato-test-net",
             None,
             "sha256:verified-local-id",
-        )
-        .unwrap();
+        );
+        let metadata = fs::metadata(writable.path()).unwrap();
+        if metadata.uid() == 0 || metadata.gid() == 0 {
+            assert!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<OciWritableUserUnauthorized>()
+                    .is_some()
+            );
+            return;
+        }
+        let args = result.unwrap();
         let rendered = args.join(" ");
         assert!(rendered.contains("dst=/data"));
         assert!(!rendered.contains("dst=/data,readonly"));
@@ -2061,9 +2102,52 @@ mod tests {
             .iter()
             .position(|value| value == "--user")
             .map(|index| args[index + 1].as_str());
-        let metadata = fs::metadata(writable.path()).unwrap();
         let expected_user = format!("{}:{}", metadata.uid(), metadata.gid());
         assert_eq!(user, Some(expected_user.as_str()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_state_never_selects_root_or_mixed_host_owners() {
+        assert_eq!(writable_owner_user(BTreeSet::new()).unwrap(), None);
+        assert_eq!(
+            writable_owner_user(BTreeSet::from([(10001, 10001)])).unwrap(),
+            Some("10001:10001".to_owned())
+        );
+        for (uid, gid) in [(0, 0), (0, 10001), (10001, 0)] {
+            let error = writable_owner_user(BTreeSet::from([(uid, gid)])).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<OciWritableUserUnauthorized>(),
+                Some(&OciWritableUserUnauthorized { uid, gid })
+            );
+        }
+        assert!(writable_owner_user(BTreeSet::from([(10001, 10001), (911, 911)])).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_owned_writable_state_is_refused_before_any_docker_command() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = fs::metadata("/").unwrap();
+        assert!(root.uid() == 0 || root.gid() == 0);
+        let (_directory, client) = fake_docker("#!/bin/sh\nexit 99\n");
+        let mut value = spec();
+        value.endpoints.clear();
+        value.mounts.push(OciMount {
+            host_path: PathBuf::from("/"),
+            guest_path: "/data".to_owned(),
+            writable: true,
+        });
+        let adapter = DockerOciAdapter::new_at(value, client.executable.as_ref().clone()).unwrap();
+        let error = adapter.admit().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<OciWritableUserUnauthorized>(),
+            Some(&OciWritableUserUnauthorized {
+                uid: root.uid(),
+                gid: root.gid()
+            })
+        );
     }
 
     #[test]
