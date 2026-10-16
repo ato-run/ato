@@ -107,6 +107,7 @@ const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     ato_runtime_attempt::startup::PROCESS_STARTUP_RUNTIME_FEATURE,
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     NAMESPACE_ISOLATION_CAPABILITY,
+    "isolation:runtime_launch=untrusted-v1",
 ];
 
 /// Capabilities that exist only when this host can actually run Firecracker.
@@ -160,6 +161,8 @@ fn advertised_capabilities(
 ) -> Vec<&'static str> {
     if host_boundary {
         capabilities.retain(|capability| *capability != NAMESPACE_ISOLATION_CAPABILITY);
+        capabilities.retain(|capability| *capability != "isolation:runtime_launch=untrusted-v1");
+        capabilities.push("isolation:runtime_launch=host-boundary-v1");
         capabilities.push(runtime_launch::host_boundary::ISOLATION_CAPABILITY);
     }
     if has_accelerator {
@@ -6704,10 +6707,13 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
     fn a_host_boundary_runner_never_advertises_namespace_isolation() {
         let base = runner_capabilities(false, false, false, false, false);
         assert!(base.contains(&"isolation=untrusted-v1"));
+        assert!(base.contains(&"isolation:runtime_launch=untrusted-v1"));
 
         let host_boundary = advertised_capabilities(base.clone(), true, false);
         assert!(host_boundary.contains(&"isolation=host-boundary-v1"));
         assert!(!host_boundary.contains(&"isolation=untrusted-v1"));
+        assert!(!host_boundary.contains(&"isolation:runtime_launch=untrusted-v1"));
+        assert!(host_boundary.contains(&"isolation:runtime_launch=host-boundary-v1"));
         assert!(!host_boundary.contains(&"gpu"));
 
         // The default mode is unchanged, byte for byte.
