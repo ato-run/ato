@@ -955,11 +955,16 @@ pub fn start(
     };
     let launched = match &spec.realization {
         LaunchRealizationV1::Process(_) => {
-            let mut launched = match super::process_executor::launch_process_with(
-                spec,
-                &resolved.context,
-                process_host,
-            ) {
+            let launch = if super::host_boundary::active().is_some() {
+                super::process_executor::launch_process_with(spec, &resolved.context, process_host)
+            } else {
+                super::process_executor::launch_process_isolated(
+                    spec,
+                    &resolved.context,
+                    process_host,
+                )
+            };
+            let mut launched = match launch {
                 Ok(launched) => launched,
                 Err(error) => {
                     // `launch_process` fails before spawning or kills

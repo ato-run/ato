@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ato_objects::{PortableApplicationBundle, PortableDependencyProfile};
 use ato_portable_application::instance_snapshot::{
@@ -194,18 +194,36 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
 handler = functools.partial(SimpleHTTPRequestHandler, directory=sys.argv[2])
 httpd = LoopbackHTTPServer(('127.0.0.1', int(sys.argv[1])), handler)
 faulthandler.cancel_dump_traceback_later()
+print(httpd.server_address[1], flush=True)
 httpd.serve_forever()
 "#;
     let mut child = Command::new("python3")
-        .args(["-I", "-c", server, &port.to_string()])
+        // The child owns the port from bind onward. Releasing a probe port
+        // before spawn allowed a parallel fixture to answer readiness, then
+        // disappear before the validator's real observation.
+        .args(["-I", "-c", server, "0"])
         .arg(root)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("python3 runs the LocalProcess candidate");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        if let Some(status) = child.try_wait().expect("candidate status") {
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let announced = std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stdout)
+            .read_line(&mut line)
+            .map(|_| line.trim().parse::<u16>().ok())
+            .ok()
+            .flatten();
+        let _ = sender.send(result);
+    });
+    let port = match receiver.recv_timeout(Duration::from_secs(20)) {
+        Ok(Some(port)) if port > 0 => port,
+        other => {
+            let _ = child.kill();
+            let _ = child.wait();
+            announced.join().unwrap();
             let mut stderr = String::new();
             child
                 .stderr
@@ -214,23 +232,10 @@ httpd.serve_forever()
                 .take(4096)
                 .read_to_string(&mut stderr)
                 .unwrap();
-            panic!("the candidate exited before listening ({status}): {stderr}");
+            panic!("candidate did not announce its owned listener: {other:?}: {stderr}");
         }
-        if Instant::now() >= deadline {
-            child.kill().expect("stop timed-out candidate");
-            child.wait().expect("reap timed-out candidate");
-            let mut stderr = String::new();
-            child
-                .stderr
-                .take()
-                .unwrap()
-                .take(4096)
-                .read_to_string(&mut stderr)
-                .unwrap();
-            panic!("the candidate never listened: {stderr}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    };
+    announced.join().unwrap();
     Candidate::Process {
         child,
         ready_url: format!("http://127.0.0.1:{port}/"),

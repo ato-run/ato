@@ -146,6 +146,8 @@ pub fn state_working_copy(workspace_root: &Path, state_key: &str) -> PathBuf {
 /// object. What survives a Run is its committed state revision, and the
 /// receipt that names it.
 pub struct LaunchedProcess {
+    #[cfg(unix)]
+    isolated_network: Option<Box<IsolatedProcessNetwork>>,
     handle: ProcessHandle,
     run_id: String,
     runtime_executable: String,
@@ -361,6 +363,59 @@ pub fn launch_process_with_scoped_network(
     launch_process_inner(spec, context, host, Some((egress_socket, ingress_root)))
 }
 
+#[cfg(unix)]
+struct IsolatedProcessNetwork {
+    _egress: crate::network_bridge::HostBridge,
+    ingress: Vec<(u16, std::sync::Arc<crate::network_bridge::IngressBridge>)>,
+}
+
+/// Reuse the scoped namespace transport, denying all undeclared runtime
+/// egress. The trusted ingress listeners stay outside the workload namespace.
+#[cfg(unix)]
+pub fn launch_process_isolated(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+) -> Result<LaunchedProcess> {
+    use std::os::unix::fs::PermissionsExt;
+    ensure!(
+        super::host_boundary::active().is_none(),
+        "isolated process requires namespaces"
+    );
+    std::fs::create_dir_all(&host.runtime_root)?;
+    let ingress_root = host.runtime_root.join("ingress");
+    std::fs::create_dir(&ingress_root)?;
+    std::fs::set_permissions(&ingress_root, std::fs::Permissions::from_mode(0o700))?;
+    let egress_socket = host.runtime_root.join("egress.sock");
+    let egress = crate::network_bridge::HostBridge::deny(&egress_socket)?;
+    let mut ingress = Vec::new();
+    for endpoint in context.endpoints() {
+        ingress.push((
+            endpoint.host_port,
+            std::sync::Arc::new(crate::network_bridge::IngressBridge::start(
+                ingress_root.join(format!("{}.sock", endpoint.host_port)),
+                endpoint.host_port,
+            )?),
+        ));
+    }
+    let mut process =
+        launch_process_with_scoped_network(spec, context, host, &egress_socket, &ingress_root)?;
+    process.isolated_network = Some(Box::new(IsolatedProcessNetwork {
+        _egress: egress,
+        ingress,
+    }));
+    Ok(process)
+}
+
+#[cfg(not(unix))]
+pub fn launch_process_isolated(
+    _: &RuntimeLaunchSpecV1,
+    _: &ResolvedRuntimeLaunchContext,
+    _: &ProcessLaunchHost,
+) -> Result<LaunchedProcess> {
+    anyhow::bail!("isolated process network requires Unix namespaces")
+}
+
 fn launch_process_inner(
     spec: &RuntimeLaunchSpecV1,
     context: &ResolvedRuntimeLaunchContext,
@@ -501,6 +556,8 @@ fn launch_process_inner(
         .spawn(context.workspace_root())
         .context("failed to spawn the contained workload")?;
     Ok(LaunchedProcess {
+        #[cfg(unix)]
+        isolated_network: None,
         handle,
         run_id: spec.context.run_id.clone(),
         runtime_executable,
@@ -588,6 +645,8 @@ fn launch_host_boundary(
         .spawn(context.workspace_root())
         .context("failed to spawn the host-boundary workload")?;
     Ok(LaunchedProcess {
+        #[cfg(unix)]
+        isolated_network: None,
         handle,
         run_id: spec.context.run_id.clone(),
         runtime_executable,
@@ -706,10 +765,32 @@ pub fn wait_until_ready(
     let Some((port, path)) = target else {
         return Ok(());
     };
+    // The host-side bridge may listen before the workload. Its handshake is
+    // readiness only after the namespace-side application accepted a socket.
+    #[cfg(unix)]
+    let tcp_bridge = if path.is_empty() {
+        launched.isolated_network.as_ref().and_then(|network| {
+            network
+                .ingress
+                .iter()
+                .find(|(endpoint_port, _)| *endpoint_port == port)
+                .map(|(_, bridge)| std::sync::Arc::clone(bridge))
+        })
+    } else {
+        None
+    };
     let record = launched.startup_record.clone();
     crate::startup::wait_for_readiness(
         Duration::from_millis(timeout_ms),
         |budget| {
+            #[cfg(unix)]
+            if let Some(bridge) = &tcp_bridge {
+                return Ok(crate::startup::ReadinessObservation {
+                    ready: bridge.ready().is_ok(),
+                    http_status: None,
+                    detail: None,
+                });
+            }
             probe
                 .observe(port, &path, budget)
                 .map_err(anyhow::Error::msg)
@@ -961,6 +1042,81 @@ mod tests {
         assert!(error.to_string().contains("oci"), "{error}");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a built connected Worker and a Linux namespace host"]
+    fn isolated_process_serves_http_but_cannot_reach_host_or_control_credentials() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let host_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let host_port = host_listener.local_addr().unwrap().port();
+        let code = format!(
+            r#"
+import os, socket, sqlite3
+from http.server import BaseHTTPRequestHandler, HTTPServer
+s = socket.socket(); s.settimeout(0.2)
+assert s.connect_ex(('127.0.0.1', {host_port})) != 0, 'host network reachable'
+s.close()
+assert 'ATO_RUNNER_TOKEN' not in os.environ
+assert not os.path.exists('/root/.ssh/authorized_keys')
+db = sqlite3.connect('/data/test.sqlite')
+db.execute('CREATE TABLE IF NOT EXISTS proof(value TEXT)')
+db.execute('INSERT INTO proof VALUES (?)', ('isolated',)); db.commit()
+class H(BaseHTTPRequestHandler):
+ def do_GET(self):
+  self.send_response(200); self.end_headers(); self.wfile.write(b'isolated')
+HTTPServer(('127.0.0.1', 34567), H).serve_forever()
+"#
+        );
+        std::fs::write(fixture.context.workspace_root().join("probe.py"), code).unwrap();
+        let mut spec = spec(PROCESS_FIXTURE);
+        spec.realization =
+            LaunchRealizationV1::Process(ato_ipc::runtime_launch::ProcessRealizationV1 {
+                argv: vec!["python3".into(), "/app/probe.py".into()],
+                executable: None,
+                required_abi: None,
+            });
+        spec.endpoints[0].name = "web".into();
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "web".into(),
+            path: "/".into(),
+            timeout_ms: 5000,
+        };
+        let runtime = tempfile::Builder::new()
+            .prefix("isolated-")
+            .tempdir()
+            .unwrap();
+        let host = ProcessLaunchHost {
+            shim: std::env::var_os("ATO_TEST_WORKER_BIN")
+                .expect("built worker path")
+                .into(),
+            runtime_root: runtime.path().join("runtime"),
+            output: None,
+        };
+        let mut launched = launch_process_isolated(&spec, &fixture.context, &host).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let probe = LoopbackReadinessProbe::new(client.clone());
+        wait_until_ready(&spec, &fixture.context, &mut launched, &probe).unwrap();
+        assert_eq!(
+            client
+                .get("http://127.0.0.1:34567/")
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "isolated"
+        );
+        launched.stop(&spec.lifecycle).unwrap();
+        assert!(std::net::TcpStream::connect(("127.0.0.1", 34567)).is_err());
+        assert!(
+            state_working_copy(fixture.context.workspace_root(), "app_data")
+                .join("test.sqlite")
+                .is_file()
+        );
+    }
+
     #[test]
     fn the_workload_learns_its_state_path_by_name() {
         let fixture = context_with_state(StateAccessV1::ReadWrite);
@@ -1014,6 +1170,8 @@ mod tests {
             timeout_ms: 10,
         };
         let mut launched = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
             handle: spawn_true(),
             run_id: spec.context.run_id.clone(),
             runtime_executable: "/bin/true".to_owned(),
@@ -1104,6 +1262,8 @@ mod tests {
             timeout_ms: 60,
         };
         let mut launched = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
             handle: spawn_sleep(),
             run_id: spec.context.run_id.clone(),
             runtime_executable: "/bin/sleep".to_owned(),
@@ -1168,6 +1328,8 @@ mod tests {
         .spawn(root.path())
         .expect("spawn");
         let process = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
             handle,
             run_id: "owned".into(),
             runtime_executable: "/bin/sh".into(),
@@ -1247,6 +1409,8 @@ mod tests {
             timeout_ms: 180000,
         };
         let mut launched = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
             handle: spawn_sleep(),
             run_id: spec.context.run_id.clone(),
             runtime_executable: "/bin/sleep".into(),
