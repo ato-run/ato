@@ -1856,26 +1856,29 @@ fn portable_instance_worker_claimed(
     }
     let restored_snapshot_ref = instance.data_snapshot_ref.clone();
     let static_state = if selected.realization == PortableRealizationKind::StaticWeb {
-        store
-            .local_surface_snapshot(&claimed.instance_id)?
-            .map(|snapshot| {
-                let persistence_token =
-                    bundle_sha256(format!("{}\0local-state", claimed.token).as_bytes());
-                StaticApplicationState {
-                    persistence_token,
-                    local_storage: snapshot.local_storage,
-                    assets: snapshot
-                        .assets
-                        .into_iter()
-                        .map(|asset| StaticApplicationAsset {
-                            asset_id: asset.asset_id,
-                            filename: asset.filename,
-                            content_type: asset.content_type,
-                            bytes: asset.bytes,
-                        })
-                        .collect(),
-                }
-            })
+        let snapshot = store.local_surface_snapshot(&claimed.instance_id)?;
+        Some({
+            let persistence_token =
+                bundle_sha256(format!("{}\0local-state", claimed.token).as_bytes());
+            StaticApplicationState {
+                persistence_token,
+                local_storage: snapshot
+                    .as_ref()
+                    .map(|value| value.local_storage.clone())
+                    .unwrap_or_default(),
+                assets: snapshot
+                    .map(|value| value.assets)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|asset| StaticApplicationAsset {
+                        asset_id: asset.asset_id,
+                        filename: asset.filename,
+                        content_type: asset.content_type,
+                        bytes: asset.bytes,
+                    })
+                    .collect(),
+            }
+        })
     } else {
         None
     };
@@ -2717,7 +2720,8 @@ fn verified_python(executable: &str, version: &str) -> Result<(String, String)> 
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if !output.status.success() || !reported.trim().starts_with(&format!("Python {version}.")) {
+    let actual = reported.trim().strip_prefix("Python ").unwrap_or_default();
+    if !output.status.success() || !(actual == version || actual.starts_with(&format!("{version}."))) {
         bail!(
             "selected Python executable {executable} does not satisfy {version}: {}",
             reported.trim()

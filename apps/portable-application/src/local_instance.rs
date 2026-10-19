@@ -466,7 +466,27 @@ impl LocalApplicationStore {
         self.ensure_snapshot_write_fence(instance_id, Some(run_token))?;
         let instance = self.instance(instance_id)?;
         let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() else {
-            return Ok(None);
+            let bytes = encode_browser_state(local_storage)
+                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+            let reference = bundle_sha256(&bytes);
+            let snapshot = InstanceSnapshotV1 {
+                schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+                resources: vec![InstanceSnapshotResourceV1 {
+                    slot: "browser".to_owned(),
+                    protocol: BROWSER_INSTANCE_STATE_PROTOCOL.to_owned(),
+                    content_ref: reference.clone(),
+                }],
+                assets: Vec::new(),
+                asset_bindings: Vec::new(),
+            };
+            return self
+                .persist_snapshot(
+                    instance_id,
+                    snapshot,
+                    &BTreeMap::from([(reference, bytes)]),
+                    Some(run_token),
+                )
+                .map(Some);
         };
         let source_bytes = self.bundle_bytes(&instance)?;
         let source = portable_bundle(&source_bytes)?;
@@ -478,13 +498,10 @@ impl LocalApplicationStore {
         let source_snapshot: InstanceSnapshotV1 = serde_json::from_slice(&snapshot_bytes)?;
         validate_snapshot(&source_snapshot)
             .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
-        if !source_snapshot
+        let has_browser_state = source_snapshot
             .resources
             .iter()
-            .any(|resource| resource.protocol == BROWSER_INSTANCE_STATE_PROTOCOL)
-        {
-            return Ok(None);
-        }
+            .any(|resource| resource.protocol == BROWSER_INSTANCE_STATE_PROTOCOL);
         let restored = self.restored_snapshot(instance_id)?.ok_or_else(|| {
             LocalInstanceError::InvalidState("restored snapshot is missing".into())
         })?;
@@ -551,6 +568,20 @@ impl LocalApplicationStore {
                 )));
             }
             content.insert(asset.content_ref.clone(), bytes);
+        }
+        if !has_browser_state {
+            let mut slot = "browser".to_owned();
+            while resources.iter().any(|resource| resource.slot == slot) {
+                slot.push('_');
+            }
+            let reference = bundle_sha256(&browser_bytes);
+            resources.push(InstanceSnapshotResourceV1 {
+                slot,
+                protocol: BROWSER_INSTANCE_STATE_PROTOCOL.to_owned(),
+                content_ref: reference.clone(),
+            });
+            content.insert(reference, browser_bytes);
+            resources.sort_by(|left, right| left.slot.cmp(&right.slot));
         }
         let snapshot = InstanceSnapshotV1 {
             schema: source_snapshot.schema,
@@ -1768,6 +1799,48 @@ mod tests {
                     "ato-asset://{}",
                     second_snapshot.assets[0].asset_id
                 ))
+        );
+    }
+
+    #[test]
+    fn first_browser_save_persists_without_an_imported_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _) = build_static_bundle(&fixture_root(), "Fresh app").unwrap();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let imported = store.import(&bytes, None).unwrap();
+        assert!(imported.data_snapshot_ref.is_none());
+        let run = store.claim_run(&imported.instance_id).unwrap();
+        let storage = BTreeMap::from([("draft".to_owned(), "first saved document".to_owned())]);
+        let saved = store
+            .save_browser_state_for_run(&imported.instance_id, &run.token, &storage)
+            .unwrap()
+            .expect("first write must create a snapshot");
+        store
+            .release_run(&imported.instance_id, &run.token)
+            .unwrap();
+        assert_ne!(saved.contract_ref, imported.contract_ref);
+        assert_eq!(
+            saved.selected_derivation_ref,
+            imported.selected_derivation_ref
+        );
+        let reopened = LocalApplicationStore::open(root.path()).unwrap();
+        assert_eq!(
+            reopened
+                .local_surface_snapshot(&imported.instance_id)
+                .unwrap()
+                .unwrap()
+                .local_storage,
+            storage
+        );
+        let exported = reopened.export_instance(&imported.instance_id).unwrap();
+        let copy = reopened.import(&exported, None).unwrap();
+        assert_eq!(
+            reopened
+                .local_surface_snapshot(&copy.instance_id)
+                .unwrap()
+                .unwrap()
+                .local_storage,
+            storage
         );
     }
 
