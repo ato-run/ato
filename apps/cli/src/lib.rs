@@ -1669,7 +1669,9 @@ fn stop_local_instance(instance_id: &str) -> Result<()> {
     fs::write(&request, b"stop")?;
     let mut acknowledged = None;
     let mut worker_exited = false;
-    for _ in 0..250 {
+    // Docker may use its full ten-second termination grace before confirming
+    // the container stopped. Leave time for that and the durable snapshot.
+    for _ in 0..1500 {
         if let Ok(value) = fs::read_to_string(&ack) {
             acknowledged = Some(value);
             break;
