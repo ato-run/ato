@@ -70,7 +70,9 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         match self.validated.realization {
             PortableRealizationKind::StaticWeb => None,
             PortableRealizationKind::LocalProcess => {
-                if !self.validated.derivation.state.is_empty() && !cfg!(target_os = "linux") {
+                if !self.validated.derivation.state.is_empty()
+                    && !cfg!(any(target_os = "linux", target_os = "macos"))
+                {
                     return refused(
                         "state_needs_linux_sandbox",
                         "local process runtime admission failed: declared filesystem state \
@@ -82,12 +84,12 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
             // The adapter forwards a container's Port from its internal
             // bridge, which Docker Desktop keeps inside its VM.
             PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup
-                if !cfg!(target_os = "linux") =>
+                if !cfg!(any(target_os = "linux", target_os = "macos")) =>
             {
                 refused(
                     "oci_needs_native_linux",
                     format!(
-                        "{} routes require a native Linux Docker host",
+                        "{} routes require Linux or macOS Docker Desktop",
                         self.validated.realization.label()
                     ),
                 )
@@ -204,7 +206,19 @@ impl PortableBundleExecutor<'_> {
         environment.extend(self.binding_environment.clone());
         environment.insert(endpoint_name, host_port.clone());
         for state in state_mounts {
-            environment.insert(state_path_env_name(&state.id), state.guest_path.clone());
+            environment.insert(
+                state_path_env_name(&state.id),
+                if cfg!(target_os = "macos") {
+                    state.host_path.display().to_string()
+                } else {
+                    state.guest_path.clone()
+                },
+            );
+        }
+        if cfg!(target_os = "macos") {
+            for value in environment.values_mut().chain(command.iter_mut()) {
+                *value = project_process_state_path(value, state_mounts);
+            }
         }
         let process_runtime = self.runtime_root.join("process");
         fs::create_dir_all(&process_runtime).with_context(|| {
@@ -217,7 +231,7 @@ impl PortableBundleExecutor<'_> {
         let process_home = process_runtime.join("home");
         fs::create_dir_all(&process_tmp).context("create the process tmp directory")?;
         fs::create_dir_all(&process_home).context("create the process home directory")?;
-        if state_mounts.is_empty() {
+        if state_mounts.is_empty() || cfg!(target_os = "macos") {
             environment.insert(
                 "ATO_RUNTIME_DIR".to_owned(),
                 process_runtime.display().to_string(),
@@ -268,6 +282,45 @@ impl PortableBundleExecutor<'_> {
             execution: evidence("process", Some(executable), Some(version), Some(pid), &base),
             kept: None,
         })
+    }
+}
+
+fn project_process_state_path(value: &str, state_mounts: &[super::PortableStateMount]) -> String {
+    for state in state_mounts {
+        if let Ok(relative) = Path::new(value).strip_prefix(&state.guest_path) {
+            return state.host_path.join(relative).display().to_string();
+        }
+    }
+    value.to_owned()
+}
+
+#[cfg(test)]
+mod state_path_tests {
+    use super::*;
+
+    #[test]
+    fn projects_only_paths_beneath_the_declared_mount() {
+        let mounts = [super::super::PortableStateMount {
+            id: "data".to_owned(),
+            host_path: PathBuf::from("/local/instance/data"),
+            guest_path: "/data".to_owned(),
+        }];
+        assert_eq!(
+            project_process_state_path("/data", &mounts),
+            "/local/instance/data/"
+        );
+        assert_eq!(
+            project_process_state_path("/data/notes.sqlite", &mounts),
+            "/local/instance/data/notes.sqlite"
+        );
+        assert_eq!(
+            project_process_state_path("/database/notes.sqlite", &mounts),
+            "/database/notes.sqlite"
+        );
+        assert_eq!(
+            project_process_state_path("--database=/data/notes.sqlite", &mounts),
+            "--database=/data/notes.sqlite"
+        );
     }
 }
 
@@ -412,7 +465,26 @@ impl PortableBundleExecutor<'_> {
                     .cloned()
                     .unwrap_or_else(|| "/app".to_owned()),
                 environment,
-                endpoints: if surface_port.from == step.id {
+                endpoints: if cfg!(target_os = "macos") {
+                    derivation
+                        .ports
+                        .iter()
+                        .filter(|port| port.from == step.id)
+                        .filter_map(|port| port.guest_port)
+                        .map(|guest_port| {
+                            Ok(OciEndpoint {
+                                host_port: if surface_port.from == step.id
+                                    && surface_port.guest_port == Some(guest_port)
+                                {
+                                    host_port
+                                } else {
+                                    free_loopback_port()?
+                                },
+                                guest_port,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                } else if surface_port.from == step.id {
                     vec![OciEndpoint {
                         host_port,
                         guest_port: surface_port
@@ -500,11 +572,6 @@ fn wait_until_service_accepts_tcp(
     name: &str,
     group: &ato_adapter_oci::OciServiceGroup,
 ) -> Result<()> {
-    let address = group
-        .services()
-        .find(|(service, _)| *service == name)
-        .map(|(_, handle)| handle.container_address())
-        .context("service was not started")?;
     let guest_port = route
         .derivation
         .ports
@@ -512,12 +579,17 @@ fn wait_until_service_accepts_tcp(
         .find(|port| port.from == name)
         .and_then(|port| port.guest_port)
         .context("OCI service serves no Port")?;
+    let target = group
+        .services()
+        .find(|(service, _)| *service == name)
+        .context("service was not started")?
+        .1
+        .probe_endpoint(guest_port)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         if let Some((service, code)) = group.exited_service()? {
             bail!("OCI service `{service}` exited before the group was ready: {code}");
         }
-        let target = std::net::SocketAddr::new(address, guest_port);
         if std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_millis(500))
             .is_ok()
         {

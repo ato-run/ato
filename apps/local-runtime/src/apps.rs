@@ -92,9 +92,19 @@ impl AppSupport {
     /// The child deliberately stays in this process's group — that is what
     /// makes the supervised worker reachable by the host's group teardown.
     fn run(&self, args: &[String]) -> Result<Vec<u8>> {
-        let output = Command::new(&self.ato_bin)
+        let mut command = Command::new(&self.ato_bin);
+        command.env_clear();
+        for name in [
+            "DOCKER_HOST",
+            "UV_PYTHON_INSTALL_DIR",
+            "ATO_OCI_PORT_PROXY_DIR",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        let output = command
             .args(args)
-            .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &self.app_home)
             .env("ATO_HOME", &self.app_home)

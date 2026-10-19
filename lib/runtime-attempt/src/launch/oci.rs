@@ -404,8 +404,8 @@ pub fn launch_service_group(
     budget: StopBudget,
 ) -> Result<OciServiceGroup> {
     ensure!(
-        cfg!(target_os = "linux"),
-        "OCI service groups require a native Linux Runner"
+        cfg!(any(target_os = "linux", target_os = "macos")),
+        "OCI service groups require Linux or macOS Docker Desktop"
     );
     let group_spec = spec.service_group();
     let names = group_spec

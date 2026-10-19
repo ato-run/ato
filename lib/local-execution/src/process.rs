@@ -114,7 +114,9 @@ fn boot_session_identity() -> Result<String> {
 
 #[cfg(target_os = "macos")]
 fn boot_session_identity() -> Result<String> {
-    command_output("sysctl", &["-n", "kern.boottime"])
+    // kern.boottime's microseconds change when macOS adjusts its wall clock.
+    // The boot UUID stays stable across clock corrections and sleep/wake.
+    command_output("/usr/sbin/sysctl", &["-n", "kern.bootsessionuuid"])
         .context("kernel boot identity is unavailable")
 }
 
@@ -153,7 +155,12 @@ fn current_process_group() -> Result<u32> {
 
 #[cfg(any(unix, windows))]
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
+    let output = Command::new(program)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .output()
+        .ok()?;
     output
         .status
         .success()
@@ -174,5 +181,13 @@ mod tests {
         let mut stale = identity;
         stale.process_start_time.push_str("-stale");
         assert!(!stale.matches_live_process().unwrap());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn boot_identity_is_the_stable_kernel_session_uuid() {
+        let identity = boot_session_identity().unwrap();
+        assert_eq!(identity.len(), 36);
+        assert_eq!(identity, boot_session_identity().unwrap());
     }
 }

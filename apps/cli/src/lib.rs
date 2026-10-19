@@ -2721,7 +2721,9 @@ fn verified_python(executable: &str, version: &str) -> Result<(String, String)> 
         String::from_utf8_lossy(&output.stderr)
     );
     let actual = reported.trim().strip_prefix("Python ").unwrap_or_default();
-    if !output.status.success() || !(actual == version || actual.starts_with(&format!("{version}."))) {
+    if !output.status.success()
+        || !(actual == version || actual.starts_with(&format!("{version}.")))
+    {
         bail!(
             "selected Python executable {executable} does not satisfy {version}: {}",
             reported.trim()
@@ -2827,7 +2829,7 @@ fn portable_process_sandbox_command(
                 state_mounts,
             );
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             bail!(
                 "local process runtime admission failed: declared filesystem state requires a Linux bubblewrap sandbox"
@@ -2852,7 +2854,10 @@ fn portable_process_sandbox_command(
     .map(PathBuf::from)
     .filter(|path| path.exists());
     let policy = SandboxPolicy::new()
-        .allow_read_write([runtime_root.clone()])
+        .allow_read_write(
+            std::iter::once(runtime_root.clone())
+                .chain(state_mounts.iter().map(|state| state.host_path.clone())),
+        )
         .allow_read_only(
             [workspace, interpreter_root]
                 .into_iter()

@@ -348,7 +348,6 @@ const rawRemove=Storage.prototype.removeItem;
 const rawClear=Storage.prototype.clear;
 rawClear.call(storage);
 for(const [key,value] of Object.entries(initial)) rawSet.call(storage,key,value);
-let queue=Promise.resolve();
 function current(){{
   const values={{}};
   for(const key of Object.keys(storage).sort()) values[key]=storage.getItem(key);
@@ -356,16 +355,19 @@ function current(){{
 }}
 function persist(){{
   const body=JSON.stringify({{local_storage:current()}});
-  queue=queue.then(()=>fetch('/__ato/instance-state/local-storage',{{
-    method:'POST',credentials:'same-origin',keepalive:true,
-    headers:{{'content-type':'application/json','x-ato-state-token':'{persistence_token}'}},body
-  }})).catch(()=>{{}});
-  return queue;
+  // Storage mutations are synchronous. Acknowledge them only after the local
+  // runtime has the new state, so an immediate Stop cannot overtake a save.
+  const request=new XMLHttpRequest();
+  request.open('POST','/__ato/instance-state/local-storage',false);
+  request.setRequestHeader('content-type','application/json');
+  request.setRequestHeader('x-ato-state-token','{persistence_token}');
+  request.send(body);
+  if(request.status!==200)throw new Error('Ato could not save application data');
 }}
 Storage.prototype.setItem=function(key,value){{rawSet.call(this,key,value);if(this===storage)persist();}};
 Storage.prototype.removeItem=function(key){{rawRemove.call(this,key);if(this===storage)persist();}};
 Storage.prototype.clear=function(){{rawClear.call(this);if(this===storage)persist();}};
-window.__atoLocalStateFlush=persist;
+window.__atoLocalStateFlush=async()=>persist();
 }})();</script>"#
     );
     let mut html = String::from_utf8(body.to_vec())

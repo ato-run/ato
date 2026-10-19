@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -183,8 +183,8 @@ impl DockerOciAdapter {
     pub fn new(spec: OciSpec) -> Result<Self> {
         validate_spec(&spec)?;
         ensure!(
-            cfg!(target_os = "linux") || spec.endpoints.is_empty(),
-            "OCI runtime admission failed: isolated HTTP endpoints currently require a native Linux host; Docker Desktop keeps the internal bridge inside its VM"
+            cfg!(any(target_os = "linux", target_os = "macos")) || spec.endpoints.is_empty(),
+            "OCI runtime admission failed: isolated HTTP endpoints require Linux or macOS Docker Desktop"
         );
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
@@ -423,7 +423,17 @@ impl DockerOciAdapter {
         };
         let mut forwarders = Vec::with_capacity(self.spec.endpoints.len());
         for endpoint in &self.spec.endpoints {
-            match PortForwarder::start(endpoint.host_port, container_address, endpoint.guest_port) {
+            let forwarder = if cfg!(target_os = "macos") {
+                PortForwarder::start_docker(
+                    endpoint.host_port,
+                    self.docker.clone(),
+                    container_id.clone(),
+                    endpoint.guest_port,
+                )
+            } else {
+                PortForwarder::start(endpoint.host_port, container_address, endpoint.guest_port)
+            };
+            match forwarder {
                 Ok(forwarder) => forwarders.push(forwarder),
                 Err(error) => {
                     drop(forwarders);
@@ -916,6 +926,23 @@ impl OciHandle {
         self.container_address
     }
 
+    /// Host-reachable endpoint; Docker Desktop's bridge lives inside its VM.
+    pub fn probe_endpoint(&self, guest_port: u16) -> Result<SocketAddr> {
+        if cfg!(target_os = "macos") {
+            let endpoint = self
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.guest_port == guest_port)
+                .context("OCI service probe Port was not published on loopback")?;
+            Ok(SocketAddr::new(
+                Ipv4Addr::LOCALHOST.into(),
+                endpoint.host_port,
+            ))
+        } else {
+            Ok(SocketAddr::new(self.container_address, guest_port))
+        }
+    }
+
     pub fn image(&self) -> &str {
         &self.image
     }
@@ -988,6 +1015,34 @@ impl OciHandle {
     }
 }
 
+fn port_proxy_path(platform: &str) -> Result<PathBuf> {
+    let arch = match platform {
+        "linux/amd64" => "amd64",
+        "linux/arm64" => "arm64",
+        _ => bail!("unsupported Docker Desktop proxy platform {platform}"),
+    };
+    let directory = std::env::var_os("ATO_OCI_PORT_PROXY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(
+            std::env::current_exe()?
+                .parent()
+                .context("OCI host binary has no directory")?
+                .to_path_buf(),
+        );
+    let proxy = PathBuf::from(directory).join(format!("ato-oci-port-proxy-linux-{arch}"));
+    Ok(proxy)
+}
+
+#[derive(Clone)]
+enum PortTarget {
+    Tcp(SocketAddr),
+    Docker {
+        docker: PathBuf,
+        container: String,
+        port: u16,
+    },
+}
+
 struct PortForwarder {
     stop: Sender<()>,
     thread: Option<JoinHandle<()>>,
@@ -995,12 +1050,29 @@ struct PortForwarder {
 
 impl PortForwarder {
     fn start(host_port: u16, container_address: IpAddr, guest_port: u16) -> Result<Self> {
+        Self::bind(
+            host_port,
+            PortTarget::Tcp(SocketAddr::new(container_address, guest_port)),
+        )
+    }
+
+    fn start_docker(host_port: u16, docker: PathBuf, container: String, port: u16) -> Result<Self> {
+        Self::bind(
+            host_port,
+            PortTarget::Docker {
+                docker,
+                container,
+                port,
+            },
+        )
+    }
+
+    fn bind(host_port: u16, target: PortTarget) -> Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, host_port))
             .with_context(|| format!("bind loopback Port {host_port}"))?;
         listener
             .set_nonblocking(true)
             .context("make OCI Port forwarder non-blocking")?;
-        let target = SocketAddr::new(container_address, guest_port);
         let (stop, stopped) = mpsc::channel();
         let thread = thread::Builder::new()
             .name(format!("ato-oci-port-{host_port}"))
@@ -1022,7 +1094,7 @@ impl Drop for PortForwarder {
     }
 }
 
-fn run_port_forwarder(listener: TcpListener, target: SocketAddr, stopped: Receiver<()>) {
+fn run_port_forwarder(listener: TcpListener, target: PortTarget, stopped: Receiver<()>) {
     loop {
         match stopped.try_recv() {
             Ok(()) | Err(TryRecvError::Disconnected) => return,
@@ -1030,9 +1102,17 @@ fn run_port_forwarder(listener: TcpListener, target: SocketAddr, stopped: Receiv
         }
         match listener.accept() {
             Ok((client, _)) => {
+                let target = target.clone();
                 let _ = thread::Builder::new()
                     .name("ato-oci-port-connection".to_owned())
-                    .spawn(move || forward_connection(client, target));
+                    .spawn(move || match target {
+                        PortTarget::Tcp(address) => forward_connection(client, address),
+                        PortTarget::Docker {
+                            docker,
+                            container,
+                            port,
+                        } => forward_docker_connection(client, &docker, &container, port),
+                    });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -1040,6 +1120,39 @@ fn run_port_forwarder(listener: TcpListener, target: SocketAddr, stopped: Receiv
             Err(_) => return,
         }
     }
+}
+
+fn forward_docker_connection(mut client: TcpStream, docker: &Path, container: &str, port: u16) {
+    let Ok(mut child) = Command::new(docker)
+        .args([
+            "exec",
+            "--interactive",
+            container,
+            "/ato-port-proxy",
+            &port.to_string(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let (Some(mut input), Some(mut output), Ok(mut reader)) =
+        (child.stdin.take(), child.stdout.take(), client.try_clone())
+    else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
+    let upload = thread::spawn(move || {
+        let _ = io::copy(&mut reader, &mut input);
+    });
+    let _ = io::copy(&mut output, &mut client);
+    let _ = client.shutdown(Shutdown::Both);
+    let _ = upload.join();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn forward_connection(client: TcpStream, target: SocketAddr) {
@@ -1246,6 +1359,16 @@ fn docker_run_arguments(
     for (key, value) in &spec.labels {
         argv.extend(["--label".to_owned(), format!("{key}={value}")]);
     }
+    if cfg!(target_os = "macos") && !spec.endpoints.is_empty() {
+        let proxy = port_proxy_path(&spec.platform)?;
+        argv.extend([
+            "--mount".to_owned(),
+            format!(
+                "type=bind,src={},dst=/ato-port-proxy,readonly",
+                proxy.display()
+            ),
+        ]);
+    }
     if let Some(alias) = alias {
         argv.extend(["--network-alias".to_owned(), alias.to_owned()]);
     }
@@ -1438,11 +1561,11 @@ mod tests {
         assert!(validate_spec(&invalid).is_err());
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn vm_backed_docker_cannot_admit_an_isolated_http_endpoint() {
         let error = DockerOciAdapter::new(spec()).err().unwrap();
-        assert!(error.to_string().contains("native Linux host"));
+        assert!(error.to_string().contains("Linux or macOS"));
     }
 
     #[test]
