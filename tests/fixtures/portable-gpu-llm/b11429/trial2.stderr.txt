@@ -1,0 +1,12 @@
+0.00.126.588 I srv  llama_server: initializing ...
+0.00.126.611 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.126.798 I srv  init_listene: The UI is disabled
+0.00.126.804 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.126.952 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.130.236 I srv    load_model: loading model '/var/lib/ato/work/leases/01M4FTFERBP26V2905E2RTRG6D/inputs/models/qwen.gguf'
+0.00.562.899 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.01.157.890 I cmn          init: llama threadpool init, n_threads = 12
+0.01.241.897 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 4096, kv_unified = 'false'
+0.01.250.461 I srv  llama_server: model loaded
+0.01.250.487 I srv  llama_server: listening on unix:///var/lib/ato/work/leases/01M4FTFERBP26V2905E2RTRG6D/process-runtime/scratch/llm.sock
+2.40.587.625 I srv    operator(): operator(): cleaning up before exit...

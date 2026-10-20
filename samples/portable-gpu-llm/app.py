@@ -154,6 +154,10 @@ class Chat:
                     raise RuntimeError("Inference returned an error")
                 choices = value.get("choices", [])
                 text = choices[0].get("delta", {}).get("content", "") if choices else ""
+                # b11429 emits a role-only delta with content:null before text.
+                # It carries no generated content; other non-string values fail.
+                if text is None:
+                    continue
                 if not isinstance(text, str):
                     raise RuntimeError("Invalid inference stream")
                 with self.lock:

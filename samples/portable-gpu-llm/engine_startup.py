@@ -8,6 +8,7 @@ import sys
 import tarfile
 import threading
 import time
+from offload_evidence import OffloadEvidence
 
 LOG_LIMIT = 256 * 1024
 
@@ -47,11 +48,13 @@ class EngineStartup:
         self.child = None
         self.tail = {'stdout': b'', 'stderr': b''}
         self.log_errors = []
+        self.offload = OffloadEvidence()
         self.started = time.monotonic()
         self.diagnostic = {'schema': 'ato.gpu-engine-startup/1', 'stage': 'created', 'error': None,
                            'cuda_recognized': None, 'cuda_probe': None, 'abi': None,
                            'engine_exit_code': None, 'engine_started': False,
-                           'engine_http_status': None, 'offload_layers': None,
+                           'engine_http_status': None, 'offload_layers': None, 'offload_evidence': self.offload.snapshot(),
+                           'failure_reason': None, 'engine_log_verbosity': 5, 'engine_log_format': 'jsonl',
                            'elapsed_ms': 0, 'phases': [], 'log_limit_bytes_each': LOG_LIMIT, 'log_bytes_seen': {'stdout': 0, 'stderr': 0}}
         self.record()
 
@@ -67,7 +70,7 @@ class EngineStartup:
 
     def status(self):
         with self.lock:
-            return {k: self.diagnostic[k] for k in ['stage', 'cuda_recognized', 'engine_exit_code', 'engine_http_status', 'offload_layers', 'abi']}
+            return {k: self.diagnostic[k] for k in ['stage', 'cuda_recognized', 'engine_exit_code', 'engine_http_status', 'offload_layers', 'offload_evidence', 'failure_reason', 'abi']}
 
     def remaining(self):
         if self.stop.is_set():
@@ -87,6 +90,7 @@ class EngineStartup:
                 with self.lock:
                     self.tail[name] = (self.tail[name] + chunk)[-LOG_LIMIT:]
                     if persist:
+                        self.offload.feed(name, chunk)
                         self.diagnostic['log_bytes_seen'][name] += len(chunk)
                         if time.monotonic() - last_write >= 0.1:
                             atomic(self.chat.output / ('engine-' + name + '.log'), self.tail[name])
@@ -102,6 +106,8 @@ class EngineStartup:
     def spawn(self, argv, environment, persist):
         self.child = subprocess.Popen(argv, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.tail = {'stdout': b'', 'stderr': b''}
+        if persist:
+            self.offload = OffloadEvidence()
         threads = [threading.Thread(target=self.collect, args=(name, pipe, persist))
                    for name, pipe in [('stdout', self.child.stdout), ('stderr', self.child.stderr)]]
         for thread in threads:
@@ -172,8 +178,9 @@ class EngineStartup:
                 raise RuntimeError('Private inference socket path exceeds the Unix socket limit')
             self.remaining()
             engine_child, threads = self.spawn([str(engine), '--model', str(self.models / 'qwen.gguf'), '--offline', '--device', 'CUDA0',
-                                               '--gpu-layers', 'all', '--fit', 'off', '--split-mode', 'none', '--ctx-size', '4096',
-                                               '--parallel', '1', '--host', str(self.chat.socket_path), '--no-webui'], environment, True)
+                                               '--gpu-layers', 'all', '--fit', 'off', '--split-mode', 'none', '--no-host', '--no-repack', '--ctx-size', '4096',
+                                               '--parallel', '1', '--host', str(self.chat.socket_path), '--no-webui',
+                                               '--log-verbosity', '5', '--log-jsonl'], environment, True)
             self.record(stage='model_loading', engine_started=True, engine_pid=engine_child.pid)
             while True:
                 remaining = self.remaining()
@@ -184,10 +191,12 @@ class EngineStartup:
                 status = self.health(self.chat.socket_path, min(0.5, remaining))
                 self.remaining()
                 with self.lock:
-                    offload = re.search(r'offloaded (\d+)/(\d+) layers to GPU', (self.tail['stdout'] + self.tail['stderr']).decode(errors='replace'))
-                layers = [int(offload[1]), int(offload[2])] if offload else None
-                self.record(engine_http_status=status, offload_layers=layers)
-                if status == 200 and layers and layers[0] > 0 and layers[0] == layers[1]:
+                    evidence = self.offload.snapshot()
+                layers = [evidence['gpu_placed_layers'], evidence['target_total_layers']] if evidence['state'] in ('full', 'insufficient') else None
+                self.record(engine_http_status=status, offload_layers=layers, offload_evidence=evidence)
+                if status == 200 and evidence['state'] in ('insufficient', 'invalid'):
+                    raise RuntimeError('offload_insufficient' if evidence['state'] == 'insufficient' else 'offload_evidence_invalid')
+                if status == 200 and evidence['state'] == 'full':
                     self.record(stage='ready')
                     with self.chat.lock:
                         self.chat.phase = 'ready'
@@ -203,11 +212,19 @@ class EngineStartup:
                 self.chat.phase = 'stopped'
         except Exception as error:
             cancelled = self.stop.is_set()
+            reason = str(error)[:500]
+            if reason == 'startup_timeout':
+                if not self.diagnostic['engine_started']:
+                    reason = 'engine_not_started'
+                elif self.diagnostic['engine_http_status'] != 200:
+                    reason = 'model_preparing'
+                else:
+                    reason = 'offload_evidence_missing'
             with self.chat.lock:
                 self.chat.phase = 'cancelled' if cancelled else 'failed'
                 self.chat.error = None if cancelled else str(error)[:500]
             try:
-                self.record(stage=self.chat.phase, error=self.chat.error)
+                self.record(stage=self.chat.phase, error=self.chat.error, failure_reason=None if cancelled else reason)
             except OSError as save_error:
                 print(f'startup_diagnostic_save_failed:{type(save_error).__name__}', file=sys.stderr, flush=True)
         finally:
@@ -216,6 +233,6 @@ class EngineStartup:
                 for thread in threads:
                     thread.join(timeout=1)
                 self.record(engine_exit_code=code if engine_child else None, log_errors=self.log_errors,
-                            log_capture_complete=all(not thread.is_alive() for thread in threads))
+                            log_capture_complete=all(not thread.is_alive() for thread in threads), offload_evidence=self.offload.snapshot())
             finally:
                 self.finished.set()
