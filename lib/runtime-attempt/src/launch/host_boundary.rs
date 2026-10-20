@@ -70,15 +70,29 @@ pub fn enable(boundary: HostBoundary) -> Result<()> {
         ato_sandbox::effective_uid() == 0,
         "host-boundary isolation needs a root Runner: it must change user before running a workload"
     );
-    ensure!(
+    require_primitives(
         ato_sandbox::is_sandbox_supported(),
-        "host-boundary isolation needs Landlock, which this kernel does not provide"
-    );
+        ato_sandbox::is_seccomp_supported(),
+    )?;
     match ACTIVE.set(boundary) {
         Ok(()) => Ok(()),
         Err(_) if ACTIVE.get() == Some(&boundary) => Ok(()),
         Err(_) => bail!("host-boundary isolation was already enabled with a different user"),
     }
+}
+
+/// The mode is a package: Landlock for files, seccomp for syscalls. A host
+/// missing either must refuse the mode rather than deliver half of it.
+fn require_primitives(landlock: bool, seccomp: bool) -> Result<()> {
+    ensure!(
+        landlock,
+        "host-boundary isolation needs Landlock, which this kernel does not provide"
+    );
+    ensure!(
+        seccomp,
+        "host-boundary isolation needs seccomp, which this kernel does not provide"
+    );
+    Ok(())
 }
 
 /// The active boundary, when this process launches in host-boundary mode.
@@ -438,5 +452,12 @@ mod tests {
     fn a_root_workload_user_is_refused() {
         assert!(enable(HostBoundary { uid: 0, gid: 20001 }).is_err());
         assert!(enable(HostBoundary { uid: 20001, gid: 0 }).is_err());
+    }
+
+    #[test]
+    fn the_mode_is_refused_when_either_primitive_is_missing() {
+        assert!(require_primitives(true, true).is_ok());
+        assert!(require_primitives(false, true).is_err());
+        assert!(require_primitives(true, false).is_err());
     }
 }

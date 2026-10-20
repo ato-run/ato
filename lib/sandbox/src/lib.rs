@@ -122,8 +122,43 @@ pub fn bubblewrap_containment_available() -> bool {
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+#[cfg(target_os = "linux")]
+pub mod seccomp;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+/// Version of the seccomp profile a host-boundary launch installs.
+pub const SECCOMP_PROFILE_VERSION: &str = "host-boundary-seccomp-v1";
+
+/// Whether seccomp filter mode with `SECCOMP_RET_ERRNO` is available.
+pub fn is_seccomp_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        seccomp::is_supported()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Install the versioned seccomp profile on the current thread.
+///
+/// Callers that declare seccomp as required must treat any error as a refusal
+/// to run, never as a reason to continue without the filter.
+pub fn apply_seccomp() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        seccomp::apply()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(anyhow::anyhow!(
+            "seccomp is only available on Linux; refusing to run without it"
+        ))
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Sensitive Paths (shared across all platforms)

@@ -164,6 +164,7 @@ fn advertised_capabilities(
         capabilities.retain(|capability| *capability != "isolation:runtime_launch=untrusted-v1");
         capabilities.push("isolation:runtime_launch=host-boundary-v1");
         capabilities.push(runtime_launch::host_boundary::ISOLATION_CAPABILITY);
+        capabilities.push("seccomp=host-boundary-seccomp-v1");
     }
     if has_accelerator {
         capabilities.push(GPU_CAPABILITY);
@@ -6714,6 +6715,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(!host_boundary.contains(&"isolation=untrusted-v1"));
         assert!(!host_boundary.contains(&"isolation:runtime_launch=untrusted-v1"));
         assert!(host_boundary.contains(&"isolation:runtime_launch=host-boundary-v1"));
+        assert!(host_boundary.contains(&"seccomp=host-boundary-seccomp-v1"));
         assert!(!host_boundary.contains(&"gpu"));
 
         // The default mode is unchanged, byte for byte.
