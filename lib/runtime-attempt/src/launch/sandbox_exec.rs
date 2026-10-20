@@ -65,6 +65,10 @@ pub fn run_host_boundary(
             applied.message
         ));
     }
+    // The syscall boundary Landlock does not cover. Required, not optional:
+    // this mode is only advertised on a host where it can be installed.
+    ato_sandbox::apply_seccomp()
+        .context("sandbox-exec: seccomp is required in host-boundary mode")?;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
