@@ -1,0 +1,2 @@
+print_info: n_layer_all           = 28
+load_tensors: offloaded 29/29 layers to GPU

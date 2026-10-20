@@ -1,4 +1,4 @@
-"""Real CPU fixture processes/sockets; CUDA enumeration/offload text is simulated."""
+"""Real CPU processes/sockets; CUDA is simulated, logger fixtures are b11429-derived."""
 import importlib.util
 import json
 import os
@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 import app
 from engine_startup import EngineStartup, LOG_LIMIT
 
+FIXTURES = Path(__file__).resolve().parents[3] / 'tests' / 'fixtures' / 'portable-gpu-llm' / 'b11429'
+
 
 class StartupTests(unittest.TestCase):
     def setUp(self):
@@ -26,15 +28,24 @@ class StartupTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
-    def fixture(self, mode, timeout=2):
+    def fixture(self, mode, timeout=5):
         source = self.root / 'fixture'
         source.mkdir()
         engine = source / 'llama-server'
+        evidence = (FIXTURES / ('partial.callback.jsonl' if mode == 'partial' else 'full.callback.jsonl')).read_bytes()
+        if mode == 'fallback':
+            evidence = (FIXTURES / 'fallback.callback.jsonl').read_bytes()
+        if mode == 'unproved':
+            evidence = (FIXTURES / 'trial2.stderr.txt').read_bytes()
         engine.write_text(f'''#!{sys.executable}
 import os, sys, time, socketserver
 from http.server import BaseHTTPRequestHandler
 if '--help' in sys.argv: print('fixture help'); sys.exit(0)
 if '--list-devices' in sys.argv: print('CUDA0: fixture (simulated)'); sys.exit(0)
+assert sys.argv[sys.argv.index('--log-verbosity') + 1] == '5'
+assert '--log-jsonl' in sys.argv
+assert '--no-host' in sys.argv
+assert '--no-repack' in sys.argv
 print('fixture model load', flush=True)
 print('fixture stderr diagnostic', file=sys.stderr, flush=True)
 if {mode!r} == 'exit': sys.exit(7)
@@ -49,7 +60,10 @@ class Health(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
 class Server(socketserver.UnixStreamServer): pass
 time.sleep(0.25)
-print('offloaded 29/29 layers to GPU', file=sys.stderr, flush=True)
+stream = sys.stderr.buffer if {mode!r} == 'unproved' else sys.stdout.buffer
+stream.write({evidence!r}); stream.flush()
+if {mode!r} == 'ready-flood':
+    sys.stdout.buffer.write(b'x' * (300 * 1024) + bytes([10])); sys.stdout.buffer.flush()
 with Server(path, Health) as server: server.serve_forever()
 ''')
         engine.chmod(0o755)
@@ -89,23 +103,25 @@ with Server(path, Health) as server: server.serve_forever()
             urlopen(self.url, timeout=1)
         self.assertEqual(response.exception.code, 503)
         response.exception.close()
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 6
         while self.chat.phase == 'preparing' and time.monotonic() < deadline:
             time.sleep(0.01)
         with urlopen(self.url, timeout=1) as response:
             self.assertEqual(response.status, 200)
             self.assertEqual(response.read(), b'gpu-llm-ready\n')
         self.assertEqual(self.diagnostic()['offload_layers'], [29, 29])
+        self.assertEqual(self.diagnostic()['offload_evidence']['state'], 'full')
         self.assertTrue(self.diagnostic()['cuda_recognized'])
         self.cleanup_engine()
         self.assertEqual(self.diagnostic()['stage'], 'stopped')
 
     def test_engine_exit_preserves_exit_code_and_both_logs(self):
         self.fixture('exit')
-        self.assertTrue(self.startup.finished.wait(3))
+        self.assertTrue(self.startup.finished.wait(8))
         self.assertEqual(self.chat.phase, 'failed')
         self.assertEqual(self.diagnostic()['engine_exit_code'], 7)
         self.assertEqual(self.diagnostic()['error'], 'engine_exited:7')
+        self.assertEqual(self.diagnostic()['failure_reason'], 'engine_exited:7')
         self.assertEqual([phase['stage'] for phase in self.diagnostic()['phases']], ['created', 'extracting', 'abi_check', 'cuda_check', 'model_loading', 'failed'])
         self.assertIn('fixture model load', (self.chat.output / 'engine-stdout.log').read_text())
         self.assertIn('stderr diagnostic', (self.chat.output / 'engine-stderr.log').read_text())
@@ -115,10 +131,57 @@ with Server(path, Health) as server: server.serve_forever()
         self.assertTrue(self.startup.finished.wait(6))
         self.assertTrue(self.diagnostic()['engine_started'])
         self.assertEqual(self.diagnostic()['error'], 'startup_timeout')
+        self.assertEqual(self.diagnostic()['failure_reason'], 'model_preparing')
         self.assertIsNotNone(self.diagnostic()['engine_exit_code'])
         self.assertLessEqual((self.chat.output / 'engine-stdout.log').stat().st_size, LOG_LIMIT)
         self.assertGreater(self.diagnostic()['log_bytes_seen']['stdout'], LOG_LIMIT)
         self.assertLess((self.chat.output / 'startup-diagnostics.json').stat().st_size, 32768)
+
+    def test_actual_trial_log_with_http_200_is_unproved_and_diagnosed(self):
+        self.fixture('unproved', timeout=3)
+        self.assertTrue(self.startup.finished.wait(6))
+        diagnostic = self.diagnostic()
+        self.assertEqual(diagnostic['engine_http_status'], 200)
+        self.assertEqual(diagnostic['error'], 'startup_timeout')
+        self.assertEqual(diagnostic['failure_reason'], 'offload_evidence_missing')
+        self.assertEqual(diagnostic['offload_evidence']['state'], 'missing')
+        self.assertIsNone(diagnostic['offload_layers'])
+        self.assertTrue(diagnostic['log_capture_complete'])
+        self.assertIsNotNone(diagnostic['engine_exit_code'])
+        self.assertIn((FIXTURES / 'trial2.stderr.txt').read_bytes(), (self.chat.output / 'engine-stderr.log').read_bytes())
+
+    def test_partial_assignment_fails_before_readiness_and_keeps_evidence(self):
+        self.fixture('partial')
+        self.assertTrue(self.startup.finished.wait(8))
+        self.assertEqual(self.chat.phase, 'failed')
+        self.assertEqual(self.diagnostic()['error'], 'offload_insufficient')
+        self.assertEqual(self.diagnostic()['failure_reason'], 'offload_insufficient')
+        self.assertEqual(self.diagnostic()['offload_layers'], [28, 29])
+        self.assertIsNotNone(self.diagnostic()['engine_exit_code'])
+
+    def test_buffer_fallback_is_invalid_and_stopped_with_diagnostics(self):
+        self.fixture('fallback')
+        self.assertTrue(self.startup.finished.wait(8))
+        self.assertEqual(self.diagnostic()['failure_reason'], 'offload_evidence_invalid')
+        self.assertEqual(self.diagnostic()['offload_evidence']['invalid_reason'], 'tensor_buffer_fallback')
+        self.assertIsNotNone(self.diagnostic()['engine_exit_code'])
+        with self.assertRaises(HTTPError) as response:
+            urlopen(self.url, timeout=1)
+        self.assertEqual(response.exception.code, 503)
+        response.exception.close()
+
+    def test_assignment_evidence_survives_bounded_log_tail_truncation(self):
+        self.fixture('ready-flood')
+        deadline = time.monotonic() + 6
+        while self.chat.phase == 'preparing' and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.chat.phase, 'ready')
+        self.cleanup_engine()
+        diagnostic = self.diagnostic()
+        self.assertEqual(diagnostic['offload_evidence']['state'], 'full')
+        self.assertGreater(diagnostic['log_bytes_seen']['stdout'], LOG_LIMIT)
+        self.assertLessEqual((self.chat.output / 'engine-stdout.log').stat().st_size, LOG_LIMIT)
+        self.assertNotIn(b'assigned to device', (self.chat.output / 'engine-stdout.log').read_bytes())
 
     def test_cancel_during_preparation_reaps_and_saves_empty_history_and_diagnostics(self):
         self.fixture('hang')
@@ -130,6 +193,7 @@ with Server(path, Health) as server: server.serve_forever()
         self.assertTrue(self.startup.finished.wait(3))
         self.cleanup_engine()
         self.assertEqual(self.diagnostic()['stage'], 'cancelled')
+        self.assertIsNone(self.diagnostic()['failure_reason'])
         self.assertIsNotNone(self.diagnostic()['engine_exit_code'])
         self.assertEqual(json.loads((self.chat.output / 'chat-history.json').read_text())['jobs'], [])
 
@@ -146,6 +210,16 @@ with Server(path, Health) as server: server.serve_forever()
         self.assertFalse(diagnostic['engine_started'])
         self.assertIsNone(diagnostic['cuda_probe'])
         self.assertIsNone(manager.child)
+
+    def test_timeout_before_engine_start_is_distinct(self):
+        self.fixture('ready')
+        chat = app.Chat(self.root / 'not-started-out', self.root / 'not-started.sock')
+        manager = EngineStartup(chat, self.root / 'not-started-scratch', self.root / 'software', self.root / 'models', app.engine_health, timeout=0)
+        manager.run()
+        diagnostic = json.loads((chat.output / 'startup-diagnostics.json').read_text())
+        self.assertEqual(diagnostic['error'], 'startup_timeout')
+        self.assertEqual(diagnostic['failure_reason'], 'engine_not_started')
+        self.assertFalse(diagnostic['engine_started'])
 
     def run_main(self, mode, cancel):
         self.fixture(mode)
