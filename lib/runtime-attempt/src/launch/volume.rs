@@ -23,6 +23,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use super::storage_capacity::available_bytes;
 use anyhow::{Context, Result};
 use ato_ipc::runtime_launch_v3::is_volume_ref;
 
@@ -535,10 +536,6 @@ fn directory_usage(root: &Path) -> Result<u64> {
         }
     }
     Ok(total)
-}
-
-fn available_bytes(path: &Path) -> Result<u64> {
-    fs2::available_space(path).with_context(|| format!("statvfs {}", path.display()))
 }
 
 #[cfg(test)]
