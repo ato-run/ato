@@ -80,6 +80,19 @@ fn probe() {
         "clone with CLONE_NEWNS was not denied (returned {clone})"
     );
 
+    // x32 shares AUDIT_ARCH_X86_64 with native x86-64. Its syscall numbers
+    // must not slip through the native deny/allow decisions.
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: scalar syscall; the result is the assertion.
+        let x32 = unsafe { libc::syscall(0x4000_0000u64 | libc::SYS_getpid as u64) };
+        assert_eq!(x32, -1, "an x32 syscall was not refused");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOSYS)
+        );
+    }
+
     // A filter survives fork: a grandchild cannot escape either.
     // SAFETY: after fork the child only makes one scalar syscall and exits.
     let pid = unsafe { libc::fork() };
