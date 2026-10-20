@@ -228,9 +228,10 @@ there. The machine itself is the only strong boundary available.
 
 ### 3.2 Contract
 
-Capability: `isolation=host-boundary-v1`. A Runner advertises it only when it
-was started with `--isolation host-boundary` and the Landlock probe passed.
-It never advertises `isolation=untrusted-v1` at the same time.
+Capability: `isolation=host-boundary-v1` plus
+`seccomp=host-boundary-seccomp-v1`. A Runner advertises them only when it was
+started with `--isolation host-boundary` and both the Landlock and seccomp
+probes passed. It never advertises `isolation=untrusted-v1` at the same time.
 
 In this mode a `process` realization is launched with:
 
@@ -241,10 +242,17 @@ In this mode a `process` realization is launched with:
   the Run's scratch directory; model/software trees are read-only to the
   workload, and cache verification markers are Runner-only; no access to the
   Runner's work root, credentials file or environment file;
-- **no seccomp filter (not implemented).** The v0 baseline is uid separation +
-  `no_new_privs` + Landlock + the machine boundary. A seccomp filter denying
-  namespace, mount, module and `ptrace` syscalls is a separate gate required
-  before arbitrary user code, cross-owner reuse or public untrusted Capsules;
+- **a versioned seccomp deny-list** (`host-boundary-seccomp-v1`) installed by
+  the shim after Landlock: namespace creation (`unshare`, `setns`, `clone` with
+  a `CLONE_NEW*` flag), `mount`/`umount2`/`pivot_root`, `ptrace` and
+  cross-process memory, kernel module and `kexec` calls, `bpf`, `userfaultfd`,
+  keyrings, `open_by_handle_at`, io_uring, fsopen/fsmount, and the other
+  host-control calls. `clone3` returns `ENOSYS` so glibc uses `clone`.
+  Everything else is allowed because an allow-list guessed without a measured
+  CUDA run would break Python/PyTorch/NVIDIA; the deny-list is the measured
+  exception set, not a claim of completeness. A host where the probe fails is
+  refused at Runner start, and a launch whose filter cannot be installed is
+  refused rather than run unfiltered;
 - an environment built from the launch spec only;
 - its own process group, so teardown kills the whole tree.
 
@@ -287,8 +295,11 @@ Surface assertion gate is **mandatory** there:
 
 ### 3.4 Receipts
 
-The Run receipt records `isolation = "host-boundary-v1"`. Verification is
-unchanged: the same authority compares the Run's real observations with K.
+The Run receipt records `isolation = "host-boundary-v1"` and
+`seccomp = "host-boundary-seccomp-v1"` in its execution evidence. Verification
+is unchanged: the same authority compares the Run's real observations with K.
+This is evidence of what the Runner installed, not a claim that the mode equals
+VM isolation.
 
 ## 4. Enrollment start
 
