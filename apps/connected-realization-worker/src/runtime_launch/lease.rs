@@ -758,6 +758,8 @@ pub struct RuntimeExecutionEvidence {
     pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<ato_adapter_oci::OciExecutionPrincipal>,
     /// Every container of an OCI service group, in start order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceExecutionEvidence>,
@@ -768,6 +770,8 @@ pub struct ServiceExecutionEvidence {
     pub name: String,
     pub container_id: String,
     pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<ato_adapter_oci::OciExecutionPrincipal>,
 }
 
 impl ActiveRun {
@@ -801,6 +805,7 @@ impl ActiveRun {
                 container_id: None,
                 image: None,
                 platform: None,
+                principal: None,
                 services: Vec::new(),
             },
             ActiveWorkload::Oci(launched) => match launched.as_ref() {
@@ -812,6 +817,7 @@ impl ActiveRun {
                     container_id: Some(container.container_id().to_owned()),
                     image: Some(container.image().to_owned()),
                     platform: Some(container.platform().to_owned()),
+                    principal: container.execution_principal().cloned(),
                     services: Vec::new(),
                 },
                 LaunchedOci::Group(group) => RuntimeExecutionEvidence {
@@ -821,6 +827,7 @@ impl ActiveRun {
                     pid: None,
                     container_id: None,
                     image: None,
+                    principal: None,
                     platform: group
                         .services()
                         .next()
@@ -831,6 +838,7 @@ impl ActiveRun {
                             name: name.to_owned(),
                             container_id: container.container_id().to_owned(),
                             image: container.image().to_owned(),
+                            principal: container.execution_principal().cloned(),
                         })
                         .collect(),
                 },

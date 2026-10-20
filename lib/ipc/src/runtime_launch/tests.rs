@@ -89,6 +89,7 @@ fn an_oci_reference_must_be_content_addressed() {
             platform: None,
             resource_limits: None,
             entrypoint: None,
+            user: None,
             argv: None,
             working_dir: None,
             workspace_mount_path: None,
@@ -429,4 +430,53 @@ fn process_startup_abi_golden_is_canonical_and_refuses_unknown_versions() {
         spec.validate(),
         Err(RuntimeLaunchSpecError::ForbiddenField { .. })
     ));
+}
+
+#[test]
+fn an_optional_numeric_oci_user_preserves_old_bytes_and_refuses_root() {
+    let original = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+    assert!(
+        !serde_json::to_string(&original.realization)
+            .unwrap()
+            .contains("\"user\"")
+    );
+    let mut spec = original;
+    let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+        panic!("OCI fixture")
+    };
+    oci.user = Some(OciUserV1 {
+        uid: 10001,
+        gid: 10001,
+    });
+    spec.validate().unwrap();
+    let encoded = serde_json::to_string(&spec).unwrap();
+    assert_eq!(RuntimeLaunchSpecV1::parse(&encoded).unwrap(), spec);
+    for user in [
+        OciUserV1 { uid: 0, gid: 10001 },
+        OciUserV1 { uid: 10001, gid: 0 },
+        OciUserV1 {
+            uid: u32::MAX,
+            gid: 1,
+        },
+    ] {
+        let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            unreachable!()
+        };
+        oci.user = Some(user);
+        assert_eq!(
+            spec.validate().unwrap_err().code(),
+            "ATO_ERR_RUNTIME_LAUNCH_SPEC_FORBIDDEN_FIELD"
+        );
+    }
+}
+
+#[test]
+fn explicit_user_golden_fixture_has_stable_canonical_bytes_and_digest() {
+    let raw = include_str!("../../tests/fixtures/runtime-launch-spec-v1/portable-oci-user.json");
+    let spec = RuntimeLaunchSpecV1::parse(raw).unwrap();
+    assert_eq!(spec.canonical_bytes().unwrap(), raw.trim_end().as_bytes());
+    assert_eq!(
+        spec.canonical_digest().unwrap(),
+        "sha256:bd0e4c307d947733883896a2ecdfd15da0dcca6d7f168fdde50243b924ce5728"
+    );
 }
