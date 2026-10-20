@@ -85,7 +85,7 @@ fn probe() {
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: scalar syscall; the result is the assertion.
-        let x32 = unsafe { libc::syscall(0x4000_0000u64 | libc::SYS_getpid as u64) };
+        let x32 = unsafe { libc::syscall(0x4000_0000i64 | libc::SYS_getpid) };
         assert_eq!(x32, -1, "an x32 syscall was not refused");
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
