@@ -6,6 +6,7 @@ mod desktop_control;
 mod object_transport;
 mod portable_attempt;
 mod portable_dependency;
+mod preparation;
 
 pub mod activity_client;
 pub mod activity_mcp;
@@ -162,6 +163,10 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AppCommands {
+    /// Assess explicit local constraints without running or weakening K.
+    Prepare(preparation::PrepareArgs),
+    /// Compile an agent's native process proposal against a frozen bundle.
+    FormNative(preparation::FormNativeArgs),
     /// Import an immutable portable bundle as a new independent Instance.
     Import(AppImportArgs),
     /// Compile a source tree plus browser state into a portable v4 bundle.
@@ -573,6 +578,8 @@ pub fn run() -> Result<()> {
         Commands::Pack(args) => pack(args),
         Commands::Run(args) => run_capsule(args),
         Commands::App { command } => match command {
+            AppCommands::Prepare(args) => preparation::prepare(args),
+            AppCommands::FormNative(args) => preparation::form_native(args),
             AppCommands::Import(args) => import_local_application(args),
             AppCommands::PackSourceSnapshot(args) => pack_source_snapshot(args),
             AppCommands::Start(args) => start_local_instance(args),

@@ -70,6 +70,19 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         match self.validated.realization {
             PortableRealizationKind::StaticWeb => None,
             PortableRealizationKind::LocalProcess => {
+                if self
+                    .validated
+                    .derivation
+                    .runtimes
+                    .contains_key(ato_portable_application::preparation::NATIVE_EXECUTABLE)
+                    && let Err(error) =
+                        ato_portable_application::preparation::admissible_local_route(
+                            self.bundle,
+                            self.validated,
+                        )
+                {
+                    return refused("native_runtime_admission_failed", error.to_string());
+                }
                 if !self.validated.derivation.state.is_empty()
                     && !cfg!(any(target_os = "linux", target_os = "macos"))
                 {
@@ -185,6 +198,46 @@ impl PortableBundleExecutor<'_> {
                     )));
                 }
                 resolve_pinned_python(python_version)?
+            } else if route
+                .derivation
+                .runtimes
+                .contains_key(ato_portable_application::preparation::NATIVE_EXECUTABLE)
+            {
+                let relative = ato_portable_application::preparation::native_executable_path(route)
+                    .map_err(anyhow::Error::from)?;
+                let source = workspace
+                    .join(relative)
+                    .canonicalize()
+                    .context("resolve immutable native executable")?;
+                let image = ato_portable_application::preparation::decode_native_image(
+                    &fs::read(source).context("read immutable native executable")?,
+                    route
+                        .derivation
+                        .runtimes
+                        .get(ato_portable_application::preparation::NATIVE_ENCODING)
+                        .map(String::as_str)
+                        .unwrap_or("identity"),
+                )
+                .map_err(anyhow::Error::from)?;
+                let binary = self.runtime_root.join("native-executable");
+                fs::write(&binary, image).context("materialize native executable")?;
+                let binary = binary
+                    .canonicalize()
+                    .context("resolve materialized native executable")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&binary, fs::Permissions::from_mode(0o500))
+                        .context("make the selected immutable native executable runnable")?;
+                }
+                (
+                    binary.display().to_string(),
+                    format!(
+                        "{}-{} bundled native",
+                        std::env::consts::OS,
+                        std::env::consts::ARCH
+                    ),
+                )
             } else {
                 (command[0].clone(), "unconstrained".to_owned())
             };
