@@ -758,6 +758,12 @@ pub struct RuntimeExecutionEvidence {
     pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// The isolation the Runner actually launched under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<&'static str>,
+    /// The seccomp profile installed in that isolation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seccomp: Option<&'static str>,
     /// Every container of an OCI service group, in start order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceExecutionEvidence>,
@@ -792,6 +798,7 @@ impl ActiveRun {
     }
 
     pub fn execution_evidence(&self) -> RuntimeExecutionEvidence {
+        let host_boundary = super::host_boundary::active().is_some();
         match &self.launched {
             ActiveWorkload::Process(process) => RuntimeExecutionEvidence {
                 realization: "process",
@@ -801,6 +808,8 @@ impl ActiveRun {
                 container_id: None,
                 image: None,
                 platform: None,
+                isolation: host_boundary.then_some("host-boundary-v1"),
+                seccomp: host_boundary.then_some(ato_sandbox::SECCOMP_PROFILE_VERSION),
                 services: Vec::new(),
             },
             ActiveWorkload::Oci(launched) => match launched.as_ref() {
@@ -812,6 +821,8 @@ impl ActiveRun {
                     container_id: Some(container.container_id().to_owned()),
                     image: Some(container.image().to_owned()),
                     platform: Some(container.platform().to_owned()),
+                    isolation: None,
+                    seccomp: None,
                     services: Vec::new(),
                 },
                 LaunchedOci::Group(group) => RuntimeExecutionEvidence {
@@ -825,6 +836,8 @@ impl ActiveRun {
                         .services()
                         .next()
                         .map(|(_, container)| container.platform().to_owned()),
+                    isolation: None,
+                    seccomp: None,
                     services: group
                         .services()
                         .map(|(name, container)| ServiceExecutionEvidence {
