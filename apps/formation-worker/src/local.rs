@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
+use ato_adapter_api::WorkspaceCapturePolicy;
 use ato_formation::authoring::{AuthoringDraft, AuthoringProvenance};
 use ato_formation::browser::{BrowserBudget, effective_contract_ref};
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
@@ -538,7 +539,9 @@ fn freeze_local_source(dir: &Path, work_root: &Path, limits: SourceLimits) -> Re
 }
 
 /// Snapshot a directory into the archive a Formation measures: the codeload
-/// shape, no `.git`, symlinks kept for the source rules to decide.
+/// shape, with the shared secure Workspace capture policy. Included symlinks
+/// are kept for the source rules to decide. Already-pinned archives do not
+/// pass through this local directory capture boundary.
 pub fn snapshot_directory(dir: &Path) -> Result<Vec<u8>> {
     let directory = dir
         .canonicalize()
@@ -675,14 +678,21 @@ pub(crate) fn freeze_verified(
 }
 
 /// Pack a directory into an in-memory tar under a `source/` wrapper,
-/// deterministically: sorted paths, zeroed metadata, no `.git`.
+/// deterministically: sorted paths, zeroed metadata and shared credential
+/// exclusions. Filtering precedes source measurement; no verified archive or
+/// existing source identity is rewritten.
 ///
 /// Symlinks are archived AS symlinks, not skipped: whether a link is
 /// acceptable is the source module's decision, and it refuses them for every
 /// source the same way.
 fn tar_directory<W: std::io::Write>(root: &Path, output: W) -> Result<W> {
     let mut entries: Vec<(PathBuf, PathBuf, EntryKind)> = Vec::new();
-    collect_tree(root, root, &mut entries)?;
+    collect_tree(
+        root,
+        root,
+        &mut entries,
+        &WorkspaceCapturePolicy::secure_default(),
+    )?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut builder = tar::Builder::new(output);
@@ -735,27 +745,28 @@ fn collect_tree(
     root: &Path,
     dir: &Path,
     entries: &mut Vec<(PathBuf, PathBuf, EntryKind)>,
+    policy: &WorkspaceCapturePolicy,
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         if entries.len() >= SourceLimits::default().max_files {
             bail!("source entry limit exceeded");
         }
-        let name = entry.file_name();
-        // VCS metadata is never app content — the same reason a codeload
-        // tarball does not carry it.
-        if name == ".git" {
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        // The default policy has no include overrides. Skip excluded paths
+        // before reading metadata/content, including excluded directories and
+        // links: credentials cannot enter a snapshot through a second caller.
+        if !policy.captures(&relative) {
             continue;
         }
-        let path = entry.path();
         let metadata = std::fs::symlink_metadata(&path)?;
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
         // A link is recorded, never followed: the source module decides.
         if metadata.is_symlink() {
             entries.push((relative, path, EntryKind::Symlink));
         } else if metadata.is_dir() {
             entries.push((relative, path.clone(), EntryKind::Dir));
-            collect_tree(root, &path, entries)?;
+            collect_tree(root, &path, entries, policy)?;
         } else if metadata.is_file() {
             entries.push((relative, path, EntryKind::File));
         }
