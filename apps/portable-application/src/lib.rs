@@ -315,6 +315,8 @@ impl PortableRealizationKind {
 #[derive(Debug, Clone)]
 pub struct PortableHttpRequirementSpec {
     pub id: String,
+    /// Logical observation Port; omission retains the existing app.http target.
+    pub port: Option<String>,
     pub path: String,
     pub status: u16,
     pub body_digest: Option<String>,
@@ -1261,6 +1263,7 @@ pub fn build_authored_bundle_v2(
                 .into_iter()
                 .map(|observation| PortableHttpRequirementSpec {
                     id: observation.id,
+                    port: Some(observation.port),
                     path: observation.path,
                     status: observation.status,
                     body_digest: observation.body_digest,
@@ -1444,7 +1447,12 @@ pub fn build_dynamic_routes_bundle(
         .map(|requirement| BoundRequirement {
             id: requirement.id.clone(),
             verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
-            port: Some("app.http".to_owned()),
+            port: Some(
+                requirement
+                    .port
+                    .clone()
+                    .unwrap_or_else(|| "app.http".to_owned()),
+            ),
             method: Some("GET".to_owned()),
             path: Some(requirement.path.clone()),
             status: Some(requirement.status),
@@ -1584,10 +1592,18 @@ fn validate_initial_route(
         ));
     }
     if derivation.steps.len() > 1 {
-        let surface_port = validate_oci_service_group(application, derivation)?;
+        validate_oci_service_group(application, derivation)?;
         let input = workspace_input(derivation)
             .ok_or_else(|| profile("route omitted its workspace input"))?;
-        validate_route_requirements(contract, input, surface_port)?;
+        validate_route_requirements(
+            contract,
+            input,
+            &derivation
+                .ports
+                .iter()
+                .map(|port| port.id.as_str())
+                .collect(),
+        )?;
         return Ok(PortableRealizationKind::OciServiceGroup);
     }
     if application.surfaces.len() != 1
@@ -1791,7 +1807,7 @@ fn validate_initial_route(
         }
     }
 
-    validate_route_requirements(contract, input, &port.id)?;
+    validate_route_requirements(contract, input, &BTreeSet::from([port.id.as_str()]))?;
     Ok(realization)
 }
 
@@ -1800,7 +1816,7 @@ fn validate_initial_route(
 fn validate_route_requirements(
     contract: &BoundContract,
     input: &BoundInput,
-    surface_port: &str,
+    observation_ports: &BTreeSet<&str>,
 ) -> Result<(), PortableApplicationError> {
     let requirement_ids = contract
         .requirements
@@ -1822,17 +1838,22 @@ fn validate_route_requirements(
                 }
             }
             HTTP_CONTRACT_VERIFIER => {
-                if requirement.port.as_deref() != Some(surface_port)
+                if !requirement
+                    .port
+                    .as_deref()
+                    .is_some_and(|port| observation_ports.contains(port))
                     || requirement.method.as_deref() != Some("GET")
                 {
                     return Err(profile(
-                        "HTTP requirement does not target the declared application surface",
+                        "HTTP requirement does not target a declared observation Port",
                     ));
                 }
                 let path = requirement.path.as_deref().unwrap_or("/");
                 if !path.starts_with('/')
                     || path.starts_with("//")
-                    || path.contains('\0')
+                    || path
+                        .chars()
+                        .any(|c| c.is_ascii_control() || c.is_ascii_whitespace())
                     || path.contains("#")
                 {
                     return Err(profile(
@@ -3132,6 +3153,58 @@ default = "pure"
     }
 
     #[test]
+    fn component_contract_keeps_logical_ports_and_requires_every_observation() {
+        use ato_formation::verify::{RuntimeHttpObservation, RuntimeObservation, verify_runtime};
+        let source = SERVICE_GROUP_TOML.replace(
+            "[[derivation]]",
+            r#"
+[[contract.observation]]
+id = "backend-health"
+use = "ato.contract.http@1"
+port = "backend.http"
+path = "/health"
+status = 200
+
+[[derivation]]"#,
+        );
+        let root = authored_root(&source);
+        let (_, bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        let requirement = route
+            .contract
+            .requirements
+            .iter()
+            .find(|r| r.id == "backend-health")
+            .unwrap();
+        assert_eq!(requirement.port.as_deref(), Some("backend.http"));
+        let mut observation = RuntimeObservation {
+            input_refs: route.attempt_spec(None).input_refs,
+            http: vec![RuntimeHttpObservation::from_response(
+                "app.http", "GET", "/", 200, b"ok",
+            )],
+            instance_snapshot_ref: None,
+        };
+        assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
+        observation.http.push(RuntimeHttpObservation::from_response(
+            "backend.http",
+            "GET",
+            "/health",
+            503,
+            b"down",
+        ));
+        assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
+        observation.http[1] =
+            RuntimeHttpObservation::from_response("backend.http", "GET", "/health", 200, b"ok");
+        assert!(verify_runtime(&route.contract, &observation).fully_satisfied());
+        // Same path on another logical Port cannot stand in for this component.
+        observation.http[1].port = "app.http".to_owned();
+        assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
+        let bad_source = source.replace("port = \"backend.http\"", "port = \"undeclared.http\"");
+        let bad_root = authored_root(&bad_source);
+        assert!(build_authored_bundle_v2(bad_root.path()).is_err());
+    }
+
+    #[test]
     fn a_service_group_compiles_to_plain_steps_ports_and_scoped_references() {
         let route = group_route();
         assert_eq!(route.realization, PortableRealizationKind::OciServiceGroup);
@@ -3853,12 +3926,14 @@ default = "pure"
             requirements: vec![
                 PortableHttpRequirementSpec {
                     id: "entry".to_owned(),
+                    port: None,
                     path: "/".to_owned(),
                     status: 200,
                     body_digest: None,
                 },
                 PortableHttpRequirementSpec {
                     id: "rows".to_owned(),
+                    port: None,
                     path: "/catalog/items.json?_shape=array&_sort=id".to_owned(),
                     status: 200,
                     body_digest: Some(format!("sha256:{}", "cd".repeat(32))),
