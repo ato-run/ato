@@ -1,0 +1,9 @@
+# Acceptance artifact only. The unchanged public Ubuntu OCI image runs this
+# independent workspace executable; no registry or agent is added to the app.
+FROM ubuntu:24.04@sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf AS build
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc libc6-dev libx11-dev libxcb1-dev libxau-dev libxdmcp-dev && rm -rf /var/lib/apt/lists/*
+COPY main.c /main.c
+RUN cc -static -O2 -o /native-app /main.c -lX11 -lxcb -lXau -lXdmcp -pthread
+FROM scratch
+COPY --from=build /native-app /native-app
+CMD ["/native-app"]

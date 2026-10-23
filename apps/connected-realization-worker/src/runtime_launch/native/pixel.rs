@@ -1,10 +1,10 @@
 //! Trusted display materialization. No helper image, cookie or host endpoint
-//! belongs to K/D. This entrypoint is deliberately absent from lease dispatch
-//! and capability advertisement until its separate publication gate is wired.
+//! belongs to K/D. Lease dispatch and typed capability advertisement require
+//! explicit trusted Runner configuration and verified local physical admission.
 use super::*;
 use ato_adapter_oci::{OciMount, OciResourceLimits, OciServiceGroup, OciSpec, OciUser};
 use ato_objects::PortableOciArchive;
-use ato_portable_application::oci_archive::{ValidatedOciArchive, verify_oci_archive};
+use ato_portable_application::oci_archive::verify_oci_archive;
 use netd::pixel_gateway::PixelGatewayConfig;
 use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -25,11 +25,14 @@ const HELPER: &str = "/usr/local/lib/ato/native-display";
 /// immutable OCI archive is admitted; no registry fallback, mutable tag, shell
 /// supplied by the application, or image package installation occurs at Run.
 /// Deliberately neither Debug nor Serialize (its archive is not a receipt).
+#[derive(Clone)]
 pub struct PixelHelper {
     image: String,
     platform: String,
-    verified: ValidatedOciArchive,
+    archive: Arc<Vec<u8>>,
+    config_reference: String,
     limits: OciResourceLimits,
+    owner: Option<super::pixel_capacity::PixelOwner>,
 }
 impl PixelHelper {
     pub fn from_archive(archive: PortableOciArchive, limits: OciResourceLimits) -> Result<Self> {
@@ -43,9 +46,89 @@ impl PixelHelper {
         Ok(Self {
             image: archive.image,
             platform: archive.platform,
-            verified,
+            archive: Arc::new(verified.bytes),
+            config_reference: verified.config_reference,
             limits,
+            owner: None,
         })
+    }
+
+    pub(crate) fn with_local_owner(mut self, socket: PathBuf, parent: String) -> Result<Self> {
+        self.owner = Some(super::pixel_capacity::PixelOwner::new(socket, parent)?);
+        Ok(self)
+    }
+
+    /// No image load or workload creation here: rollout requires explicit
+    /// prematerialization and exact verified config/platform already present.
+    pub(crate) fn check_ready(&self, work_root: &Path) -> Result<()> {
+        let owner = self
+            .owner
+            .as_ref()
+            .context("Pixel omitted local owner binding")?;
+        owner.admit(
+            &OciResourceLimits {
+                memory_bytes: 0,
+                cpu_limit_millis: 0,
+                pids_limit: 0,
+            },
+            &self.limits,
+        )?;
+        let metadata = std::fs::metadata(work_root)?;
+        let spec = OciSpec {
+            id: "native-display-admission".into(),
+            image: self.image.clone(),
+            platform: self.platform.clone(),
+            entrypoint: Some(HELPER.into()),
+            user: Some(
+                OciUser {
+                    uid: metadata.uid(),
+                    gid: metadata.gid(),
+                }
+                .validate()?,
+            ),
+            argv: vec!["320".into(), "200".into()],
+            working_dir: "/run".into(),
+            workspace_mount_path: "/run/ato-unused-workspace".into(),
+            environment: BTreeMap::new(),
+            endpoints: vec![],
+            mounts: vec![],
+            limits: self.limits.clone(),
+            stop_timeout_seconds: 1,
+            labels: BTreeMap::new(),
+        };
+        let config = tempfile::Builder::new()
+            .prefix(".native-display-admission-")
+            .tempdir_in(work_root)?;
+        DockerOciAdapter::new_offline(spec, vec![], self.config_reference.clone())?
+            .with_cgroup_parent(owner.docker_parent.clone())?
+            .with_isolated_owner(&owner.socket, &config.path().join("docker"))?
+            .with_control(ato_adapter_oci::command_control::CommandControl::cleanup(
+                Duration::from_millis(500),
+            ))
+            .admit()?;
+        Ok(())
+    }
+
+    pub(crate) fn admit_spec(&self, spec: &RuntimeLaunchSpecV1) -> Result<()> {
+        let LaunchRealizationV1::Oci(oci) = &spec.realization else {
+            anyhow::bail!("Pixel requires OCI");
+        };
+        let limits = oci
+            .resource_limits
+            .as_ref()
+            .context("Pixel requires explicit app limits")?;
+        self.owner
+            .as_ref()
+            .context("Pixel omitted local owner binding")?
+            .admit(
+                &OciResourceLimits {
+                    memory_bytes: limits.memory_bytes,
+                    cpu_limit_millis: limits.cpu_limit_millis,
+                    pids_limit: limits.pids_limit,
+                },
+                &self.limits,
+            )?;
+        Ok(())
     }
 }
 
@@ -328,6 +411,9 @@ pub async fn start_pixel(
         physical.native_surface = None;
         let mut app = container_oci_spec(spec, &physical, context, owner.labels(Some("main"))?)?;
         validate_app(&app)?;
+        if let Some(owner) = &helper.owner {
+            owner.admit(&app.limits, &helper.limits)?;
+        }
         ensure!(
             helper.platform == app.platform,
             "display helper platform mismatch"
@@ -375,8 +461,8 @@ pub async fn start_pixel(
         });
         let helper_spec = OciSpec {
             id: format!("{}-display", app.id),
-            image: helper.image,
-            platform: helper.platform,
+            image: helper.image.clone(),
+            platform: helper.platform.clone(),
             entrypoint: Some(HELPER.into()),
             user: Some(user),
             argv: vec![viewport.width.to_string(), viewport.height.to_string()],
@@ -385,7 +471,7 @@ pub async fn start_pixel(
             environment: BTreeMap::new(),
             endpoints: vec![],
             mounts: helper_mounts,
-            limits: helper.limits,
+            limits: helper.limits.clone(),
             stop_timeout_seconds: app.stop_timeout_seconds,
             labels: owner.labels(Some("native-display"))?,
         };
@@ -395,19 +481,27 @@ pub async fn start_pixel(
                 .min(config.maximum_lifetime)
                 .min(Duration::from_secs(5))
                 .as_millis() as u64;
-        let helper_adapter = DockerOciAdapter::new_offline(
+        let mut helper_adapter = DockerOciAdapter::new_offline_shared(
             helper_spec,
-            helper.verified.bytes,
-            helper.verified.config_reference,
+            Arc::clone(&helper.archive),
+            helper.config_reference.clone(),
         )?
         .with_deadline(deadline);
-        let app_adapter = match application_archive {
+        let mut app_adapter = match application_archive {
             Some(verified) => {
                 DockerOciAdapter::new_offline(app, verified.bytes, verified.config_reference)?
             }
             None => DockerOciAdapter::new(app)?,
         }
         .with_deadline(deadline);
+        if let Some(owner) = &helper.owner {
+            helper_adapter = helper_adapter
+                .with_cgroup_parent(owner.docker_parent.clone())?
+                .with_isolated_owner(&owner.socket, &runtime.join("helper-docker-client"))?;
+            app_adapter = app_adapter
+                .with_cgroup_parent(owner.docker_parent.clone())?
+                .with_isolated_owner(&owner.socket, &runtime.join("app-docker-client"))?;
+        }
         let socket_directory = std::fs::File::open(dirs.path("rfb"))?;
         Ok((
             declaration,
@@ -458,6 +552,9 @@ pub async fn start_pixel(
             Some("native-display"),
         )?;
         group.push("native-display".into(), handle);
+        if let Some(owner) = &helper.owner {
+            owner.verify_container(group.services().next().unwrap().1)?;
+        }
         let dirs = parts.pixel_directories.as_ref().unwrap();
         // X server socket + RFB transport are readiness, never app acceptance.
         loop {
@@ -488,6 +585,9 @@ pub async fn start_pixel(
             Some("main"),
         )?;
         group.push("main".into(), handle);
+        if let Some(owner) = &helper.owner {
+            owner.verify_container(group.services().last().unwrap().1)?;
+        }
         // X applications may map their first window asynchronously. Do not
         // replay authored actions: wait for an explicit X client property via
         // the helper's private readiness marker before the one capture.
@@ -567,7 +667,7 @@ pub async fn start_pixel(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Recovery preserves settled workspaces. Strip this runtime-only credential
 /// before that move, including after a Runner SIGKILL when Drop never ran.
