@@ -58,3 +58,14 @@ in the private attempt directory but were not copied to the explicit
 that failure path and retains the original nonzero result. The repeated real
 negative run verifies that behavior. Existing cleanup and receipt immutability
 remain owned by the common attempt.
+
+## Failure receipt regression follow-up
+
+GitHub CLI CI (macOS/Linux) caught an old test expecting no receipt even when
+`--verification-receipt` was explicitly requested. The test now requires the
+existing false verdict, exact K/D, failed root observation/digest reason, a
+closed execution endpoint and the finished failed attempt record, while CLI
+exit remains nonzero. Admission failures still must not emit receipts. The
+full 16-test portable CLI integration suite passes locally on Python 3.12.8.
+This is an expectation update for the existing explicit evidence export, not
+a relaxation of Run acceptance or a successful receipt for failed K.
