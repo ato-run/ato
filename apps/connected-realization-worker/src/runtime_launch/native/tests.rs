@@ -11,9 +11,9 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const EXPECTED: &[u8] = b"go\r\n1\r\nEND";
-const WORKLOAD: &str = "import sys,os\nn=0\nfor line in sys.stdin:\n if line.strip()=='exit': break\n if line.strip()=='size':\n  size=os.get_terminal_size(0)\n  print('size:'+str(size.columns)+'x'+str(size.lines)+'\\nEND',end='',flush=True)\n else:\n  n+=1\n  print(str(n)+'\\nEND',end='',flush=True)\n";
+pub(crate) const WORKLOAD: &str = "import sys,os\nn=0\nfor line in sys.stdin:\n if line.strip()=='exit': break\n if line.strip()=='size':\n  size=os.get_terminal_size(0)\n  print('size:'+str(size.columns)+'x'+str(size.lines)+'\\nEND',end='',flush=True)\n else:\n  n+=1\n  print(str(n)+'\\nEND',end='',flush=True)\n";
 
-fn fixture(
+pub(crate) fn fixture(
     image: &str,
 ) -> (
     RuntimeLaunchSpecV1,
@@ -69,7 +69,7 @@ fn fixture(
     }]})).unwrap();
     (spec, descriptor, contract, derivation)
 }
-fn owner(spec: &RuntimeLaunchSpecV1) -> OciOwner {
+pub(crate) fn owner(spec: &RuntimeLaunchSpecV1) -> OciOwner {
     OciOwner {
         runner_id: "native-test-runner".into(),
         slot_id: "isolated-native".into(),
@@ -82,7 +82,7 @@ fn owner(spec: &RuntimeLaunchSpecV1) -> OciOwner {
         incarnation: format!("test-{}", std::process::id()),
     }
 }
-fn config() -> NativeLeaseSurfaceConfig {
+pub(crate) fn config() -> NativeLeaseSurfaceConfig {
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = socket.local_addr().unwrap();
     drop(socket);
@@ -99,7 +99,7 @@ fn config() -> NativeLeaseSurfaceConfig {
         maximum_lifetime: Duration::from_secs(30),
     }
 }
-fn context(root: &std::path::Path, workload: &str) -> ResolvedRuntimeLaunchContext {
+pub(crate) fn context(root: &std::path::Path, workload: &str) -> ResolvedRuntimeLaunchContext {
     use std::os::unix::fs::PermissionsExt;
     let workspace = root.join("w");
     std::fs::create_dir(&workspace).unwrap();
@@ -124,7 +124,7 @@ fn image() -> String {
     std::env::var("ATO_NATIVE_TERMINAL_TEST_IMAGE")
         .expect("explicit already-present digest-pinned CPU test image")
 }
-fn scratch() -> tempfile::TempDir {
+pub(crate) fn scratch() -> tempfile::TempDir {
     let root = std::env::var_os("ATO_NATIVE_TEST_ROOT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp"));
@@ -161,7 +161,7 @@ fn assertion(owner: &OciOwner, scope: &SurfaceGatewayScope) -> String {
         .as_str()
         .to_owned()
 }
-fn viewer(
+pub(crate) fn viewer(
     addr: SocketAddr,
     assertion: String,
     origin: &str,

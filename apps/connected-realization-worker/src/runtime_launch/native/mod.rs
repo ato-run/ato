@@ -1,8 +1,10 @@
 //! Runner-owned Native startup and cleanup. Kept behind dispatch admission:
 //! transport readiness never authorizes publication or satisfies Contract K.
+mod dispatch;
 mod producer;
+pub use dispatch::NativeLeaseRun;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use anyhow::{Context, Result, ensure};
 use ato_adapter_oci::{DockerOciAdapter, OciHandle, OciOwner, StopBudget, StopOutcome};
@@ -74,6 +76,9 @@ impl OwnedNativeTerminalRun {
             .container_id
             .as_deref()
             .expect("owned container identity")
+    }
+    pub fn is_finished(&self) -> bool {
+        self.task.as_ref().is_none_or(JoinHandle::is_finished)
     }
     pub fn execution_evidence(&self) -> &super::lease::RuntimeExecutionEvidence {
         &self.execution
