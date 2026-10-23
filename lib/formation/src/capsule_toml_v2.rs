@@ -76,6 +76,7 @@ pub struct PortableStateDraftV2 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortableHttpObservationDraftV2 {
     pub id: String,
+    pub port: String,
     pub path: String,
     pub status: u16,
     pub body_digest: Option<String>,
@@ -530,13 +531,10 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
                     format!("duplicate id {:?}", observation.id),
                 ));
             }
-            if observation.verifier != "ato.contract.http@1"
-                || observation.port != "app.http"
-                || observation.method != "GET"
-            {
+            if observation.verifier != "ato.contract.http@1" || observation.method != "GET" {
                 return Err(invalid(
                     "contract.observation",
-                    "portable v0 supports GET ato.contract.http@1 on app.http",
+                    "portable observations require GET ato.contract.http@1",
                 ));
             }
             if !observation.path.starts_with('/') || !(100..=599).contains(&observation.status) {
@@ -555,6 +553,7 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             }
             Ok(PortableHttpObservationDraftV2 {
                 id: observation.id,
+                port: observation.port,
                 path: observation.path,
                 status: observation.status,
                 body_digest: observation.body_digest,
