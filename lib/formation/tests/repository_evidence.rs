@@ -197,3 +197,28 @@ fn source_file_links_and_linked_root_are_never_followed() {
     std::os::unix::fs::symlink(external.path(), dir.path().join("root-link")).unwrap();
     assert!(repository_evidence::inspect(&dir.path().join("root-link")).is_err());
 }
+
+#[test]
+fn provider_evidence_never_promotes_source_to_verification_or_arbitrary_text() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("pyproject.toml"),
+        "[project]\ndependencies = [\"torch\", \"PySide6\"]\n",
+    )
+    .unwrap();
+    let report = ato_formation::repository_evidence::inspect(root.path()).unwrap();
+    assert!(report.validate());
+    assert!(!report.runtime_verified);
+    let mut forged = report.clone();
+    forged.runtime_verified = true;
+    assert!(!forged.validate());
+    forged = report.clone();
+    forged.facts[0].file = "private/source/path".into();
+    assert!(!forged.validate());
+    forged = report.clone();
+    forged.credential_names = vec!["RAW_SECRET_VALUE".into()];
+    assert!(!forged.validate());
+    forged = report.clone();
+    forged.declared_container_ports = vec![0];
+    assert!(!forged.validate());
+}
