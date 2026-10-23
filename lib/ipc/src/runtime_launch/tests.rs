@@ -541,3 +541,19 @@ fn native_terminal_launch_golden_is_canonical_and_digest_bound() {
     };
     assert!(oci.native_surface.is_some());
 }
+
+#[test]
+fn host_native_ports_launch_golden_is_canonical_and_digest_bound() {
+    let fixture =
+        include_str!("../../tests/fixtures/runtime-launch-spec-v1/native-terminal-host-ports.json");
+    let spec = RuntimeLaunchSpecV1::parse(fixture).unwrap();
+    assert_eq!(
+        spec.canonical_bytes().unwrap(),
+        fixture.trim_end().as_bytes()
+    );
+    assert_eq!(
+        spec.canonical_digest().unwrap(),
+        "sha256:e695edbf0587d918a3ce4b63aaddab443d739ce5fdb6a52119213d94b23e22fc"
+    );
+    assert!(spec.endpoints.is_empty());
+}

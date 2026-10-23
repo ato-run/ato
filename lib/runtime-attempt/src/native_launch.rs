@@ -2,6 +2,7 @@
 //! This is neither a new Capsule identity nor a claim that Contract K passed.
 
 use anyhow::{Context, Result, ensure};
+use ato_formation::authoring::BoundPort;
 use ato_formation::native_surface::{NativePresentation, NativeSurfaceAdapter};
 use ato_ipc::runtime_launch::MAX_NATIVE_LAUNCH_DECLARATION_BYTES;
 use ato_ipc::session_surface::{SessionSurfaceDescriptor, SurfaceCapabilityValue};
@@ -12,6 +13,9 @@ use serde::{Deserialize, Serialize};
 pub struct NativeLaunchDeclaration {
     pub derivation_ref: String,
     pub adapter: NativeSurfaceAdapter,
+    /// Exact Port facts of the validator-selected D; absent only on legacy wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<Vec<BoundPort>>,
 }
 
 impl NativeLaunchDeclaration {
@@ -19,9 +23,31 @@ impl NativeLaunchDeclaration {
         let declaration = Self {
             derivation_ref,
             adapter,
+            ports: None,
         };
         declaration.validate()?;
         Ok(declaration)
+    }
+
+    pub fn with_ports(mut self, ports: Vec<BoundPort>) -> Result<Self> {
+        self.ports = Some(ports);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// This backend owns a host PTY and a host observation listener. It cannot
+    /// silently erase a D's promise of real guest TCP listeners.
+    pub fn require_host_terminal_ports(&self) -> Result<()> {
+        let ports = self
+            .ports
+            .as_ref()
+            .context("native launch omitted selected D Port facts")?;
+        ensure!(
+            self.adapter.surface.kind() == "terminal"
+                && ports.iter().all(|port| port.guest_port.is_none()),
+            "host Terminal backend cannot honor declared guest TCP listeners"
+        );
+        Ok(())
     }
 
     /// Decode only after the IPC launch envelope's bounds have been checked.
@@ -48,7 +74,19 @@ impl NativeLaunchDeclaration {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "native declaration requires canonical selected DerivationRef"
         );
-        self.adapter.validate_catalog().map_err(anyhow::Error::msg)
+        self.adapter
+            .validate_catalog()
+            .map_err(anyhow::Error::msg)?;
+        if let Some(ports) = &self.ports {
+            ensure!(
+                ports.len() == 2,
+                "native launch requires the exact two selected D Ports"
+            );
+            self.adapter
+                .validate_ports(ports)
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
     }
 
     /// Bind presentation metadata to the catalog inside the digested spec.
@@ -113,6 +151,31 @@ mod tests {
         }})
     }
 
+    #[test]
+    fn selected_port_facts_are_required_and_guest_listeners_are_not_erased() {
+        let legacy = NativeLaunchDeclaration::decode(&declaration()).unwrap();
+        assert!(legacy.require_host_terminal_ports().is_err());
+        let spec = ato_ipc::runtime_launch::RuntimeLaunchSpecV1::parse(include_str!(
+            "../../ipc/tests/fixtures/runtime-launch-spec-v1/native-terminal-host-ports.json"
+        ))
+        .unwrap();
+        let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = spec.realization else {
+            unreachable!()
+        };
+        let mut native =
+            NativeLaunchDeclaration::decode(oci.native_surface.as_ref().unwrap()).unwrap();
+        native.require_host_terminal_ports().unwrap();
+        let ports = native.ports.as_mut().unwrap();
+        ports[0].guest_port = Some(1026);
+        ports[1].guest_port = Some(8081);
+        native.validate().unwrap();
+        assert!(native.require_host_terminal_ports().is_err());
+        native.ports.as_mut().unwrap()[0].guest_port = None;
+        assert!(native.validate().is_err());
+        let mut value = serde_json::to_value(&native).unwrap();
+        value["ports"][0]["host_path"] = json!("/secret");
+        assert!(NativeLaunchDeclaration::decode(&value).is_err());
+    }
     #[test]
     fn ipc_native_golden_contains_the_same_strict_validated_catalog() {
         let spec = ato_ipc::runtime_launch::RuntimeLaunchSpecV1::parse(include_str!(
