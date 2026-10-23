@@ -98,3 +98,25 @@ The Runner-owned sidecar accepts this scope through bounded stdin configuration,
 requires the single Runner key for a scoped execution and never prints key
 material. End-to-end lease launch/placement and native Contract verification
 remain separate integration gates; this change does not advertise native support.
+
+## Private Unix Terminal producer
+
+A non-VM sandbox may opt into `ATO_GUEST_AGENT_TERMINAL_UNIX_SOCKET` while
+using stdio supervisor control and the existing single PTY workload profile.
+The Agent requires an absolute normalized path in a canonical directory owned
+by its effective uid with no group/other access. The socket is 0600. Existing
+files/sockets are never overwritten; teardown removes only its own socket inode.
+A bounded `CONNECT 1026`/`OK 1026` preface connects the same existing Terminal
+frame broker used by Firecracker; the common Runner gateway is unchanged.
+This is an explicit private transport, not host shell access or a public endpoint.
+
+Stopping the handle disconnects an attached viewer, joins its bounded server
+thread and removes the socket. Dropping the PTY workload stops its process group
+with bounded TERM/KILL grace; an unconfirmed stop retains its generation for
+recovery. Supervisor stdio EOF therefore does not leave this owned PTY running.
+The existing VM/vsock default is unchanged when the opt-in is absent.
+
+Both transports send Ready before reading output but wait for the first bounded
+client frame before draining the PTY. A readiness-only connection can close
+without stealing the initial prompt/screen. The existing PWA sends a viewport
+Resize after Ready. This transport-level Ready does not satisfy application K.
