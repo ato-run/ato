@@ -130,12 +130,20 @@ fn request(stream: &mut TcpStream) -> Option<(String, String, String, Vec<u8>)> 
     Some((method, path, lower, body))
 }
 fn respond(stream: &mut TcpStream, status: &str, body: &[u8]) {
-    write!(
+    let header = write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
-    )
-    .unwrap();
+    );
+    if let Err(error) = header {
+        // Deadline tests deliberately close the readback socket before the
+        // delayed response. Keep the server alive to observe owned cleanup.
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        ));
+        return;
+    }
     let _ = stream.write_all(body);
 }
 impl Server {
