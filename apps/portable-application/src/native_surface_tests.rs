@@ -246,6 +246,43 @@ fn native_k_requires_actual_probe_bytes_and_cannot_be_satisfied_by_surface_ready
 }
 
 #[test]
+fn native_pixel_k_verifies_the_compact_measured_frame_response() {
+    let bundle = fixture(true);
+    let route = validate_bundle(&bundle).unwrap();
+    let spec = route.attempt_spec(None);
+    let verify = |body: &[u8]| {
+        verify_observed_candidate(
+            &spec,
+            vec![RuntimeHttpObservation::from_response(
+                "app.probe",
+                "GET",
+                "/result/calculate",
+                200,
+                body,
+            )],
+            serde_json::from_value::<VerificationExecutionEvidence>(
+                serde_json::json!({"realization":"native-fixture"}),
+            )
+            .unwrap(),
+            &ReceiptContext::formation(),
+        )
+        .verification
+        .fully_satisfied()
+    };
+    let mut frame = vec![0; 640 * 480 * 4];
+    let measured = ato_formation::native_surface::pixel_probe_result(&frame).unwrap();
+    assert_eq!(measured.len(), 72);
+    assert!(verify(&measured));
+    frame[0] = 1;
+    assert!(!verify(
+        &ato_formation::native_surface::pixel_probe_result(&frame).unwrap()
+    ));
+    assert!(!verify(b"surface_ready"));
+    assert!(!verify(&frame));
+    assert!(!verify(&measured[..71]));
+}
+
+#[test]
 fn native_profile_refuses_missing_k_digest_unobserved_actions_and_unsupported_routes() {
     let bundle = fixture(false);
     let route = validate_bundle(&bundle).unwrap();
