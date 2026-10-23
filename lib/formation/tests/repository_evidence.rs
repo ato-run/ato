@@ -149,6 +149,24 @@ fn malformed_oversized_and_non_utf8_files_are_reported_without_partial_inference
 }
 
 #[test]
+fn source_static_web_is_detected_without_interpreting_html() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "index.html",
+        "<script>fetch('https://example.test/private-source')</script>",
+    );
+    let report = repository_evidence::inspect(dir.path()).unwrap();
+    assert!(has(&report, ExecutionSignal::Web));
+    assert!(!report.runtime_verified);
+    assert!(
+        !serde_json::to_string(&report)
+            .unwrap()
+            .contains("private-source")
+    );
+}
+
+#[test]
 fn missing_markers_are_an_empty_report_not_an_unsupported_runtime_verdict() {
     let dir = tempfile::tempdir().unwrap();
     let report = repository_evidence::inspect(dir.path()).unwrap();
