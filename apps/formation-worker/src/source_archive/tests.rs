@@ -163,6 +163,13 @@ impl Server {
                     state.object_bearer_leaked |= headers.contains("authorization:")
                         || headers.contains("runner-token-canary");
                     if method == "PUT" {
+                        assert!(!headers.contains("transfer-encoding:"));
+                        let expected_size =
+                            state.binding.as_ref().unwrap()["archive_descriptor"]["size_bytes"]
+                                .as_u64()
+                                .unwrap();
+                        assert_eq!(body.len() as u64, expected_size);
+                        assert!(headers.contains(&format!("content-length: {expected_size}\r\n")));
                         if matches!(fault, Fault::PutFailure | Fault::CleanupFailure) {
                             respond(&mut stream, "503 Unavailable", b"{}");
                             continue;

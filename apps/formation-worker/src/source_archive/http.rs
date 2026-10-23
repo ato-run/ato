@@ -220,6 +220,10 @@ impl SourceArchiveApi {
             .put(self.object_url(&ticket.upload_url)?)
             .timeout(source_fetch::remaining(deadline)?)
             .header("content-type", "application/octet-stream")
+            .header(
+                reqwest::header::CONTENT_LENGTH,
+                descriptor.size_bytes.to_string(),
+            )
             .body(body)
             .send()
             .map_err(|_| anyhow::anyhow!("source_archive_upload_failed"))?;
