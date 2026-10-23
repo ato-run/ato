@@ -1,0 +1,9 @@
+{
+  "archive_sha256": "sha256:51625a35b6d29941dba0eb7556d337fa26f7eceb47a6935a57c7a8dd6f421b28",
+  "compressed_bytes": 7654810,
+  "uncompressed_bytes": 20425371,
+  "file_count": 7,
+  "largest_file_bytes": 20252229,
+  "source_commit": "2b320e5069ad708b900bcd85253c4be637a869e7",
+  "repo_url": "https://github.com/Automattic/harper"
+}
