@@ -716,6 +716,10 @@ impl Submission {
             .context("producer not enabled")?;
         let state = self.proposal_search(status)?;
         let mut value = ProposalRequestV2 {
+            repository_evidence: Some(
+                ato_formation::repository_evidence::inspect(&local.source_inventory.root)
+                    .context("cannot inspect frozen Formation source")?,
+            ),
             schema: ProposalRequestV2Schema::V2,
             search_id: request.search_id,
             round_seq: local.frozen.policy.exploration.as_ref().map(|_| {

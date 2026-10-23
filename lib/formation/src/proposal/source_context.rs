@@ -62,6 +62,10 @@ pub struct ProposalRequestV2 {
     pub operation_catalog: OperationCatalog,
     pub remaining_budget: ProposalBudget,
     pub source_context: Vec<SourceContextEntry>,
+    /// Advisory source evidence from the frozen requester workspace. It grants
+    /// no effects, resources or secret access and never changes the fixed K.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_evidence: Option<crate::repository_evidence::RepositoryEvidence>,
 }
 /// Bounded public execution evidence. No Runtime identity, secret, host path,
 /// binding or private source-ID resolution is included.
@@ -237,12 +241,20 @@ impl ProposalRequestV2 {
             operation_catalog: request.operation_catalog,
             remaining_budget: request.remaining_budget,
             source_context: build_source_context(auth, sources)?,
+            repository_evidence: None,
         };
         value.validate(auth)?;
         Ok(value)
     }
     pub fn validate(&self, auth: &ProposalAuthorization) -> Result<(), ProposalError> {
         auth.validate()?;
+        if self
+            .repository_evidence
+            .as_ref()
+            .is_some_and(|evidence| !evidence.validate())
+        {
+            return Err(ProposalError("repository_evidence_invalid"));
+        }
         if let Some(context) = &self.exploration_context {
             context.validate()?;
         }

@@ -66,3 +66,25 @@ malformed/oversized/binary sources, source symlinks, deterministic empty reports
 credential value exclusion, README injection and non-execution of scripts.
 The D/K inspection regression verifies borrowed canonical objects, omitted
 environment values and unchanged ContractRef/DerivationRef.
+
+## Automatic requester integration
+
+The source-authorized v2 Proposal request now includes an optional
+`repository_evidence` projection from the requester's frozen source directory.
+The bounded scanner reads only the fixed root manifest/document allowlist. It
+does not execute scripts, read `.env`, follow file symlinks or send source text,
+commands, credential values, host paths or endpoints in this projection.
+
+The evidence validator rejects unknown filenames, arbitrary name text, duplicate
+or oversized collections, invalid Ports and `runtime_verified=true`. Provider
+input remains advisory. Existing frozen K, explicit runtime constraint, operation
+catalog, proposal validation, execution requirement ceiling, durable attempt
+ledger and search budgets retain all authority. Neither a GPU/GUI hint nor a
+Compose declaration authorizes additional resources, keys, egress or execution.
+
+Requests created without this optional projection keep their previous bytes.
+Source text must already be authorized for this v2 provider request. Runtime
+verification remains mandatory and a source declaration is never promoted to a
+successful Formation or receipt. Unsupported observations/routes fail through
+the existing admission path; this change does not claim arbitrary GUI/GPU plans
+can already be generated and executed.
