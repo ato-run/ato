@@ -61,6 +61,49 @@ pub struct RepositoryEvidence {
     pub runtime_verified: bool,
 }
 
+impl RepositoryEvidence {
+    /// Validate a provider-bound advisory projection. Source declarations can
+    /// never claim runtime verification or introduce arbitrary text fields.
+    pub fn validate(&self) -> bool {
+        self.schema == "ato.formation-repository-evidence/1"
+            && !self.runtime_verified
+            && self.facts.len() <= MAX_FACTS
+            && self.facts.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .facts
+                .iter()
+                .all(|fact| FILES.contains(&fact.file.as_str()))
+            && self.entrypoint_names.len() <= 64
+            && self.entrypoint_names.iter().all(|name| symbol(name))
+            && self
+                .entrypoint_names
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && self.credential_names.len() <= 32
+            && self
+                .credential_names
+                .iter()
+                .all(|name| credential_name(name))
+            && self
+                .credential_names
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && self.declared_container_ports.len() <= 64
+            && self.declared_container_ports.iter().all(|port| *port > 0)
+            && self
+                .declared_container_ports
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && self.unscanned_files.len() <= FILES.len()
+            && self
+                .unscanned_files
+                .iter()
+                .all(|file| FILES.contains(&file.as_str()))
+            && self.unscanned_files.iter().collect::<BTreeSet<_>>().len()
+                == self.unscanned_files.len()
+    }
+}
+
 const FILES: &[&str] = &[
     "index.html",
     "package.json",
