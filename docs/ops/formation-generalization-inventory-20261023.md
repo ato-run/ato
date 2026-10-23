@@ -51,7 +51,12 @@ appのcreate_worktreeは `Not a git repository`。git worktreeで代替した。
 - [Wan modes Draft ato #1501](https://github.com/ato-run/ato/pull/1501)、[API #817](https://github.com/ato-run/ato-api/pull/817)、[PWA #492](https://github.com/ato-run/ato-pwa/pull/492)
 - [実機GPU試験 API #763](https://github.com/ato-run/ato-api/pull/763) と [Go/No-Go Draft #818](https://github.com/ato-run/ato-api/pull/818)
 - [Formation outcome設計 #1391](https://github.com/ato-run/ato/pull/1391)、[共通attempt #1390](https://github.com/ato-run/ato/pull/1390)
-- OCI service groupのtracking: ato-api #630、#634、#635、#636（既存設計書からの参照。Issue状態の個別確認は未実施）
+- 関連tracking: [API #630](https://github.com/ato-run/ato-api/issues/630)、
+  [#634](https://github.com/ato-run/ato-api/issues/634)、
+  [#635](https://github.com/ato-run/ato-api/issues/635)、
+  [#636](https://github.com/ato-run/ato-api/issues/636)。本文とopen状態を個別確認。
+  それぞれ動的アプリ基盤、休止抑止、復旧時の外部作用抑止、Private/egress境界を扱う。
+  9月時点の背景を含むため、openという状態だけから現在の実装不足を断定しない。
 
 ## OmniVoice独立コピー
 
@@ -92,7 +97,7 @@ static artifactを捏造したり、元のLease/秘密値/利用者data/receipt�
 | [PWA #506](https://github.com/ato-run/ato-pwa/pull/506) | GUI/PTYの共通接続寿命、同じSurfaceへの手動再接続、古い状態/DOM書込の排除 | GUI producer、転送/clipboard/GUI resize/idle、実RFB/PTYのstaging検証 |
 | [ato #1504](https://github.com/ato-run/ato/pull/1504) | `depends_on`を既存の順次起動へ安定topological sort。重複/未宣言/自己参照/循環を拒否 | 複数の個別HTTP・接続・全体操作のK観測、異種runtime混在 |
 | [API #831](https://github.com/ato-run/ato-api/pull/831) | owner/attemptに結び付く永続code/stageから失敗分類・retryabilityをpoll/waitへ同じ形式で表示 | retryの自動実行、GPU予約/Provider切替、Managed Secrets Broker |
-| [ato #1505](https://github.com/ato-run/ato/pull/1505) | Linux限定OCI explorationの必須userフィールドを補完し、image USERを継承 | Linux CIの修正後結果待ち |
+| [ato #1505](https://github.com/ato-run/ato/pull/1505) | Linux限定OCI explorationの必須userフィールドを補完し、image USERを継承 | 実OCIコンテナの起動検証 |
 
 ローカル検証:
 
@@ -117,6 +122,8 @@ macOSの`http_gate_forwards_binary_body_byte_for_byte`失敗は実行済みstep�
 課金例外へ含めない。前者は#1505に分離。後者は原因未確定として残す。
 macOSからのLinux cross-checkは`x86_64-linux-gnu-gcc`不足で到達できず、
 Linux検証成功とは数えない。
+修正#1505 `5ace78f76`ではUbuntu CIのcheck/test/clippyがPASS。
+同PRのWindows suiteはloopback CDP待機timeoutで1件失敗しており、全OS成功ではない。
 
 共有stagingの調整メッセージ送信はユーザーが明示許可済み。
 「OSS 7件のFormationとstaging掲載」は切替可能、保持対象はHarperの承認済みsource、
