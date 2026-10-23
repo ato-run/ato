@@ -10,6 +10,7 @@ mod unix {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use ato_ipc::session_surface::SurfaceExecutionScope;
     use netd::native_surface::{
         NativeSurfaceConfig, NativeSurfaceProbe, NativeSurfaceReady, start_ready_native_surface,
     };
@@ -25,6 +26,8 @@ mod unix {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Config {
+        #[serde(default)]
+        execution: Option<SurfaceExecutionScope>,
         session_id: String,
         surface_id: String,
         listen_addr: SocketAddr,
@@ -70,8 +73,20 @@ mod unix {
             session_id: config.session_id,
             surface_id: config.surface_id,
         };
+        if config.execution.is_some() {
+            anyhow::ensure!(
+                config.assertion_keys.len() == 1
+                    && config.assertion_keys.contains_key("ato.runner-surface@1"),
+                "execution requires the scoped Runner key"
+            );
+        }
         let keys = Arc::new(SurfaceAssertionKeyring::new(config.assertion_keys)?);
-        let assertion = keys.issue_readiness_assertion(&scope)?;
+        let assertion =
+            keys.issue_readiness_assertion_for_execution(&scope, config.execution.clone())?;
+        let mut authorizer = HmacSurfaceAccessAuthorizer::new(keys);
+        if let Some(execution) = config.execution {
+            authorizer = authorizer.with_execution_scope(execution);
+        }
         let allowed_origins = BTreeSet::from([config.origin.clone()]);
         let timeout = Duration::from_secs(config.readiness_timeout_secs);
         let target = match config.target {
@@ -94,7 +109,7 @@ mod unix {
         };
         let handle = start_ready_native_surface(
             target,
-            Arc::new(HmacSurfaceAccessAuthorizer::new(keys)),
+            Arc::new(authorizer),
             NativeSurfaceProbe {
                 connect_url: &config.connect_url,
                 origin: &config.origin,
