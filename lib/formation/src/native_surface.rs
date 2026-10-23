@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::authoring::{BoundPort, BoundStep, HTTP_PROTOCOL, TCP_PROTOCOL};
 
 pub const NATIVE_SURFACE_RUNTIME_FEATURE: &str = "runtime_feature=native_surface_probe_v1";
+/// Internal full-frame capture bound. HTTP returns only its measured digest.
+pub const MAX_NATIVE_PROBE_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 pub const TERMINAL_PORT_PROTOCOL: &str = "ato.pty@1";
 /// RFB semantics belong to the Adapter/profile; the logical transport reuses
 /// the existing opaque TCP Port instead of inventing a registered Protocol.
@@ -88,11 +90,23 @@ pub enum NativeProbeOperation {
     PixelKeyFrame {
         path: String,
         keysyms: Vec<u32>,
-        /// Exact full-frame B,G,R,X bytes. RFB pixel format is 32 bpp,
+        /// Bound for exact full-frame B,G,R,X capture. RFB format is 32 bpp,
         /// depth 24, little-endian, true-colour, max 255, shifts 16/8/0.
+        /// The frozen HTTP body is `sha256:<actual frame hex>\n`, not the frame.
         max_frame_bytes: u32,
         timeout_ms: u64,
     },
+}
+
+/// Compact measured pixel evidence, compatible with all existing HTTP body
+/// bounds. The expected answer stays exclusively in K. Neither this function
+/// nor the Adapter accepts an expected digest or produces a success verdict.
+pub fn pixel_probe_result(frame: &[u8]) -> Result<Vec<u8>, &'static str> {
+    use sha2::{Digest, Sha256};
+    if frame.is_empty() || frame.len() > MAX_NATIVE_PROBE_FRAME_BYTES as usize {
+        return Err("native pixel frame exceeds the capture bounds");
+    }
+    Ok(format!("sha256:{:x}\n", Sha256::digest(frame)).into_bytes())
 }
 
 impl NativeProbeOperation {
@@ -195,6 +209,7 @@ impl NativeSurfaceAdapter {
                         && keysyms.len() <= 32
                         && keysyms.iter().all(|key| (1..=0x1fff_ffff).contains(key))
                         && *max_frame_bytes == u32::from(*width) * u32::from(*height) * 4
+                        && *max_frame_bytes <= MAX_NATIVE_PROBE_FRAME_BYTES
                 }
                 _ => false,
             };

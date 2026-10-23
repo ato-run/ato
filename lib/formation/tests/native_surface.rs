@@ -175,3 +175,27 @@ fn terminal_line_echo_cannot_complete_probe_after_termios_newline_translation() 
         );
     }
 }
+
+#[test]
+fn large_pixel_captures_return_only_compact_measured_digest_bytes() {
+    let (mut value, _, _) = fixture();
+    value["surface"] = json!({"kind":"pixel_stream","port":"app.pixel","width":1536,"height":1536});
+    value["operations"] = json!([{"kind":"pixel_key_frame","path":"/result/frame",
+        "keysyms":[97],"max_frame_bytes":1536*1536*4,"timeout_ms":1000}]);
+    let native: NativeSurfaceAdapter = serde_json::from_value(value.clone()).unwrap();
+    native.validate_catalog().unwrap();
+    value["surface"]["width"] = json!(4096);
+    value["surface"]["height"] = json!(4096);
+    value["operations"][0]["max_frame_bytes"] = json!(64 * 1024 * 1024);
+    let native: NativeSurfaceAdapter = serde_json::from_value(value).unwrap();
+    native.validate_catalog().unwrap();
+    let body = ato_formation::native_surface::pixel_probe_result(b"measured BGRX bytes").unwrap();
+    assert_eq!(body.len(), 72);
+    assert!(body.starts_with(b"sha256:"));
+    assert!(body.ends_with(b"\n"));
+    assert_ne!(
+        body,
+        ato_formation::native_surface::pixel_probe_result(b"different actual frame").unwrap()
+    );
+    assert!(ato_formation::native_surface::pixel_probe_result(&[]).is_err());
+}
