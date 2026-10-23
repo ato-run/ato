@@ -375,6 +375,8 @@ pub struct PortableRouteReport {
     /// Adapter declaration of this exact D, never a launch authorization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_surface: Option<ato_formation::native_surface::NativeSurfaceAdapter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_ports: Option<Vec<ato_formation::authoring::BoundPort>>,
     pub derivation_ref: String,
     pub realization: &'static str,
     pub runtimes: BTreeMap<String, String>,
@@ -414,6 +416,11 @@ impl PortableRouteReport {
                 let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::new(
                     self.derivation_ref.clone(),
                     adapter.clone(),
+                )?
+                .with_ports(
+                    self.native_ports
+                        .clone()
+                        .context("native validator report omitted selected D Ports")?,
                 )?;
                 ensure!(
                     oci.native_surface.is_none(),
@@ -787,6 +794,7 @@ fn validated_routes(
                     .context("service group omitted its Surface Port")?;
                 return Ok(PortableRouteReport {
                     native_surface: None,
+                    native_ports: None,
                     derivation_ref: route.derivation_ref.to_string(),
                     realization: "oci_service_group",
                     runtimes: route.derivation.runtimes.clone(),
@@ -850,6 +858,11 @@ fn validated_routes(
                 .context("route omitted port")?;
             Ok(PortableRouteReport {
                 native_surface: route.derivation.native_surface.clone(),
+                native_ports: route
+                    .derivation
+                    .native_surface
+                    .as_ref()
+                    .map(|_| route.derivation.ports.clone()),
                 derivation_ref: route.derivation_ref.to_string(),
                 realization: match route.realization {
                     PortableRealizationKind::StaticWeb => "static_web",
@@ -1610,6 +1623,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(declaration.derivation_ref, report.routes[0].derivation_ref);
+            assert_eq!(declaration.ports, report.routes[0].native_ports);
             assert_eq!(
                 Some(&declaration.adapter),
                 report.routes[0].native_surface.as_ref()

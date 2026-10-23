@@ -276,3 +276,20 @@ conversion also refuses any native declaration, so another caller cannot ignore
 it and silently execute the Web OCI path. No native capability is advertised.
 API dispatch, native endpoint allocation and lease-owned sidecar attachment are
 separate follow-ups; this wire extension enables none of them by itself.
+
+### Selected native Port facts
+
+The optional `ports` field of the digested native launch declaration carries
+exactly the selected D's existing two `BoundPort` values. The validator report
+projects them as `native_ports`; lowering copies them unchanged. It never
+invents or erases a declared `guest_port`. Legacy absence preserves old wire
+bytes but is insufficient for execution by a host-owned Native backend.
+
+A host-owned Terminal presentation and observation binding may omit both guest
+TCP ports. Both remain logical Ports on the same serving step; an execution
+attempt resolves them to its owned private PTY/UDS and HTTP listener. Mixed
+omitted/present guest ports are refused. Pixel still requires declared guest
+TCP ports in this profile. Ordinary Web/process/OCI validation is unchanged.
+A backend unable to honor a declared guest TCP listener must refuse that D,
+not lower it into a different physical promise. Port facts change D and the
+launch digest, never K. No provider or runtime address enters Capsule identity.

@@ -29,3 +29,13 @@ file's trailing newline) digest to
 `sha256:dd69e6a80b94332365f8290ababc295dd723dbf27c07aa817a7bf55f239688dc`.
 This is a cross-language wire fixture, not native execution admission: both
 the Runner and ordinary OCI conversion continue to refuse native launch.
+
+`native-terminal-host-ports.json` preserves the exact selected D's existing
+`BoundPort` DTOs in the optional native declaration `ports` array. Both logical
+Ports omit `guest_port`: this host-owned Terminal backend creates a private
+PTY/UDS and private HTTP observation listener, without claiming guest TCP
+listeners. The launch has no OCI endpoints and uses process readiness. Canonical
+bytes digest to
+`sha256:e695edbf0587d918a3ce4b63aaddab443d739ce5fdb6a52119213d94b23e22fc`.
+The old native fixture and all pre-native wire digests remain unchanged. Legacy
+missing Port facts stay decodable but cannot authorize this host-owned backend.

@@ -334,3 +334,67 @@ fn native_profile_refuses_missing_k_digest_unobserved_actions_and_unsupported_ro
         assert!(validate_initial_route(&k, &route.application, &route.derivation).is_err());
     }
 }
+
+#[test]
+fn host_terminal_ports_are_exact_d_facts_without_fake_guest_listeners() {
+    let mut bundle = fixture(false);
+    let original = validate_bundle(&bundle).unwrap();
+    let original_k = original.contract_ref.to_string();
+    let old_ref = original.derivation_ref.to_string();
+    let mut derivation = original.derivation.clone();
+    for port in &mut derivation.ports {
+        port.guest_port = None;
+    }
+    bundle.index.derivations = vec![replace_object(&mut bundle, &old_ref, &derivation)];
+    let bytes = encode_portable_application_bundle(&bundle).unwrap();
+    let (_, routes) = validate_bytes_all(&bytes).unwrap();
+    let route = &routes[0];
+    assert_eq!(route.contract_ref.as_str(), original_k);
+    assert_ne!(route.derivation_ref.as_str(), old_ref);
+    assert!(
+        route
+            .derivation
+            .ports
+            .iter()
+            .all(|port| port.guest_port.is_none())
+    );
+    let reports = validator_agent::tests_support::route_reports(&routes).unwrap();
+    assert_eq!(
+        reports[0].native_ports.as_ref(),
+        Some(&route.derivation.ports)
+    );
+    assert_eq!(reports[0].guest_port, None);
+    let mut spec = ato_ipc::runtime_launch::RuntimeLaunchSpecV1::parse(include_str!(
+        "../../../lib/ipc/tests/fixtures/runtime-launch-spec-v1/native-terminal-host-ports.json"
+    ))
+    .unwrap();
+    let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+        unreachable!()
+    };
+    oci.native_surface = None;
+    reports[0].lower_native_surface(oci).unwrap();
+    let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(
+        oci.native_surface.as_ref().unwrap(),
+    )
+    .unwrap();
+    declaration.require_host_terminal_ports().unwrap();
+    assert_eq!(declaration.ports.as_ref(), Some(&derivation.ports));
+    assert_eq!(declaration.derivation_ref, route.derivation_ref.as_str());
+    assert_eq!(route.contract.contract_ref().unwrap(), original_k);
+
+    // Host binding is a Native Adapter permission, not a relaxation for Web OCI.
+    let mut ordinary = derivation.clone();
+    ordinary.native_surface = None;
+    ordinary.ports.retain(|port| port.id == "app.probe");
+    let mut app = route.application.clone();
+    app.surfaces[0].port = "app.probe".into();
+    assert!(validate_initial_route(&route.contract, &app, &ordinary).is_err());
+    let mut mixed = derivation.clone();
+    mixed.ports[0].guest_port = Some(1026);
+    assert!(mixed.derivation_ref().is_err());
+    let mut pixel = validate_bundle(&fixture(true)).unwrap().derivation.clone();
+    for port in &mut pixel.ports {
+        port.guest_port = None;
+    }
+    assert!(pixel.derivation_ref().is_err());
+}
