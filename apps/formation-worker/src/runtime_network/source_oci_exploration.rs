@@ -645,6 +645,7 @@ impl SourceOciRealizer<'_> {
                 image: built.image_reference.clone(),
                 platform: recipe.platform.clone(),
                 entrypoint: None,
+                user: None,
                 argv: facts.cmd,
                 working_dir: if facts.working_dir.is_empty() {
                     "/app".into()
