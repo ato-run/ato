@@ -1,5 +1,5 @@
 //! Bounded owner-side OCI commands. Workload cleanup gets its own budget.
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{
     Arc,
@@ -55,6 +55,30 @@ impl CommandControl {
         self.output_with_limit(command, OUTPUT_LIMIT)
     }
     pub fn output_with_limit(&self, command: &mut Command, limit: u64) -> io::Result<Output> {
+        self.output_inner(command, limit, None)
+    }
+    /// A small fixed owner-side request, never an unbounded workload stream.
+    pub fn output_with_input(
+        &self,
+        command: &mut Command,
+        input: &[u8],
+        limit: u64,
+    ) -> io::Result<Output> {
+        if input.len() > 4096 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "OCI owner request exceeds input bound",
+            ));
+        }
+        command.stdin(Stdio::piped());
+        self.output_inner(command, limit, Some(input))
+    }
+    fn output_inner(
+        &self,
+        command: &mut Command,
+        limit: u64,
+        input: Option<&[u8]>,
+    ) -> io::Result<Output> {
         self.remaining()?;
         #[cfg(unix)]
         {
@@ -68,6 +92,14 @@ impl CommandControl {
                 .spawn()?,
             finished: false,
         };
+        if let Some(input) = input {
+            let mut stdin = owned
+                .child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("OCI request pipe missing"))?;
+            stdin.write_all(input)?;
+        }
         let (tx, rx) = mpsc::channel();
         let output_bytes = Arc::new(AtomicU64::new(0));
         for (index, stream) in [
@@ -190,6 +222,23 @@ mod tests {
 #[cfg(all(test, unix))]
 mod output_tests {
     use super::*;
+    #[test]
+    fn bounded_owner_input_is_delivered_and_closed_without_exposing_a_general_proxy() {
+        let mut command = Command::new("/bin/cat");
+        let output = CommandControl::cleanup(Duration::from_secs(2))
+            .output_with_input(&mut command, b"fixed owner request", 64)
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fixed owner request");
+        let mut never = Command::new("a-command-that-does-not-exist");
+        assert_eq!(
+            CommandControl::cleanup(Duration::from_secs(2))
+                .output_with_input(&mut never, &[0; 4097], 8192)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
     #[test]
     fn stdout_and_stderr_share_one_output_budget() {
         let mut command = Command::new("/bin/sh");

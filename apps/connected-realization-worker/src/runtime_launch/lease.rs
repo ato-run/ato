@@ -807,6 +807,22 @@ pub struct RuntimeExecutionEvidence {
     pub services: Vec<ServiceExecutionEvidence>,
 }
 
+impl RuntimeExecutionEvidence {
+    pub fn for_container(container: &ato_adapter_oci::OciHandle) -> Self {
+        RuntimeExecutionEvidence {
+            realization: "oci",
+            runtime_executable: Some("docker".to_owned()),
+            runtime_version: None,
+            pid: None,
+            container_id: Some(container.container_id().to_owned()),
+            image: Some(container.image().to_owned()),
+            platform: Some(container.platform().to_owned()),
+            principal: container.execution_principal().cloned(),
+            services: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct ServiceExecutionEvidence {
     pub name: String,
@@ -851,17 +867,9 @@ impl ActiveRun {
                 services: Vec::new(),
             },
             ActiveWorkload::Oci(launched) => match launched.as_ref() {
-                LaunchedOci::Container(container) => RuntimeExecutionEvidence {
-                    realization: "oci",
-                    runtime_executable: Some("docker".to_owned()),
-                    runtime_version: None,
-                    pid: None,
-                    container_id: Some(container.container_id().to_owned()),
-                    image: Some(container.image().to_owned()),
-                    platform: Some(container.platform().to_owned()),
-                    principal: container.execution_principal().cloned(),
-                    services: Vec::new(),
-                },
+                LaunchedOci::Container(container) => {
+                    RuntimeExecutionEvidence::for_container(container)
+                }
                 LaunchedOci::Group(group) => RuntimeExecutionEvidence {
                     realization: "oci_service_group",
                     runtime_executable: Some("docker".to_owned()),
@@ -893,7 +901,7 @@ impl ActiveRun {
 /// and — never overridden by it — what the start itself established about
 /// what it had started. A cleanup the start could not confirm keeps the Run
 /// quarantined even if a later sweep finds nothing.
-fn settle_failed_oci_start(
+pub(super) fn settle_failed_oci_start(
     owner: &OciOwner,
     budget: ato_adapter_oci::StopBudget,
     error: &anyhow::Error,
