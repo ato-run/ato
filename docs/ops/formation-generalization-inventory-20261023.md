@@ -151,3 +151,56 @@ ChromeでDiscover/既存Libraryの読み取り表示・console error0を確認�
 Managed Secrets、Vast、Providerを跨ぐ予算予約/排他、全体自動化はまだ実装していない。
 この台帳および上記PRをもって、依頼全体の完了・GPUの稼働・運営キーの安全な提供・
 既存アプリの保存/再接続のstaging回帰なしを主張しない。
+
+## 2026-10-24 続行時点の差分台帳
+
+上記「今回の実装と検証」と末尾の未実装記述は初回5 PR・初回stagingの記録。
+以下で更新する。Draft実装の存在、隔離CPU実測、共有staging配備、機能有効化を分ける。
+
+| 範囲 | 追加Draftと確認した実装 | 受入の残り |
+|---|---|---|
+| GUI/TUI producer・transport | ato #1506/#1507/#1509/#1511/#1512/#1513。private Xvnc、PTY、Run/Lease/Runner scoped assertion、owner EOF/idle cleanup | Hosted Runnerとの一体所有、保存/復旧、製品GUI viewport変更・ファイル/clipboard |
+| Native観測・wire | ato #1514/#1515/#1516/#1518、API #842/#848。Dのoptional Native catalog、bounded RFB full-frame測定、入力を再実行しないprivate HTTP観測、selected Dを含むlaunch digest | Native実行guardとcapability無広告を維持。製品公開/実Hosted K Receiptは未達 |
+| 複合K | ato #1508、API #838。全logical Port観測、owned container handles、private observation proof、全観測のRust判定 | 共有Hosted配備と再接続/保存の受入。異種runtime混在は未対応 |
+| Managed Secrets | API #837/#841/#843/#844/#846。既存暗号化/Grant、固定text-embedding Broker、named Admin entrypoint、用途別Admin認可、safe additive deploy | Brokerはstaging無効、policy/key未投入。実workload/egress受入、任意chat/URLの運営キー提供は不可 |
+| GPU | API #836/#839/#840。共通予約、Vast Adapter、同Run排他、費用内訳・期限・停止後削除/孤児照合 | 実Provider/GPU試験は未実施、課金作成は承認直前で停止する。Vast flagは無効 |
+| 推定・転送 | ato #1510/#1517。既存ProposalV2へ証拠検出、bounded file-backed GitHub取得、redirect/decoded amplification拒否 | 通常Formation jobとの全体統合、初回GitHub archive承認→実行 |
+| 失敗・再試行 | API #845/#849。保存code/stageと既存Search予算の投影、既存fence/created_atによる3 claims/1h、単一D1 batch/CAS | 新しい自動再試行schedulerは作らない。期限の自動kill/未接触job expireは今回のclaim受付制限に含まない |
+| GitHub入口・証拠 | API #847/#850。pinned commit/subdir、既存from-source、Job/attempt/ownerへsource receiptを束縛、明示archive承認 | 旧wizard receiptの実測不足は409拒否。現Formation実測のreceiver/実archive保存を実装中 |
+| UI成功判定 | PWA #508。Add/Updateがready/succeeded＋Schema＋失敗なしの場合だけ進む共通判定 | 未配備。失敗/UNKNOWNにstale Schema IDがあっても進まない65 fixtures/full build確認 |
+
+Native組み立ては `apps/native-surface-gateway` に置く。netdのservice層から
+Formation libへ依存した初回CI違反は修正し、既存architecture ruleは変更していない。
+同名共通binary、既存transport、shared catalogを再利用する。Linux app+netd全target
+119 tests、macOS新app9 tests、all-target clippy、architecture44 packagesが通過。
+
+隔離CPUの実Agent PTY＋probe＋Surface準備は207ms、実TigerVNC＋probeは977ms。
+複合OCIのgood caseは23,275msで全K satisfied、backend失敗caseは23,545msで
+frontend200でも全体false、両container削除を確認した。単発sampleであり共有stagingの
+起動性能ではない。証跡は各PRのdocs/opsとevidenceを参照する。
+
+NativeのRust/TypeScript shared golden bytes/digestは一致し、旧v1/v2/v3 fixturesも維持。
+CLIの明示failure Receipt exportに対する旧「Receipt不在」期待はCIで検出した。
+更新テストは非ゼロ終了、fully_satisfied=false、同じK/D、failed observation、停止した
+endpointとfinished failed attemptを検証する。Mac portable CLI全16 testsが通過した。
+
+共有stagingはphase4でAPI `c54fe31e-55d5-40ce-9a9b-9fff83d117a7`、Admin
+`1677264a-a7fb-48bd-ae4e-346b608bbc89`。既存117 API bindings/settingsを全保持し、
+用途別の非secret Admin membershipだけ追加（118 total/36 secrets）。実Chromeの既存
+Access/sessionでAdmin GETが通り、無効Brokerのnot_found404を確認した。API public
+admin routeも404、Broker無効、policies0/liveGPU0、Vast未有効。D1 read-only snapshotsは
+Harper source/Instance/Schema/Receipt/curation/未掲載状態を保持。phase4 lockは解放済み。
+続くAPI #845/#849/#847/#850/#848統合は242 tests/typecheck通過、まだ未配備。
+
+### 追加で検出したauthority不足
+
+APIが参照する旧 `crates/snapshot/src/source_receipt.rs` / source-materialization
+producerはmonolith dismantle commit `4a5df3bc7`（2026-08-14）で削除済みで、現行Rustに
+同じproducerは見つからなかった。APIのqueue/claim/reportは残っているが、これを
+稼働中のproducerとして扱わない。旧 `ato.capsule-program-source-projection/v1` と現行
+`ato.source-resolver.v1/v2` は別authority。raw codeloadを `ato.source-archive/v1` へ偽装せず、
+実測・保存証拠がないmaterializationはnull/実行拒否のままにする。現Formationの既存
+source_evidence経路を使うreceiver-firstの修正と実archive保存を後続で進める。
+
+本番配備、課金GPU作成、運営キーの本番投入は実施していない。全体完了・全種のHosted
+実行・運営キーの実workload安全性・既存アプリの保存/再接続回帰完了とは報告しない。
