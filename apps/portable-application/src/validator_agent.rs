@@ -31,8 +31,8 @@ use crate::instance_snapshot::{
     InstanceSnapshotAssetBindingV1, InstanceSnapshotV1, validated_snapshot,
 };
 use crate::{
-    PortableRealizationKind, ValidatedPortableApplication, binding_environment_name, bundle_sha256,
-    validate_bytes_all, validate_bytes_for_derivation,
+    PortableRealizationKind, ValidatedPortableApplication, application_binding_environment_name,
+    bundle_sha256, validate_bytes_all, validate_bytes_for_derivation,
 };
 
 #[derive(Debug, Clone)]
@@ -600,7 +600,7 @@ fn report(
                 id: binding.id.clone(),
                 protocol: binding.protocol.clone(),
                 required: binding.required,
-                environment: binding_environment_name(&binding.id),
+                environment: application_binding_environment_name(binding),
             })
             .collect(),
         static_derivation_ref: static_route.map(|route| route.derivation_ref.to_string()),

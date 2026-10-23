@@ -419,6 +419,19 @@ pub fn binding_environment_name(id: &str) -> String {
     format!("ATO_BINDING_{}", id.to_ascii_uppercase())
 }
 
+/// Explicit protocol-owned SDK projections. `api-key` delivers only the Broker's
+/// short-lived per-Run embedding capability, never a provider credential.
+pub const OPENAI_EMBEDDING_API_KEY_PROTOCOL: &str = "ato.openai.embeddings.api-key@1";
+pub const OPENAI_EMBEDDING_BASE_URL_PROTOCOL: &str = "ato.openai.embeddings.base-url@1";
+
+pub fn application_binding_environment_name(binding: &ApplicationBindingV1) -> String {
+    match binding.protocol.as_str() {
+        OPENAI_EMBEDDING_API_KEY_PROTOCOL => "OPENAI_API_KEY".to_owned(),
+        OPENAI_EMBEDDING_BASE_URL_PROTOCOL => "OPENAI_BASE_URL".to_owned(),
+        _ => binding_environment_name(&binding.id),
+    }
+}
+
 pub fn resolve_application_bindings(
     application: &ValidatedApplication,
     supplied: &BTreeMap<String, String>,
@@ -456,7 +469,7 @@ pub fn resolve_application_bindings(
                 binding.id
             )));
         }
-        environment.insert(binding_environment_name(&binding.id), value.clone());
+        environment.insert(application_binding_environment_name(binding), value.clone());
     }
     Ok(environment)
 }
@@ -927,6 +940,7 @@ fn validate_application_bindings(
     bindings: &[ApplicationBindingV1],
 ) -> Result<(), PortableApplicationError> {
     let mut ids = BTreeSet::new();
+    let mut environments = BTreeSet::new();
     for binding in bindings {
         let valid_id = !binding.id.is_empty()
             && binding.id.len() <= 64
@@ -953,6 +967,11 @@ fn validate_application_bindings(
                 "application Binding `{}` has an invalid protocol",
                 binding.id
             )));
+        }
+        if !environments.insert(application_binding_environment_name(binding)) {
+            return Err(profile(
+                "application Bindings project to a repeated environment name",
+            ));
         }
         if !ids.insert(binding.id.as_str()) {
             return Err(profile(format!(
@@ -1636,7 +1655,7 @@ fn validate_initial_route(
     }
     if let Some(binding) = application.bindings.iter().find(|binding| {
         step.env
-            .contains_key(&binding_environment_name(&binding.id))
+            .contains_key(&application_binding_environment_name(binding))
     }) {
         return Err(profile(format!(
             "Binding `{}` conflicts with an authored environment value",
@@ -2105,7 +2124,15 @@ fn validate_oci_service_group<'a>(
                     step.id
                 )));
             }
-            if step.env.contains_key(&binding_environment_name(binding_id)) {
+            let binding = application
+                .bindings
+                .iter()
+                .find(|binding| binding.id == *binding_id)
+                .ok_or_else(|| profile("service names an undeclared Binding"))?;
+            if step
+                .env
+                .contains_key(&application_binding_environment_name(binding))
+            {
                 return Err(profile(format!(
                     "Binding `{binding_id}` conflicts with an authored environment value of service `{}`",
                     step.id
@@ -4190,6 +4217,110 @@ default = "pure"
             !bytes
                 .windows(secret.len())
                 .any(|window| window == secret.as_bytes())
+        );
+    }
+
+    #[test]
+    fn explicit_embedding_protocols_project_only_their_declared_sdk_environment() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let mut spec = datasette_spec();
+        spec.bindings = vec![
+            ApplicationBindingV1 {
+                id: "embedding_key".into(),
+                protocol: OPENAI_EMBEDDING_API_KEY_PROTOCOL.into(),
+                required: true,
+            },
+            ApplicationBindingV1 {
+                id: "embedding_url".into(),
+                protocol: OPENAI_EMBEDDING_BASE_URL_PROTOCOL.into(),
+                required: true,
+            },
+            ApplicationBindingV1 {
+                id: "opaque_json".into(),
+                protocol: "ato.binding.secret@1".into(),
+                required: false,
+            },
+        ];
+        let (bytes, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+        assert_eq!(
+            bundle.index.root_contract_ref,
+            original.index.root_contract_ref
+        );
+        assert_eq!(bundle.index.derivations, original.index.derivations);
+        let (_, routes) = validate_bytes_all(&bytes).unwrap();
+        for route in routes {
+            let environment = resolve_application_bindings(
+                &route.application,
+                &BTreeMap::from([
+                    ("embedding_key".into(), "short-run-capability".into()),
+                    (
+                        "embedding_url".into(),
+                        "https://broker.invalid/v1/managed-secrets".into(),
+                    ),
+                    ("opaque_json".into(), r#"{"api_key":"opaque-json"}"#.into()),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(environment.len(), 3);
+            assert_eq!(environment["OPENAI_API_KEY"], "short-run-capability");
+            assert_eq!(
+                environment["OPENAI_BASE_URL"],
+                "https://broker.invalid/v1/managed-secrets"
+            );
+            assert_eq!(
+                environment["ATO_BINDING_OPAQUE_JSON"],
+                r#"{"api_key":"opaque-json"}"#
+            );
+            assert!(!environment.contains_key("ATO_BINDING_EMBEDDING_KEY"));
+            assert!(
+                !bytes
+                    .windows(b"short-run-capability".len())
+                    .any(|w| w == b"short-run-capability")
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_environment_conflicts_and_duplicate_protocol_targets_are_refused() {
+        let mut spec = datasette_spec();
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "embedding".into(),
+            protocol: OPENAI_EMBEDDING_API_KEY_PROTOCOL.into(),
+            required: true,
+        }];
+        spec.process.env.insert(
+            "OPENAI_API_KEY".into(),
+            "public-value-cannot-shadow-capability".into(),
+        );
+        assert!(
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with an authored environment")
+        );
+        spec.process.env.clear();
+        spec.bindings.push(ApplicationBindingV1 {
+            id: "second".into(),
+            protocol: OPENAI_EMBEDDING_API_KEY_PROTOCOL.into(),
+            required: true,
+        });
+        assert!(
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("repeated environment name")
+        );
+        // Similar protocol strings do not opt in to SDK projection.
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "embedding".into(),
+            protocol: "ato.openai.embeddings.api-key@2".into(),
+            required: true,
+        }];
+        assert_eq!(
+            application_binding_environment_name(&spec.bindings[0]),
+            "ATO_BINDING_EMBEDDING"
         );
     }
 
