@@ -4,6 +4,7 @@
 //! Only the runner reads the claims. Browser-facing code receives an HttpOnly
 //! cookie and the session-host boundary injects the assertion during upgrade.
 
+use ato_ipc::session_surface::SurfaceExecutionScope;
 use std::{collections::BTreeMap, fmt, sync::Arc, time::SystemTime};
 
 use ato_ipc::session_surface::{
@@ -76,6 +77,14 @@ impl SurfaceAssertionKeyring {
         &self,
         scope: &PixelGatewayScope,
     ) -> Result<ReadinessSurfaceAssertion, SurfaceAssertionIssueError> {
+        self.issue_readiness_assertion_for_execution(scope, None)
+    }
+
+    pub fn issue_readiness_assertion_for_execution(
+        &self,
+        scope: &PixelGatewayScope,
+        execution: Option<SurfaceExecutionScope>,
+    ) -> Result<ReadinessSurfaceAssertion, SurfaceAssertionIssueError> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_err(|_| SurfaceAssertionIssueError::Clock)?
@@ -93,6 +102,7 @@ impl SurfaceAssertionKeyring {
             .try_fill_bytes(&mut random)
             .map_err(|_| SurfaceAssertionIssueError::Entropy)?;
         let claims = SurfaceAssertionClaims {
+            execution,
             aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
             session_id: scope.session_id.clone(),
             surface_id: scope.surface_id.clone(),
@@ -154,6 +164,7 @@ pub enum SurfaceKeyringError {
 /// principals. Both principal kinds remain scoped to the exact session and
 /// surface carried by the lease.
 pub struct HmacSurfaceAccessAuthorizer {
+    execution: Option<SurfaceExecutionScope>,
     keyring: Arc<SurfaceAssertionKeyring>,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
@@ -176,11 +187,18 @@ impl HmacSurfaceAccessAuthorizer {
         })
     }
 
+    /// A Connected Runner must bind this to its claimed execution before serving.
+    pub fn with_execution_scope(mut self, execution: SurfaceExecutionScope) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
     fn with_clock(
         keyring: Arc<SurfaceAssertionKeyring>,
         now: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
         Self {
+            execution: None,
             keyring,
             now: Arc::new(now),
         }
@@ -225,7 +243,10 @@ impl HmacSurfaceAccessAuthorizer {
             .checked_sub(now)
             .filter(|ttl| *ttl > 0 && *ttl <= MAX_ASSERTION_REMAINING_TTL_SECS)
             .ok_or(SurfaceAuthorizationError)?;
-        if claims.session_id != scope.session_id || claims.surface_id != scope.surface_id {
+        if claims.session_id != scope.session_id
+            || claims.surface_id != scope.surface_id
+            || claims.execution != self.execution
+        {
             return Err(SurfaceAuthorizationError);
         }
 
@@ -263,6 +284,7 @@ mod tests {
 
     fn claims() -> SurfaceAssertionClaims {
         SurfaceAssertionClaims {
+            execution: None,
             aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
             session_id: "session-1".to_string(),
             surface_id: "surface-1".to_string(),
@@ -295,6 +317,74 @@ mod tests {
 
     fn authorizer() -> HmacSurfaceAccessAuthorizer {
         HmacSurfaceAccessAuthorizer::with_clock(keyring(), || NOW)
+    }
+
+    fn execution() -> SurfaceExecutionScope {
+        SurfaceExecutionScope {
+            run_id: "run-1".into(),
+            lease_id: "lease-1".into(),
+            runner_id: "runner-1".into(),
+        }
+    }
+
+    #[test]
+    fn execution_scope_is_exact_and_cannot_downgrade_to_legacy() {
+        let mut scoped = claims();
+        scoped.execution = Some(execution());
+        let assertion = sign(&scoped, KEY.as_bytes());
+        assert!(
+            authorizer()
+                .with_execution_scope(execution())
+                .authorize(&assertion, &scope())
+                .is_ok()
+        );
+        assert!(authorizer().authorize(&assertion, &scope()).is_err());
+        let legacy = sign(&claims(), KEY.as_bytes());
+        assert!(
+            authorizer()
+                .with_execution_scope(execution())
+                .authorize(&legacy, &scope())
+                .is_err()
+        );
+        for field in 0..3 {
+            let mut other = execution();
+            match field {
+                0 => other.run_id.push_str("-other"),
+                1 => other.lease_id.push_str("-other"),
+                _ => other.runner_id.push_str("-other"),
+            }
+            assert!(
+                authorizer()
+                    .with_execution_scope(other)
+                    .authorize(&assertion, &scope())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_readiness_uses_the_same_execution_authority() {
+        let keys = keyring();
+        let assertion = keys
+            .issue_readiness_assertion_for_execution(&scope(), Some(execution()))
+            .unwrap();
+        assert!(
+            HmacSurfaceAccessAuthorizer::new(Arc::clone(&keys))
+                .with_execution_scope(execution())
+                .authorize(assertion.as_str(), &scope())
+                .is_ok()
+        );
+        assert!(
+            HmacSurfaceAccessAuthorizer::new(keys)
+                .authorize(assertion.as_str(), &scope())
+                .is_err()
+        );
+        assert!(
+            serde_json::to_value(claims())
+                .unwrap()
+                .get("execution")
+                .is_none()
+        );
     }
 
     #[test]
