@@ -126,6 +126,25 @@ pub struct ManagedEmbeddingRelay {
     connections: Arc<ConnectionGroup>,
 }
 
+// Acceptance uses a local CA-signed Broker fixture. Keep that trust root scoped
+// to the evaluating test thread; production always builds the ordinary client.
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static FIXTURE_HTTP_CLIENT: std::cell::RefCell<Option<Client>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn with_fixture_http_client<T>(client: Client, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<Client>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FIXTURE_HTTP_CLIENT.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _reset = Reset(FIXTURE_HTTP_CLIENT.with(|slot| slot.replace(Some(client))));
+    run()
+}
+
 impl ManagedEmbeddingRelay {
     /// Resolve and match both authorized scalar values BEFORE creating a
     /// network or workload. Callers must retain this validation order.
@@ -161,6 +180,10 @@ impl ManagedEmbeddingRelay {
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(2))
             .build()?;
+        #[cfg(all(test, target_os = "linux"))]
+        let client = FIXTURE_HTTP_CLIENT
+            .with(|slot| slot.borrow().clone())
+            .unwrap_or(client);
         Self::start_with_client(endpoint, grant, token, client)
     }
 

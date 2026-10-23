@@ -11,6 +11,8 @@ mod activity_controller;
 mod data_plane;
 pub mod diagnostics;
 pub mod host_resources;
+#[cfg(all(test, target_os = "linux"))]
+mod managed_hosted_tests;
 pub mod runtime_launch;
 mod slot_state;
 
