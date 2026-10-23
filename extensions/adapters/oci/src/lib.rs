@@ -342,14 +342,33 @@ pub struct DockerOciAdapter {
     spec: OciSpec,
     offline_image: Option<OfflineImage>,
     attached_terminal: bool,
+    cgroup_parent: Option<String>,
 }
 
 struct OfflineImage {
-    archive: Vec<u8>,
+    archive: std::sync::Arc<Vec<u8>>,
     config_reference: String,
 }
 
 impl DockerOciAdapter {
+    /// Trusted physical placement, independent of the application's identity.
+    /// The caller measures this exact existing parent before creating either
+    /// member of an auxiliary group. Never inferred from dockerd's cgroup.
+    pub fn with_cgroup_parent(mut self, parent: String) -> Result<Self> {
+        ensure!(
+            !parent.is_empty()
+                && parent.len() <= 256
+                && parent
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b))
+                && !parent.split('/').any(|part| part == ".." || part == ".")
+                && !parent.contains("//")
+                && !parent.ends_with('/'),
+            "invalid explicit OCI cgroup parent"
+        );
+        self.cgroup_parent = Some(parent);
+        Ok(self)
+    }
     /// Host-owned PTY for the declared entrypoint; no helper enters the image.
     /// This deliberately supports no network endpoint or root execution.
     pub fn with_attached_terminal(mut self) -> Result<Self> {
@@ -399,6 +418,7 @@ impl DockerOciAdapter {
             spec,
             offline_image: None,
             attached_terminal: false,
+            cgroup_parent: None,
         })
     }
 
@@ -406,6 +426,16 @@ impl DockerOciAdapter {
     /// config, layers, platform, and pinned image digest. Docker may load it,
     /// but must not resolve an absent image through the network.
     pub fn new_offline(spec: OciSpec, archive: Vec<u8>, config_reference: String) -> Result<Self> {
+        Self::new_offline_shared(spec, std::sync::Arc::new(archive), config_reference)
+    }
+
+    /// Reuse a fully verified frozen materialization without copying a large
+    /// helper archive into every attempt's admission footprint.
+    pub fn new_offline_shared(
+        spec: OciSpec,
+        archive: std::sync::Arc<Vec<u8>>,
+        config_reference: String,
+    ) -> Result<Self> {
         ensure!(
             config_reference
                 .strip_prefix("sha256:")
@@ -440,7 +470,7 @@ impl DockerOciAdapter {
         );
         let mut adapter = Self::new_at(spec, executable)?;
         adapter.offline_image = Some(OfflineImage {
-            archive,
+            archive: std::sync::Arc::new(archive),
             config_reference,
         });
         Ok(adapter)
@@ -548,7 +578,7 @@ impl DockerOciAdapter {
                 .is_err()
         {
             let path = runtime_root.join("verified-oci-image.tar");
-            fs::write(&path, &offline.archive).context("write verified OCI archive")?;
+            fs::write(&path, offline.archive.as_slice()).context("write verified OCI archive")?;
             run_checked(
                 &self.docker,
                 [
@@ -645,6 +675,9 @@ impl DockerOciAdapter {
             argv[0] = "create".to_owned();
             argv.remove(1); // --detach applies only to run.
             argv.splice(1..1, ["--interactive".to_owned(), "--tty".to_owned()]);
+        }
+        if let Some(parent) = &self.cgroup_parent {
+            argv.splice(1..1, ["--cgroup-parent".to_owned(), parent.clone()]);
         }
         // Persist the chosen name before Docker can create it. A worker crash
         // must not erase the identity needed to inspect an external workload.
@@ -1256,6 +1289,59 @@ pub struct OciHandle {
 }
 
 impl OciHandle {
+    /// Confirm the physical parent selected during host capacity admission.
+    /// A mismatching or unobservable parent is never accepted as placement.
+    pub fn verify_cgroup_parent(&self, docker_parent: &str, parent: &Path) -> Result<()> {
+        ensure!(
+            cfg!(target_os = "linux"),
+            "effective cgroup observation requires Linux"
+        );
+        let mut client = self.docker.clone();
+        client.control = Some(command_control::CommandControl::cleanup(
+            Duration::from_millis(500),
+        ));
+        let output = run_checked(
+            &client,
+            [
+                "inspect",
+                self.container_id.as_str(),
+                "--format",
+                "{{.State.Pid}}|{{.HostConfig.CgroupParent}}",
+            ],
+            "observe effective OCI cgroup parent",
+        )?;
+        let (pid, actual) = output
+            .trim()
+            .split_once('|')
+            .context("missing OCI cgroup parent evidence")?;
+        let pid: u32 = pid.parse()?;
+        ensure!(
+            pid > 0 && actual == docker_parent,
+            "OCI cgroup parent differs from admitted placement"
+        );
+        use std::io::Read as _;
+        let mut cgroup = String::new();
+        fs::File::open(format!("/proc/{pid}/cgroup"))?
+            .take(4097)
+            .read_to_string(&mut cgroup)?;
+        ensure!(cgroup.len() <= 4096, "oversized OCI cgroup evidence");
+        let actual = cgroup
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .context("unknown effective OCI cgroup")?;
+        let expected = Path::new("/").join(parent);
+        ensure!(
+            Path::new(actual)
+                .strip_prefix(expected)?
+                .components()
+                .next()
+                .is_some()
+                && actual.contains(&self.container_id),
+            "OCI process did not enter the admitted cgroup parent"
+        );
+        Ok(())
+    }
+
     /// Transfer the trusted attach client to the Runner-owned producer.
     pub fn take_terminal(&mut self) -> Option<OciTerminal> {
         self.terminal.take().map(|terminal| *terminal)
