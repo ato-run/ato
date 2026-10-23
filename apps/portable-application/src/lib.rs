@@ -1639,7 +1639,12 @@ fn validate_native_route(
     probe_route
         .ports
         .retain(|port| port.id == native.probe_port);
-    let realization = validate_initial_route(contract, &probe_application, &probe_route)?;
+    let host_native = derivation
+        .ports
+        .iter()
+        .all(|port| port.guest_port.is_none());
+    let realization =
+        validate_route_profile(contract, &probe_application, &probe_route, host_native)?;
     debug_assert_eq!(realization, PortableRealizationKind::OciContainer);
     Ok(realization)
 }
@@ -1652,6 +1657,15 @@ fn validate_initial_route(
     if derivation.native_surface.is_some() {
         return validate_native_route(contract, application, derivation);
     }
+    validate_route_profile(contract, application, derivation, false)
+}
+
+fn validate_route_profile(
+    contract: &BoundContract,
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+    host_native: bool,
+) -> Result<PortableRealizationKind, PortableApplicationError> {
     if !matches!(
         application.schema.as_str(),
         APPLICATION_SCHEMA | APPLICATION_V2_SCHEMA
@@ -1849,7 +1863,7 @@ fn validate_initial_route(
                 || step.root.is_some()
                 || step.entry.is_some()
                 || step.spa_fallback.is_some()
-                || port.guest_port.is_none()
+                || (port.guest_port.is_none() && !host_native)
             {
                 return Err(profile(
                     "OCI derivation is outside the declared container HTTP profile",

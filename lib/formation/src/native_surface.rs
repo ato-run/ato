@@ -225,8 +225,9 @@ impl NativeSurfaceAdapter {
         Ok(())
     }
 
-    /// Logical Port graph check in addition to the bounded catalog.
-    pub fn validate(&self, ports: &[BoundPort], steps: &[BoundStep]) -> Result<(), &'static str> {
+    /// Validate the declared Port facts independently of physical placement.
+    /// A host-owned Terminal/HTTP probe pair has no guest TCP listeners.
+    pub fn validate_ports(&self, ports: &[BoundPort]) -> Result<(), &'static str> {
         self.validate_catalog()?;
         let find = |id: &str| {
             let mut matching = ports.iter().filter(|port| port.id == id);
@@ -235,16 +236,34 @@ impl NativeSurfaceAdapter {
         };
         let surface = find(self.surface.port()).ok_or("native Surface Port is not unique")?;
         let probe = find(&self.probe_port).ok_or("native probe Port is not unique")?;
+        let transport = match (surface.guest_port, probe.guest_port) {
+            (None, None) => matches!(self.surface, NativePresentation::Terminal { .. }),
+            (Some(surface), Some(probe)) => surface != 0 && probe != 0 && surface != probe,
+            _ => false,
+        };
         if surface.protocol != self.surface.protocol()
             || probe.protocol != HTTP_PROTOCOL
+            || surface.from.is_empty()
             || surface.from != probe.from
-            || steps.iter().filter(|step| step.id == surface.from).count() != 1
-            || surface.guest_port.is_none_or(|port| port == 0)
-            || probe.guest_port.is_none_or(|port| port == 0)
-            || surface.guest_port == probe.guest_port
+            || !transport
             || surface.client_address_transport.is_some()
             || probe.client_address_transport.is_some()
         {
+            return Err(
+                "native Surface and private HTTP probe must declare one consistent producer and transport binding",
+            );
+        }
+        Ok(())
+    }
+
+    /// Logical Port graph check in addition to the bounded catalog.
+    pub fn validate(&self, ports: &[BoundPort], steps: &[BoundStep]) -> Result<(), &'static str> {
+        self.validate_ports(ports)?;
+        let surface = ports
+            .iter()
+            .find(|port| port.id == self.surface.port())
+            .expect("validated Surface Port");
+        if steps.iter().filter(|step| step.id == surface.from).count() != 1 {
             return Err(
                 "native Surface and private HTTP probe must belong to the same serving step",
             );
