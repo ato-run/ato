@@ -120,3 +120,90 @@ Both transports send Ready before reading output but wait for the first bounded
 client frame before draining the PTY. A readiness-only connection can close
 without stealing the initial prompt/screen. The existing PWA sends a viewport
 Resize after Ready. This transport-level Ready does not satisfy application K.
+
+## Portable v3 native declaration (format admission only)
+
+`BoundDerivation.native_surface` is an optional Adapter declaration. It is
+omitted from old canonical bytes. Native configuration changes D, never K;
+physical listener addresses, host/Provider identities, Run/lease identifiers,
+authorization keys and expected answers are absent from the declaration.
+Kernel and computation-root wire v2 are unchanged.
+
+The first portable native shape is one digest-pinned OCI serving step with
+an explicit non-root numeric UID:GID, one logical native presentation Port,
+and a distinct private HTTP probe Port on that same step. The Application
+uses its existing `ato.application/2` logical Surface and names the native
+Port. Terminal uses the existing `ato.pty@1` Protocol; pixel uses the existing
+payload-opaque `ato.tcp@1` Port. RFB semantics belong to the Adapter and
+`ato.pixel-stream.v1` session profile; no new Core Protocol is registered.
+
+Example declaration (byte arrays are public, authored interaction input):
+
+```json
+{
+  "surface": {"kind":"terminal","port":"app.terminal","cols":80,"rows":24},
+  "probe_port":"app.probe",
+  "operations":[{
+    "kind":"terminal_exchange",
+    "path":"/result/calculate",
+    "input":[50,43,50,10],
+    "output_delimiter":[69,78,68],
+    "max_output_bytes":4096,
+    "timeout_ms":1000
+  }]
+}
+```
+
+`NativeSurfaceAdapter::validate_catalog` is the shared pure bounds validator;
+`validate(ports, steps)` additionally checks the logical graph. A catalog has
+one to eight actions in authored order, distinct normalized result paths,
+at most 30 seconds per action, 120 seconds total, and 64 MiB aggregate output.
+An unknown field or action kind is rejected.
+
+Terminal catalog input is one to 4096 printable ASCII/CR/LF bytes; interactive
+viewer input retains the existing PTY byte protocol. Output is at most 64 KiB. The nonempty
+completion delimiter is at most 256 bytes, fits within the output cap, and
+cannot occur in a conservative representation of the input's line-discipline
+echo. The validator removes CR/LF while comparing and also rejects ECHOCTL
+`^M` variants; newline-only delimiters are refused. This closes ICRNL/ONLCR
+and related newline-translation echo completion without assuming termios
+settings. The delimiter frames completion; it is not an
+expected answer. Measured output includes the delimiter and preserves prior
+pending PTY output. Applications and K must account for echo and other actual
+output rather than treating an echoed input or a prompt as app success.
+An Adapter must also refuse a delimiter already present in pending output
+before it sends this operation's input.
+
+Pixel presentation is 64 to 4096 pixels per dimension. `pixel_key_frame`
+contains one to 32 keysyms, a result path, timeout, and `max_frame_bytes`
+exactly equal to width × height × 4. Each keysym means one down/up pair in
+authored order. The captured result is one full B,G,R,X frame using RFB's
+32-bpp, depth-24, little-endian true-colour format, channel maxima 255 and
+red/green/blue shifts 16/8/0. It is not a PNG, RGBA buffer, readiness frame,
+or a boolean outcome.
+
+The physical Adapter must perform each action once, capture actual bounded
+output, and freeze the result before any observation is published. Repeated
+GET retrieves the frozen bytes and never repeats the input. It must not
+receive the expected K digest or synthesize a `PASS` result. Every catalog
+path requires exactly one original HTTP K observation on the private probe
+Port, with GET, status 200 and an explicit SHA-256 body digest. Extra actions,
+missing observations, native-Surface observations and digest-free health
+checks are refused by format admission. The existing Rust HTTP verifier and
+receipt decide satisfaction; Surface readiness remains independent evidence.
+
+The validator report adds kind/profile only for native Surfaces and carries
+the exact per-D native declaration. Its native route discriminator is
+`native_oci_container`, so an older Coordinator refuses it rather than
+launching it as ordinary Web OCI. Existing Web report fields remain omitted
+as before. The Runner lease DTO can carry the existing typed
+`SessionSurfaceDescriptor` as optional `session_surface` metadata outside
+the launch-spec digest.
+
+This slice admits the native bundle format, not native execution. Existing
+local/Formation execution lowering and attempt admission refuse a native D.
+The Connected Runner rejects native `session_surface` before launch and
+continues to advertise Web only. Native probe implementation, producer
+attachment, capability matching, private endpoint resolution, authenticated
+publication, lease-owned cleanup and staging app acceptance require subsequent
+implementation and validation. No existing deployment flag is enabled here.

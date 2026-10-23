@@ -78,6 +78,10 @@ pub fn RUNTIME_LAUNCH_SUPPORTED() -> bool {
 /// What the control plane puts in `runner_leases.command_json`.
 #[derive(Debug, serde::Deserialize)]
 pub struct RuntimeLaunchLeaseCommand {
+    /// Negotiated presentation metadata, outside the digested launch spec.
+    /// Native execution remains refused until the owning lifecycle is wired.
+    #[serde(default)]
+    pub session_surface: Option<ato_ipc::session_surface::SessionSurfaceDescriptor>,
     pub run_id: String,
     pub compute_instance_id: String,
     /// The canonical digest of `launch_spec`, recomputed and compared here.
@@ -404,6 +408,15 @@ pub fn refresh_execution_authorization(
 /// control plane digested onto the Run, the Runner would execute something the
 /// receipt does not describe.
 pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunchSpec> {
+    if let Some(surface) = &command.session_surface {
+        surface
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid runtime launch Surface: {error}"))?;
+        ensure!(
+            surface.kind() == ato_ipc::session_surface::SessionSurfaceKind::Web,
+            "native_surface_unavailable: this Runner has no native workload lifecycle"
+        );
+    }
     if let Some(seconds) = command.max_duration_secs {
         ensure!(
             (1..=RUNTIME_LAUNCH_MAX_DURATION_SECS).contains(&seconds),
@@ -1155,6 +1168,7 @@ mod tests {
 
     fn command_for(spec: &RuntimeLaunchSpecV1, digest: &str) -> RuntimeLaunchLeaseCommand {
         RuntimeLaunchLeaseCommand {
+            session_surface: None,
             run_id: spec.context.run_id.clone(),
             compute_instance_id: spec.context.compute_instance_id.clone(),
             launch_spec_digest: digest.to_owned(),
@@ -1174,6 +1188,30 @@ mod tests {
         // it looks like "no runner available", forever — so the literal is
         // pinned here rather than referenced.
         assert_eq!(RUNTIME_LAUNCH_LEASE_KIND, "runtime_launch");
+    }
+
+    #[test]
+    fn native_session_surface_is_typed_but_refused_before_launch() {
+        let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).unwrap();
+        let mut command = command_for(&spec, &spec.canonical_digest().unwrap());
+        assert!(verified_spec(&command).is_ok());
+        command.session_surface = Some(
+            ato_ipc::session_surface::SessionSurfaceDescriptor::Terminal {
+                profile: ato_ipc::session_surface::TERMINAL_SURFACE_PROFILE.to_owned(),
+                surface_id: "surface_fixture".to_owned(),
+                transport: ato_ipc::session_surface::SessionSurfaceTransport::TerminalWebsocket,
+                capabilities: BTreeMap::new(),
+            },
+        );
+        let error = verified_spec(&command).unwrap_err().to_string();
+        assert!(error.starts_with("native_surface_unavailable"), "{error}");
+        command.session_surface = Some(ato_ipc::session_surface::SessionSurfaceDescriptor::Unknown);
+        assert!(
+            verified_spec(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid runtime launch Surface")
+        );
     }
 
     #[test]
@@ -1235,6 +1273,7 @@ mod tests {
         let spec =
             ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2::parse(GROUP_FIXTURE).expect("fixture");
         RuntimeLaunchLeaseCommand {
+            session_surface: None,
             run_id: spec.context.run_id.clone(),
             compute_instance_id: spec.context.compute_instance_id.clone(),
             launch_spec_digest: spec.canonical_digest().expect("digests"),
