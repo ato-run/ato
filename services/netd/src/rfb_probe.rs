@@ -199,6 +199,30 @@ pub async fn capture_private_rfb_frame(
     max_frame_bytes: usize,
     wait: Duration,
 ) -> Result<Vec<u8>, RfbProbeError> {
+    capture_private_rfb_frame_with_settle(
+        addr,
+        width,
+        height,
+        keysyms,
+        max_frame_bytes,
+        Duration::ZERO,
+        wait,
+    )
+    .await
+}
+
+/// Same bounded capture with an authored render-settling interval. The wait is
+/// within the original deadline, cancellable, and never repeats a key or frame.
+#[allow(clippy::too_many_arguments)]
+pub async fn capture_private_rfb_frame_with_settle(
+    addr: SocketAddr,
+    width: u16,
+    height: u16,
+    keysyms: &[u32],
+    max_frame_bytes: usize,
+    settle: Duration,
+    wait: Duration,
+) -> Result<Vec<u8>, RfbProbeError> {
     if !addr.ip().is_loopback() {
         return Err(RfbProbeError::InvalidPrivateEndpoint);
     }
@@ -216,11 +240,14 @@ pub async fn capture_private_rfb_frame(
         || max_frame_bytes > MAX_FRAME_BYTES
         || wait < Duration::from_millis(1)
         || wait > Duration::from_secs(30)
+        || settle > Duration::from_secs(1)
+        || settle >= wait
     {
         return Err(RfbProbeError::InvalidCaptureRequest);
     }
     timeout(wait, async {
         let mut stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
         let metadata = negotiate_rfb_server(&mut stream).await?;
         if metadata.width != width || metadata.height != height {
             return Err(RfbProbeError::InvalidFramebuffer);
@@ -237,6 +264,10 @@ pub async fn capture_private_rfb_frame(
                 stream.write_all(&[4, down, 0, 0]).await?;
                 stream.write_all(&keysym.to_be_bytes()).await?;
             }
+        }
+        stream.flush().await?;
+        if !settle.is_zero() {
+            tokio::time::sleep(settle).await;
         }
         stream.write_all(&[3, 0, 0, 0, 0, 0]).await?;
         stream.write_u16(width).await?;
@@ -596,6 +627,17 @@ pub(crate) mod tests {
         response: Vec<u8>,
         keep_open: bool,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        capture_fixture_with_settle(keysyms, response, keep_open, Duration::ZERO, false, None).await
+    }
+
+    async fn capture_fixture_with_settle(
+        keysyms: Vec<u32>,
+        response: Vec<u8>,
+        keep_open: bool,
+        minimum_settle: Duration,
+        expect_cancel: bool,
+        keys_received: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -630,15 +672,117 @@ pub(crate) mod tests {
                     assert_eq!(&event[4..], &keysym.to_be_bytes());
                 }
             }
+            let keys_sent = std::time::Instant::now();
+            if let Some(ready) = keys_received {
+                let _ = ready.send(());
+            }
+            if expect_cancel {
+                assert_eq!(stream.read(&mut [0; 1]).await.unwrap(), 0);
+                return;
+            }
             let mut request = [0_u8; 10];
             stream.read_exact(&mut request).await.unwrap();
             assert_eq!(request, [3, 0, 0, 0, 0, 0, 0, 2, 0, 2]);
+            assert!(keys_sent.elapsed() >= minimum_settle);
             stream.write_all(&response).await.unwrap();
             if keep_open {
                 sleep(Duration::from_secs(5)).await;
             }
         });
         (addr, server)
+    }
+
+    #[tokio::test]
+    async fn declared_settle_runs_keys_once_then_one_update_inside_deadline_and_cancels() {
+        let pixels = [4, 3, 2, 0].repeat(4);
+        let response = frame_update(&[raw_rectangle(0, 0, 2, 2, &pixels)]);
+        let (addr, server) = capture_fixture_with_settle(
+            vec![103],
+            response,
+            false,
+            Duration::from_millis(40),
+            false,
+            None,
+        )
+        .await;
+        let frame = capture_private_rfb_frame_with_settle(
+            addr,
+            2,
+            2,
+            &[103],
+            16,
+            Duration::from_millis(50),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(frame, pixels);
+        server.await.unwrap();
+        for (settle, wait) in [(1001, 1500), (100, 100)] {
+            assert!(matches!(
+                capture_private_rfb_frame_with_settle(
+                    "127.0.0.1:1".parse().unwrap(),
+                    2,
+                    2,
+                    &[103],
+                    16,
+                    Duration::from_millis(settle),
+                    Duration::from_millis(wait)
+                )
+                .await,
+                Err(RfbProbeError::InvalidCaptureRequest)
+            ));
+        }
+        let (keys_sent, keys_seen) = tokio::sync::oneshot::channel();
+        let (addr, server) = capture_fixture_with_settle(
+            vec![103],
+            vec![],
+            false,
+            Duration::ZERO,
+            true,
+            Some(keys_sent),
+        )
+        .await;
+        let task = tokio::spawn(async move {
+            capture_private_rfb_frame_with_settle(
+                addr,
+                2,
+                2,
+                &[103],
+                16,
+                Duration::from_millis(900),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), keys_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let (addr, server) = capture_fixture(vec![103], vec![], true).await;
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            capture_private_rfb_frame_with_settle(
+                addr,
+                2,
+                2,
+                &[103],
+                16,
+                Duration::from_millis(100),
+                Duration::from_millis(200)
+            )
+            .await,
+            Err(RfbProbeError::Timeout)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

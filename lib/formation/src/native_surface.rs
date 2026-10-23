@@ -95,6 +95,10 @@ pub enum NativeProbeOperation {
         /// The frozen HTTP body is `sha256:<actual frame hex>\n`, not the frame.
         max_frame_bytes: u32,
         timeout_ms: u64,
+        /// Declared application render settling, inside the operation deadline.
+        /// Old D bytes omit zero. This never polls for an expected answer.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        settle_ms: u64,
     },
 }
 
@@ -107,6 +111,10 @@ pub fn pixel_probe_result(frame: &[u8]) -> Result<Vec<u8>, &'static str> {
         return Err("native pixel frame exceeds the capture bounds");
     }
     Ok(format!("sha256:{:x}\n", Sha256::digest(frame)).into_bytes())
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl NativeProbeOperation {
@@ -201,11 +209,15 @@ impl NativeSurfaceAdapter {
                     NativeProbeOperation::PixelKeyFrame {
                         keysyms,
                         max_frame_bytes,
+                        settle_ms,
+                        timeout_ms,
                         ..
                     },
                 ) => {
                     total_output += u64::from(*max_frame_bytes);
-                    !keysyms.is_empty()
+                    *settle_ms <= 1000
+                        && *settle_ms < *timeout_ms
+                        && !keysyms.is_empty()
                         && keysyms.len() <= 32
                         && keysyms.iter().all(|key| (1..=0x1fff_ffff).contains(key))
                         && *max_frame_bytes == u32::from(*width) * u32::from(*height) * 4
@@ -226,7 +238,7 @@ impl NativeSurfaceAdapter {
     }
 
     /// Validate the declared Port facts independently of physical placement.
-    /// A host-owned Terminal/HTTP probe pair has no guest TCP listeners.
+    /// Host-owned Native/HTTP probe pairs have no guest TCP listeners.
     pub fn validate_ports(&self, ports: &[BoundPort]) -> Result<(), &'static str> {
         self.validate_catalog()?;
         let find = |id: &str| {
@@ -237,7 +249,7 @@ impl NativeSurfaceAdapter {
         let surface = find(self.surface.port()).ok_or("native Surface Port is not unique")?;
         let probe = find(&self.probe_port).ok_or("native probe Port is not unique")?;
         let transport = match (surface.guest_port, probe.guest_port) {
-            (None, None) => matches!(self.surface, NativePresentation::Terminal { .. }),
+            (None, None) => true,
             (Some(surface), Some(probe)) => surface != 0 && probe != 0 && surface != probe,
             _ => false,
         };
@@ -305,4 +317,44 @@ fn terminal_echo_may_complete(input: &[u8], delimiter: &[u8]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod settling_tests {
+    use super::*;
+    #[test]
+    fn pixel_settling_is_optional_omitted_at_zero_and_inside_the_original_deadline() {
+        let old = serde_json::json!({"surface":{"kind":"pixel_stream","port":"gui","width":640,"height":480},"probe_port":"probe","operations":[{"kind":"pixel_key_frame","path":"/result","keysyms":[103],"max_frame_bytes":1228800,"timeout_ms":1500}]});
+        let adapter: NativeSurfaceAdapter = serde_json::from_value(old.clone()).unwrap();
+        adapter.validate_catalog().unwrap();
+        assert_eq!(
+            serde_jcs::to_vec(&adapter).unwrap(),
+            serde_jcs::to_vec(&old).unwrap()
+        );
+        for (settle, timeout, valid) in [
+            (0, 100, true),
+            (50, 100, true),
+            (1000, 1500, true),
+            (1001, 1500, false),
+            (100, 100, false),
+            (100, 50, false),
+        ] {
+            let mut wire = old.clone();
+            wire["operations"][0]["settle_ms"] = serde_json::json!(settle);
+            wire["operations"][0]["timeout_ms"] = serde_json::json!(timeout);
+            let adapter: NativeSurfaceAdapter = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                adapter.validate_catalog().is_ok(),
+                valid,
+                "{settle}/{timeout}"
+            );
+            if settle == 0 {
+                assert!(
+                    serde_json::to_value(adapter).unwrap()["operations"][0]
+                        .get("settle_ms")
+                        .is_none()
+                );
+            }
+        }
+    }
 }
