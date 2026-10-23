@@ -41,3 +41,4 @@ pub mod operations;
 pub mod retained;
 
 pub mod metered_decision;
+pub mod source_archive;

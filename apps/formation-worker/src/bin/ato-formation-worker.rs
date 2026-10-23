@@ -57,7 +57,47 @@ fn main() -> Result<()> {
         return serve(&args[2..]);
     }
 
+    if args.get(1).is_some_and(|arg| arg == "source-archive") {
+        return source_archive_one(&args[2..]);
+    }
+
     run_one(&args[1..])
+}
+
+/// Source I/O only. Existing authenticated Formation queue/attempts are reused;
+/// no build containment, toolchain, manifest or application is entered here.
+fn source_archive_one(args: &[String]) -> Result<()> {
+    let base = flag(args, "--api-base")
+        .context("--api-base is required")?
+        .to_owned();
+    let root = PathBuf::from(flag(args, "--work-root").context("--work-root is required")?);
+    let worker_id = flag(args, "--worker-id").unwrap_or("formation-source-archive");
+    let token = std::env::var("ATO_FORMATION_TOKEN").context("ATO_FORMATION_TOKEN is required")?;
+    let api =
+        ato_formation_worker::source_archive::SourceArchiveApi::new(base.clone(), token.clone())?;
+    let fetcher = PinnedSourceFetcher::new(base, token)?;
+    let claim = match flag(args, "--job-id") {
+        Some(job_id) => api.claim(worker_id, job_id)?,
+        None => api.claim_next(worker_id)?,
+    };
+    let Some(claim) = claim else {
+        println!("{{\"job_id\":null}}");
+        return Ok(());
+    };
+    match ato_formation_worker::source_archive::materialize_source_archive(
+        &api, &fetcher, &claim, &root,
+    ) {
+        Ok(output) => {
+            println!("{}", String::from_utf8(serde_jcs::to_vec(&output)?)?);
+            Ok(())
+        }
+        Err(error) => {
+            if api.report_failure(&claim).is_err() {
+                eprintln!("source archive failure report was not accepted");
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Poll for work, run it, repeat.
