@@ -1,0 +1,20 @@
+{
+  "surface_ready_ms": 84,
+  "initial_output_preserved": true,
+  "actual_workload_input": true,
+  "resize": [
+    120,
+    40
+  ],
+  "reconnect": true,
+  "scoped_auth_rejections": 6,
+  "replay_rejected": true,
+  "gateway_owner_cleanup": true,
+  "gateway_idle_cleanup": true,
+  "producer_owner_cleanup": true,
+  "contract_verified": false,
+  "initial_size": [
+    80,
+    24
+  ]
+}
