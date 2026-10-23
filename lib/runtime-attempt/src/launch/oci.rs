@@ -175,6 +175,10 @@ pub fn container_oci_spec(
     context: &ResolvedRuntimeLaunchContext,
     labels: BTreeMap<String, String>,
 ) -> Result<OciSpec> {
+    ensure!(
+        oci.native_surface.is_none(),
+        "native_surface_unavailable: ordinary OCI execution cannot own a native workload lifecycle"
+    );
     let image = oci
         .image_reference
         .clone()
@@ -919,6 +923,15 @@ mod tests {
         assert_eq!(adapter_spec.mounts[0].guest_path, "/opt/app/server-data");
         assert!(adapter_spec.mounts[0].writable);
         ato_adapter_oci::validate_oci_spec(&adapter_spec).expect("the Adapter accepts it");
+
+        let mut native = oci.clone();
+        native.native_surface = Some(serde_json::json!({}));
+        assert!(
+            container_oci_spec(&spec, &native, &context, BTreeMap::new())
+                .unwrap_err()
+                .to_string()
+                .starts_with("native_surface_unavailable")
+        );
 
         let mut explicit = oci.clone();
         explicit.user = Some(ato_ipc::runtime_launch::OciUserV1 {

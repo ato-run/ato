@@ -947,9 +947,28 @@ fn a_run_whose_contract_fails_keeps_nothing_running() {
         stderr.contains("did not fully satisfy observation root"),
         "{stderr}"
     );
-    // A failed Run hands nothing off: no receipt is published for it, and
-    // the attempt's own record says it failed K — it did not stop halfway.
-    assert!(!receipt_path.exists());
+    // An explicitly requested receipt preserves failure evidence, never a
+    // successful handoff. The attempt is finished and its endpoint is stopped.
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["schema"], "ato.contract-verification-receipt/1");
+    assert_eq!(receipt["fully_satisfied"], false);
+    assert_eq!(receipt["contract_ref"], bundle.index.root_contract_ref);
+    assert_eq!(receipt["derivation_ref"], bundle.index.derivations[0]);
+    let root = receipt["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|observation| observation["id"] == "root")
+        .unwrap();
+    assert_eq!(root["outcome"], "failed");
+    assert!(
+        root["failure"]
+            .as_str()
+            .unwrap()
+            .contains("http_body_digest_mismatch")
+    );
+    let endpoint = receipt["execution"]["endpoint"].as_str().unwrap();
+    assert_eq!(http_status(endpoint.trim_end_matches('/'), "/"), None);
     let records = home.path().join("attempt-records");
     let mut outcomes = Vec::new();
     for request in fs::read_dir(&records).unwrap() {
