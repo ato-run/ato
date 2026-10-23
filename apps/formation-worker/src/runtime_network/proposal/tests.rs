@@ -674,3 +674,250 @@ fn native_helper_bytes_do_not_block_failure_feedback_or_success_context() {
     assert_eq!(serde_json::to_value(context.previous_plan).unwrap(), plan);
     assert_eq!(context.failures[0].code, "npm_lifecycle_plan_required");
 }
+
+fn raw_github_source(root: &Path) -> (std::path::PathBuf, Vec<u8>, String, String, String) {
+    use std::io::Write;
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut directory = tar::Header::new_gnu();
+    directory.set_entry_type(tar::EntryType::Directory);
+    directory.set_size(0);
+    directory.set_mode(0o755);
+    directory.set_mtime(123);
+    directory.set_cksum();
+    tar.append_data(&mut directory, "repository-0123456789abcdef/", &b""[..])
+        .unwrap();
+    for (name, bytes) in [
+        (
+            "app.py",
+            &b"raise RuntimeError('must never execute during intake')\n"[..],
+        ),
+        ("README.md", &b"Python application: python app.py\n"[..]),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(123);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("repository-0123456789abcdef/{name}"),
+            bytes,
+        )
+        .unwrap();
+    }
+    let tar = tar.into_inner().unwrap();
+    let mut gzip = flate2::GzBuilder::new()
+        .mtime(123)
+        .write(Vec::new(), flate2::Compression::default());
+    gzip.write_all(&tar).unwrap();
+    let bytes = gzip.finish().unwrap();
+    let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let path = root.join("github.tar.gz");
+    std::fs::write(&path, &bytes).unwrap();
+    let verified = FileVerifiedArchive::verify(
+        File::open(&path).unwrap(),
+        &digest,
+        bytes.len() as u64,
+        SourceLimits::default(),
+    )
+    .unwrap();
+    (
+        path,
+        bytes,
+        digest,
+        verified.tree_digest().to_owned(),
+        verified.closure_ref("").unwrap().as_str().to_owned(),
+    )
+}
+
+#[test]
+fn original_github_wrapper_archive_reaches_search_without_retar_or_semantic_relabel() {
+    use crate::job::source_intake::{ArchiveFileFetcher, prepare_source_proposal};
+    let (root, mut template) = prepared(|_| {});
+    let mut explicit_authorization = authorization();
+    explicit_authorization.policy.allow_source_text = true;
+    explicit_authorization.policy.max_source_bytes = 4096;
+    template
+        .enable_candidate_producer(explicit_authorization)
+        .unwrap();
+    let (file, bytes, digest, tree, closure) = raw_github_source(root.path());
+    let mut request = template.request.clone();
+    request.source = SourceTransport {
+        archive_base64: None,
+        content_ref: Some(digest.clone()),
+        archive_bytes: Some(bytes.len() as u64),
+        archive_digest: digest.clone(),
+        closure_ref: closure.clone(),
+    };
+    request.initial_source = Some(InitialSource {
+        archive_digest: digest.clone(),
+        closure_ref: closure.clone(),
+    });
+    let k = request.base_contract.clone();
+    let frozen = frozen_request(&request).unwrap().canonical_bytes().unwrap();
+    let job:ato_ipc::formation::FormationJobV1=serde_json::from_value(json!({
+        "protocol":"ato.formation-job.v1","job_id":"fjob_wrapper_search","request_idempotency_key":"wrapper-search-explicit",
+        "source":{"kind":"uploaded_archive","archive_ref":"formation-source-archive:fjob_source","expected_archive_digest":digest,"expected_source_tree_digest":tree,"subdirectory":""},
+        "requested_outputs":["process_workspace"],"target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},"policy":{"policy_version":"formation-v1","network":"denied","publish_enabled":false}
+    })).unwrap();
+    let sub = prepare_source_proposal(
+        &ArchiveFileFetcher(file),
+        &job,
+        request.clone(),
+        &root.path().join("raw-search"),
+    )
+    .unwrap();
+    assert_eq!(sub.request.base_contract, k);
+    assert_eq!(sub.request.base_contract_ref, k.contract_ref().unwrap());
+    assert_eq!(
+        frozen_request(&sub.request)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        frozen
+    );
+    let mut transported = Vec::new();
+    sub.source_file()
+        .unwrap()
+        .read_to_end(&mut transported)
+        .unwrap();
+    assert_eq!(transported, bytes);
+    let verified = FileVerifiedArchive::verify(
+        sub.source_file().unwrap(),
+        &digest,
+        bytes.len() as u64,
+        SourceLimits::default(),
+    )
+    .unwrap();
+    println!(
+        "raw_github_vector={}",
+        json!({
+            "archive_base64":BASE64.encode(&bytes),"archive_digest":digest,"size_bytes":bytes.len(),
+            "source_tree_digest":tree,"source_closure_ref":closure,
+            "observed_file_count":verified.expanded_file_count(),
+            "observed_uncompressed_bytes":verified.expanded_bytes(),
+        "resolver_contract_version":verified.resolver_contract(),
+            "job":job,"request":request,"canonical_frozen_json":String::from_utf8(frozen.clone()).unwrap()
+        })
+    );
+    assert_eq!(verified.tree_digest(), tree);
+    assert_eq!(
+        verified.archive_format(),
+        ato_formation::source::RAW_TAR_GZIP_FORMAT
+    );
+    let runtime = local::freeze_verified_file(
+        verified,
+        &root.path().join("runtime"),
+        SourceLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(runtime.closure_ref.as_str(), closure);
+    assert!(runtime.root.join("app.py").is_file());
+    assert!(!runtime.root.join("repository-0123456789abcdef").exists());
+    let proposal = sub.proposal_request_v2(&status(&sub)).unwrap();
+    assert!(proposal.repository_evidence.is_some());
+    assert_eq!(proposal.frozen_contract, k);
+    println!(
+        "raw_github_proof archive={digest} tree={tree} closure={closure} bytes={}",
+        bytes.len()
+    );
+    for corruption in [
+        "archive",
+        "tree",
+        "subdir",
+        "closure",
+        "budget",
+        "expanded_budget",
+        "transfer_budget",
+        "K",
+    ] {
+        let mut bad_job = job.clone();
+        let mut bad = request.clone();
+        match corruption {
+            "archive" => {
+                bad.source.archive_digest = format!("sha256:{}", "0".repeat(64));
+            }
+            "tree" => {
+                if let ato_ipc::formation::FormationSourceV1::UploadedArchive(s) =
+                    &mut bad_job.source
+                {
+                    s.expected_source_tree_digest = Some(format!("sha256:{}", "0".repeat(64)));
+                }
+            }
+            "subdir" => {
+                if let ato_ipc::formation::FormationSourceV1::UploadedArchive(s) =
+                    &mut bad_job.source
+                {
+                    s.subdirectory = "child".into();
+                }
+            }
+            "closure" => {
+                bad.source.closure_ref = format!("sha256:{}", "0".repeat(64));
+            }
+            "budget" => {
+                bad.budget.max_attempts = 0;
+            }
+            "expanded_budget" => {
+                bad.budget.max_expanded_bytes = 1;
+            }
+            "transfer_budget" => {
+                bad.budget.max_transfer_bytes = 1;
+            }
+            "K" => {
+                bad.base_contract_ref = format!("sha256:{}", "0".repeat(64));
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            prepare_source_proposal(
+                &ArchiveFileFetcher(root.path().join("github.tar.gz")),
+                &bad_job,
+                bad,
+                &root.path().join(format!("bad-{corruption}"))
+            )
+            .is_err(),
+            "{corruption}"
+        );
+    }
+}
+
+#[test]
+fn explicit_zero_derivation_archive_never_enables_source_manifest_or_known_preset_fallback() {
+    let (root, mut template) =
+        prepared(|p| std::fs::write(p.join("capsule.toml"), "not valid TOML !!!").unwrap());
+    template.enable_candidate_producer(authorization()).unwrap();
+    let mut request = template.request.clone();
+    request
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .policy
+        .max_proposals = 1;
+    request.policy.exploration=Some(serde_json::from_value(json!({
+        "ceiling":{},"max_provider_calls":1,"max_inspections":1,"max_provider_cost_usd_micros":1,
+        "max_provider_input_tokens":1,"max_provider_output_tokens":1
+    })).unwrap());
+    let expected = frozen_request(&request).unwrap().canonical_bytes().unwrap();
+    let verified = FileVerifiedArchive::verify(
+        template.source_file().unwrap(),
+        &request.source.archive_digest,
+        request.source.archive_bytes.unwrap(),
+        SourceLimits::default(),
+    )
+    .unwrap();
+    let sub = prepare_pinned_proposal_submission(
+        verified,
+        request,
+        &root.path().join("explicit-no-fallback"),
+    )
+    .unwrap();
+    assert!(sub.request.authorized_derivations.is_empty());
+    assert_eq!(
+        frozen_request(&sub.request)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        expected
+    );
+}

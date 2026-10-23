@@ -84,7 +84,7 @@ fn limit() -> anyhow::Error {
 /// At most maximum+1 bytes are read, and at most maximum are written. The
 /// extra byte establishes over-limit failure without reading the remainder.
 /// No allocation is sized from Content-Length or archive/member metadata.
-pub(super) fn copy_bounded(
+pub(crate) fn copy_bounded(
     mut source: impl Read,
     mut target: impl Write,
     maximum: u64,
@@ -156,7 +156,7 @@ pub(super) fn download(
     copy_bounded(response, target, maximum, deadline)
 }
 
-pub(super) fn temporary_file(root: &Path, maximum: u64, deadline: Instant) -> Result<File> {
+pub(crate) fn temporary_file(root: &Path, maximum: u64, deadline: Instant) -> Result<File> {
     remaining(deadline)?;
     ensure!(
         maximum > 0 && maximum <= crate::runtime_network::MAX_SOURCE_OBJECT_BYTES,
@@ -193,7 +193,7 @@ pub(crate) fn download_file(
     rewind(file, digest)
 }
 
-pub(super) fn rewind(mut file: File, digest: String) -> Result<(File, String)> {
+pub(crate) fn rewind(mut file: File, digest: String) -> Result<(File, String)> {
     file.rewind().context("rewind acquired source archive")?;
     Ok((file, digest))
 }
