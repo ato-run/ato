@@ -62,6 +62,7 @@ pub struct RepositoryEvidence {
 }
 
 const FILES: &[&str] = &[
+    "index.html",
     "package.json",
     "pyproject.toml",
     "Cargo.toml",
@@ -151,6 +152,7 @@ pub fn inspect(root: &Path) -> std::io::Result<RepositoryEvidence> {
         use EvidenceStrength::{Declaration, Hint};
         use ExecutionSignal::*;
         match *file {
+            "index.html" => add(Web, Declaration),
             "package.json" => {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
                     report.unscanned_files.push((*file).into());
