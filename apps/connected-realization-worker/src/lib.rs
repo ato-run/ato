@@ -177,6 +177,29 @@ const NAMESPACE_ISOLATION_CAPABILITY: &str = "isolation=untrusted-v1";
 /// The capability the control plane requires for a `gpu` runtime requirement.
 const GPU_CAPABILITY: &str = "gpu";
 
+const NATIVE_TERMINAL_RUNTIME_FEATURE: &str = "runtime_feature=native_surface_probe_v1";
+fn native_terminal_available(enabled: bool, linux: bool, oci: bool) -> bool {
+    enabled && linux && oci
+}
+fn with_native_terminal_capability(
+    mut capabilities: Vec<&'static str>,
+    available: bool,
+) -> Vec<&'static str> {
+    if available {
+        capabilities.push(NATIVE_TERMINAL_RUNTIME_FEATURE);
+    }
+    capabilities
+}
+fn supported_session_surfaces(native: bool) -> serde_json::Value {
+    let mut surfaces = vec![
+        serde_json::json!({"kind":"web","profiles":["ato.web-surface.v1"],"transports":["https"]}),
+    ];
+    if native {
+        surfaces.push(serde_json::json!({"kind":"terminal","profiles":["ato.terminal-surface.v1"],"transports":["terminal_websocket"]}));
+    }
+    serde_json::Value::Array(surfaces)
+}
+
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -1102,6 +1125,11 @@ pub struct WorkerConfig {
         default_value = "127.0.0.1:18420"
     )]
     pub hidden_surface_listen: SocketAddr,
+    /// Explicit opt-in after API receipt/access counterpart is installed.
+    #[arg(long, env = "ATO_RUNNER_NATIVE_TERMINAL", default_value_t = false)]
+    pub native_terminal: bool,
+    #[arg(long, env = "ATO_NATIVE_SURFACE_IDLE_SECS", default_value_t = 300)]
+    pub native_surface_idle_secs: u64,
     /// Host-reachable guest endpoint behind the candidate-internal relay. This
     /// is physical runtime configuration and never participates in identity.
     #[arg(long, env = "ATO_RUNTIME_SURFACE_TARGET")]
@@ -1597,7 +1625,18 @@ impl ConnectedWorker {
     /// Run within its authorization window and ask again next tick. A
     /// definitive rejection still ends the Run.
     fn control_stop_requested(&self, lease_id: &str) -> Result<bool> {
-        match self.api.control(lease_id) {
+        self.control_stop_requested_runtime(lease_id, false)
+    }
+
+    fn control_stop_requested_runtime(&self, lease_id: &str, native: bool) -> Result<bool> {
+        match self.api.control_with_timeout(
+            lease_id,
+            if native {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_secs(60)
+            },
+        ) {
             Ok(control) => Ok(control.stop_requested),
             Err(error) => match classify_comm_error(&error) {
                 CommErrorKind::Transient => {
@@ -1846,6 +1885,28 @@ impl ConnectedWorker {
         // not the one the control plane digested onto the Run, the Runner
         // would execute something the receipt does not describe.
         let spec = runtime_launch::lease::verified_spec(command)?;
+        if runtime_launch::lease::has_native_surface(&spec) {
+            ensure!(
+                lease.run_id == command.run_id,
+                "Native lease Run does not match its command"
+            );
+            ensure!(
+                native_terminal_available(
+                    self.config.native_terminal,
+                    cfg!(target_os = "linux"),
+                    ato_adapter_oci::docker_runtime_available()
+                ),
+                "native_surface_unavailable: Native Terminal is not enabled on this Linux OCI Runner"
+            );
+            ensure!(
+                HttpProxyGate::for_lease(lease, &self.config.runner_id).is_some(),
+                "Native Terminal requires the scoped Runner assertion key"
+            );
+            ensure!(
+                (1..=86_400).contains(&self.config.native_surface_idle_secs),
+                "invalid bounded Native idle policy"
+            );
+        }
         // Arm this before materialization/startup. A public preview's cap owns
         // the whole allocation, not only the time after readiness.
         let started = Instant::now();
@@ -1906,6 +1967,7 @@ impl ConnectedWorker {
 
         let outcome = self.run_runtime_launch(
             lease,
+            command,
             &spec,
             hard_deadline,
             &mut execution_authorization,
@@ -1945,6 +2007,7 @@ impl ConnectedWorker {
     fn run_runtime_launch(
         &self,
         lease: &ClaimedLease,
+        command: &runtime_launch::lease::RuntimeLaunchLeaseCommand,
         spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
         hard_deadline: Option<Instant>,
         execution_authorization: &mut Option<runtime_launch::lease::ExecutionAuthorizationMonitor>,
@@ -1954,6 +2017,7 @@ impl ConnectedWorker {
         entry: &mut runtime_launch::recovery::RunJournalEntry,
         lease_root: &Path,
     ) -> RuntimeLaunchOutcome {
+        let native = runtime_launch::lease::has_native_surface(spec);
         let not_started = |result: Result<()>| RuntimeLaunchOutcome {
             result,
             stop_confirmed: true,
@@ -1987,8 +2051,14 @@ impl ConnectedWorker {
             Err(error) => return not_started(Err(error)),
         };
         match poll_runtime_launch_control(
-            || self.control_stop_requested(&lease.id),
-            || self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut()),
+            || self.control_stop_requested_runtime(&lease.id, native),
+            || {
+                self.refresh_runtime_authorization(
+                    &lease.id,
+                    execution_authorization.as_mut(),
+                    native,
+                )
+            },
         ) {
             Ok(true) => {
                 let execution_id = match spec.canonical_digest() {
@@ -2012,15 +2082,28 @@ impl ConnectedWorker {
         // Both are existing Runner configuration — the control plane never
         // picks a host port, because only the Runner knows what is free and
         // the stable URL must not depend on it.
-        let endpoint_name = match runtime_launch::lease::published_endpoint_name(spec) {
-            Ok(name) => name,
-            Err(error) => return not_started(Err(error)),
+        let endpoint_name = if native {
+            // Logical identifier only. The host-owned Native backend allocates
+            // its private UDS and probe; it promises no guest TCP listener.
+            command
+                .session_surface
+                .as_ref()
+                .and_then(|surface| surface.surface_id())
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            match runtime_launch::lease::published_endpoint_name(spec) {
+                Ok(name) => name,
+                Err(error) => return not_started(Err(error)),
+            }
         };
         let mut assigned_ports = std::collections::BTreeMap::new();
-        assigned_ports.insert(
-            endpoint_name.clone(),
-            self.config.hidden_surface_listen.port(),
-        );
+        if !native {
+            assigned_ports.insert(
+                endpoint_name.clone(),
+                self.config.hidden_surface_listen.port(),
+            );
+        }
         // `resolve_run` acquires the writers and gives them back itself if it
         // fails; no workload exists yet.
         let process_host = runtime_launch::process_executor::ProcessLaunchHost {
@@ -2047,11 +2130,12 @@ impl ConnectedWorker {
             lease_root,
             || {
                 if poll_runtime_launch_control(
-                    || self.control_stop_requested(&lease.id),
+                    || self.control_stop_requested_runtime(&lease.id, native),
                     || {
-                        self.refresh_execution_authorization(
+                        self.refresh_runtime_authorization(
                             &lease.id,
                             execution_authorization.as_mut(),
+                            native,
                         )
                     },
                 )? {
@@ -2131,11 +2215,12 @@ impl ConnectedWorker {
             );
             if last_control.is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(1)) {
                 if poll_runtime_launch_control(
-                    || self.control_stop_requested(&lease.id),
+                    || self.control_stop_requested_runtime(&lease.id, native),
                     || {
-                        self.refresh_execution_authorization(
+                        self.refresh_runtime_authorization(
                             &lease.id,
                             execution_authorization.as_mut(),
+                            native,
                         )
                     },
                 )? {
@@ -2149,15 +2234,73 @@ impl ConnectedWorker {
             &probe,
             &mut check_startup,
         );
-        let active = match runtime_launch::lease::start(
-            spec,
-            resolved,
-            &state,
-            &controlled_probe,
-            owner,
-            network_authorization,
-            &process_host,
-        ) {
+        let started = if native {
+            #[cfg(unix)]
+            {
+                let ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::V1(native_spec) = spec else {
+                    unreachable!()
+                };
+                let timeout_ms = match &native_spec.readiness {
+                    ato_ipc::runtime_launch::ReadinessV1::Process { timeout_ms }
+                    | ato_ipc::runtime_launch::ReadinessV1::Tcp { timeout_ms, .. }
+                    | ato_ipc::runtime_launch::ReadinessV1::Http { timeout_ms, .. } => *timeout_ms,
+                };
+                let config = runtime_launch::native::NativeLeaseSurfaceConfig {
+                    scope: netd::surface_authorization::SurfaceGatewayScope {
+                        session_id: command.session_id.clone().expect("verified Native session"),
+                        surface_id: endpoint_name.clone(),
+                    },
+                    verification_key: lease
+                        .proxy_assertion_key
+                        .as_deref()
+                        .expect("Native scoped key")
+                        .trim()
+                        .to_owned(),
+                    origin: command
+                        .surface_origin
+                        .clone()
+                        .expect("verified Native origin"),
+                    surface_listen: self.config.hidden_surface_listen,
+                    startup_timeout: Duration::from_millis(timeout_ms.min(120_000)),
+                    idle_timeout: Duration::from_secs(self.config.native_surface_idle_secs),
+                    maximum_lifetime: hard_deadline
+                        .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+                        .unwrap_or(Duration::from_secs(1)),
+                };
+                runtime_launch::lease::start_native(
+                    native_spec,
+                    resolved,
+                    &state,
+                    owner,
+                    command
+                        .portable_derivation_ref
+                        .as_deref()
+                        .expect("verified Native D"),
+                    command
+                        .session_surface
+                        .as_ref()
+                        .expect("verified Native descriptor"),
+                    config,
+                    &mut check_startup,
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                runtime_launch::session::abort_run(&state, &resolved.prepared);
+                Err(anyhow::anyhow!("native_surface_unavailable").into())
+            }
+        } else {
+            runtime_launch::lease::start(
+                spec,
+                resolved,
+                &state,
+                &controlled_probe,
+                owner,
+                network_authorization,
+                &process_host,
+            )
+        };
+        let active = match started {
             Ok(active) => active,
             Err(mut failure) => {
                 entry.process = failure.process.take();
@@ -2337,17 +2480,42 @@ impl ConnectedWorker {
             hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
             "runtime launch maximum lifetime elapsed during startup"
         );
+        let native_lane = runtime_launch::lease::has_native_surface(spec);
         let execution_id = spec
             .canonical_digest()
             .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
-        if self
-            .refresh_execution_authorization(&lease.id, execution_authorization.as_deref_mut())?
-        {
+        if self.refresh_runtime_authorization(
+            &lease.id,
+            execution_authorization.as_deref_mut(),
+            native_lane,
+        )? {
             return Ok(execution_id);
         }
-        let port = active.endpoint_port(endpoint_name).with_context(|| {
-            format!("the launch declared no `{endpoint_name}` endpoint to report")
-        })?;
+        #[cfg(unix)]
+        let native = match &active.launched {
+            runtime_launch::lease::ActiveWorkload::Native(native) => Some(native.as_ref()),
+            _ => None,
+        };
+        #[cfg(not(unix))]
+        let native: Option<()> = None;
+        let port = {
+            #[cfg(unix)]
+            {
+                native
+                    .map(|native| native.surface_addr().port())
+                    .or_else(|| active.endpoint_port(endpoint_name))
+            }
+            #[cfg(not(unix))]
+            {
+                active.endpoint_port(endpoint_name)
+            }
+        }
+        .with_context(|| format!("the launch declared no `{endpoint_name}` endpoint to report"))?;
+        #[cfg(unix)]
+        ensure!(
+            !native.is_some_and(|native| native.is_finished()),
+            "Native workload ended before transport readiness"
+        );
         let execution_evidence = active.execution_evidence();
         let oci_port_mapping = active.launched.surface_container().and_then(|container| {
             let (container_ip, mappings) = container.port_mapping();
@@ -2382,6 +2550,19 @@ impl ConnectedWorker {
                 }
             }
         }
+        #[cfg(unix)]
+        if let Some(native) = native {
+            let ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::V1(spec) = spec else {
+                unreachable!()
+            };
+            let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &spec.realization else {
+                unreachable!()
+            };
+            let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(
+                oci.native_surface.as_ref().expect("Native declaration"),
+            )?;
+            observation_targets.insert(declaration.adapter.probe_port, native.observation_addr());
+        }
         let _surface_gate = TcpProxy::start_with_mux(
             self.config.surface_listen,
             ProxyTarget::Tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
@@ -2389,7 +2570,7 @@ impl ConnectedWorker {
                 control_target: None,
                 presentation_frame: None,
                 gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
-                guest_surface_gateway: false,
+                guest_surface_gateway: native.is_some(),
                 observation_targets,
             }),
         )?;
@@ -2398,16 +2579,18 @@ impl ConnectedWorker {
         // still validates the hostname against this Runner's active ingress
         // slots, so a misconfigured `public_base_url` is refused rather than
         // believed.
-        self.api.report_ready(
+        let ready = ReadyReport {
+            execution_id: &execution_id,
+            ready_url: self.config.public_base_url.as_deref(),
+            local_port: Some(port),
+            execution: Some(&execution_evidence),
+            port_mapping: oci_port_mapping.as_ref(),
+            control: None,
+        };
+        self.api.report_ready_with_budget(
             &lease.id,
-            ReadyReport {
-                execution_id: &execution_id,
-                ready_url: self.config.public_base_url.as_deref(),
-                local_port: Some(port),
-                execution: Some(&execution_evidence),
-                port_mapping: oci_port_mapping.as_ref(),
-                control: None,
-            },
+            ready,
+            native_lane.then_some(Duration::from_millis(500)),
         )?;
         if let Some(network) = network_authorization {
             let runtime_launch::lease::ActiveWorkload::Oci(launched) = &active.launched else {
@@ -2464,6 +2647,10 @@ impl ConnectedWorker {
         // ACTIVE. The control plane decides when this ends.
         let last_heartbeat = std::cell::Cell::new(Instant::now());
         let mut stop = || -> Result<bool> {
+            #[cfg(unix)]
+            if native.is_some_and(|native| native.is_finished()) {
+                bail!("Native workload lifecycle ended while ACTIVE");
+            }
             // A group is one Application: a service that exits while ACTIVE
             // fails the whole Run, which is then stopped by `finish`.
             if let runtime_launch::lease::ActiveWorkload::Oci(launched) = &active.launched
@@ -2478,11 +2665,12 @@ impl ConnectedWorker {
                 last_heartbeat.set(Instant::now());
             }
             poll_runtime_launch_control(
-                || self.control_stop_requested(&lease.id),
+                || self.control_stop_requested_runtime(&lease.id, native_lane),
                 || {
-                    self.refresh_execution_authorization(
+                    self.refresh_runtime_authorization(
                         &lease.id,
                         execution_authorization.as_deref_mut(),
+                        native_lane,
                     )
                 },
             )
@@ -2491,10 +2679,11 @@ impl ConnectedWorker {
         Ok(execution_id)
     }
 
-    fn refresh_execution_authorization(
+    fn refresh_runtime_authorization(
         &self,
         lease_id: &str,
         monitor: Option<&mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
+        native: bool,
     ) -> Result<bool> {
         let Some(monitor) = monitor else {
             return Ok(false);
@@ -2503,7 +2692,16 @@ impl ConnectedWorker {
             monitor,
             lease_id,
             Instant::now,
-            || self.api.renew_execution_authorization(lease_id),
+            || {
+                self.api.renew_execution_authorization_with_timeout(
+                    lease_id,
+                    if native {
+                        Duration::from_millis(500)
+                    } else {
+                        Duration::from_secs(60)
+                    },
+                )
+            },
             std::thread::sleep,
         )
     }
@@ -2968,6 +3166,10 @@ impl WorkerConfig {
 }
 
 fn validate_config(config: &WorkerConfig) -> Result<()> {
+    ensure!(
+        (1..=86_400).contains(&config.native_surface_idle_secs),
+        "invalid Native idle timeout"
+    );
     ensure!(!config.runner_id.trim().is_empty(), "runner id is empty");
     ensure!(
         !config.runner_token.trim().is_empty(),
@@ -4324,7 +4526,7 @@ pub(crate) enum LeaseCommand {
     #[serde(rename = "activity_browser_executor_v0")]
     Activity(ActivityLeaseCommand),
     #[serde(rename = "runtime_launch")]
-    RuntimeLaunch(runtime_launch::lease::RuntimeLaunchLeaseCommand),
+    RuntimeLaunch(Box<runtime_launch::lease::RuntimeLaunchLeaseCommand>),
     #[serde(rename = "state_volume_maintenance")]
     VolumeMaintenance(runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand),
 }
@@ -4527,28 +4729,27 @@ impl HttpRunnerApi {
         {
             resources["connection"] = connection;
         }
+        let oci_available = ato_adapter_oci::docker_runtime_available();
+        let native = native_terminal_available(
+            config.native_terminal,
+            cfg!(target_os = "linux"),
+            oci_available,
+        );
         self.authorized(self.client.post(format!(
             "{}/v1/runners/{}/heartbeat",
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
             "capabilities": advertised_capabilities(
-                runner_capabilities(
-                    config.firecracker_configured(),
-                    ato_adapter_oci::docker_runtime_available(),
-                    self.persistent_volumes,
-                    config.network_controls,
-                    !config.fixed_tcp_allowlist.trim().is_empty(),
-                ),
+                with_native_terminal_capability(runner_capabilities(
+                    config.firecracker_configured(), oci_available, self.persistent_volumes,
+                    config.network_controls, !config.fixed_tcp_allowlist.trim().is_empty(),
+                ), native),
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
             ),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
-            "supported_session_surfaces": [{
-                "kind": "web",
-                "profiles": ["ato.web-surface.v1"],
-                "transports": ["https"]
-            }],
+            "supported_session_surfaces": supported_session_surfaces(native),
             "public_base_url": config.public_base_url,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -4563,6 +4764,11 @@ impl HttpRunnerApi {
             // Refresh mutable capacity and device visibility on every heartbeat.
             "host_resources": resources,
         }))
+        .timeout(if config.native_terminal {
+            Duration::from_millis(500)
+        } else {
+            Duration::from_secs(60)
+        })
         .send()?
         .error_for_status()?;
         Ok(())
@@ -4684,10 +4890,28 @@ impl HttpRunnerApi {
     }
 
     fn report_ready(&self, lease_id: &str, report: ReadyReport<'_>) -> Result<()> {
-        self.post_control_plane(
-            format!("{}/v1/runner-leases/{lease_id}/ready", self.base),
-            &report,
-        )
+        self.report_ready_with_budget(lease_id, report, None)
+    }
+
+    fn report_ready_with_budget(
+        &self,
+        lease_id: &str,
+        report: ReadyReport<'_>,
+        budget: Option<Duration>,
+    ) -> Result<()> {
+        let url = format!("{}/v1/runner-leases/{lease_id}/ready", self.base);
+        if let Some(budget) = budget {
+            // Bounded live-workload report. Retrying must not extend its
+            // independently renewable execution authority window.
+            self.authorized(self.client.post(url))
+                .timeout(budget)
+                .json(&report)
+                .send()?
+                .error_for_status()?;
+            Ok(())
+        } else {
+            self.post_control_plane(url, &report)
+        }
     }
 
     pub fn persist_computation_head(
@@ -4708,26 +4932,32 @@ impl HttpRunnerApi {
         )
     }
 
-    fn control(&self, lease_id: &str) -> Result<ControlResponse> {
+    fn control_with_timeout(&self, lease_id: &str, timeout: Duration) -> Result<ControlResponse> {
         Ok(self
             .authorized(
                 self.client
-                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base)),
+                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base))
+                    .timeout(timeout),
             )
             .send()?
             .error_for_status()?
             .json()?)
     }
 
-    fn renew_execution_authorization(
+    fn renew_execution_authorization_with_timeout(
         &self,
         lease_id: &str,
+        timeout: Duration,
     ) -> Result<ExecutionAuthorizationRenewalOutcome> {
         let response = self
-            .authorized(self.client.post(format!(
-                "{}/v1/runner-leases/{lease_id}/execution-authorization/renew",
-                self.base
-            )))
+            .authorized(
+                self.client
+                    .post(format!(
+                        "{}/v1/runner-leases/{lease_id}/execution-authorization/renew",
+                        self.base
+                    ))
+                    .timeout(timeout),
+            )
             .send()?;
         if response.status() == reqwest::StatusCode::CONFLICT {
             let refusal = response.json::<ExecutionAuthorizationRefusalResponse>()?;
@@ -6594,6 +6824,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "0.0.0.0:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            native_terminal: false,
+            native_surface_idle_secs: 300,
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: Some("172.16.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
@@ -6622,6 +6854,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            native_terminal: false,
+            native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
@@ -6661,6 +6895,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             work_root: directory.path().join("work"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            native_terminal: false,
+            native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
@@ -6718,6 +6954,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             work_root: PathBuf::from(".tmp/worker"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            native_terminal: false,
+            native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
@@ -6780,6 +7018,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            native_terminal: false,
+            native_surface_idle_secs: 300,
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: tap_host_cidr.map(str::to_owned),
             slot_id: "0".to_owned(),
@@ -6902,6 +7142,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             work_root: PathBuf::from(".tmp/worker"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            native_terminal: false,
+            native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
@@ -7280,3 +7522,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         drop(proxy);
     }
 }
+
+#[cfg(all(test, unix))]
+mod native_dispatch_tests;
