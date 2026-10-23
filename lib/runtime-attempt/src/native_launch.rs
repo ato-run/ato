@@ -52,6 +52,21 @@ impl NativeLaunchDeclaration {
         Ok(())
     }
 
+    /// Host-produced display and observation bindings cannot erase promised
+    /// guest listeners. Legacy missing facts remain decodable but not runnable.
+    pub fn require_host_pixel_ports(&self) -> Result<()> {
+        let ports = self
+            .ports
+            .as_ref()
+            .context("native launch omitted selected D Port facts")?;
+        ensure!(
+            self.adapter.surface.kind() == "pixel_stream"
+                && ports.iter().all(|port| port.guest_port.is_none()),
+            "host Pixel backend cannot honor declared guest TCP listeners"
+        );
+        Ok(())
+    }
+
     /// Decode only after the IPC launch envelope's bounds have been checked.
     pub fn decode(value: &serde_json::Value) -> Result<Self> {
         ensure!(
@@ -228,6 +243,7 @@ mod tests {
                         keysyms: vec![65],
                         max_frame_bytes: 1920 * 1080 * 4,
                         timeout_ms: 1000,
+                        settle_ms: 0,
                     },
                 ],
             };

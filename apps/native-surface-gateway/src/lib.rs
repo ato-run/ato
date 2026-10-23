@@ -140,15 +140,17 @@ pub async fn capture_and_start_native_probe(
                 NativeProbeOperation::PixelKeyFrame {
                     keysyms,
                     max_frame_bytes,
+                    settle_ms,
                     ..
                 },
             ) => {
-                let frame = netd::rfb_probe::capture_private_rfb_frame(
+                let frame = netd::rfb_probe::capture_private_rfb_frame_with_settle(
                     *addr,
                     *width,
                     *height,
                     keysyms,
                     *max_frame_bytes as usize,
+                    Duration::from_millis(*settle_ms),
                     wait,
                 )
                 .await?;
