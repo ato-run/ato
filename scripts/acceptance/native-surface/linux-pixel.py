@@ -34,13 +34,13 @@ class UpgradeRejected(Exception):
 
 
 class WebSocketSocket:
-    def __init__(self, port, assertion):
+    def __init__(self, port, assertion, subprotocol="binary"):
         self.socket = socket.create_connection(("127.0.0.1", port), timeout=4)
         self.socket.settimeout(4)
         key = base64.b64encode(os.urandom(16)).decode()
         request = (f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
             f"Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n"
-            f"Sec-WebSocket-Protocol: binary\r\nOrigin: http://localhost:5173\r\n"
+            f"Sec-WebSocket-Protocol: {subprotocol}\r\nOrigin: http://localhost:5173\r\n"
             f"x-ato-surface-assertion: {assertion}\r\n\r\n")
         self.socket.sendall(request.encode())
         header = bytearray()
@@ -68,8 +68,8 @@ class WebSocketSocket:
             header = bytes([128 | opcode, 128 | 127]) + struct.pack(">Q", length)
         self.socket.sendall(header + mask + bytes(byte ^ mask[index % 4] for index, byte in enumerate(value)))
 
-    def recv(self, count):
-        while not self.pending:
+    def read_message(self):
+        while True:
             header = exact(self.socket, 2)
             opcode = header[0] & 15
             assert not header[1] & 128
@@ -81,12 +81,20 @@ class WebSocketSocket:
             assert length <= 1024 * 1024
             payload = exact(self.socket, length)
             if opcode == 8:
-                return b""
+                return opcode, payload
             if opcode == 9:
                 self.sendall(payload, 10)
                 continue
             if opcode == 10:
                 continue
+            assert opcode in (1, 2)
+            return opcode, payload
+
+    def recv(self, count):
+        while not self.pending:
+            opcode, payload = self.read_message()
+            if opcode == 8:
+                return b""
             assert opcode == 2
             self.pending.extend(payload)
         value = bytes(self.pending[:count])
@@ -101,17 +109,22 @@ class WebSocketSocket:
         self.socket.close()
 
 
-def assertion(key, session="native-acceptance", expired=False):
+def assertion(key, session="native-acceptance", expired=False, execution=None,
+              surface="native-pixel", kid="acceptance"):
     claims = {"aud": "ato.runner.surface-gateway", "session_id": session,
-        "surface_id": "native-pixel", "principal": {"kind": "user", "id": "acceptance"},
-        "exp": int(time.time()) + (-1 if expired else 60), "jti": os.urandom(16).hex(), "kid": "acceptance"}
+        "surface_id": surface, "principal": {"kind": "user", "id": "acceptance"},
+        "exp": int(time.time()) + (-1 if expired else 60), "jti": os.urandom(16).hex(), "kid": kid}
+    if execution is not None:
+        claims["execution"] = execution
     encoded = base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).decode().rstrip("=")
     return encoded + "." + hmac.new(key.encode(), encoded.encode(), hashlib.sha256).hexdigest()
 
 
 class Client:
-    def __init__(self, port, key=None):
-        self.stream = WebSocketSocket(port, assertion(key)) if key else socket.create_connection(("127.0.0.1", port), timeout=4)
+    def __init__(self, port, key=None, execution=None):
+        signed = assertion(key, execution=execution,
+            kid="ato.runner-surface@1" if execution else "acceptance") if key else None
+        self.stream = WebSocketSocket(port, signed) if key else socket.create_connection(("127.0.0.1", port), timeout=4)
         self.stream.settimeout(4)
         assert exact(self.stream, 12) == b"RFB 003.008\n"
         self.stream.sendall(b"RFB 003.008\n")
@@ -190,7 +203,12 @@ def main():
     parser.add_argument("--producer", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--gateway", type=Path)
+    parser.add_argument("--execution-scope", action="store_true")
     args = parser.parse_args()
+    assert not args.execution_scope or args.gateway, "execution scope requires the gateway"
+    execution = {"run_id": "run-native-acceptance", "lease_id": "lease-native-acceptance",
+                 "runner_id": "runner-native-acceptance"} if args.execution_scope else None
+    kid = "ato.runner-surface@1" if execution else "acceptance"
     root = args.work_root.resolve()
     root.mkdir(parents=True, exist_ok=False)
     environment = dict(os.environ, TMPDIR=str(root), LC_ALL="C", LANG="C")
@@ -211,16 +229,24 @@ def main():
                 gateway = subprocess.Popen([str(args.gateway)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=output, text=True, env=environment)
                 configuration = {"session_id": "native-acceptance", "surface_id": "native-pixel",
                     "listen_addr": "127.0.0.1:16000", "connect_url": "http://127.0.0.1:16000/",
-                    "origin": "http://localhost:5173", "assertion_keys": {"acceptance": key},
+                    "origin": "http://localhost:5173", "assertion_keys": {kid: key},
                     "idle_timeout_secs": 30, "readiness_timeout_secs": 8,
                     "target": {"kind": "pixel", "private_rfb_addr": f"127.0.0.1:{port}"}}
+                if execution:
+                    configuration["execution"] = execution
                 gateway.stdin.write(json.dumps(configuration) + "\n")
                 gateway.stdin.flush()
                 assert select.select([gateway.stdout], [], [], 10)[0], "gateway readiness timed out"
                 ready = json.loads(gateway.stdout.readline())
                 assert ready["surface_ready"] and not ready["contract_verified"]
                 port = 16000
-                for rejected in [assertion(key, expired=True), assertion(key, session="foreign-session")]:
+                invalid = [assertion(key, expired=True, execution=execution, kid=kid),
+                           assertion(key, session="foreign-session", execution=execution, kid=kid)]
+                if execution:
+                    invalid.extend(assertion(key, execution=dict(execution, **{field: "foreign"}), kid=kid)
+                                   for field in execution)
+                    invalid.append(assertion(key, kid=kid))
+                for rejected in invalid:
                     try:
                         WebSocketSocket(port, rejected)
                         raise AssertionError("invalid assertion admitted")
@@ -231,7 +257,7 @@ def main():
                 if process.poll() is not None:
                     raise AssertionError("GUI producer exited: " + log.read_text())
                 try:
-                    client = Client(port, key)
+                    client = Client(port, key, execution)
                     break
                 except (OSError, RuntimeError):
                     time.sleep(0.1)
@@ -246,12 +272,13 @@ def main():
             client.resize(1024, 768)
             resized, resized_bytes = client.frame()
             client.stream.close()
-            client = Client(port, key)
+            client = Client(port, key, execution)
             reconnect, _ = client.frame()
             assert (client.width, client.height) == (1024, 768)
             assert client.clipboard_messages == 0
             report = {"schema": "ato.native-pixel-producer-acceptance/1", "real_tigervnc": True, "transport": "authenticated_gateway" if key else "private_rfb",
                 "expired_assertion_rejected": bool(key), "wrong_session_rejected": bool(key),
+                "execution_scope_verified": bool(execution),
                 "initial_frame_bytes": frame_bytes, "ready_ms": ready_ms, "keyboard_changed_pixels": True,
                 "resized_viewport": [client.width, client.height], "resized_frame_bytes": resized_bytes,
                 "reconnect": True, "clipboard_messages": client.clipboard_messages,
