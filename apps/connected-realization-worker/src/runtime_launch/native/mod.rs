@@ -1,13 +1,14 @@
 //! Runner-owned Native startup and cleanup. Kept behind dispatch admission:
 //! transport readiness never authorizes publication or satisfies Contract K.
 mod dispatch;
+pub mod pixel;
 mod producer;
 pub use dispatch::NativeLeaseRun;
 #[cfg(test)]
 pub(crate) mod tests;
 
 use anyhow::{Context, Result, ensure};
-use ato_adapter_oci::{DockerOciAdapter, OciHandle, OciOwner, StopBudget, StopOutcome};
+use ato_adapter_oci::{DockerOciAdapter, OciOwner, StopBudget, StopOutcome};
 use ato_ipc::{
     runtime_launch::{LaunchRealizationV1, RuntimeLaunchSpecV1},
     session_surface::{SessionSurfaceDescriptor, SurfaceCapabilityValue, SurfaceExecutionScope},
@@ -16,7 +17,10 @@ use ato_native_surface_gateway::{
     NativeProbeHandle, NativeProbeTarget, capture_and_start_native_probe,
 };
 use ato_runtime_attempt::{
-    launch::{oci::container_oci_spec, resolved::ResolvedRuntimeLaunchContext},
+    launch::{
+        oci::{LaunchedOci, container_oci_spec},
+        resolved::ResolvedRuntimeLaunchContext,
+    },
     native_launch::NativeLaunchDeclaration,
 };
 use netd::{
@@ -109,13 +113,15 @@ impl Drop for OwnedNativeTerminalRun {
 }
 
 struct Parts {
-    container: Option<OciHandle>,
+    container: Option<LaunchedOci>,
     producer: Option<TerminalProducer>,
+    pixel_relay: Option<pixel::RfbRelay>,
+    pixel_directories: Option<pixel::DisplayDirectories>,
     probe: Option<NativeProbeHandle>,
     surface: Option<NativeSurfaceHandle>,
     budget: StopBudget,
     // Keep the Linux directory alias alive through every UDS connection.
-    _socket_directory: std::fs::File,
+    _socket_directory: Option<std::fs::File>,
 }
 impl Parts {
     async fn shutdown(mut self) -> StopOutcome {
@@ -138,11 +144,35 @@ impl Parts {
         {
             failures.push("terminal cleanup");
         }
+        if let Some(mut relay) = self.pixel_relay.take()
+            && relay.stop().await.is_err()
+        {
+            failures.push("RFB relay cleanup");
+        }
         let outcome = self
             .container
             .take()
-            .map(|container| container.stop_gracefully(self.budget))
+            .map(|container| match container {
+                LaunchedOci::Container(handle) => handle.stop_gracefully(self.budget),
+                LaunchedOci::Group(group) => {
+                    let report = group.stop_gracefully(self.budget);
+                    if report.network_removed {
+                        report
+                            .overall()
+                            .unwrap_or(StopOutcome::AlreadyExited { exit_code: 0 })
+                    } else {
+                        StopOutcome::Unconfirmed {
+                            reason: "native container group network cleanup not confirmed".into(),
+                        }
+                    }
+                }
+            })
             .unwrap_or(StopOutcome::AlreadyExited { exit_code: 0 });
+        if outcome.is_confirmed() {
+            self.pixel_directories.take();
+        } else if let Some(dirs) = self.pixel_directories.take() {
+            dirs.retain_for_recovery();
+        }
         if !failures.is_empty() {
             return StopOutcome::Unconfirmed {
                 reason: format!(
@@ -310,19 +340,21 @@ pub async fn start_terminal(
         }
     };
     let mut parts = Parts {
-        container: Some(container),
+        container: Some(LaunchedOci::Container(container)),
         producer: None,
+        pixel_relay: None,
+        pixel_directories: None,
         probe: None,
         surface: None,
         budget: super::recovery::stop_budget(&spec.lifecycle),
-        _socket_directory: socket_directory,
+        _socket_directory: Some(socket_directory),
     };
     let lifetime_deadline = started_at + config.maximum_lifetime;
     let startup = async {
-        let terminal = parts
-            .container
-            .as_mut()
-            .unwrap()
+        let LaunchedOci::Container(container) = parts.container.as_mut().unwrap() else {
+            unreachable!()
+        };
+        let terminal = container
             .take_terminal()
             .context("container omitted owned PTY")?;
         parts.producer = Some(TerminalProducer::start(terminal, socket.clone(), cols, rows).await?);
@@ -352,12 +384,7 @@ pub async fn start_terminal(
             .await?,
         );
         ensure!(
-            parts
-                .container
-                .as_ref()
-                .unwrap()
-                .exit_code_bounded(Duration::from_millis(500))?
-                .is_none(),
+            !parts.workload_exited()?,
             "native workload exited during startup"
         );
         ensure!(
@@ -382,10 +409,48 @@ pub async fn start_terminal(
             process: None,
         });
     }
+    Ok(finish_owned_run(parts, owner_alive, lifetime_deadline))
+}
+
+impl Parts {
+    fn workload_exited(&self) -> Result<bool> {
+        let containers = self.container.as_ref().unwrap().containers();
+        // Preserve the original single-container Terminal bound. The GUI
+        // pair shares that same aggregate owner-poll budget.
+        let budget = Duration::from_millis(500 / containers.len().max(1) as u64);
+        for (_, container) in containers {
+            if container.exit_code_bounded(budget)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn finish_owned_run(
+    parts: Parts,
+    mut owner_alive: watch::Receiver<bool>,
+    lifetime_deadline: Instant,
+) -> OwnedNativeTerminalRun {
     let surface_addr = parts.surface.as_ref().unwrap().local_addr();
     let observation_addr = parts.probe.as_ref().unwrap().local_addr();
-    let execution =
-        super::lease::RuntimeExecutionEvidence::for_container(parts.container.as_ref().unwrap());
+    let containers = parts.container.as_ref().unwrap().containers();
+    let app = containers
+        .iter()
+        .find(|(name, _)| *name == "main")
+        .map(|(_, h)| *h)
+        .unwrap_or(containers[0].1);
+    let mut execution = super::lease::RuntimeExecutionEvidence::for_container(app);
+    execution.services = containers
+        .iter()
+        .filter(|(_, h)| h.container_id() != app.container_id())
+        .map(|(name, h)| super::lease::ServiceExecutionEvidence {
+            name: (*name).into(),
+            container_id: h.container_id().into(),
+            image: h.image().into(),
+            principal: h.execution_principal().cloned(),
+        })
+        .collect();
     let (stop, mut stopped) = oneshot::channel();
     let task = tokio::spawn(async move {
         let cause = loop {
@@ -396,12 +461,12 @@ pub async fn start_terminal(
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     if Instant::now() >= lifetime_deadline { break "maximum_lifetime"; }
                     if parts.surface.as_ref().unwrap().idle_expired() { break "idle_timeout"; }
-                    match parts.container.as_ref().unwrap().exit_code_bounded(Duration::from_millis(500)) {
-                        Ok(Some(_)) => break "workload_exit",
+                    match parts.workload_exited() {
+                        Ok(true) => break "workload_exit",
                         Err(_) => break "workload_status_unavailable",
-                        Ok(None) => {}
+                        Ok(false) => {}
                     }
-                    if parts.producer.as_ref().unwrap().failed() { break "producer_failure"; }
+                    if parts.producer.as_ref().is_some_and(TerminalProducer::failed) || parts.pixel_relay.as_ref().is_some_and(pixel::RfbRelay::failed) { break "producer_failure"; }
                 }
             }
         };
@@ -410,11 +475,11 @@ pub async fn start_terminal(
             cause,
         }
     });
-    Ok(OwnedNativeTerminalRun {
+    OwnedNativeTerminalRun {
         surface_addr,
         observation_addr,
         execution,
         stop: Some(stop),
         task: Some(task),
-    })
+    }
 }
