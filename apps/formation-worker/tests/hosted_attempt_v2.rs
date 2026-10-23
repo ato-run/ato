@@ -260,6 +260,18 @@ status = 200
         )
         .unwrap();
     }
+    let subdirectory = if fault == Some("selected-source") {
+        std::fs::create_dir(source.path().join("site")).unwrap();
+        std::fs::rename(
+            source.path().join("index.html"),
+            source.path().join("site/index.html"),
+        )
+        .unwrap();
+        std::fs::write(source.path().join("README"), "outside selected app").unwrap();
+        "site"
+    } else {
+        ""
+    };
     let fetcher = Fetcher {
         bytes: ato_formation_worker::pack::pack_tree(source.path()).unwrap(),
         calls: AtomicUsize::new(0),
@@ -286,7 +298,7 @@ status = 200
         attempt_id: "hosted_attempt".into(),
         attempt_fence: 1,
     };
-    let job = json!({"job_id":"hosted_job", "source":{"subdirectory":""}, "target":{"triple":if process.is_some() {"aarch64-linux-gnu"} else {"wasm32-browser"}, "workspace_guest_root":"/app"}, "policy":{"network":if process.is_some() {"dependency_resolution"} else {"denied"}}});
+    let job = json!({"job_id":"hosted_job", "source":{"kind":"git_hub", "owner":"ato-run", "repository":"verified-source-fixture", "resolved_commit_sha":"a".repeat(40), "subdirectory":subdirectory}, "target":{"triple":if process.is_some() {"aarch64-linux-gnu"} else {"wasm32-browser"}, "workspace_guest_root":"/app"}, "policy":{"network":if process.is_some() {"dependency_resolution"} else {"denied"}}});
     use ato_runtime_attempt::journal::{AttemptJournal, AttemptLedger};
     let journal = AttemptJournal::new(scratch.path().join("attempt-records"));
     if fault == Some("history") {
@@ -397,6 +409,52 @@ status = 200
     } else {
         assert!(outcome.is_ok(), "{outcome:?}");
         let result = server.result.lock().unwrap().clone().unwrap();
+        let archive_digest = ato_formation_worker::job::digest(&fetcher.bytes);
+        let verified = ato_formation::source::DownloadedArchive::new(fetcher.bytes.clone())
+            .verify_archive_digest(&archive_digest)
+            .unwrap()
+            .verify_tree_digest(None, SourceLimits::default())
+            .unwrap();
+        assert_eq!(
+            result["source_evidence"],
+            json!({
+                "archive_digest": archive_digest,
+                "tree_digest": verified.tree_digest(),
+                "resolver_contract_version": verified.resolver_contract(),
+                "subdirectory": subdirectory,
+                "observed_file_count": verified.expanded_file_count(),
+                "observed_uncompressed_bytes": verified.expanded_bytes(),
+            })
+        );
+        assert_ne!(
+            result["source_evidence"]["resolver_contract_version"],
+            "ato.capsule-program-source-projection/v1"
+        );
+        assert_eq!(
+            result["source_closure_ref"],
+            verified.closure_ref(subdirectory).unwrap().as_str()
+        );
+        assert_eq!(result["job_id"], job["job_id"]);
+        assert_eq!(result["job_id"], attempt.job_id);
+        assert_eq!(result["attempt_id"], attempt.attempt_id);
+        assert_eq!(result["attempt_fence"], attempt.attempt_fence);
+        assert_eq!(
+            result["verification_receipt"]["execution"]["request_id"],
+            attempt.job_id
+        );
+        assert_eq!(
+            result["verification_receipt"]["execution"]["attempt_id"],
+            attempt.attempt_id
+        );
+        if subdirectory == "site" {
+            assert_eq!(result["source_evidence"]["observed_file_count"], 2);
+            assert!(
+                verified.expanded_bytes()
+                    > std::fs::metadata(source.path().join("site/index.html"))
+                        .unwrap()
+                        .len()
+            );
+        }
         assert_eq!(result["protocol"], "ato.formation-result.v2");
         assert!(result.get("program_intent_ref").is_none());
         assert!(result.get("effective_build_plan_ref").is_none());
@@ -444,6 +502,131 @@ fn hosted_static_is_observed_then_published() {
     assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], true);
     for name in ["seal", "runtime_verification", "cleanup", "publication"] {
         assert_eq!(r["outcomes"][name]["state"], "succeeded");
+    }
+}
+#[test]
+fn selected_app_keeps_full_archive_source_measurements_and_its_distinct_closure() {
+    let r = hosted_with_fault(false, false, None, Some("selected-source"));
+    assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], true);
+}
+
+#[test]
+fn mismatched_job_assignment_refuses_before_acquisition_or_publication() {
+    let scratch = scratch_dir();
+    let fetcher = Fetcher {
+        bytes: Vec::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let server = ApiFixture::new(false);
+    let api = FormationApi::new(
+        reqwest::blocking::Client::new(),
+        server.url.clone(),
+        "test".into(),
+    );
+    let context = JobContext {
+        api: &api,
+        fetcher: &fetcher,
+        packer: &Packer,
+        work_root: scratch.path(),
+        shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+        worker_id: "test",
+        limits: BuildLimits::default(),
+        source_limits: SourceLimits::default(),
+    };
+    let attempt = BuildAttempt {
+        job_id: "assigned".into(),
+        attempt_id: "attempt".into(),
+        attempt_fence: 7,
+    };
+    let error = run_claimed_job(
+        &context,
+        &attempt,
+        &json!({"job_id":"different", "source":{"subdirectory":""}}),
+        "compute",
+        "revision",
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("formation_source_assignment_mismatch")
+    );
+    assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0);
+    assert!(server.result.lock().unwrap().is_none());
+}
+
+#[test]
+fn declared_archive_tree_and_selection_mismatches_cannot_emit_source_evidence_or_publish() {
+    let input = scratch_dir();
+    std::fs::write(input.path().join("index.html"), "verified input").unwrap();
+    let bytes = ato_formation_worker::pack::pack_tree(input.path()).unwrap();
+    for mismatch in ["archive", "tree", "selection"] {
+        let scratch = scratch_dir();
+        let fetcher = Fetcher {
+            bytes: bytes.clone(),
+            calls: AtomicUsize::new(0),
+        };
+        let server = ApiFixture::new(false);
+        let api = FormationApi::new(
+            reqwest::blocking::Client::new(),
+            server.url.clone(),
+            "test".into(),
+        );
+        let context = JobContext {
+            api: &api,
+            fetcher: &fetcher,
+            packer: &Packer,
+            work_root: scratch.path(),
+            shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+            worker_id: "test",
+            limits: BuildLimits::default(),
+            source_limits: SourceLimits::default(),
+        };
+        let attempt = BuildAttempt {
+            job_id: "assigned".into(),
+            attempt_id: "attempt".into(),
+            attempt_fence: 9,
+        };
+        let mut source = json!({"kind":"uploaded_archive", "subdirectory":""});
+        let expected = match mismatch {
+            "archive" => {
+                source["expected_archive_digest"] = format!("sha256:{}", "0".repeat(64)).into();
+                "source_archive_digest_mismatch"
+            }
+            "tree" => {
+                source["expected_source_tree_digest"] = format!("sha256:{}", "0".repeat(64)).into();
+                "source_tree_digest_mismatch"
+            }
+            _ => {
+                source["subdirectory"] = "missing".into();
+                "source_subdirectory_missing"
+            }
+        };
+        let error = run_claimed_job(
+            &context,
+            &attempt,
+            &json!({"job_id":"assigned", "source":source}),
+            "compute",
+            "revision",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<ato_formation::source::SourceError>()
+                .unwrap()
+                .code(),
+            expected
+        );
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+        assert!(server.result.lock().unwrap().is_none());
+        assert!(
+            !scratch
+                .path()
+                .join("attempt/formation-result-v2.json")
+                .exists()
+        );
     }
 }
 #[test]
