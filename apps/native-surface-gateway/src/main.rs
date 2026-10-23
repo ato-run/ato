@@ -12,7 +12,7 @@ mod unix {
 
     use ato_formation::native_surface::NativeSurfaceAdapter;
     use ato_ipc::session_surface::SurfaceExecutionScope;
-    use netd::native_probe::{NativeProbeTarget, capture_and_start_native_probe};
+    use ato_native_surface_gateway::{NativeProbeTarget, capture_and_start_native_probe};
     use netd::native_surface::{
         NativeSurfaceConfig, NativeSurfaceProbe, NativeSurfaceReady, start_ready_native_surface,
     };

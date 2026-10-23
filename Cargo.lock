@@ -635,6 +635,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-native-surface-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-formation",
+ "ato-ipc",
+ "bytes",
+ "http 1.4.2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "netd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "ato-objects"
 version = "0.1.0"
 dependencies = [
@@ -2086,7 +2106,6 @@ version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
- "ato-formation",
  "ato-ipc",
  "base64 0.22.1",
  "bytes",

@@ -5,6 +5,7 @@ members = [
     "apps/local-runtime",
     "apps/connected-realization-worker",
     "apps/formation-worker",
+    "apps/native-surface-gateway",
     "apps/firecracker-guest-image",
     "apps/runtime-object-graph",
     "apps/portable-application",

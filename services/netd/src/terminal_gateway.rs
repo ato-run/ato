@@ -30,9 +30,9 @@ use crate::surface_websocket_auth::{
 };
 
 pub const GUEST_TERMINAL_VSOCK_PORT: u32 = 1026;
-pub(crate) const FRAME_INPUT: u8 = 1;
-pub(crate) const FRAME_OUTPUT: u8 = 2;
-pub(crate) const FRAME_CONTROL: u8 = 3;
+pub const FRAME_INPUT: u8 = 1;
+pub const FRAME_OUTPUT: u8 = 2;
+pub const FRAME_CONTROL: u8 = 3;
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -233,7 +233,7 @@ async fn serve_terminal_connection(
     relay_terminal(websocket, guest, last_input_activity_unix_millis).await
 }
 
-pub(crate) async fn connect_guest_terminal(
+pub async fn connect_guest_terminal(
     path: &std::path::Path,
     budget: Duration,
 ) -> std::io::Result<UnixStream> {
@@ -392,7 +392,7 @@ where
     writer_result.map_err(TerminalGatewayError::WebSocket)
 }
 
-pub(crate) async fn write_guest_frame<W: tokio::io::AsyncWrite + Unpin>(
+pub async fn write_guest_frame<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     kind: u8,
     payload: &[u8],
@@ -403,7 +403,7 @@ pub(crate) async fn write_guest_frame<W: tokio::io::AsyncWrite + Unpin>(
     writer.flush().await
 }
 
-pub(crate) async fn read_guest_frame<R: tokio::io::AsyncRead + Unpin>(
+pub async fn read_guest_frame<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(u8, Vec<u8>), TerminalGatewayError> {
     let kind = reader.read_u8().await?;
