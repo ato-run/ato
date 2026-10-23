@@ -399,3 +399,18 @@ ordinary Native attempt/CLI admission and unsupported native guest TCP promises
 remain refused. Installing the complete API receiver/access gate and verifying
 it precede any shared Runner opt-in. No installation or flag change is part of
 this source change.
+
+## Host Pixel bindings and declared render intervals
+
+Native Pixel may use the existing pair of None guest-port facts for a host-owned
+display and HTTP probe. Some facts remain unchanged; a backend that cannot honor
+those real guest listeners must refuse them, never erase or guess bindings.
+Ordinary Web/OCI constraints are unchanged. Physical execution/publication stays
+independently gated after format validation.
+
+Adapter-owned PixelKeyFrame optionally declares settle_ms, omitted/default zero,
+at most 1000ms and strictly inside the existing total operation deadline. Keys
+execute once, the declared wait is cancellable, then one full frame is captured.
+No polling, expected answer, input replay, extended deadline or K rewriting is
+added. This accommodates X application rendering after delivered key events;
+zero retains the old serialized D bytes and capture wrapper behavior.
