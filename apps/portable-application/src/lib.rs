@@ -38,6 +38,8 @@ pub mod dependency_transport;
 pub mod hosted_export;
 pub mod instance_snapshot;
 pub mod local_instance;
+#[cfg(test)]
+mod native_surface_tests;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
@@ -1342,6 +1344,7 @@ pub fn build_dynamic_routes_bundle(
     }
     route_inputs.sort_by(|a, b| a.id.cmp(&b.id));
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
+        native_surface: None,
         runtime_port_operations: vec![],
         variable_bindings: vec![],
         requirements: ato_formation::requirements::ExecutionRequirements {
@@ -1572,11 +1575,83 @@ pub fn verify_materialized_tree(
     Ok(())
 }
 
+/// Native admission is a format check, never an execution capability. Reuse
+/// the existing OCI/workspace/Binding constraints against the private HTTP
+/// probe route; the original K, D and Application remain unchanged and are
+/// returned to every verifier. No projected object is hashed or executed.
+fn validate_native_route(
+    contract: &BoundContract,
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+) -> Result<PortableRealizationKind, PortableApplicationError> {
+    let native = derivation.native_surface.as_ref().expect("native route");
+    native
+        .validate(&derivation.ports, &derivation.steps)
+        .map_err(profile)?;
+    if application.schema != APPLICATION_V2_SCHEMA
+        || application.surfaces.len() != 1
+        || derivation.steps.len() != 1
+        || derivation.ports.len() != 2
+        || derivation.steps[0].protocol != OCI_PROTOCOL
+        || application.surfaces[0].port != native.surface.port()
+        || application.surfaces[0].path != "/"
+        || derivation.requirements.startup.is_some()
+    {
+        return Err(profile(
+            "native profile requires one OCI step, one native Surface and a distinct private HTTP probe",
+        ));
+    }
+    validate_dynamic_surface(&application.surfaces[0])?;
+    if !derivation.runtimes.contains_key(OCI_USER_RUNTIME) {
+        return Err(profile(
+            "native OCI profile requires an explicit non-root execution identity",
+        ));
+    }
+    let http = contract
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
+        .collect::<Vec<_>>();
+    if http.len() != native.operations.len()
+        || native.operations.iter().any(|operation| {
+            http.iter()
+                .filter(|requirement| {
+                    requirement.port.as_deref() == Some(native.probe_port.as_str())
+                        && requirement.path.as_deref() == Some(operation.path())
+                        && requirement.method.as_deref() == Some("GET")
+                        && requirement.status == Some(200)
+                        && requirement.body_digest.as_deref().is_some_and(|digest| {
+                            parse_ref(digest, "native probe body digest").is_ok()
+                        })
+                })
+                .count()
+                != 1
+        })
+    {
+        return Err(profile(
+            "every native operation requires one independent HTTP K observation with an exact output digest",
+        ));
+    }
+    let mut probe_application = application.clone();
+    probe_application.surfaces[0].port = native.probe_port.clone();
+    let mut probe_route = derivation.clone();
+    probe_route.native_surface = None;
+    probe_route
+        .ports
+        .retain(|port| port.id == native.probe_port);
+    let realization = validate_initial_route(contract, &probe_application, &probe_route)?;
+    debug_assert_eq!(realization, PortableRealizationKind::OciContainer);
+    Ok(realization)
+}
+
 fn validate_initial_route(
     contract: &BoundContract,
     application: &ValidatedApplication,
     derivation: &BoundDerivation,
 ) -> Result<PortableRealizationKind, PortableApplicationError> {
+    if derivation.native_surface.is_some() {
+        return validate_native_route(contract, application, derivation);
+    }
     if !matches!(
         application.schema.as_str(),
         APPLICATION_SCHEMA | APPLICATION_V2_SCHEMA
@@ -3848,7 +3923,7 @@ status = 200
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
     }
 
-    fn datasette_fixture_root() -> PathBuf {
+    pub(super) fn datasette_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-datasette")
     }
 
@@ -3895,7 +3970,7 @@ status = 200
         assert_eq!(renamed_bundle.index.derivations, bundle.index.derivations);
     }
 
-    fn datasette_spec() -> PortableDynamicBundleSpec {
+    pub(super) fn datasette_spec() -> PortableDynamicBundleSpec {
         PortableDynamicBundleSpec {
             title: "Datasette catalog".to_owned(),
             surface_path: "/".to_owned(),
