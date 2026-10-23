@@ -57,3 +57,12 @@ also exercises idle shutdown through a synthetic RFB server, independent of the
 real Linux measurement. The sidecar is available to Runner orchestration; the
 current connected Runner does not yet spawn it for a hosted GUI lease. No hosted
 or browser acceptance is implied by the standalone sidecar experiment.
+
+## Image generation selection
+
+The guest image tool now projects explicit Terminal or Pixel physical profiles
+into the existing Supervisor config. Two new tests prove unchanged Computation
+and workspace identity, omitted fields for legacy plans, PTY selection, Pixel
+relay generation, dependency checks, and rejection of conflicting profiles and
+HTTP/RFB relay ports. The complete image-tool test target has 5 passing tests.
+This verifies config generation, not a booted Firecracker image or hosted lease.
