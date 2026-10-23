@@ -44,6 +44,7 @@ pub mod failure;
 #[cfg(feature = "planning")]
 pub mod intent;
 pub mod model_set;
+pub mod native_surface;
 pub mod port_operations;
 #[cfg(feature = "planning")]
 pub mod preset;
@@ -51,6 +52,7 @@ pub mod process_binding;
 #[cfg(feature = "planning")]
 pub mod projection;
 pub mod receipt;
+pub mod repository_evidence;
 pub mod request;
 pub mod requirements;
 pub mod retained;

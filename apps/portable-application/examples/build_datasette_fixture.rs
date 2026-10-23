@@ -59,18 +59,21 @@ fn main() -> Result<()> {
         requirements: vec![
             PortableHttpRequirementSpec {
                 id: "datasette-entry".to_owned(),
+                port: None,
                 path: "/".to_owned(),
                 status: 200,
                 body_digest: None,
             },
             PortableHttpRequirementSpec {
                 id: "items-in-id-order".to_owned(),
+                port: None,
                 path: "/catalog/items.json?_shape=array&_sort=id".to_owned(),
                 status: 200,
                 body_digest: Some(ROWS_SHA256.to_owned()),
             },
             PortableHttpRequirementSpec {
                 id: "quantity-total".to_owned(),
+                port: None,
                 path: "/catalog.json?sql=select%20sum(quantity)%20as%20total%20from%20items&_shape=array"
                     .to_owned(),
                 status: 200,

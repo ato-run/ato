@@ -1,0 +1,104 @@
+{
+  "good": {
+    "exit_code": 0,
+    "elapsed_ms": 23275,
+    "contract_ref": "sha256:084a5af45d5761ec2279261b745706459b151bff9786a43d0947f17e4baa7c73",
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:0a749feba689ae7885aa286b66065484daa713667216cf2a260f88b5b0a1412a",
+          "method": "GET",
+          "path": "/health",
+          "status": 200
+        },
+        "id": "backend-health",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "body_sha256": "sha256:ff412ed914362f3d8df687ccd13dcf5c5449a1bb194f5e0a3c39bcda45ddf088",
+          "method": "GET",
+          "path": "/joined",
+          "status": 200
+        },
+        "id": "sibling-connection",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "body_sha256": "sha256:7f489a4761bdf16235e2e6a86d14a29b1fa6b09e0ce544014048505eec5f2f79",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "web-health",
+        "outcome": "satisfied"
+      }
+    ],
+    "services": [
+      {
+        "container_id": "b215bbd6c1efe8febda6c7238987eb55976737bb5474014833c11a454e2f1246",
+        "image": "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b",
+        "name": "backend"
+      },
+      {
+        "container_id": "14360b4e6dcc1dce442075eeb9fe9c9aac24079fdb3c829ac51441e214af8689",
+        "image": "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b",
+        "name": "web"
+      }
+    ]
+  },
+  "bad": {
+    "exit_code": 1,
+    "elapsed_ms": 23545,
+    "contract_ref": "sha256:084a5af45d5761ec2279261b745706459b151bff9786a43d0947f17e4baa7c73",
+    "fully_satisfied": false,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:c43b53dbadd7ff469ddded0daa8d2c9e9797abfd3f06536b3746e714293041c2",
+          "method": "GET",
+          "path": "/health",
+          "status": 503
+        },
+        "failure": "http_status_mismatch: GET /health on backend.http returned 503; expected 200",
+        "id": "backend-health",
+        "outcome": "failed"
+      },
+      {
+        "evidence": {
+          "body_sha256": "sha256:08a62c8b9410ddbe0d51674193ef35c77617d46885935e7a1d55257b2b5a6f53",
+          "method": "GET",
+          "path": "/joined",
+          "status": 502
+        },
+        "failure": "http_status_mismatch: GET /joined on app.http returned 502; expected 200",
+        "id": "sibling-connection",
+        "outcome": "failed"
+      },
+      {
+        "evidence": {
+          "body_sha256": "sha256:7f489a4761bdf16235e2e6a86d14a29b1fa6b09e0ce544014048505eec5f2f79",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "web-health",
+        "outcome": "satisfied"
+      }
+    ],
+    "services": [
+      {
+        "container_id": "8a03754e056f4abb172f58cea2eb04bdc98269ddca9de234440c806671da713e",
+        "image": "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b",
+        "name": "backend"
+      },
+      {
+        "container_id": "36bf63d30c4d54ced2f748efafc5b4e817f8fae4d4d2dcd608ae3695487498dc",
+        "image": "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b",
+        "name": "web"
+      }
+    ]
+  }
+}

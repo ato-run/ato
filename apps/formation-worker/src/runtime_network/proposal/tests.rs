@@ -407,6 +407,22 @@ fn auto_source_priority_subset_is_valid_canonical_provider_context() {
     )
     .unwrap();
     let request = fresh.proposal_request_v2(&status(&fresh)).unwrap();
+    let repository = request
+        .repository_evidence
+        .as_ref()
+        .expect("automatic repository evidence");
+    assert!(repository.validate());
+    assert!(!repository.runtime_verified);
+    assert!(
+        repository
+            .facts
+            .iter()
+            .any(|fact| fact.file == "package.json")
+    );
+    let encoded_evidence = serde_json::to_string(repository).unwrap();
+    assert!(!encoded_evidence.contains("PROVIDER_KEY") && !encoded_evidence.contains("excluded"));
+    assert_eq!(request.frozen_contract, fresh.request.base_contract);
+
     let mut view = status(&fresh);
     let mut old = view["search_state"]["proposal_round"].clone();
     old["outcome"] = json!("completed");
