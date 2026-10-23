@@ -408,3 +408,11 @@ are not part of Step ③.
 - Sleep inhibition for foreground jobs and private inter-Instance Bindings.
 - IPv6 and DNS-scoped egress, direct MX delivery, general user-selected public
   ports, and production DNS/TLS publication.
+
+## Component-level observations (draft extension)
+
+The additional observation path is described in
+[COMPONENT_CONTRACT_OBSERVATION.md](COMPONENT_CONTRACT_OBSERVATION.md). Internal
+Ports retain their transport and isolation. HTTP observation semantics live in
+the existing Contract verifier; a component's TCP readiness remains distinct
+from K satisfaction.
