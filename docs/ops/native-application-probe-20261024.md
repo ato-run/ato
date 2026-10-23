@@ -53,6 +53,15 @@ keyboard input changed pixels with local terminal echo disabled. These are
 individual samples, not statistics. Neither is a Hosted staging measurement.
 JSON evidence is in `evidence/native-probe-20261024/`.
 
+After assembly relocation, the Linux app + netd all-target suite passed all
+119 tests (9 application, 110 transport), with all-target locked clippy clean.
+The initial remote scratch export retained three deleted files and was rejected
+for duplicate binary names/unresolved old imports; removing exactly those stale
+export files reproduced the committed application layout. No code workaround or
+architecture-rule relaxation was needed. Remote source also includes the
+subsequent Native launch-wire branch; application/transport sources are the
+same as this PR. GitHub architecture CI passed on `e812a33aa`.
+
 ## Boundaries remaining
 
 This does not install the binary in shared Runner services, advertise Native
