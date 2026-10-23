@@ -26,7 +26,7 @@ Linux isolated checkout combined this PR with the independent #1505 source-OCI
 compiler correction. Portable library 105/105 PASS. The connected worker library
 initially exhausted the host's 1024-descriptor shell limit under default test
 parallelism. With a process-local limit 8192 and two test threads: 145 pass,
-3 ignored and 3 pre-existing session fixture process-start failures remain
+3 ignored and 3 session fixture process-start failures remain
 (`startup_process_exited: Some(101)`); no claim of a fully passing Runner suite.
 The new private-observation real-socket test passes on both hosts.
 
