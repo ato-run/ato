@@ -2367,19 +2367,18 @@ impl ConnectedWorker {
         let mut observation_targets = BTreeMap::new();
         if let (Some(spec), runtime_launch::lease::ActiveWorkload::Oci(launched)) =
             (spec.service_group_spec(), &active.launched)
+            && let ato_runtime_attempt::launch::oci::LaunchedOci::Group(group) = launched.as_ref()
         {
-            if let ato_runtime_attempt::launch::oci::LaunchedOci::Group(group) = launched.as_ref() {
-                for service in &spec.service_group().services {
-                    let (_, handle) = group
-                        .services()
-                        .find(|(name, _)| *name == service.name)
-                        .context("observation target service is not running")?;
-                    for endpoint in &service.endpoints {
-                        observation_targets.insert(
-                            endpoint.name.clone(),
-                            SocketAddr::new(handle.container_address(), endpoint.guest_port),
-                        );
-                    }
+            for service in &spec.service_group().services {
+                let (_, handle) = group
+                    .services()
+                    .find(|(name, _)| *name == service.name)
+                    .context("observation target service is not running")?;
+                for endpoint in &service.endpoints {
+                    observation_targets.insert(
+                        endpoint.name.clone(),
+                        SocketAddr::new(handle.container_address(), endpoint.guest_port),
+                    );
                 }
             }
         }
@@ -5117,9 +5116,7 @@ impl HttpProxyGate {
     }
 
     fn claims(&self, assertion: &str) -> Option<HttpProxyAssertionClaims> {
-        let Some((encoded, signature)) = assertion.split_once('.') else {
-            return None;
-        };
+        let (encoded, signature) = assertion.split_once('.')?;
         if signature.contains('.') {
             return None;
         }
@@ -5335,54 +5332,52 @@ fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &S
     }
     if let Some(claims) = mux.gate.as_deref().and_then(|gate| {
         http_prelude_header(head, RUN_ASSERTION_HEADER).and_then(|assertion| gate.claims(assertion))
-    }) {
-        if claims.kind == "observation" {
-            let request_line = std::str::from_utf8(head)
-                .ok()
-                .and_then(|text| text.split("\r\n").next());
-            let expected = claims
-                .path
-                .as_ref()
-                .map(|path| format!("GET {path} HTTP/1.1"));
-            let target = claims
-                .port
-                .as_ref()
-                .and_then(|port| mux.observation_targets.get(port));
-            if !claims.path.as_deref().is_some_and(|path| {
-                path.starts_with('/')
-                    && !path.starts_with("//")
-                    && !path
-                        .chars()
-                        .any(|c| c.is_ascii_control() || c.is_ascii_whitespace() || c == '#')
-            }) || claims.method.as_deref() != Some("GET")
-                || request_line != expected.as_deref()
-                || !tail.is_empty()
-                || http_prelude_header(head, "transfer-encoding").is_some()
-                || http_prelude_header(head, "content-length").is_some_and(|value| value != "0")
-            {
-                proxy_assertion_forbidden(&mut client);
-                return;
-            }
-            if let Some(target) = target {
-                // Rebuild one bodyless request. Do not pass Upgrade, credentials, pipelined
-                // requests or arbitrary headers into a private service.
-                let request = format!(
-                    "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                    claims.path.as_deref().unwrap_or("/"),
-                    target
-                );
-                if let Ok(mut upstream) = TcpStream::connect_timeout(target, Duration::from_secs(5))
-                {
-                    let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
-                    if upstream.write_all(request.as_bytes()).is_ok() {
-                        let _ = io::copy(&mut upstream.take(1024 * 1024 + 16384), &mut client);
-                    }
-                }
-            } else {
-                proxy_assertion_forbidden(&mut client);
-            }
+    }) && claims.kind == "observation"
+    {
+        let request_line = std::str::from_utf8(head)
+            .ok()
+            .and_then(|text| text.split("\r\n").next());
+        let expected = claims
+            .path
+            .as_ref()
+            .map(|path| format!("GET {path} HTTP/1.1"));
+        let target = claims
+            .port
+            .as_ref()
+            .and_then(|port| mux.observation_targets.get(port));
+        if !claims.path.as_deref().is_some_and(|path| {
+            path.starts_with('/')
+                && !path.starts_with("//")
+                && !path
+                    .chars()
+                    .any(|c| c.is_ascii_control() || c.is_ascii_whitespace() || c == '#')
+        }) || claims.method.as_deref() != Some("GET")
+            || request_line != expected.as_deref()
+            || !tail.is_empty()
+            || http_prelude_header(head, "transfer-encoding").is_some()
+            || http_prelude_header(head, "content-length").is_some_and(|value| value != "0")
+        {
+            proxy_assertion_forbidden(&mut client);
             return;
         }
+        if let Some(target) = target {
+            // Rebuild one bodyless request. Do not pass Upgrade, credentials, pipelined
+            // requests or arbitrary headers into a private service.
+            let request = format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                claims.path.as_deref().unwrap_or("/"),
+                target
+            );
+            if let Ok(mut upstream) = TcpStream::connect_timeout(target, Duration::from_secs(5)) {
+                let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
+                if upstream.write_all(request.as_bytes()).is_ok() {
+                    let _ = io::copy(&mut upstream.take(1024 * 1024 + 16384), &mut client);
+                }
+            }
+        } else {
+            proxy_assertion_forbidden(&mut client);
+        }
+        return;
     }
     if let Some(gate) = mux.gate.as_deref() {
         let asserted = http_prelude_header(head, RUN_ASSERTION_HEADER)
