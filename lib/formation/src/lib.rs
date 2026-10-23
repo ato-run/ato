@@ -51,7 +51,6 @@ pub mod process_binding;
 #[cfg(feature = "planning")]
 pub mod projection;
 pub mod receipt;
-#[cfg(feature = "planning")]
 pub mod repository_evidence;
 pub mod request;
 pub mod requirements;
