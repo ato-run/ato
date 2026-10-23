@@ -414,3 +414,22 @@ execute once, the declared wait is cancellable, then one full frame is captured.
 No polling, expected answer, input replay, extended deadline or K rewriting is
 added. This accommodates X application rendering after delivered key events;
 zero retains the old serialized D bytes and capture wrapper behavior.
+
+## Owned OCI GUI helper (dispatch still closed)
+
+A connected Runner may explicitly materialize a trusted immutable display helper
+from the existing verified `PortableOciArchive` transport. This is a physical
+resource of the Run, not an Application service or semantic input. The app's
+own pinned image/argv remains unchanged. The helper creates an isolated X display,
+shares only owned Unix socket/Xauthority directories, disables TCP X11/RFB and
+clipboard, and reaches the existing scoped gateway through an owned private relay.
+Explicit app DISPLAY/XAUTHORITY or mount conflicts fail admission.
+
+The existing OCI group, Native actor, labels, StopBudget, journal and recovery
+own both containers. Root remains readonly, UIDs/GIDs numeric nonroot and resources
+bounded independently. Credentials are transient and excluded from preserved
+lease directories after confirmed crash recovery; unsafe symlink parents refuse
+cleanup/preservation. Optional application archive transport must match D's exact
+image/platform and pass the same existing archive verification before creation.
+Cold materialization retains the existing command bound and is a separate rollout
+gate; only an exactly verified loaded config/platform can be reused.

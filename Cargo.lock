@@ -363,6 +363,7 @@ dependencies = [
  "ato-materializer-vm-snapshot",
  "ato-native-surface-gateway",
  "ato-objects",
+ "ato-portable-application",
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-attempt",
