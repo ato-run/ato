@@ -477,6 +477,9 @@ pub struct BoundState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundDerivation {
+    /// Optional Adapter configuration. Omission preserves pre-native D bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_surface: Option<crate::native_surface::NativeSurfaceAdapter>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_port_operations: Vec<crate::port_operations::RuntimePortOperation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -527,6 +530,11 @@ impl BoundContract {
 
 impl BoundDerivation {
     pub fn derivation_ref(&self) -> Result<String, AuthoringError> {
+        if let Some(native) = &self.native_surface {
+            native
+                .validate(&self.ports, &self.steps)
+                .map_err(|error| malformed("native_surface", error))?;
+        }
         if self
             .runtime_port_operations
             .iter()
@@ -756,6 +764,7 @@ fn bind_derivation(
         ));
     }
     Ok(BoundDerivation {
+        native_surface: None,
         runtime_port_operations: draft.runtime_port_operations.clone(),
         variable_bindings,
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),

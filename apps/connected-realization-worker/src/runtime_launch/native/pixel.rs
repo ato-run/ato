@@ -1,0 +1,603 @@
+//! Trusted display materialization. No helper image, cookie or host endpoint
+//! belongs to K/D. This entrypoint is deliberately absent from lease dispatch
+//! and capability advertisement until its separate publication gate is wired.
+use super::*;
+use ato_adapter_oci::{OciMount, OciResourceLimits, OciServiceGroup, OciSpec, OciUser};
+use ato_objects::PortableOciArchive;
+use ato_portable_application::oci_archive::{ValidatedOciArchive, verify_oci_archive};
+use netd::pixel_gateway::PixelGatewayConfig;
+use std::{
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+use tokio::{
+    net::{TcpListener, UnixStream},
+    task::JoinSet,
+};
+
+const DISPLAY: &str = ":64";
+const X11: &str = "/tmp/.X11-unix";
+const AUTH: &str = "/run/ato-native-auth";
+const RFB: &str = "/run/ato-native-rfb";
+const HELPER: &str = "/usr/local/lib/ato/native-display";
+
+/// Explicit trusted Runner configuration, default absent. Only a verified
+/// immutable OCI archive is admitted; no registry fallback, mutable tag, shell
+/// supplied by the application, or image package installation occurs at Run.
+/// Deliberately neither Debug nor Serialize (its archive is not a receipt).
+pub struct PixelHelper {
+    image: String,
+    platform: String,
+    verified: ValidatedOciArchive,
+    limits: OciResourceLimits,
+}
+impl PixelHelper {
+    pub fn from_archive(archive: PortableOciArchive, limits: OciResourceLimits) -> Result<Self> {
+        ensure!(
+            (64 * 1024 * 1024..=1024 * 1024 * 1024).contains(&limits.memory_bytes)
+                && (100..=2000).contains(&limits.cpu_limit_millis)
+                && (8..=128).contains(&limits.pids_limit),
+            "invalid bounded display helper resources"
+        );
+        let verified = verify_oci_archive(&archive)?;
+        Ok(Self {
+            image: archive.image,
+            platform: archive.platform,
+            verified,
+            limits,
+        })
+    }
+}
+
+/// Only these child directories are bind mounted; the owning parent remains
+/// host-private. The wildcard Xauthority record is necessary across the two
+/// isolated container hostnames. Read access is delegated only into this Run.
+pub(super) struct DisplayDirectories {
+    root: PathBuf,
+    retain: bool,
+}
+impl DisplayDirectories {
+    fn create(runtime: &Path) -> Result<Self> {
+        std::fs::create_dir_all(runtime)?;
+        std::fs::set_permissions(runtime, std::fs::Permissions::from_mode(0o700))?;
+        let root = runtime.join("display");
+        std::fs::create_dir(&root).context("create fresh owned display directory")?;
+        let dirs = Self {
+            root,
+            retain: false,
+        };
+        std::fs::set_permissions(&dirs.root, std::fs::Permissions::from_mode(0o700))?;
+        for (name, mode) in [
+            ("x11", 0o755),
+            ("auth", 0o755),
+            ("rfb", 0o700),
+            ("empty", 0o755),
+        ] {
+            let path = dirs.root.join(name);
+            std::fs::create_dir(&path)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        }
+        // Xauthority binary format: FamilyWild, address, display, protocol,
+        // and a cryptographically random cookie. No command/log contains it.
+        let cookie: [u8; 16] = rand::random();
+        let mut bytes = 0xffff_u16.to_be_bytes().to_vec();
+        for field in [b"".as_slice(), b"64", b"MIT-MAGIC-COOKIE-1", &cookie] {
+            bytes.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            bytes.extend_from_slice(field);
+        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o444)
+            .open(dirs.root.join("auth/Xauthority"))?;
+        file.write_all(&bytes)?;
+        std::fs::set_permissions(
+            dirs.root.join("auth/Xauthority"),
+            std::fs::Permissions::from_mode(0o444),
+        )?;
+        Ok(dirs)
+    }
+    fn path(&self, name: &str) -> PathBuf {
+        self.root.join(name)
+    }
+    pub(super) fn retain_for_recovery(mut self) {
+        self.retain = true;
+    }
+}
+impl Drop for DisplayDirectories {
+    fn drop(&mut self) {
+        // Even an unconfirmed stop must never preserve the credential in a
+        // future snapshot. Recovery retains socket directories, not the cookie.
+        let _ = std::fs::remove_file(self.root.join("auth/Xauthority"));
+        if !self.retain {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+/// Private bounded TCP -> owned Unix socket bridge for the existing RFB
+/// probe/gateway. Its JoinSet owns every accepted stream; cancellation closes
+/// both halves without detached forwarding threads or live guest sockets.
+pub(super) struct RfbRelay {
+    addr: SocketAddr,
+    stop: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+}
+impl RfbRelay {
+    async fn start(path: PathBuf) -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (stop, mut stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut clients = JoinSet::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut stopped => break,
+                    Some(_) = clients.join_next(), if !clients.is_empty() => {},
+                    accepted = listener.accept(), if clients.len() < 8 => {
+                        let Ok((mut incoming,_)) = accepted else { break };
+                        if incoming.set_nodelay(true).is_err() {continue;}
+                        let path = path.clone();
+                        clients.spawn(async move {
+                            if let Ok(Ok(mut upstream)) = tokio::time::timeout(Duration::from_secs(1),UnixStream::connect(path)).await {
+                                // The enclosing owner/idle/lifetime actor owns
+                                // this JoinSet, including incomplete handshakes.
+                                let _ = tokio::io::copy_bidirectional(&mut incoming,&mut upstream).await;
+                            }
+                        });
+                    }
+                }
+            }
+            clients.abort_all();
+            while clients.join_next().await.is_some() {}
+        });
+        Ok(Self {
+            addr,
+            stop: Some(stop),
+            task: Some(task),
+        })
+    }
+    pub(super) fn failed(&self) -> bool {
+        self.task.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    pub(super) async fn stop(&mut self) -> Result<()> {
+        self.stop.take();
+        if let Some(mut task) = self.task.take() {
+            match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    anyhow::bail!("RFB relay cleanup timeout")
+                }
+            }
+        }
+        Ok(())
+    }
+}
+impl Drop for RfbRelay {
+    fn drop(&mut self) {
+        self.stop.take();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+fn reserved_mount(path: &str) -> bool {
+    [X11, AUTH, RFB].iter().any(|reserved| {
+        path == *reserved
+            || path.starts_with(&format!("{reserved}/"))
+            || reserved.starts_with(&format!("{}/", path.trim_end_matches('/')))
+    })
+}
+fn validate_app(app: &OciSpec) -> Result<()> {
+    ensure!(
+        app.user.is_some(),
+        "native GUI requires explicit nonroot user"
+    );
+    ensure!(
+        app.endpoints.is_empty(),
+        "host GUI cannot erase declared OCI endpoints"
+    );
+    ensure!(
+        !app.environment.contains_key("DISPLAY") && !app.environment.contains_key("XAUTHORITY"),
+        "native display owns DISPLAY and XAUTHORITY"
+    );
+    ensure!(
+        !reserved_mount(&app.workspace_mount_path)
+            && app.mounts.iter().all(|m| !reserved_mount(&m.guest_path)),
+        "declared mount conflicts with native display"
+    );
+    Ok(())
+}
+
+/// Starts an isolated application display, then the unmodified application's
+/// argv, then actual authored probes, and finally the existing scoped gateway.
+/// It returns physical readiness only. The caller must use the existing Rust
+/// K verifier and receipt authority before publication; dispatch stays closed.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_pixel(
+    spec: &RuntimeLaunchSpecV1,
+    selected_ref: &str,
+    descriptor: &SessionSurfaceDescriptor,
+    context: &ResolvedRuntimeLaunchContext,
+    owner: &OciOwner,
+    config: NativeLeaseSurfaceConfig,
+    helper: PixelHelper,
+    application_archive: Option<PortableOciArchive>,
+    mut owner_alive: watch::Receiver<bool>,
+) -> std::result::Result<OwnedNativeTerminalRun, super::super::lease::StartFailure> {
+    let started = Instant::now();
+    // All declaration/config/key/scope checks precede mounts, native actions
+    // and container creation, just as the Terminal path.
+    let (
+        declaration,
+        mut gateway,
+        keys,
+        execution,
+        authorizer,
+        helper_adapter,
+        app_adapter,
+        dirs,
+        runtime,
+        socket_directory,
+    ) = (|| -> Result<_> {
+        spec.validate().map_err(anyhow::Error::new)?;
+        ensure!(
+            cfg!(target_os = "linux"),
+            "native GUI requires Linux Runner"
+        );
+        ensure!(
+            *owner_alive.borrow() && owner.run_id == spec.context.run_id,
+            "native owner disconnected or Run mismatch"
+        );
+        let LaunchRealizationV1::Oci(oci) = &spec.realization else {
+            anyhow::bail!("native GUI requires OCI")
+        };
+        let declaration = NativeLaunchDeclaration::decode(
+            oci.native_surface
+                .as_ref()
+                .context("missing native declaration")?,
+        )?;
+        declaration.validate_selection(selected_ref, descriptor)?;
+        declaration.require_host_pixel_ports()?;
+        let SessionSurfaceDescriptor::PixelStream { viewport, .. } = descriptor else {
+            unreachable!()
+        };
+        ensure!(
+            (320..=4096).contains(&viewport.width) && (200..=2160).contains(&viewport.height),
+            "unsupported display geometry"
+        );
+        ensure!(
+            config.scope.surface_id == descriptor.surface_id().unwrap_or_default(),
+            "native surface owner mismatch"
+        );
+        ensure!(
+            config.surface_listen.ip().is_loopback() && config.surface_listen.port() != 0,
+            "private assigned gateway required"
+        );
+        ensure!(
+            (Duration::from_secs(1)..=Duration::from_secs(120)).contains(&config.startup_timeout)
+                && (Duration::from_secs(1)..=Duration::from_secs(86400))
+                    .contains(&config.idle_timeout)
+                && (Duration::from_secs(1)..=Duration::from_secs(86400))
+                    .contains(&config.maximum_lifetime),
+            "invalid bounded native lifetime"
+        );
+        ensure!(
+            spec.lifecycle.graceful_shutdown_ms <= 10000
+                && spec.lifecycle.force_kill_after_ms <= 15000,
+            "native cleanup exceeds supported budget"
+        );
+        let gateway = PixelGatewayConfig {
+            listen_addr: config.surface_listen,
+            private_rfb_addr: "127.0.0.1:1".parse().unwrap(),
+            private_rfb_connect_timeout: config.startup_timeout,
+            scope: config.scope.clone(),
+            allowed_origins: BTreeSet::from([config.origin.clone()]),
+        };
+        gateway.validate()?;
+        let keys = Arc::new(SurfaceAssertionKeyring::new(BTreeMap::from([(
+            "ato.runner-surface@1".into(),
+            config.verification_key,
+        )]))?);
+        let execution = SurfaceExecutionScope {
+            run_id: owner.run_id.clone(),
+            lease_id: owner.lease_id.clone(),
+            runner_id: owner.runner_id.clone(),
+        };
+        let authorizer = Arc::new(
+            HmacSurfaceAccessAuthorizer::new(Arc::clone(&keys))
+                .with_execution_scope(execution.clone()),
+        );
+        ensure!(
+            spec.public_env
+                .iter()
+                .all(|entry| entry.name != "DISPLAY" && entry.name != "XAUTHORITY")
+                && spec
+                    .secret_grants
+                    .iter()
+                    .all(|entry| entry.name != "DISPLAY" && entry.name != "XAUTHORITY"),
+            "native display owns declared DISPLAY and XAUTHORITY"
+        );
+        let mut physical = oci.clone();
+        physical.native_surface = None;
+        let mut app = container_oci_spec(spec, &physical, context, owner.labels(Some("main"))?)?;
+        validate_app(&app)?;
+        ensure!(
+            helper.platform == app.platform,
+            "display helper platform mismatch"
+        );
+        let application_archive = application_archive
+            .map(|archive| {
+                ensure!(
+                    archive.image == app.image && archive.platform == app.platform,
+                    "GUI application archive differs from selected D"
+                );
+                verify_oci_archive(&archive)
+            })
+            .transpose()?;
+        let runtime = ato_runtime_attempt::launch::oci::lease_runtime_root(context)?;
+        let dirs = DisplayDirectories::create(&runtime)?;
+        let metadata = std::fs::metadata(dirs.path("x11"))?;
+        let user = OciUser {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        }
+        .validate()?;
+        let mounts = |writable: bool| {
+            vec![
+                OciMount {
+                    host_path: dirs.path("x11"),
+                    guest_path: X11.into(),
+                    writable,
+                },
+                OciMount {
+                    host_path: dirs.path("auth"),
+                    guest_path: AUTH.into(),
+                    writable: false,
+                },
+            ]
+        };
+        app.mounts.extend(mounts(false));
+        app.environment.insert("DISPLAY".into(), DISPLAY.into());
+        app.environment
+            .insert("XAUTHORITY".into(), format!("{AUTH}/Xauthority"));
+        let mut helper_mounts = mounts(true);
+        helper_mounts.push(OciMount {
+            host_path: dirs.path("rfb"),
+            guest_path: RFB.into(),
+            writable: true,
+        });
+        let helper_spec = OciSpec {
+            id: format!("{}-display", app.id),
+            image: helper.image,
+            platform: helper.platform,
+            entrypoint: Some(HELPER.into()),
+            user: Some(user),
+            argv: vec![viewport.width.to_string(), viewport.height.to_string()],
+            working_dir: "/run".into(),
+            workspace_mount_path: "/run/ato-unused-workspace".into(),
+            environment: BTreeMap::new(),
+            endpoints: vec![],
+            mounts: helper_mounts,
+            limits: helper.limits,
+            stop_timeout_seconds: app.stop_timeout_seconds,
+            labels: owner.labels(Some("native-display"))?,
+        };
+        let deadline = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64
+            + config
+                .startup_timeout
+                .min(config.maximum_lifetime)
+                .min(Duration::from_secs(5))
+                .as_millis() as u64;
+        let helper_adapter = DockerOciAdapter::new_offline(
+            helper_spec,
+            helper.verified.bytes,
+            helper.verified.config_reference,
+        )?
+        .with_deadline(deadline);
+        let app_adapter = match application_archive {
+            Some(verified) => {
+                DockerOciAdapter::new_offline(app, verified.bytes, verified.config_reference)?
+            }
+            None => DockerOciAdapter::new(app)?,
+        }
+        .with_deadline(deadline);
+        let socket_directory = std::fs::File::open(dirs.path("rfb"))?;
+        Ok((
+            declaration,
+            gateway,
+            keys,
+            execution,
+            authorizer,
+            helper_adapter,
+            app_adapter,
+            dirs,
+            runtime,
+            socket_directory,
+        ))
+    })()?;
+    let network = match helper_adapter.create_internal_network(&owner.run_id) {
+        Ok(network) => network,
+        Err(error) => {
+            return Err(super::super::lease::StartFailure {
+                stop: super::super::lease::settle_failed_oci_start(
+                    owner,
+                    super::super::recovery::stop_budget(&spec.lifecycle),
+                    &error,
+                ),
+                error,
+                process: None,
+            });
+        }
+    };
+    let mut parts = Parts {
+        container: Some(LaunchedOci::Group(OciServiceGroup::new(network))),
+        producer: None,
+        pixel_relay: None,
+        pixel_directories: Some(dirs),
+        probe: None,
+        surface: None,
+        budget: super::super::recovery::stop_budget(&spec.lifecycle),
+        _socket_directory: Some(socket_directory),
+    };
+    let startup = async {
+        let empty_workspace = parts.pixel_directories.as_ref().unwrap().path("empty");
+        let LaunchedOci::Group(group) = parts.container.as_mut().unwrap() else {
+            unreachable!()
+        };
+        let handle = helper_adapter.spawn_in_network(
+            &empty_workspace,
+            &runtime.join("display-helper"),
+            group.network(),
+            Some("native-display"),
+        )?;
+        group.push("native-display".into(), handle);
+        let dirs = parts.pixel_directories.as_ref().unwrap();
+        // X server socket + RFB transport are readiness, never app acceptance.
+        loop {
+            ensure!(
+                !parts.workload_exited()?,
+                "display helper exited during startup"
+            );
+            if dirs.path("x11/X64").exists() && dirs.path("rfb/display.sock").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        use std::os::fd::AsRawFd;
+        let socket = PathBuf::from(format!(
+            "/proc/self/fd/{}/display.sock",
+            parts._socket_directory.as_ref().unwrap().as_raw_fd()
+        ));
+        let relay = RfbRelay::start(socket).await?;
+        gateway.private_rfb_addr = relay.addr;
+        parts.pixel_relay = Some(relay);
+        let LaunchedOci::Group(group) = parts.container.as_mut().unwrap() else {
+            unreachable!()
+        };
+        let handle = app_adapter.spawn_in_network(
+            context.workspace_root(),
+            &runtime.join("application"),
+            group.network(),
+            Some("main"),
+        )?;
+        group.push("main".into(), handle);
+        // X applications may map their first window asynchronously. Do not
+        // replay authored actions: wait for an explicit X client property via
+        // the helper's private readiness marker before the one capture.
+        loop {
+            ensure!(
+                !parts.workload_exited()?,
+                "native GUI exited during startup"
+            );
+            if dirs.path("rfb/application-ready").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        parts.probe = Some(
+            capture_and_start_native_probe(
+                "127.0.0.1:0".parse().unwrap(),
+                NativeProbeTarget::Pixel(gateway.private_rfb_addr),
+                &declaration.adapter,
+            )
+            .await?,
+        );
+        let assertion =
+            keys.issue_readiness_assertion_for_execution(&config.scope, Some(execution))?;
+        let connect_url = format!("http://{}/__ato/surface", config.surface_listen);
+        parts.surface = Some(
+            start_ready_native_surface(
+                NativeSurfaceConfig::Pixel(gateway),
+                authorizer,
+                NativeSurfaceProbe {
+                    connect_url: &connect_url,
+                    origin: &config.origin,
+                    assertion: assertion.as_str(),
+                },
+                config.startup_timeout,
+                config.idle_timeout,
+            )
+            .await?,
+        );
+        ensure!(
+            !parts.workload_exited()?,
+            "native GUI exited during startup"
+        );
+        Ok::<_, anyhow::Error>(())
+    };
+    let result = tokio::select! {biased;
+        _=owner_alive.changed()=>Err(anyhow::anyhow!("native owner disconnected during startup")),
+        _=tokio::time::sleep_until(tokio::time::Instant::from_std(started+config.startup_timeout.min(config.maximum_lifetime)))=>Err(anyhow::anyhow!("native startup timeout")),
+        result=startup=>result,
+    };
+    if let Err(error) = result {
+        if error
+            .downcast_ref::<ato_adapter_oci::SpawnCleanupUnconfirmed>()
+            .is_some()
+            && let Some(LaunchedOci::Group(group)) = parts.container.as_mut()
+        {
+            group.retain_networks_for_recovery();
+        }
+        let stop = parts.shutdown().await;
+        // A failed spawn can have created an unreturned container. The same
+        // existing label-scoped recovery sweep is the authority for that case.
+        let swept = super::super::lease::settle_failed_oci_start(
+            owner,
+            super::super::recovery::stop_budget(&spec.lifecycle),
+            &error,
+        );
+        return Err(super::super::lease::StartFailure {
+            error,
+            stop: StopOutcome::worst([&stop, &swept]).unwrap(),
+            process: None,
+        });
+    }
+    Ok(finish_owned_run(
+        parts,
+        owner_alive,
+        started + config.maximum_lifetime,
+    ))
+}
+
+#[cfg(test)]
+mod tests;
+
+/// Recovery preserves settled workspaces. Strip this runtime-only credential
+/// before that move, including after a Runner SIGKILL when Drop never ran.
+/// The lease was already attributed to this slot and all writers stopped.
+pub(crate) fn clear_recovered_credentials(lease_root: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(lease_root) {
+        Ok(metadata) => ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "native recovery lease is not an owned directory"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect native recovery lease"),
+    }
+    let mut path = lease_root.to_path_buf();
+    for component in ["oci-runtime", "display", "auth"] {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "native recovery credential parent is not an owned directory"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).context("inspect native recovery credential directory");
+            }
+        }
+    }
+    match std::fs::remove_file(path.join("Xauthority")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("clear recovered native credential"),
+    }
+}

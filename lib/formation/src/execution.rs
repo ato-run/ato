@@ -140,6 +140,11 @@ pub fn lower_execution(
     binding: RuntimeBinding<'_>,
 ) -> Result<ExecutionPlan, LoweringError> {
     let refuse = |detail: String| ProjectionError::Unprojectable { detail };
+    if d.native_surface.is_some() {
+        return Err(
+            refuse("native Surface Adapter is not supported by this executor".to_owned()).into(),
+        );
+    }
     let serves: Vec<_> = d
         .steps
         .iter()
@@ -410,6 +415,9 @@ pub fn lower_retained(
     use crate::retained::{RetainedError, RetainedShape};
     descriptor.validate()?;
     let d = &descriptor.derivation;
+    if d.native_surface.is_some() {
+        return Err(RetainedError("native_surface_unavailable"));
+    }
     let serving_step = d
         .steps
         .iter()

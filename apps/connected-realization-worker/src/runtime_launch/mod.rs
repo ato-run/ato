@@ -13,6 +13,8 @@ pub use ato_runtime_attempt::launch::{
 
 pub mod lease;
 pub mod managed_embedding_relay;
+#[cfg(unix)]
+pub mod native;
 pub mod network_broker;
 pub mod recovery;
 pub mod service_group;

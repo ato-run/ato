@@ -634,6 +634,8 @@ pub fn recover_slot_on(
             // the entry, so a crash between the two still leaves a directory
             // the next recovery reports and preserves.
             if residue.contains_key(&lease_id) {
+                #[cfg(unix)]
+                super::native::pixel::clear_recovered_credentials(&leases_dir.join(&lease_id))?;
                 preserve_lease_dir(leases_dir, &lease_id)?;
             }
             journal.remove(&lease_id)?;

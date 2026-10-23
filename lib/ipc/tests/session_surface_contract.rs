@@ -308,6 +308,7 @@ fn client_omission_and_empty_advertisement_are_distinct_errors() {
 #[test]
 fn surface_assertion_claims_reject_empty_session_binding() {
     let claims = SurfaceAssertionClaims {
+        execution: None,
         aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
         session_id: String::new(),
         surface_id: "surface-1".to_string(),
