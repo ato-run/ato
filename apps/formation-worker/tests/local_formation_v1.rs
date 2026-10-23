@@ -410,6 +410,37 @@ fn vcs_metadata_is_outside_the_initial_condition() {
     assert!(!bundle_contains(&scratch_git, "refs/heads/main"));
 }
 
+#[test]
+fn credential_defaults_never_reach_the_frozen_tree_or_formed_artifact() {
+    const CANARY: &str = "public-local-formation-credential-capture-canary";
+    let plain = site(&[("index.html", "<!doctype html><h1>public</h1>")]);
+    let with_credentials = site(&[
+        ("index.html", "<!doctype html><h1>public</h1>"),
+        (".env", CANARY),
+        ("credentials.json", CANARY),
+        (".ssh/id_ed25519", CANARY),
+        (".capsule/objects/private", CANARY),
+    ]);
+    let plain_scratch = tempfile::tempdir().unwrap();
+    let credential_scratch = tempfile::tempdir().unwrap();
+    let plain_result = local::run(
+        &request(plain.path(), FormationNetworkPolicy::Denied),
+        &formation(&plain_scratch),
+    )
+    .unwrap();
+    let captured_result = local::run(
+        &request(with_credentials.path(), FormationNetworkPolicy::Denied),
+        &formation(&credential_scratch),
+    )
+    .unwrap();
+    assert_eq!(
+        contract_ref_of(&plain_result),
+        contract_ref_of(&captured_result)
+    );
+    assert!(bundle_contains(&credential_scratch, "<h1>public</h1>"));
+    assert!(!bundle_contains(&credential_scratch, CANARY));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_is_decided_by_the_source_rules_not_skipped() {
