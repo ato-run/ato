@@ -198,4 +198,8 @@ fn large_pixel_captures_return_only_compact_measured_digest_bytes() {
         ato_formation::native_surface::pixel_probe_result(b"different actual frame").unwrap()
     );
     assert!(ato_formation::native_surface::pixel_probe_result(&[]).is_err());
+    assert_eq!(
+        ato_formation::native_surface::pixel_probe_result(b"abc").unwrap(),
+        b"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
+    );
 }
