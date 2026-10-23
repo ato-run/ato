@@ -50,7 +50,9 @@ The original SHA-256 and all verifier measurements remain unchanged.
 Attempt-scoped upload authorization returns an upload ID, the exact binding
 digest, transient upload/download URLs and an epoch-millisecond expiry. URLs are
 not logged, persisted or passed to the application. Object PUT/GET requests never
-receive the Runner bearer token. The strict client disables redirects, ambient
+receive the Runner bearer token. PUT explicitly sets the exact descriptor
+`Content-Length` and uses a finite sized reader, matching the API's signed length
+constraint; it does not use chunked transfer. The strict client disables redirects, ambient
 proxies and transparent decoding. The original intake retains the existing
 256 MiB transport ceiling, 50,000 files / 512 MiB expansion ceiling and frozen
 15-minute deadline. Control responses are capped at 64 KiB; readback is capped at

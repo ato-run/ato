@@ -46,3 +46,9 @@ source-only work. Invalid IDs and an unrelated returned assignment fail closed;
 no flag preserves dedicated queue polling. The focused source-archive suite
 passes all 11 tests (one additional test over the 944-test run), and Worker
 all-target Clippy was rerun after this additive filter.
+
+
+The final upload follow-up explicitly sets the descriptor Content-Length in
+addition to the finite sized reader, matching the API signed-header constraint.
+Actual HTTP PUT fixtures assert exact length and no Transfer-Encoding. All 11
+source-only tests and Worker all-target Clippy pass after this change.
