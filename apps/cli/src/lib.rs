@@ -133,6 +133,16 @@ enum Commands {
     /// Form a local directory into a Capsule: build each candidate, observe it
     /// satisfying its Contract, and keep the verified artifact.
     Form(Box<FormArgs>),
+    /// Inspect repository execution evidence without building or launching it.
+    FormInspect {
+        path: PathBuf,
+        /// Optional canonical D JSON, inspected without changing or executing it.
+        #[arg(long, requires = "contract")]
+        derivation: Option<PathBuf>,
+        /// The unchanged K whose observations the selected D must satisfy.
+        #[arg(long, requires = "derivation")]
+        contract: Option<PathBuf>,
+    },
     /// Inspect or supply scoped input to an existing Formation Search.
     FormInput(formation_input::InputArgs),
     /// Produce bounded Formation proposals through a scoped Session bridge.
@@ -618,6 +628,31 @@ pub fn run() -> Result<()> {
         Commands::Upload(args) => upload(args),
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
+        Commands::FormInspect {
+            path,
+            derivation,
+            contract,
+        } => {
+            let evidence = ato_formation::repository_evidence::inspect(&path)?;
+            let declared = match (derivation, contract) {
+                (Some(d), Some(k)) => {
+                    let d: ato_formation::authoring::BoundDerivation = read_inspection_json(&d)?;
+                    let k: ato_formation::authoring::BoundContract = read_inspection_json(&k)?;
+                    Some(serde_json::to_value(
+                        ato_formation::requirements::inspection::inspect(&d, &k),
+                    )?)
+                }
+                (None, None) => None,
+                _ => bail!("--derivation and --contract must be supplied together"),
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "repository": evidence, "declared_execution": declared,
+                }))?
+            );
+            Ok(())
+        }
         Commands::FormInput(args) => formation_input::run(args),
         Commands::FormSession(args) => formation_session::run(args),
         Commands::FormVerify(args) => formation_verify::run(args),
@@ -1042,6 +1077,18 @@ fn runtime_network_serve(args: RuntimeNetworkServeArgs) -> Result<()> {
             max_tickets: args.max_attempts,
         },
     )
+}
+
+fn read_inspection_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    const MAX_BYTES: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        bail!("inspection JSON exceeds 1 MiB");
+    }
+    serde_json::from_slice(&bytes).context("invalid inspection JSON")
 }
 
 fn form(args: FormArgs) -> Result<()> {
@@ -2305,7 +2352,26 @@ fn run_portable_application(
             bindings: Some(&bindings),
             ..PortableRuntimeState::default()
         },
-    )?;
+    );
+    let started = match started {
+        Ok(started) => started,
+        Err(error) => {
+            // The common attempt has already persisted its immutable verdict,
+            // even when K failed and no live candidate was handed off.
+            if let Some(output) = &args.verification_receipt {
+                match fs::read(runtime_root.join("verification-receipt.json")) {
+                    Ok(bytes) => fs::write(output, bytes).with_context(|| {
+                        format!("write failed verification receipt {}", output.display())
+                    })?,
+                    Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(read_error) => {
+                        return Err(read_error).context("read recorded verification receipt");
+                    }
+                }
+            }
+            return Err(error);
+        }
+    };
     let mut runtime = started.runtime;
     let receipt = started.receipt;
     let result = (|| -> Result<()> {
@@ -3375,6 +3441,45 @@ mod tests {
                 "redacted",
             ])
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn formation_inspection_requires_a_paired_contract_and_derivation() {
+        assert!(Cli::try_parse_from(["ato", "form-inspect", "."]).is_ok());
+        assert!(
+            Cli::try_parse_from(["ato", "form-inspect", ".", "--derivation", "d.json"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["ato", "form-inspect", ".", "--contract", "k.json"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "form-inspect",
+                ".",
+                "--derivation",
+                "d.json",
+                "--contract",
+                "k.json"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn formation_inspection_bounds_canonical_json_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inspection.json");
+        fs::write(&path, "{\"schema\":\"example\"}").unwrap();
+        assert_eq!(
+            read_inspection_json::<serde_json::Value>(&path).unwrap()["schema"],
+            "example"
+        );
+        fs::write(&path, vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert!(
+            read_inspection_json::<serde_json::Value>(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 1 MiB")
         );
     }
 

@@ -135,6 +135,7 @@ fn runner_capabilities(
         // it is offered exactly where single-container OCI is, by a build that
         // understands ato.runtime-launch-spec.v2.
         capabilities.push(ato_ipc::oci_service_group::OCI_SERVICE_GROUP_RUNTIME_FEATURE);
+        capabilities.push("runtime_feature=component_contract_observation_v1");
         // Volumes are their own feature: a group Runner is not a volume
         // Runner until it understands v3 AND has a writable volume store.
         if persistent_volumes {
@@ -2363,6 +2364,24 @@ impl ConnectedWorker {
         // that is exactly the state in which the control plane cannot sign
         // assertions, so nothing enforceable is lost. A host-boundary Runner
         // never reaches here without a key (`require_surface_gate`).
+        let mut observation_targets = BTreeMap::new();
+        if let (Some(spec), runtime_launch::lease::ActiveWorkload::Oci(launched)) =
+            (spec.service_group_spec(), &active.launched)
+            && let ato_runtime_attempt::launch::oci::LaunchedOci::Group(group) = launched.as_ref()
+        {
+            for service in &spec.service_group().services {
+                let (_, handle) = group
+                    .services()
+                    .find(|(name, _)| *name == service.name)
+                    .context("observation target service is not running")?;
+                for endpoint in &service.endpoints {
+                    observation_targets.insert(
+                        endpoint.name.clone(),
+                        SocketAddr::new(handle.container_address(), endpoint.guest_port),
+                    );
+                }
+            }
+        }
         let _surface_gate = TcpProxy::start_with_mux(
             self.config.surface_listen,
             ProxyTarget::Tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
@@ -2371,6 +2390,7 @@ impl ConnectedWorker {
                 presentation_frame: None,
                 gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
                 guest_surface_gateway: false,
+                observation_targets,
             }),
         )?;
         // The ready_url is the ingress slot's public hostname, and the process
@@ -2573,6 +2593,7 @@ impl ConnectedWorker {
                 presentation_frame: presentation_frame.clone(),
                 gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
                 guest_surface_gateway: true,
+                observation_targets: BTreeMap::new(),
             }),
         )?;
         let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
@@ -5060,6 +5081,12 @@ struct HttpProxyAssertionClaims {
     runner_id: String,
     exp: i64,
     jti: String,
+    #[serde(default)]
+    port: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
 }
 
 impl HttpProxyGate {
@@ -5084,35 +5111,39 @@ impl HttpProxyGate {
     /// this lease on this runner, and only until `exp`. No replay cache —
     /// a captured assertion replays against the same Run for at most its TTL.
     fn verify(&self, assertion: &str) -> bool {
-        let Some((encoded, signature)) = assertion.split_once('.') else {
-            return false;
-        };
+        self.claims(assertion)
+            .is_some_and(|claims| claims.kind == "http")
+    }
+
+    fn claims(&self, assertion: &str) -> Option<HttpProxyAssertionClaims> {
+        let (encoded, signature) = assertion.split_once('.')?;
         if signature.contains('.') {
-            return false;
+            return None;
         }
         let Ok(signature) = hex::decode(signature) else {
-            return false;
+            return None;
         };
         let Ok(mut mac) = HmacSha256::new_from_slice(self.verification_key.as_bytes()) else {
-            return false;
+            return None;
         };
         mac.update(encoded.as_bytes());
         if mac.verify_slice(&signature).is_err() {
-            return false;
+            return None;
         }
         let Ok(payload) = URL_SAFE_NO_PAD.decode(encoded) else {
-            return false;
+            return None;
         };
         let Ok(claims) = serde_json::from_slice::<HttpProxyAssertionClaims>(&payload) else {
-            return false;
+            return None;
         };
-        claims.v == 1
-            && claims.kind == "http"
+        (claims.v == 1
+            && matches!(claims.kind.as_str(), "http" | "observation")
             && claims.run_id == self.run_id
             && claims.lease_id == self.lease_id
             && claims.runner_id == self.runner_id
             && claims.exp > OffsetDateTime::now_utc().unix_timestamp()
-            && !claims.jti.is_empty()
+            && !claims.jti.is_empty())
+        .then_some(claims)
     }
 }
 
@@ -5210,6 +5241,8 @@ struct SurfaceMux {
     /// runtime-launch workloads — there the path is just an app path and stays
     /// behind the gate.
     guest_surface_gateway: bool,
+    /// Lease-owned container addresses, reachable only through an observation-scoped proof.
+    observation_targets: BTreeMap<String, SocketAddr>,
 }
 
 impl TcpProxy {
@@ -5295,6 +5328,55 @@ fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &S
     }
     if mux.guest_surface_gateway && path == Some(SURFACE_CONNECT_PATH) {
         proxy_connection_with_prelude(&mut client, surface_target, &prelude);
+        return;
+    }
+    if let Some(claims) = mux.gate.as_deref().and_then(|gate| {
+        http_prelude_header(head, RUN_ASSERTION_HEADER).and_then(|assertion| gate.claims(assertion))
+    }) && claims.kind == "observation"
+    {
+        let request_line = std::str::from_utf8(head)
+            .ok()
+            .and_then(|text| text.split("\r\n").next());
+        let expected = claims
+            .path
+            .as_ref()
+            .map(|path| format!("GET {path} HTTP/1.1"));
+        let target = claims
+            .port
+            .as_ref()
+            .and_then(|port| mux.observation_targets.get(port));
+        if !claims.path.as_deref().is_some_and(|path| {
+            path.starts_with('/')
+                && !path.starts_with("//")
+                && !path
+                    .chars()
+                    .any(|c| c.is_ascii_control() || c.is_ascii_whitespace() || c == '#')
+        }) || claims.method.as_deref() != Some("GET")
+            || request_line != expected.as_deref()
+            || !tail.is_empty()
+            || http_prelude_header(head, "transfer-encoding").is_some()
+            || http_prelude_header(head, "content-length").is_some_and(|value| value != "0")
+        {
+            proxy_assertion_forbidden(&mut client);
+            return;
+        }
+        if let Some(target) = target {
+            // Rebuild one bodyless request. Do not pass Upgrade, credentials, pipelined
+            // requests or arbitrary headers into a private service.
+            let request = format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                claims.path.as_deref().unwrap_or("/"),
+                target
+            );
+            if let Ok(mut upstream) = TcpStream::connect_timeout(target, Duration::from_secs(5)) {
+                let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
+                if upstream.write_all(request.as_bytes()).is_ok() {
+                    let _ = io::copy(&mut upstream.take(1024 * 1024 + 16384), &mut client);
+                }
+            }
+        } else {
+            proxy_assertion_forbidden(&mut client);
+        }
         return;
     }
     if let Some(gate) = mux.gate.as_deref() {
@@ -6913,6 +6995,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate: Some(gate),
                 guest_surface_gateway: false,
+                observation_targets: BTreeMap::new(),
             }),
         )
         .unwrap();
@@ -6933,6 +7016,55 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         let mut response = Vec::new();
         client.read_to_end(&mut response).unwrap();
         response
+    }
+
+    fn observation_assertion(gate: &HttpProxyGate, port: &str, path: &str) -> String {
+        let claims = serde_json::json!({"v":1,"kind":"observation", "run_id":gate.run_id,
+            "lease_id":gate.lease_id,"runner_id":gate.runner_id,"exp":OffsetDateTime::now_utc().unix_timestamp()+30,
+            "jti":"observation-test","port":port,"method":"GET","path":path});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let mut mac = HmacSha256::new_from_slice(gate.verification_key.as_bytes()).unwrap();
+        mac.update(encoded.as_bytes());
+        format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn component_observation_is_scoped_to_port_path_and_never_forwards_proof() {
+        let gate = test_gate();
+        let (upstream, worker) = prelude_echo_upstream();
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = reservation.local_addr().unwrap();
+        drop(reservation);
+        let _proxy = TcpProxy::start_with_mux(
+            public,
+            ProxyTarget::Tcp("127.0.0.1:1".parse().unwrap()),
+            Some(SurfaceMux {
+                control_target: None,
+                presentation_frame: None,
+                gate: Some(gate.clone()),
+                guest_surface_gateway: false,
+                observation_targets: BTreeMap::from([("backend.http".to_owned(), upstream)]),
+            }),
+        )
+        .unwrap();
+        let proof = observation_assertion(&gate, "backend.http", "/health?probe=1");
+        assert!(
+            !gate.verify(&proof),
+            "normal app proof verifier must reject observation credentials"
+        );
+        assert!(http_get(public, "/other", Some(&proof)).starts_with(b"HTTP/1.1 403"));
+        let wrong_port = observation_assertion(&gate, "missing.http", "/health?probe=1");
+        assert!(
+            http_get(public, "/health?probe=1", Some(&wrong_port)).starts_with(b"HTTP/1.1 403")
+        );
+        let injection = observation_assertion(&gate, "backend.http", "/health\r\nInjected: yes");
+        assert!(http_get(public, "/health", Some(&injection)).starts_with(b"HTTP/1.1 403"));
+        let response = http_get(public, "/health?probe=1", Some(&proof));
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        let received = String::from_utf8(worker.join().unwrap()).unwrap();
+        assert!(received.starts_with("GET /health?probe=1 HTTP/1.1\r\n"));
+        assert!(!received.contains(RUN_ASSERTION_HEADER));
+        assert!(received.contains("Connection: close"));
     }
 
     #[test]
@@ -7054,6 +7186,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate: Some(gate),
                 guest_surface_gateway: true,
+                observation_targets: BTreeMap::new(),
             }),
         )
         .unwrap();
