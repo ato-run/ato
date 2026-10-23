@@ -12,6 +12,7 @@ pub use ato_runtime_attempt::launch::{
 };
 
 pub mod lease;
+pub mod managed_embedding_relay;
 pub mod network_broker;
 pub mod recovery;
 pub mod service_group;
