@@ -409,7 +409,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tokio::{net::TcpListener, time::sleep};
 
@@ -417,7 +417,7 @@ mod tests {
         fixture_server_with_input(security_types, false).await
     }
 
-    async fn fixture_server_with_input(
+    pub(crate) async fn fixture_server_with_input(
         security_types: Vec<u8>,
         expect_pointer_input: bool,
     ) -> SocketAddr {
