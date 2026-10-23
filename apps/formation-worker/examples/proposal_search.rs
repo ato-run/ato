@@ -8,8 +8,8 @@ use ato_formation_worker::{
         DecisionPoint, DecisionProvider, OfferedAction, ProviderAnswer, serve_decision,
     },
     runtime_network::{
-        Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, accept_verified_routes,
-        prepare_submission,
+        Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, SatisfyRequest,
+        accept_verified_routes, prepare_submission,
         proposal::{
             budget::{BudgetPlan, CallBudget},
             deepseek::{DeepSeekCandidateProducer, DeepSeekConfig},
@@ -45,6 +45,13 @@ struct Config {
     search_id: String,
     claimant_id: String,
     contract: BoundContract,
+    /// Explicit archive mode; never inferred from a normal job or local manifest.
+    #[serde(default)]
+    source_job: Option<ato_ipc::formation::FormationJobV1>,
+    #[serde(default)]
+    source_archive: Option<PathBuf>,
+    #[serde(default)]
+    frozen_request: Option<SatisfyRequest>,
     #[serde(default)]
     routes: Vec<PathBuf>,
     authorization: Option<ProposalAuthorization>,
@@ -157,7 +164,39 @@ fn main() -> Result<()> {
         .nth(1)
         .context("usage: proposal_search CONFIG_JSON")?;
     let config: Config = serde_json::from_slice(&std::fs::read(path)?)?;
-    let mut submission = if config.routes.is_empty() {
+    let explicit_archive = config.source_job.is_some()
+        || config.source_archive.is_some()
+        || config.frozen_request.is_some();
+    let mut submission = if explicit_archive {
+        let job = config
+            .source_job
+            .as_ref()
+            .context("explicit source_job required")?;
+        let file = config
+            .source_archive
+            .as_ref()
+            .context("explicit source_archive required")?;
+        let request = config
+            .frozen_request
+            .clone()
+            .context("explicit owner-frozen SatisfyRequest required")?;
+        let mut policy = config.policy.clone();
+        policy.proposal = config.authorization.clone();
+        anyhow::ensure!(
+            config.routes.is_empty()
+                && config.contract == request.base_contract
+                && config.search_id == request.search_id
+                && config.budget == request.budget
+                && serde_jcs::to_vec(&policy)? == serde_jcs::to_vec(&request.policy)?,
+            "explicit source Search configuration differs from frozen request"
+        );
+        ato_formation_worker::job::source_intake::prepare_source_proposal(
+            &ato_formation_worker::job::source_intake::ArchiveFileFetcher(file.clone()),
+            job,
+            request,
+            &config.work,
+        )?
+    } else if config.routes.is_empty() {
         prepare_proposal_submission(
             &config.source,
             config.contract.clone(),

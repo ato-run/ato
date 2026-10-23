@@ -731,3 +731,42 @@ fn hosted_report_preserves_admission_and_journal_uncertainty() {
         hosted_with_fault(false, false, None, Some(fault));
     }
 }
+
+#[test]
+fn source_only_policy_cannot_enter_normal_execution_even_with_application_output() {
+    let root = scratch_dir();
+    let fetcher = Fetcher {
+        bytes: Vec::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let server = ApiFixture::new(false);
+    let api = FormationApi::new(
+        reqwest::blocking::Client::new(),
+        server.url.clone(),
+        "test".into(),
+    );
+    let context = JobContext {
+        api: &api,
+        fetcher: &fetcher,
+        packer: &Packer,
+        work_root: root.path(),
+        shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+        worker_id: "test",
+        limits: BuildLimits::default(),
+        source_limits: SourceLimits::default(),
+    };
+    let attempt = BuildAttempt {
+        job_id: "job".into(),
+        attempt_id: "attempt".into(),
+        attempt_fence: 7,
+    };
+    let error=run_claimed_job(&context,&attempt,&json!({"job_id":"job","requested_outputs":["static_web"],"policy":{"policy_version":"formation-source-archive-v1"}}),"compute","revision",false).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source_archive_requires_source_only_executor")
+    );
+    assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0);
+    assert!(!root.path().join("attempt-records").exists());
+    assert!(server.result.lock().unwrap().is_none());
+}
