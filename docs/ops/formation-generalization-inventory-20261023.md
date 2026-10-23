@@ -13,7 +13,7 @@
 
 adminはユーザー確認によりato-api内の管理Workerを対象とする。
 既存checkoutを切り替えず、workspace `.tmp/formation-generalization-20261023/` に
-3つの独立worktreeを作成。アプリがGit repoでないworkspace rootに属するため、
+独立worktreeを作成。アプリがGit repoでないworkspace rootに属するため、
 appのcreate_worktreeは `Not a git repository`。git worktreeで代替した。
 
 ## 再利用先と不足
@@ -80,3 +80,53 @@ static artifactを捏造したり、元のLease/秘密値/利用者data/receipt�
 
 全6項目の完了には実装と実環境検証が必要。unit/mock成功をstaging実測へ置き換えない。
 本番deploy、課金GPU作成、運営キー本番投入は未承認で、実施しない。
+
+## 今回の実装と検証
+
+以下はすべてDraft。意味的なK/D/wire、DB table、migration、flagは追加・変更していない。
+新しいinspectionは表示専用であり、正規化済みDの代替・実行認可には使わない。
+
+| PR | 実装した範囲 | 残る範囲 |
+|---|---|---|
+| [ato #1502](https://github.com/ato-run/ato/pull/1502) | 既存D/Kを借用する要件表示、bounded repository証拠検出、`form-inspect` | Git URLの取得からFormation実行までの自動統合、Compose解決、実測への昇格 |
+| [PWA #506](https://github.com/ato-run/ato-pwa/pull/506) | GUI/PTYの共通接続寿命、同じSurfaceへの手動再接続、古い状態/DOM書込の排除 | GUI producer、転送/clipboard/GUI resize/idle、実RFB/PTYのstaging検証 |
+| [ato #1504](https://github.com/ato-run/ato/pull/1504) | `depends_on`を既存の順次起動へ安定topological sort。重複/未宣言/自己参照/循環を拒否 | 複数の個別HTTP・接続・全体操作のK観測、異種runtime混在 |
+| [API #831](https://github.com/ato-run/ato-api/pull/831) | owner/attemptに結び付く永続code/stageから失敗分類・retryabilityをpoll/waitへ同じ形式で表示 | retryの自動実行、GPU予約/Provider切替、Managed Secrets Broker |
+| [ato #1505](https://github.com/ato-run/ato/pull/1505) | Linux限定OCI explorationの必須userフィールドを補完し、image USERを継承 | Linux CIの修正後結果待ち |
+
+ローカル検証:
+
+- #1502 source `841cd0b17`: ato-formation 447 tests、CLIの新規2 tests、
+  `cargo check -p ato-cli`、workspace全target/feature clippy、fmt PASS。
+- workspace全テストは1,985 PASS / 1 FAILED / 9 ignored。残る1件は
+  `deny_bridge_tests`がcrate内の`.tmp`へ固定生成するUnix socketの長さ超過。
+  短いworkspace内TMPDIRだけではこの相対パスを置換できない。同じテストバイナリの
+  該当1件を短いworkspace内cwdから実行するとPASS。全suite成功とは報告しない。
+- #1504 source `1e0e5d803`: ato-formation 441 testsと同crate clippy PASS。
+- APIの単体16 tests、実Workers/D1 outcome 12 tests、全体typecheck PASS。
+  Workers suiteは既存projectのhook 120秒/test 30秒の一時configを使う。
+  既定hook 10秒での成功や、mockの実機成功への読み替えは行わない。
+- PWAの既存noVNC/xterm/共通frame 21 testsとfull build（型検査/i18n/staticを含む）PASS。
+- 実OmniVoice sourceにfresh CLI環境から`form-inspect`を実行。Python宣言、
+  Web/GPU/modelのhint、4つのentrypoint名を検出。`runtime_verified=false`。
+  この検査ではアプリをbuild/launchしない。
+
+CIではAPI/PWAのannotationに課金制限・開始stepなしを確認した。コード失敗と扱わず、
+課金設定変更や再実行は要求しない。一方RustのLinux E0063（OCI user欠落）と
+macOSの`http_gate_forwards_binary_body_byte_for_byte`失敗は実行済みstepのエラーであり、
+課金例外へ含めない。前者は#1505に分離。後者は原因未確定として残す。
+macOSからのLinux cross-checkは`x86_64-linux-gnu-gcc`不足で到達できず、
+Linux検証成功とは数えない。
+
+共有stagingの調整メッセージ送信はユーザーが明示許可済み。
+「OSS 7件のFormationとstaging掲載」は切替可能、保持対象はHarperの承認済みsource、
+Formation/Receipt/curation記録とInstance。掲載不可状態を維持する。
+「公開前の確認と改善を完了する」は別修正を配備・検証中のため、その完了を待つ。
+既存配備のAPI `320fb0105a49` とPWA `f4dd42458d54`を基に、今回の各差分だけを
+追加した専用integration worktreeを準備した。既存checkoutの切替・上書きは行わない。
+integrationのAPI Library/Discover/outcome 100 tests、分類16 tests、PWA Library/
+Discover/Surface 186 testsがPASS。stagingの変更検証とは区別する。
+
+Managed Secrets、Vast、Providerを跨ぐ予算予約/排他、全体自動化はまだ実装していない。
+この台帳および上記PRをもって、依頼全体の完了・GPUの稼働・運営キーの安全な提供・
+既存アプリの保存/再接続のstaging回帰なしを主張しない。
