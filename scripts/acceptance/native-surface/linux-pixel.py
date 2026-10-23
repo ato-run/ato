@@ -9,6 +9,7 @@ import base64
 import hmac
 import hashlib
 import json
+import http.client
 import os
 from pathlib import Path
 import signal
@@ -204,8 +205,10 @@ def main():
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--gateway", type=Path)
     parser.add_argument("--execution-scope", action="store_true")
+    parser.add_argument("--application-probe", action="store_true")
     args = parser.parse_args()
     assert not args.execution_scope or args.gateway, "execution scope requires the gateway"
+    assert not args.application_probe or (args.gateway and args.execution_scope), "application probe requires scoped gateway"
     execution = {"run_id": "run-native-acceptance", "lease_id": "lease-native-acceptance",
                  "runner_id": "runner-native-acceptance"} if args.execution_scope else None
     kid = "ato.runner-surface@1" if execution else "acceptance"
@@ -218,13 +221,28 @@ def main():
     with log.open("wb") as output:
         process = subprocess.Popen(["bash", str(args.producer.resolve()), "800", "600", str(port), "199",
             "xterm", "-e", "/bin/bash", "-c",
-            'printf "\\033[41mGUI ready\\n"; IFS= read -r value; printf "\\033[42mINPUT:%s\\n" "$value"; sleep 60'],
+            'stty -echo; printf "\\033[41mGUI ready\\n"; while IFS= read -r value; do printf "\\033[42mINPUT:%s\\n" "$value"; done'],
             env=environment, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         client = None
         gateway = None
         key = None
+        application_result = None
         try:
             if args.gateway:
+                if args.application_probe:
+                    # Wait for the private producer before giving its owned
+                    # endpoint to the one-shot operation Adapter.
+                    deadline = time.monotonic() + 8
+                    while True:
+                        try:
+                            private = Client(port)
+                            private.frame()
+                            private.stream.close()
+                            break
+                        except (OSError, RuntimeError):
+                            assert time.monotonic() < deadline, "private GUI did not start"
+                            time.sleep(0.05)
+                    time.sleep(0.15)
                 key = os.urandom(32).hex()
                 gateway = subprocess.Popen([str(args.gateway)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=output, text=True, env=environment)
                 configuration = {"session_id": "native-acceptance", "surface_id": "native-pixel",
@@ -234,11 +252,30 @@ def main():
                     "target": {"kind": "pixel", "private_rfb_addr": f"127.0.0.1:{port}"}}
                 if execution:
                     configuration["execution"] = execution
+                if args.application_probe:
+                    configuration["application_probe"] = {"listen_addr": "127.0.0.1:16001", "adapter": {
+                        "surface": {"kind": "pixel_stream", "port": "native", "width": 800, "height": 600},
+                        "probe_port": "native-results", "operations": [{"kind": "pixel_key_frame",
+                            "path": "/result", "keysyms": [ord(c) for c in "probe"] + [0xFF0D],
+                            "max_frame_bytes": 800 * 600 * 4, "timeout_ms": 5000}]}}
                 gateway.stdin.write(json.dumps(configuration) + "\n")
                 gateway.stdin.flush()
                 assert select.select([gateway.stdout], [], [], 10)[0], "gateway readiness timed out"
                 ready = json.loads(gateway.stdout.readline())
                 assert ready["surface_ready"] and not ready["contract_verified"]
+                if args.application_probe:
+                    for _ in range(2):
+                        observed = http.client.HTTPConnection("127.0.0.1", 16001, timeout=3)
+                        observed.request("GET", "/result")
+                        response = observed.getresponse()
+                        assert response.status == 200
+                        body = response.read(1024)
+                        assert len(body) == 72 and body.startswith(b"sha256:") and body.endswith(b"\n")
+                        assert len(bytes.fromhex(body[7:-1].decode())) == 32
+                        if application_result is not None:
+                            assert application_result == body.decode()
+                        application_result = body.decode()
+                        observed.close()
                 port = 16000
                 invalid = [assertion(key, expired=True, execution=execution, kid=kid),
                            assertion(key, session="foreign-session", execution=execution, kid=kid)]
@@ -279,6 +316,7 @@ def main():
             report = {"schema": "ato.native-pixel-producer-acceptance/1", "real_tigervnc": True, "transport": "authenticated_gateway" if key else "private_rfb",
                 "expired_assertion_rejected": bool(key), "wrong_session_rejected": bool(key),
                 "execution_scope_verified": bool(execution),
+                "application_probe_result": application_result,
                 "initial_frame_bytes": frame_bytes, "ready_ms": ready_ms, "keyboard_changed_pixels": True,
                 "resized_viewport": [client.width, client.height], "resized_frame_bytes": resized_bytes,
                 "reconnect": True, "clipboard_messages": client.clipboard_messages,

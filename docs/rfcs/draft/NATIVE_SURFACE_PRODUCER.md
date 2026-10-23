@@ -215,3 +215,38 @@ continues to advertise Web only. Native probe implementation, producer
 attachment, capability matching, private endpoint resolution, authenticated
 publication, lease-owned cleanup and staging app acceptance require subsequent
 implementation and validation. No existing deployment flag is enabled here.
+
+### Runner-owned application observation probe
+
+The common sidecar may explicitly receive `application_probe` containing a
+private loopback `listen_addr` and the selected D's shared `NativeSurfaceAdapter`.
+It validates configuration/authority before touching the workload, performs
+all declared bounded actions once, then publishes only frozen actual results.
+The execution scope is mandatory for application observations. Expected hashes,
+K verdicts, Provider identity and host paths never enter the authored catalog.
+
+Terminal line-profile input is printable ASCII plus CR/LF. Catalog validation
+rejects completion delimiters reproducible by normal PTY echo transforms.
+Queued startup output is retained, and a completion already present before the
+input is refused. Capture ends at the authored delimiter; overflow, exit,
+trailing bytes in that frame and timeout fail without publishing any result.
+Full TUI escape/control-sequence probes need a future explicit profile; viewer
+input itself retains the existing unrestricted bounded Terminal transport.
+
+Pixel operations negotiate the shared fixed BGRX32 format, send each key once,
+and require one complete nonoverlapping frame. The HTTP result is exactly the
+shared `pixel_probe_result` encoding: `sha256:<actual frame hex digest>\n`.
+K compares the digest of this measured 72-byte response. No expected frame hash
+is supplied to the Adapter and existing HTTP response limits remain unchanged.
+
+The result listener accepts only bodyless GETs of declared exact paths, never
+re-executes an action, and is distinct from the public Surface. The existing
+Run/lease/Runner/Port/path-scoped observation ingress must be its only Hosted
+route. All captures must finish before publication; a later failed action
+prevents even earlier results being served. Startup cancellation and owner
+EOF/signal/idle close owned gateway/probe listeners and in-flight clients.
+
+Frozen evidence does not attest that a workload remains alive. Runner wiring
+must still monitor its owned workload and preserve the existing stop/recovery
+and quarantine fences. This implementation does not advertise Native capability
+or bypass the portable runtime admission guard added in PR #1514.

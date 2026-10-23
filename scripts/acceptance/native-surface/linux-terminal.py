@@ -6,6 +6,7 @@ No application Contract is inferred or issued by this transport test.
 """
 import argparse
 import importlib.util
+import http.client
 import json
 import os
 from pathlib import Path
@@ -64,6 +65,7 @@ def main():
     parser.add_argument("--agent", type=Path, required=True)
     parser.add_argument("--gateway", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)
+    parser.add_argument("--application-probe", action="store_true")
     args = parser.parse_args()
     root = args.work_root.resolve()
     root.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -99,6 +101,13 @@ def main():
                     "assertion_keys": {"ato.runner-surface@1": key}, "idle_timeout_secs": idle,
                     "readiness_timeout_secs": 5,
                     "target": {"kind": "terminal", "firecracker_vsock_uds": str(endpoint)}}
+                if args.application_probe:
+                    value["application_probe"] = {"listen_addr": "127.0.0.1:16001", "adapter": {
+                        "surface": {"kind": "terminal", "port": "terminal", "cols": 80, "rows": 24},
+                        "probe_port": "native-results", "operations": [{"kind": "terminal_exchange",
+                            "path": "/result", "input": list(b"probe\n"),
+                            "output_delimiter": list(b"EXECUTED:probe\r\n"),
+                            "max_output_bytes": 1024, "timeout_ms": 5000}]}}
                 process.stdin.write(json.dumps(value) + "\n")
                 process.stdin.flush()
                 assert select.select([process.stdout], [], [], 8)[0], "Gateway readiness timed out"
@@ -107,6 +116,14 @@ def main():
                 assert value["contract_verified"] is False
                 return process
             gateway = start_gateway(30)
+            if args.application_probe:
+                for _ in range(2):
+                    observed = http.client.HTTPConnection("127.0.0.1", 16001, timeout=3)
+                    observed.request("GET", "/result")
+                    response = observed.getresponse()
+                    assert response.status == 200
+                    assert response.read(2048) == b"INITIAL-PROMPT\r\nEXECUTED:probe\r\n"
+                    observed.close()
             rejected = [token(expired=True), token(session="foreign-session")]
             for field in execution:
                 rejected.append(pixel.assertion(key, execution=dict(execution, **{field: "foreign"}),
@@ -123,7 +140,8 @@ def main():
             client = pixel.WebSocketSocket(16000, accepted, "ato.terminal.v1")
             initial = ready(client)
             control(client, type="resize", cols=80, rows=24)
-            output_until(client, b"INITIAL-PROMPT\r\n")
+            if not args.application_probe:
+                output_until(client, b"INITIAL-PROMPT\r\n")
             ready_ms = round((time.monotonic() - started) * 1000)
             client.sendall(b"hello\n")
             output_until(client, b"EXECUTED:hello\r\n")
@@ -149,9 +167,16 @@ def main():
             gateway.stdin.close()
             assert gateway.wait(timeout=5) == 0
             until(lambda: stopped(16000), "Gateway listener survived owner EOF")
+            if args.application_probe:
+                until(lambda: stopped(16001), "Observation listener survived owner EOF")
             client.close()
             client = None
+            # On the next owned gateway, the same workload continues: its
+            # initial prompt was already observed by the first operation.
+            previous_probe = args.application_probe
+            args.application_probe = False
             gateway = start_gateway(2)
+            args.application_probe = previous_probe
             assert gateway.wait(timeout=6) == 0
             stopped_event = json.loads(gateway.stdout.readline())
             assert stopped_event["surface_stopped"] and stopped_event["idle_expired"]
@@ -169,7 +194,8 @@ def main():
                 "scoped_auth_rejections": len(rejected), "replay_rejected": True,
                 "gateway_owner_cleanup": True, "gateway_idle_cleanup": True,
                 "producer_owner_cleanup": True, "contract_verified": False,
-                "initial_size": [initial["cols"], initial["rows"]]}
+                "initial_size": [initial["cols"], initial["rows"]],
+                "application_probe_frozen_actual_bytes": args.application_probe}
             (root / "acceptance.json").write_text(json.dumps(result, indent=2) + "\n")
             print(json.dumps(result))
         finally:
