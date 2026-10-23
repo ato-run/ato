@@ -825,10 +825,21 @@ pub struct SurfaceAssertionPrincipal {
     pub id: String,
 }
 
+/// Physical execution authority, separate from Capsule/Contract identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceExecutionScope {
+    pub run_id: String,
+    pub lease_id: String,
+    pub runner_id: String,
+}
+
 /// Signed assertion claims consumed by the runner surface gateway. The
 /// signature container and key material intentionally live outside this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceAssertionClaims {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<SurfaceExecutionScope>,
     pub aud: String,
     pub session_id: String,
     pub surface_id: String,
@@ -845,6 +856,18 @@ impl SurfaceAssertionClaims {
     pub fn validate(&self) -> Result<(), SurfaceAssertionError> {
         if self.aud != SURFACE_GATEWAY_ASSERTION_AUDIENCE {
             return Err(SurfaceAssertionError::InvalidAudience);
+        }
+        if let Some(execution) = &self.execution {
+            for (name, value) in [
+                ("execution.run_id", &execution.run_id),
+                ("execution.lease_id", &execution.lease_id),
+                ("execution.runner_id", &execution.runner_id),
+            ] {
+                validate_claim(name, value)?;
+                if value.len() > 200 {
+                    return Err(SurfaceAssertionError::InvalidExecutionScope);
+                }
+            }
         }
         validate_claim("session_id", &self.session_id)?;
         validate_claim("surface_id", &self.surface_id)?;
@@ -871,6 +894,8 @@ fn validate_claim(name: &'static str, value: &str) -> Result<(), SurfaceAssertio
 /// Structural validation failures for surface-gateway assertions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SurfaceAssertionError {
+    #[error("surface execution scope exceeds limits")]
+    InvalidExecutionScope,
     #[error("surface assertion audience is invalid")]
     InvalidAudience,
     #[error("surface assertion claim {0} must not be empty")]
