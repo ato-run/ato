@@ -176,11 +176,19 @@ before it sends this operation's input.
 
 Pixel presentation is 64 to 4096 pixels per dimension. `pixel_key_frame`
 contains one to 32 keysyms, a result path, timeout, and `max_frame_bytes`
-exactly equal to width × height × 4. Each keysym means one down/up pair in
+exactly equal to width × height × 4, bounded by the 64 MiB aggregate capture
+limit. Each keysym means one down/up pair in
 authored order. The captured result is one full B,G,R,X frame using RFB's
 32-bpp, depth-24, little-endian true-colour format, channel maxima 255 and
 red/green/blue shifts 16/8/0. It is not a PNG, RGBA buffer, readiness frame,
-or a boolean outcome.
+or a boolean outcome. The HTTP result body is the 72 ASCII bytes
+`sha256:<SHA-256 hex of the actual captured BGRX frame>\n`; it never contains
+the full frame. `pixel_probe_result` is the shared pure encoder. This fits
+the existing Hosted observation body bounds without changing any legacy
+transport limit. K's `body_digest` is the digest of this measured HTTP body,
+not a frame digest given to the Adapter. A different actual frame therefore
+changes the observed response and fails K unless its original expectation
+matches that response.
 
 The physical Adapter must perform each action once, capture actual bounded
 output, and freeze the result before any observation is published. Repeated

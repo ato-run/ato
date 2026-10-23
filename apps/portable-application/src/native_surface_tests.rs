@@ -66,7 +66,11 @@ pub(crate) fn fixture(pixel: bool) -> PortableApplicationBundle {
         method: Some("GET".to_owned()),
         path: Some("/result/calculate".to_owned()),
         status: Some(200),
-        body_digest: Some(bundle_sha256(ANSWER)),
+        body_digest: Some(bundle_sha256(&if pixel {
+            ato_formation::native_surface::pixel_probe_result(&vec![0; 640 * 480 * 4]).unwrap()
+        } else {
+            ANSWER.to_vec()
+        })),
         input: None,
         digest: None,
     });
