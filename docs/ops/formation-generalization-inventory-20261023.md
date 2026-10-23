@@ -128,11 +128,25 @@ Linux検証成功とは数えない。
 共有stagingの調整メッセージ送信はユーザーが明示許可済み。
 「OSS 7件のFormationとstaging掲載」は切替可能、保持対象はHarperの承認済みsource、
 Formation/Receipt/curation記録とInstance。掲載不可状態を維持する。
-「公開前の確認と改善を完了する」は別修正を配備・検証中のため、その完了を待つ。
-既存配備のAPI `320fb0105a49` とPWA `f4dd42458d54`を基に、今回の各差分だけを
-追加した専用integration worktreeを準備した。既存checkoutの切替・上書きは行わない。
-integrationのAPI Library/Discover/outcome 100 tests、分類16 tests、PWA Library/
-Discover/Surface 186 testsがPASS。stagingの変更検証とは区別する。
+「公開前の確認と改善を完了する」も切替窓と最終修正`73e8dd87`を記録した。
+既存配備のAPI `320fb0105a49` とPWA `f4dd42458d54`を基に、今回の差分と同修正を
+追加した専用integration worktreeを準備した。既存checkoutの切替・上書きはない。
+integrationのAPI Library/Discover/outcome 100 tests、分類16 tests、全体typecheck、
+PWA Library/Discover/Surface 188 tests・staging full buildがPASS。
+
+APIは`82b22d266767` / Worker `9f1f9eb5-047a-4668-89ad-bd9fccdf991e` 100%、
+PWAは`f58babe61a00` / Worker `4368c545-2323-426e-b99f-97ec26abb597` 100%へ直列配備。
+通常API configは存在しないExecutorを参照し、最初のuploadをCloudflare10143で拒否。
+直前のbinding整理`e8fe4bcf`の現設定を保全する専用configをintegrationにcommitし、
+既存safe package scriptで配備した。全120 binding metadataが前後同一、Secret37保持、
+migration pending0/適用なし、provision flags1/1/1/live provisions0を維持。
+PWAのmain/CSS/Native Surface lazy chunkの配信bytesがlocal buildと一致。
+配信確認の単発値はshell200/366ms、API health200/280msであり、アプリ起動性能ではない。
+ChromeでDiscover/既存Libraryの読み取り表示・console error0を確認。Run作成はなし。
+実RFB/PTY、保存・復元・再接続、複合K、GPU実行は未検証。
+共有profileはcanonical lifecycle skillのstaging専用profile条件を満たさず、同suiteは
+未開始。読み取りsmokeをlifecycle受入として数えない。
+2026-10-23T14:12:15Zに共有stagingを解放し、両チャットへ最終版を通知した。
 
 Managed Secrets、Vast、Providerを跨ぐ予算予約/排他、全体自動化はまだ実装していない。
 この台帳および上記PRをもって、依頼全体の完了・GPUの稼働・運営キーの安全な提供・
