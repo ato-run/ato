@@ -446,6 +446,7 @@ name = "ato-formation-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-api",
  "ato-adapter-oci",
  "ato-adapter-process",
  "ato-formation",
