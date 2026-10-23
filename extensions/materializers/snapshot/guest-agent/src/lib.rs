@@ -26,6 +26,8 @@ pub mod pixel;
 pub mod relay;
 pub mod supervisor;
 pub mod terminal;
+#[cfg(target_os = "linux")]
+pub mod terminal_unix;
 pub mod terminal_vsock;
 pub mod tmpfs;
 pub mod volume_mount;
