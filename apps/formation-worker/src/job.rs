@@ -43,6 +43,7 @@ use crate::api::{FailureReport, FormationApi, PublishOutcome};
 use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
+mod source_evidence;
 mod source_fetch;
 
 /// Fetching a pinned source. A trait so the whole job is testable offline.
@@ -262,6 +263,10 @@ pub fn run_claimed_job_with_ledger(
     let source = &job["source"];
     let subdirectory = source["subdirectory"].as_str().unwrap_or("");
     let job_id = job["job_id"].as_str().context("job names no id")?;
+    anyhow::ensure!(
+        attempt.job_id == job_id,
+        "formation_source_assignment_mismatch"
+    );
     let source_deadline = Instant::now()
         + Duration::from_secs(context.limits.wall_clock_seconds)
             .min(crate::runtime_network::SOURCE_TRANSFER_TIMEOUT);
@@ -284,7 +289,9 @@ pub fn run_claimed_job_with_ledger(
     // and must not pass the second.
     let mut verified = FileVerifiedArchive::verify_with_guard(
         archive,
-        &archive_digest,
+        source["expected_archive_digest"]
+            .as_str()
+            .unwrap_or(&archive_digest),
         archive_bytes,
         context.source_limits,
         &|| Instant::now() < source_deadline,
@@ -307,6 +314,9 @@ pub fn run_claimed_job_with_ledger(
         context.source_limits,
         &|| Instant::now() < source_deadline,
     )?;
+    // Measurement is captured from the same verified archive after its exact
+    // subdirectory selection succeeded, before any application/build can edit it.
+    let source_evidence = source_evidence::capture(&verified, subdirectory)?;
     // The verified tree is now materialized; do not retain its compressed
     // scratch file throughout the subsequent build and publication lifetime.
     drop(verified);
@@ -539,6 +549,7 @@ pub fn run_claimed_job_with_ledger(
     let result = compose_result(
         &attempt,
         &closure_ref,
+        &source_evidence,
         &planned,
         &materialization_ref,
         // The artifact's real size, whichever store it went to. Reporting the
@@ -667,6 +678,7 @@ fn persist_hosted_outcome(
 fn compose_result(
     attempt: &BuildAttempt,
     closure_ref: &SourceClosureRef,
+    source_evidence: &source_evidence::FormationSourceEvidenceV1,
     planned: &PlannedCandidate,
 
     materialization_ref: &str,
@@ -728,6 +740,7 @@ fn compose_result(
         "formation_key": formation_key,
         "source_revision_ref": format!("srev_{}", &closure_ref.as_str()[7..23]),
         "source_closure_ref": closure_ref.as_str(),
+        "source_evidence": source_evidence,
         "compute_schema_ref": digest(
             format!("{derivation_ref}|{materialization_ref}").as_bytes(),
         ),
