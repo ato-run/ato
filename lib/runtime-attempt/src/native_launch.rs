@@ -5,7 +5,9 @@ use anyhow::{Context, Result, ensure};
 use ato_formation::authoring::BoundPort;
 use ato_formation::native_surface::{NativePresentation, NativeSurfaceAdapter};
 use ato_ipc::runtime_launch::MAX_NATIVE_LAUNCH_DECLARATION_BYTES;
-use ato_ipc::session_surface::{SessionSurfaceDescriptor, SurfaceCapabilityValue};
+use ato_ipc::session_surface::{
+    PixelStreamViewport, SessionSurfaceDescriptor, SessionSurfaceTransport, SurfaceCapabilityValue,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +91,52 @@ impl NativeLaunchDeclaration {
         Ok(())
     }
 
+    /// Project the selected D into the existing session DTO, with no host or
+    /// authorization data. This is descriptor metadata, never an admission.
+    pub fn session_surface_descriptor(&self, surface_id: &str) -> Result<SessionSurfaceDescriptor> {
+        self.validate()?;
+        use SurfaceCapabilityValue::{Boolean, Integer, Text};
+        let descriptor = match &self.adapter.surface {
+            NativePresentation::Terminal { cols, rows, .. } => SessionSurfaceDescriptor::Terminal {
+                profile: self.adapter.surface.profile().into(),
+                surface_id: surface_id.into(),
+                transport: SessionSurfaceTransport::TerminalWebsocket,
+                capabilities: std::collections::BTreeMap::from([
+                    ("input".into(), Boolean(true)),
+                    ("resize".into(), Boolean(true)),
+                    ("clipboard".into(), Boolean(false)),
+                    ("file_transfer".into(), Boolean(false)),
+                    ("recording".into(), Boolean(false)),
+                    ("encoding".into(), Text("utf-8".into())),
+                    ("cols".into(), Integer(i64::from(*cols))),
+                    ("rows".into(), Integer(i64::from(*rows))),
+                ]),
+            },
+            NativePresentation::PixelStream { width, height, .. } => {
+                SessionSurfaceDescriptor::PixelStream {
+                    profile: self.adapter.surface.profile().into(),
+                    surface_id: surface_id.into(),
+                    transport: SessionSurfaceTransport::RfbWebsocket,
+                    viewport: PixelStreamViewport {
+                        width: u32::from(*width),
+                        height: u32::from(*height),
+                    },
+                    capabilities: std::collections::BTreeMap::from([
+                        ("pointer".into(), Boolean(true)),
+                        ("keyboard".into(), Text("us".into())),
+                        ("clipboard".into(), Boolean(false)),
+                        ("file_transfer".into(), Boolean(false)),
+                        ("audio".into(), Boolean(false)),
+                        ("accessibility".into(), Text("pixel_only".into())),
+                        ("max_fps".into(), Integer(30)),
+                    ]),
+                }
+            }
+        };
+        self.validate_selection(&self.derivation_ref, &descriptor)?;
+        Ok(descriptor)
+    }
+
     /// Bind presentation metadata to the catalog inside the digested spec.
     /// The caller must still refuse execution until it owns the native lifecycle.
     pub fn validate_selection(
@@ -149,6 +197,60 @@ mod tests {
             "probe_port":"app.probe","operations":[{"kind":"terminal_exchange","path":"/result",
                 "input":[50,43,50,13],"output_delimiter":[69,78,68],"max_output_bytes":1024,"timeout_ms":1000}]
         }})
+    }
+
+    #[test]
+    fn selected_native_descriptor_preserves_dimensions_and_omits_runtime_access() {
+        let mut native = NativeLaunchDeclaration::decode(&declaration()).unwrap();
+        for surface in [
+            NativePresentation::Terminal {
+                port: "app.terminal".into(),
+                cols: 137,
+                rows: 43,
+            },
+            NativePresentation::PixelStream {
+                port: "app.terminal".into(),
+                width: 1920,
+                height: 1080,
+            },
+        ] {
+            native.adapter.surface = surface;
+            native.adapter.operations = match native.adapter.surface {
+                NativePresentation::Terminal { .. } => {
+                    NativeLaunchDeclaration::decode(&declaration())
+                        .unwrap()
+                        .adapter
+                        .operations
+                }
+                NativePresentation::PixelStream { .. } => vec![
+                    ato_formation::native_surface::NativeProbeOperation::PixelKeyFrame {
+                        path: "/result".into(),
+                        keysyms: vec![65],
+                        max_frame_bytes: 1920 * 1080 * 4,
+                        timeout_ms: 1000,
+                    },
+                ],
+            };
+            let descriptor = native
+                .session_surface_descriptor("authored-surface")
+                .unwrap();
+            native
+                .validate_selection(&native.derivation_ref, &descriptor)
+                .unwrap();
+            assert_eq!(descriptor.surface_id(), Some("authored-surface"));
+            let wire = serde_json::to_value(&descriptor).unwrap();
+            assert!(wire.get("access").is_none());
+            assert!(wire.get("connect_url").is_none());
+            if wire["kind"] == "terminal" {
+                assert_eq!(wire["capabilities"]["cols"], 137);
+                assert_eq!(wire["capabilities"]["rows"], 43);
+                assert_eq!(wire["capabilities"]["clipboard"], false);
+            } else {
+                assert_eq!(wire["viewport"], json!({"width":1920,"height":1080}));
+                assert_eq!(wire["capabilities"]["file_transfer"], false);
+            }
+            assert!(native.session_surface_descriptor("").is_err());
+        }
     }
 
     #[test]
