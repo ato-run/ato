@@ -16,7 +16,9 @@ fields and application job digests remain unchanged.
 
 The existing Runner principal, Formation job, attempt and attempt fence authorize
 all control operations. The dedicated `source-archives/claim` path reuses the API
-claim service with an exclusive output filter. The normal claim path must exclude
+claim service with an exclusive output filter. Optional `--job-id` adds an exact
+`job_id` claim query; the worker rejects an unrelated returned assignment. Without
+that flag, the dedicated queue behavior is preserved. The normal claim path must exclude
 this output by default; the normal Rust job executor also refuses it before
 journal reservation, source fetch, manifest parsing or build. There is no fallback
 from an absent dedicated route, and no legacy snapshot-builder credential.

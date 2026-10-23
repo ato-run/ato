@@ -106,14 +106,36 @@ impl SourceArchiveApi {
             .map_err(|_| anyhow::anyhow!("source_archive_control_response_invalid"))
     }
     pub fn claim_next(&self, worker_id: &str) -> Result<Option<ClaimedSourceArchive>> {
+        self.claim_filtered(worker_id, None)
+    }
+    pub fn claim(&self, worker_id: &str, job_id: &str) -> Result<Option<ClaimedSourceArchive>> {
+        ensure!(
+            !job_id.is_empty()
+                && job_id.len() <= 160
+                && job_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "source_archive_job_id_invalid"
+        );
+        self.claim_filtered(worker_id, Some(job_id))
+    }
+    fn claim_filtered(
+        &self,
+        worker_id: &str,
+        job_id: Option<&str>,
+    ) -> Result<Option<ClaimedSourceArchive>> {
         ensure!(
             !worker_id.is_empty() && worker_id.len() <= 160,
             "source_archive_worker_id_invalid"
         );
+        let mut request = self
+            .request(Method::POST, "source-archives/claim")
+            .query(&[("worker_id", worker_id)]);
+        if let Some(job_id) = job_id {
+            request = request.query(&[("job_id", job_id)]);
+        }
         let value: serde_json::Value = self.control(
-            self.request(Method::POST, "source-archives/claim")
-                .query(&[("worker_id", worker_id)])
-                .json(&serde_json::json!({})),
+            request.json(&serde_json::json!({})),
             Instant::now() + Duration::from_secs(30),
         )?;
         if value["job_id"].is_null() {
@@ -122,6 +144,10 @@ impl SourceArchiveApi {
         let claim: ClaimedSourceArchive = serde_json::from_value(value)
             .map_err(|_| anyhow::anyhow!("source_archive_claim_invalid"))?;
         claim.validate()?;
+        ensure!(
+            job_id.is_none_or(|expected| expected == claim.job_id),
+            "source_archive_claim_job_mismatch"
+        );
         Ok(Some(claim))
     }
     pub(super) fn authorize(&self, binding: &Binding, deadline: Instant) -> Result<UploadTicket> {

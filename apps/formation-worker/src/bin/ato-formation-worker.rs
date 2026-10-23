@@ -76,7 +76,11 @@ fn source_archive_one(args: &[String]) -> Result<()> {
     let api =
         ato_formation_worker::source_archive::SourceArchiveApi::new(base.clone(), token.clone())?;
     let fetcher = PinnedSourceFetcher::new(base, token)?;
-    let Some(claim) = api.claim_next(worker_id)? else {
+    let claim = match flag(args, "--job-id") {
+        Some(job_id) => api.claim(worker_id, job_id)?,
+        None => api.claim_next(worker_id)?,
+    };
+    let Some(claim) = claim else {
         println!("{{\"job_id\":null}}");
         return Ok(());
     };
