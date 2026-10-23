@@ -10,7 +10,9 @@ mod unix {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use ato_formation::native_surface::NativeSurfaceAdapter;
     use ato_ipc::session_surface::SurfaceExecutionScope;
+    use ato_native_surface_gateway::{NativeProbeTarget, capture_and_start_native_probe};
     use netd::native_surface::{
         NativeSurfaceConfig, NativeSurfaceProbe, NativeSurfaceReady, start_ready_native_surface,
     };
@@ -21,7 +23,10 @@ mod unix {
     use serde::Deserialize;
     use zeroize::Zeroizing;
 
-    const MAX_CONFIG_BYTES: usize = 64 * 1024;
+    // Eight bounded byte-array operations may exceed 64KiB as JSON even
+    // though their aggregate raw input is only 32KiB. Keep the whole config
+    // bounded while admitting the shared catalog's maximum encoding.
+    const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -37,6 +42,14 @@ mod unix {
         idle_timeout_secs: u64,
         readiness_timeout_secs: u64,
         target: Target,
+        #[serde(default)]
+        application_probe: Option<ApplicationProbe>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ApplicationProbe {
+        listen_addr: SocketAddr,
+        adapter: NativeSurfaceAdapter,
     }
     #[derive(Deserialize)]
     #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -63,6 +76,26 @@ mod unix {
             (1..=120).contains(&config.readiness_timeout_secs),
             "invalid surface readiness timeout"
         );
+        anyhow::ensure!(
+            (1..=86_400).contains(&config.idle_timeout_secs),
+            "invalid surface idle timeout"
+        );
+        anyhow::ensure!(
+            config.application_probe.is_none() || config.execution.is_some(),
+            "native application observations require an execution scope"
+        );
+        if let Some(execution) = &config.execution {
+            for id in [&execution.run_id, &execution.lease_id, &execution.runner_id] {
+                anyhow::ensure!(
+                    !id.is_empty()
+                        && id.len() <= 160
+                        && id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)),
+                    "invalid surface execution scope"
+                );
+            }
+        }
         Ok(config)
     }
 
@@ -81,20 +114,24 @@ mod unix {
             );
         }
         let keys = Arc::new(SurfaceAssertionKeyring::new(config.assertion_keys)?);
-        let assertion =
-            keys.issue_readiness_assertion_for_execution(&scope, config.execution.clone())?;
-        let mut authorizer = HmacSurfaceAccessAuthorizer::new(keys);
-        if let Some(execution) = config.execution {
+        let mut authorizer = HmacSurfaceAccessAuthorizer::new(Arc::clone(&keys));
+        if let Some(execution) = config.execution.clone() {
             authorizer = authorizer.with_execution_scope(execution);
         }
         let allowed_origins = BTreeSet::from([config.origin.clone()]);
         let timeout = Duration::from_secs(config.readiness_timeout_secs);
+        let probe_target = match &config.target {
+            Target::Pixel { private_rfb_addr } => NativeProbeTarget::Pixel(*private_rfb_addr),
+            Target::Terminal {
+                firecracker_vsock_uds,
+            } => NativeProbeTarget::Terminal(firecracker_vsock_uds.clone()),
+        };
         let target = match config.target {
             Target::Pixel { private_rfb_addr } => NativeSurfaceConfig::Pixel(PixelGatewayConfig {
                 listen_addr: config.listen_addr,
                 private_rfb_addr,
                 private_rfb_connect_timeout: timeout,
-                scope,
+                scope: scope.clone(),
                 allowed_origins,
             }),
             Target::Terminal {
@@ -103,34 +140,18 @@ mod unix {
                 listen_addr: config.listen_addr,
                 firecracker_vsock_uds,
                 guest_connect_timeout: timeout,
-                scope,
+                scope: scope.clone(),
                 allowed_origins,
             }),
         };
-        let handle = start_ready_native_surface(
-            target,
-            Arc::new(authorizer),
-            NativeSurfaceProbe {
-                connect_url: &config.connect_url,
-                origin: &config.origin,
-                assertion: assertion.as_str(),
-            },
-            timeout,
-            Duration::from_secs(config.idle_timeout_secs),
-        )
-        .await?;
-        let (kind, viewport) = match handle.ready {
-            NativeSurfaceReady::Pixel(frame) => ("pixel_stream", Some((frame.width, frame.height))),
-            NativeSurfaceReady::Terminal => ("terminal", None),
-        };
-        println!(
-            "{}",
-            serde_json::json!({ "surface_ready": true, "kind": kind,
-            "viewport": viewport, "contract_verified": false })
-        );
-        std::io::stdout().flush()?;
-        // A bounded owner-control channel: stop on any byte, EOF, TERM, INT, or
-        // inactivity. Reconnect belongs to viewers and never restarts the Run.
+        match &target {
+            NativeSurfaceConfig::Pixel(config) => config.validate()?,
+            NativeSurfaceConfig::Terminal(config) => config.validate()?,
+        }
+        netd::rfb_probe::pixel_gateway_probe_url(&config.connect_url)?;
+        // Watch ownership from the beginning of startup, including bounded
+        // application actions and Surface readiness. Cancellation drops all
+        // partial handles; it must not continue input after its owner exits.
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         std::thread::spawn(move || {
             let mut command = [0_u8; 1];
@@ -138,6 +159,50 @@ mod unix {
             let _ = tx.blocking_send(());
         });
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let startup = async {
+            let application_probe = match config.application_probe {
+                Some(probe) => Some(
+                    capture_and_start_native_probe(probe.listen_addr, probe_target, &probe.adapter)
+                        .await?,
+                ),
+                None => None,
+            };
+            // Issue after capture so the short readiness assertion cannot
+            // expire while an authored application operation is running.
+            let assertion =
+                keys.issue_readiness_assertion_for_execution(&scope, config.execution)?;
+            let handle = start_ready_native_surface(
+                target,
+                Arc::new(authorizer),
+                NativeSurfaceProbe {
+                    connect_url: &config.connect_url,
+                    origin: &config.origin,
+                    assertion: assertion.as_str(),
+                },
+                timeout,
+                Duration::from_secs(config.idle_timeout_secs),
+            )
+            .await?;
+            Ok::<_, anyhow::Error>((application_probe, handle))
+        };
+        let (mut application_probe, handle) = tokio::select! {
+            biased;
+            _ = rx.recv() => return Ok(()),
+            _ = term.recv() => return Ok(()),
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            result = startup => result?,
+        };
+        let (kind, viewport) = match handle.ready {
+            NativeSurfaceReady::Pixel(frame) => ("pixel_stream", Some((frame.width, frame.height))),
+            NativeSurfaceReady::Terminal => ("terminal", None),
+        };
+        let mut ready = serde_json::json!({ "surface_ready": true, "kind": kind,
+            "viewport": viewport, "contract_verified": false });
+        if let Some(probe) = &application_probe {
+            ready["application_probe_addr"] = serde_json::json!(probe.local_addr());
+        }
+        println!("{ready}");
+        std::io::stdout().flush()?;
         loop {
             tokio::select! {
                 _ = rx.recv() => break,
@@ -147,6 +212,9 @@ mod unix {
             }
         }
         handle.stop().await?;
+        if let Some(probe) = &mut application_probe {
+            probe.stop().await?;
+        }
         println!(
             "{}",
             serde_json::json!({"surface_stopped": true, "idle_expired": handle.idle_expired()})
