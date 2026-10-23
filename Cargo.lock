@@ -2086,6 +2086,7 @@ version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ato-formation",
  "ato-ipc",
  "base64 0.22.1",
  "bytes",
