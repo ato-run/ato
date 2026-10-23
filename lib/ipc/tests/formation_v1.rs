@@ -259,3 +259,46 @@ fn emit_expected_digests() {
         static_web.canonical_digest().unwrap()
     );
 }
+
+#[test]
+fn source_archive_is_an_exclusive_physical_output_with_no_application_authoring() {
+    let mut value: serde_json::Value = serde_json::from_str(PYTHON_JOB).unwrap();
+    value["requested_outputs"] = serde_json::json!(["source_archive"]);
+    value["policy"] = serde_json::json!({"policy_version":SOURCE_ARCHIVE_POLICY_V1,"network":"denied","publish_enabled":false});
+    value.as_object_mut().unwrap().remove("authoring");
+    let job = FormationJobV1::parse(&value.to_string()).unwrap();
+    assert_eq!(job.requested_outputs, [RequestedOutputV1::SourceArchive]);
+    for (key, invalid) in [
+        (
+            "requested_outputs",
+            serde_json::json!(["source_archive", "process_workspace"]),
+        ),
+        (
+            "authoring",
+            serde_json::json!({"manifest_toml":"schema_version = '1'"}),
+        ),
+        (
+            "policy",
+            serde_json::json!({"policy_version":SOURCE_ARCHIVE_POLICY_V1,"network":"dependency_resolution","publish_enabled":false}),
+        ),
+        (
+            "policy",
+            serde_json::json!({"policy_version":SOURCE_ARCHIVE_POLICY_V1,"network":"denied","publish_enabled":true}),
+        ),
+        (
+            "policy",
+            serde_json::json!({"policy_version":"formation-policy-v1","network":"denied","publish_enabled":false}),
+        ),
+        (
+            "source",
+            serde_json::json!({"kind":"uploaded_archive","archive_digest":format!("sha256:{}", "a".repeat(64)),"subdirectory":""}),
+        ),
+    ] {
+        let mut rejected = value.clone();
+        rejected[key] = invalid;
+        assert!(
+            FormationJobV1::parse(&rejected.to_string()).is_err(),
+            "{key}: {rejected}"
+        );
+    }
+}

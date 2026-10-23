@@ -41,6 +41,12 @@ use sha2::{Digest, Sha256};
 /// Zstandard's magic number, little-endian.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
+/// Truthful transports of an already verified source archive. These labels
+/// deliberately do not claim the removed canonical snapshot encoder's v1.
+pub const RAW_TAR_FORMAT: &str = "ato.source-archive.raw-tar/1";
+pub const RAW_TAR_GZIP_FORMAT: &str = "ato.source-archive.raw-tar-gzip/1";
+pub const RAW_TAR_ZSTD_FORMAT: &str = "ato.source-archive.raw-tar-zstd/1";
+
 /// Decompress by what the BYTES say, not by what the URL ended in.
 ///
 /// GitHub serves gzip; an uploaded archive arrives zstd-compressed. Sniffing
@@ -313,6 +319,8 @@ pub struct FileVerifiedArchive {
     file: std::fs::File,
     measured: Measured,
     archive_digest: String,
+    archive_bytes: u64,
+    archive_format: &'static str,
 }
 
 impl FileVerifiedArchive {
@@ -339,6 +347,8 @@ impl FileVerifiedArchive {
         let mut hasher = Sha256::new();
         let mut size = 0u64;
         let mut buffer = [0u8; 64 * 1024];
+        let mut magic = [0u8; 4];
+        let mut magic_length = 0;
         loop {
             if !can_continue() {
                 return Err(SourceError::DeadlineExceeded);
@@ -346,6 +356,11 @@ impl FileVerifiedArchive {
             let count = file.read(&mut buffer).map_err(source_io)?;
             if count == 0 {
                 break;
+            }
+            if magic_length < 4 {
+                let take = count.min(4 - magic_length);
+                magic[magic_length..magic_length + take].copy_from_slice(&buffer[..take]);
+                magic_length += take;
             }
             size = size.saturating_add(count as u64);
             if size > expected_size {
@@ -378,10 +393,32 @@ impl FileVerifiedArchive {
             file,
             measured,
             archive_digest: actual,
+            archive_bytes: size,
+            archive_format: if magic_length >= 2 && magic[..2] == [0x1f, 0x8b] {
+                RAW_TAR_GZIP_FORMAT
+            } else if magic_length == 4 && magic == ZSTD_MAGIC {
+                RAW_TAR_ZSTD_FORMAT
+            } else {
+                RAW_TAR_FORMAT
+            },
         })
     }
     pub fn archive_digest(&self) -> &str {
         &self.archive_digest
+    }
+    pub fn archive_bytes(&self) -> u64 {
+        self.archive_bytes
+    }
+    pub fn archive_format(&self) -> &'static str {
+        self.archive_format
+    }
+    /// Read-only, finite raw transport for upload. The underlying private
+    /// anonymous archive is never exposed as a writable file or host path.
+    pub fn archive_reader(&self) -> Result<impl Read + Send + 'static, SourceError> {
+        use std::io::Seek;
+        let mut file = self.file.try_clone().map_err(source_io)?;
+        file.rewind().map_err(source_io)?;
+        Ok(file.take(self.archive_bytes))
     }
     pub fn expanded_bytes(&self) -> u64 {
         self.measured.file_bytes
@@ -1990,10 +2027,13 @@ mod tests {
         ]);
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gzip.write_all(&bytes).unwrap();
-        for encoded in [
-            bytes.clone(),
-            gzip.finish().unwrap(),
-            zstd::stream::encode_all(bytes.as_slice(), 1).unwrap(),
+        for (encoded, format) in [
+            (bytes.clone(), RAW_TAR_FORMAT),
+            (gzip.finish().unwrap(), RAW_TAR_GZIP_FORMAT),
+            (
+                zstd::stream::encode_all(bytes.as_slice(), 1).unwrap(),
+                RAW_TAR_ZSTD_FORMAT,
+            ),
         ] {
             let digest = content_ref(&encoded);
             let memory = DownloadedArchive::new(encoded.clone())
@@ -2003,6 +2043,14 @@ mod tests {
                 .unwrap();
             let mut file = file_archive(&encoded, encoded.len() as u64, &digest, LIMITS).unwrap();
             assert_eq!(file.archive_digest(), digest);
+            assert_eq!(file.archive_bytes(), encoded.len() as u64);
+            assert_eq!(file.archive_format(), format);
+            let mut transported = Vec::new();
+            file.archive_reader()
+                .unwrap()
+                .read_to_end(&mut transported)
+                .unwrap();
+            assert_eq!(transported, encoded);
             assert_eq!(memory.expanded_file_count(), 4);
             assert_eq!(file.expanded_file_count(), 4);
             assert_eq!(file.expanded_bytes(), 11);
