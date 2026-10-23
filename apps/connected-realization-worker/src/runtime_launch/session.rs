@@ -1118,6 +1118,7 @@ while True:
                 generation: 1,
             }],
             fixed_tcp: Vec::new(),
+            managed_embeddings: Vec::new(),
         };
         let document = group_run("group_egress", Some(&authorization));
         assert_eq!(document["served_status"], 200);

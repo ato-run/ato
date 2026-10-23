@@ -108,6 +108,8 @@ pub struct RuntimeLaunchLeaseCommand {
 pub struct NetworkAuthorization {
     pub egress: Vec<TcpEgressGrant>,
     pub fixed_tcp: Vec<FixedTcpAllocation>,
+    #[serde(default)]
+    pub managed_embeddings: Vec<super::managed_embedding_relay::ManagedEmbeddingGrant>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -442,7 +444,9 @@ fn verify_network_authorization(
         return Ok(());
     };
     ensure!(
-        !authorization.egress.is_empty() || !authorization.fixed_tcp.is_empty(),
+        !authorization.egress.is_empty()
+            || !authorization.fixed_tcp.is_empty()
+            || !authorization.managed_embeddings.is_empty(),
         "empty network authorization must be omitted"
     );
     ensure!(
@@ -454,6 +458,7 @@ fn verify_network_authorization(
         .service_group_spec()
         .context("network authorization requires an OCI service group")?
         .service_group();
+    super::managed_embedding_relay::validate_grants(spec, authorization)?;
     let mut grant_ids = BTreeSet::new();
     let mut binding_ids = BTreeSet::new();
     let mut environments = BTreeSet::new();

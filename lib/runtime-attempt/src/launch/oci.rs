@@ -403,6 +403,8 @@ pub struct ServiceEgress {
     pub environment_value: String,
     pub network: OciNetwork,
     pub guard: Box<dyn Send>,
+    /// Exact original scalar for the fixed managed embedding projection only.
+    pub expected_secret_value: Option<String>,
 }
 
 /// Start an `ato.runtime-launch-spec.v2` OCI service group: one `--internal`
@@ -451,12 +453,22 @@ pub fn launch_service_group(
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let adapter = DockerOciAdapter::new(service_oci_spec(
+        let expected_rebindings = mine
+            .iter()
+            .filter_map(|grant| {
+                grant
+                    .expected_secret_value
+                    .as_ref()
+                    .map(|value| (grant.environment_name.clone(), value.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let adapter = DockerOciAdapter::new(service_oci_spec_rebinding(
             spec,
             service,
             context,
             owner,
             &network_environment,
+            &expected_rebindings,
         )?)?;
         let (networks, guards) = mine
             .into_iter()
@@ -495,6 +507,30 @@ pub fn service_oci_spec(
     owner: &OciOwner,
     network_environment: &BTreeMap<String, String>,
 ) -> Result<OciSpec> {
+    service_oci_spec_rebinding(
+        spec,
+        service,
+        context,
+        owner,
+        network_environment,
+        &BTreeMap::new(),
+    )
+}
+
+fn service_oci_spec_rebinding(
+    spec: &RuntimeLaunchSpecV2,
+    service: &OciServiceV2,
+    context: &ResolvedRuntimeLaunchContext,
+    owner: &OciOwner,
+    network_environment: &BTreeMap<String, String>,
+    expected_rebindings: &BTreeMap<String, String>,
+) -> Result<OciSpec> {
+    ensure!(
+        expected_rebindings
+            .keys()
+            .all(|name| name == "OPENAI_BASE_URL" && network_environment.contains_key(name)),
+        "only explicit managed embedding base URL can be rebound"
+    );
     let group = spec.service_group();
     let endpoints = service
         .endpoints
@@ -543,6 +579,16 @@ pub fn service_oci_spec(
         .collect::<BTreeMap<_, _>>();
     environment.extend(context.secret_environment_for(&secret_names)?);
     for (name, value) in network_environment {
+        if let Some(expected) = expected_rebindings.get(name) {
+            ensure!(
+                secret_names.contains(name.as_str())
+                    && environment.get(name) == Some(expected)
+                    && !service.public_env.iter().any(|entry| entry.name == *name),
+                "managed embedding base URL rebind mismatch"
+            );
+            environment.insert(name.clone(), value.clone());
+            continue;
+        }
         ensure!(
             environment.insert(name.clone(), value.clone()).is_none(),
             "network Binding `{name}` conflicts with another environment value"
@@ -774,6 +820,68 @@ fn remove_owned(paths: &[PathBuf]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_embedding_rebind_is_exact_and_preserves_generic_collision_rejection() {
+        use crate::launch::resolved::ResolvedSecret;
+        let mut raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../ipc/tests/fixtures/runtime-launch-spec-v3/service-group-volume.json"
+        ))
+        .unwrap();
+        raw["realization"]["services"][0]["state_keys"] = serde_json::json!([]);
+        raw["state_attachments"] = serde_json::json!([]);
+        raw["protocol"] = serde_json::json!("ato.runtime-launch-spec.v2");
+        raw["realization"]["services"][0]["secret_grants"] = serde_json::json!([
+            {"name":"OPENAI_API_KEY","grant_ref":"portable-binding:key"},
+            {"name":"OPENAI_BASE_URL","grant_ref":"portable-binding:url"}
+        ]);
+        let parsed = ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::parse(
+            &serde_json::to_string(&raw).unwrap(),
+        )
+        .unwrap();
+        let spec = parsed.service_group_spec().unwrap();
+        let service = &spec.service_group().services[0];
+        let workspace = tempfile::tempdir().unwrap();
+        let original = "https://broker.example/v1/managed-secrets";
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.path().to_path_buf(),
+            "",
+            BTreeMap::new(),
+            vec![
+                ResolvedSecret::new("OPENAI_API_KEY", "short-capability"),
+                ResolvedSecret::new("OPENAI_BASE_URL", original),
+            ],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let owner = OciOwner {
+            runner_id: "runner".into(),
+            slot_id: "slot".into(),
+            lease_id: "lease".into(),
+            run_id: spec.context.run_id.clone(),
+            incarnation: "inc".into(),
+        };
+        let local = BTreeMap::from([("OPENAI_BASE_URL".into(), "http://172.22.0.1:1080".into())]);
+        assert!(service_oci_spec(spec, service, &context, &owner, &local).is_err());
+        let expected = BTreeMap::from([("OPENAI_BASE_URL".into(), original.into())]);
+        let projected =
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &expected).unwrap();
+        assert_eq!(
+            projected.environment["OPENAI_BASE_URL"],
+            local["OPENAI_BASE_URL"]
+        );
+        assert_eq!(projected.environment["OPENAI_API_KEY"], "short-capability");
+        let wrong = BTreeMap::from([("OPENAI_BASE_URL".into(), "https://wrong.example".into())]);
+        assert!(
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &wrong).is_err()
+        );
+        let forbidden = BTreeMap::from([("OPENAI_API_KEY".into(), "short-capability".into())]);
+        assert!(
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &forbidden)
+                .is_err()
+        );
+    }
 
     #[test]
     fn the_hosted_portable_projection_reaches_the_adapter_with_its_working_dir() {
