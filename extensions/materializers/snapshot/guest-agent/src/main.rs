@@ -389,17 +389,19 @@ fn main() -> std::io::Result<()> {
             terminal_enabled = cfg.stdio_mode == StdioMode::Pty;
             let workload_state = std::sync::Arc::clone(&terminal_state);
             let stdio_mode = cfg.stdio_mode;
+            let pixel_surface = cfg.pixel_surface.clone();
             (
-                Some(Supervisor::new(
-                    cfg,
-                    root.clone(),
-                    move || match stdio_mode {
-                        StdioMode::Log => GuestWorkload::Log(ChildWorkload::default()),
-                        StdioMode::Pty => GuestWorkload::Pty(PtyChildWorkload::new(
+                Some(Supervisor::new(cfg, root.clone(), move || {
+                    match (pixel_surface.clone(), stdio_mode) {
+                        (Some(config), _) => GuestWorkload::Pixel(
+                            guest_agent::pixel::PixelChildWorkload::new(config),
+                        ),
+                        (None, StdioMode::Log) => GuestWorkload::Log(ChildWorkload::default()),
+                        (None, StdioMode::Pty) => GuestWorkload::Pty(PtyChildWorkload::new(
                             std::sync::Arc::clone(&workload_state),
                         )),
-                    },
-                )),
+                    }
+                })),
                 volumes,
             )
         }
@@ -533,6 +535,7 @@ mod tests {
         let state = spy.0.clone();
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["/app/serve".into()],
             cwd: "/".into(),
             base_env: BTreeMap::new(),
@@ -612,6 +615,7 @@ mod tests {
         let state = spy.0.clone();
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
@@ -681,6 +685,7 @@ mod tests {
         }];
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),

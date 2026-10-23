@@ -491,6 +491,7 @@ fn supervisor_config(plan: &GuestBuildPlan) -> Result<SupervisorConfig> {
     let process = &plan.processes[0];
     Ok(SupervisorConfig {
         stdio_mode: StdioMode::Log,
+        pixel_surface: None,
         cmd: process.command.clone(),
         cwd: process.cwd.clone(),
         base_env: BTreeMap::new(),
