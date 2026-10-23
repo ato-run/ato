@@ -358,3 +358,44 @@ to the exact declared logical Port and existing HTTP K authority, and publish
 only after that authority accepts the Run. Surface readiness alone remains
 insufficient. Pixel requires an equivalent explicitly provisioned trusted
 producer; arbitrary OCI images are not assumed to contain Xvnc or an Agent.
+
+### Connected lease dispatch (explicit Runner opt-in)
+
+The existing `runtime_launch` command may carry optional `session_id`,
+`surface_origin` and `surface_contract_version`. Native Terminal requires the
+current Run's `run:<RunId>` session, exact normalized HTTPS server-policy
+Origin, version `1`, the exact selected route's existing session descriptor,
+finite `max_duration_secs`, no guest endpoints, process readiness and no mutable
+network authorization. Web commands retain their old omitted metadata. The
+Coordinator derives policy from its trusted site configuration, never a request
+or Capsule. The claim's existing per-Runner assertion key is mandatory for
+Native and is not copied into command JSON, the workload, D, K or evidence.
+
+Dispatch reuses the existing workspace resolver, PreparedRun writers, lease
+journal and startup-control callback. Its Native work variant holds the owned
+physical lifecycle; the same finish gate commits only after confirmed stop and
+quarantines an unconfirmed writer. The async/sync bridge runs the existing
+blocking control callback in a blocking-safe context. Native control, renewal,
+heartbeat and transport-ready requests are bounded to 500ms while a workload
+is alive; the common authorization monitor still owns refusal/expiry decisions.
+A Native ready report has the existing OCI/principal execution envelope and no
+invented guest port mapping.
+
+The existing proxy mux maps only the exact logical probe Port to this attempt's
+private frozen-result listener. Its existing observation proof binds Run,
+lease, Runner, method and path. The Surface path retains the common gateway's
+independent scoped assertion and Origin checks. Transport-ready enables private
+verification ingress; it is not a K verdict. The API counterpart must withhold
+browser access/assertions until the existing current Run/lease verification job
+and accepted import receipt agree and every original observation is satisfied.
+No second success status, receipt format or TypeScript K algorithm is added.
+
+`ATO_RUNNER_NATIVE_TERMINAL` defaults to false. Only explicit opt-in together
+with Linux and an available OCI runtime advertises the existing
+`native_surface_probe_v1` feature and Terminal profile/transport together. Typed
+surface negotiation is mandatory; that feature alone cannot place Pixel work.
+`ATO_NATIVE_SURFACE_IDLE_SECS` is bounded to 1..86400 (default 300). Pixel,
+ordinary Native attempt/CLI admission and unsupported native guest TCP promises
+remain refused. Installing the complete API receiver/access gate and verifying
+it precede any shared Runner opt-in. No installation or flag change is part of
+this source change.
