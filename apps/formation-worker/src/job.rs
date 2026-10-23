@@ -44,7 +44,7 @@ use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
 mod source_evidence;
-mod source_fetch;
+pub(crate) mod source_fetch;
 
 /// Fetching a pinned source. A trait so the whole job is testable offline.
 pub trait SourceFetcher {
@@ -243,6 +243,14 @@ pub fn run_claimed_job_with_ledger(
     operation_catalog_required: bool,
     journal: &dyn AttemptLedger,
 ) -> Result<JobOutcome> {
+    anyhow::ensure!(
+        !job["requested_outputs"]
+            .as_array()
+            .is_some_and(|outputs| outputs
+                .iter()
+                .any(|output| output.as_str() == Some("source_archive"))),
+        "source_archive_requires_source_only_executor"
+    );
     let attempt = attempt.clone();
     // Reserve historical execution before fetching source or refusing planning.
     // A redelivery must never overwrite prior uncertainty with a fresh refusal.

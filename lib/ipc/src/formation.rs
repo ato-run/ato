@@ -177,7 +177,12 @@ pub enum RequestedOutputV1 {
     /// Reserved so the vocabulary is stable. B1 refuses it rather than
     /// half-implementing it.
     OciImage,
+    /// Source-only physical output. No application build, Contract seal,
+    /// ComputeSchema or runtime launch is authorized by this request.
+    SourceArchive,
 }
+
+pub const SOURCE_ARCHIVE_POLICY_V1: &str = "formation-source-archive-v1";
 
 /// The execution target a materialization must match.
 ///
@@ -597,6 +602,21 @@ impl FormationJobV1 {
             return Err(invalid(
                 "ATO_ERR_FORMATION_JOB_INVALID",
                 "a job that requests no output has nothing to produce",
+            ));
+        }
+        if self
+            .requested_outputs
+            .contains(&RequestedOutputV1::SourceArchive)
+            && (self.requested_outputs != [RequestedOutputV1::SourceArchive]
+                || !matches!(self.source, FormationSourceV1::GitHub(_))
+                || self.authoring.is_some()
+                || self.policy.publish_enabled
+                || self.policy.policy_version != SOURCE_ARCHIVE_POLICY_V1
+                || self.policy.network != FormationNetworkPolicyV1::Denied)
+        {
+            return Err(invalid(
+                "ATO_ERR_FORMATION_JOB_INVALID",
+                "source_archive requires one GitHub source-only output, no authoring or public publication",
             ));
         }
         if self

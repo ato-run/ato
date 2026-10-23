@@ -11,7 +11,7 @@ use ato_formation::source::SourceError;
 use reqwest::blocking::{Client, RequestBuilder};
 use sha2::{Digest, Sha256};
 
-pub(super) fn client() -> Result<Client> {
+pub(crate) fn client() -> Result<Client> {
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .referer(false)
@@ -26,7 +26,7 @@ pub(super) fn client() -> Result<Client> {
         .context("cannot configure the bounded source transport")
 }
 
-pub(super) fn remaining(deadline: Instant) -> Result<std::time::Duration> {
+pub(crate) fn remaining(deadline: Instant) -> Result<std::time::Duration> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
@@ -182,7 +182,7 @@ pub(super) fn temporary_file(root: &Path, maximum: u64, deadline: Instant) -> Re
     tempfile::tempfile_in(root).context("create owned source archive file")
 }
 
-pub(super) fn download_file(
+pub(crate) fn download_file(
     request: RequestBuilder,
     root: &Path,
     maximum: u64,
