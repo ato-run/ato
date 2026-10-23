@@ -45,6 +45,7 @@ use crate::sandbox::{BuildLimits, NetworkPolicy};
 
 mod source_evidence;
 pub(crate) mod source_fetch;
+pub mod source_intake;
 
 /// Fetching a pinned source. A trait so the whole job is testable offline.
 pub trait SourceFetcher {
@@ -244,11 +245,13 @@ pub fn run_claimed_job_with_ledger(
     journal: &dyn AttemptLedger,
 ) -> Result<JobOutcome> {
     anyhow::ensure!(
-        !job["requested_outputs"]
-            .as_array()
-            .is_some_and(|outputs| outputs
-                .iter()
-                .any(|output| output.as_str() == Some("source_archive"))),
+        job["policy"]["policy_version"].as_str()
+            != Some(ato_ipc::formation::SOURCE_ARCHIVE_POLICY_V1)
+            && !job["requested_outputs"]
+                .as_array()
+                .is_some_and(|outputs| outputs
+                    .iter()
+                    .any(|output| output.as_str() == Some("source_archive"))),
         "source_archive_requires_source_only_executor"
     );
     let attempt = attempt.clone();
@@ -278,41 +281,15 @@ pub fn run_claimed_job_with_ledger(
     let source_deadline = Instant::now()
         + Duration::from_secs(context.limits.wall_clock_seconds)
             .min(crate::runtime_network::SOURCE_TRANSFER_TIMEOUT);
-    let maximum = context
-        .source_limits
-        .max_total_bytes
-        .min(crate::runtime_network::MAX_SOURCE_OBJECT_BYTES);
-    let (archive, archive_digest) =
-        context
-            .fetcher
-            .fetch_file(job_id, source, context.work_root, maximum, source_deadline)?;
-    let archive_bytes = archive.metadata()?.len();
-    if archive_bytes > maximum {
-        return Err(SourceError::LimitExceeded {
-            limit: "archive_bytes",
-        }
-        .into());
-    }
-    // Both checks, in order. Intact bytes of a DIFFERENT tree pass the first
-    // and must not pass the second.
-    let mut verified = FileVerifiedArchive::verify_with_guard(
-        archive,
-        source["expected_archive_digest"]
-            .as_str()
-            .unwrap_or(&archive_digest),
-        archive_bytes,
+    let mut verified = source_intake::verify_source(
+        context.fetcher,
+        job_id,
+        source,
+        context.work_root,
         context.source_limits,
-        &|| Instant::now() < source_deadline,
+        context.source_limits.max_total_bytes,
+        source_deadline,
     )?;
-    if let Some(expected) = source["expected_source_tree_digest"].as_str()
-        && expected != verified.tree_digest()
-    {
-        return Err(SourceError::TreeDigestMismatch {
-            expected: expected.to_owned(),
-            actual: verified.tree_digest().to_owned(),
-        }
-        .into());
-    }
     let closure_ref = verified.closure_ref(subdirectory)?;
 
     let attempt_root = context.work_root.join(&attempt.attempt_id);
