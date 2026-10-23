@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+# Fixed trusted ABI v1. Only bounded geometry is accepted, never app argv,
+# arbitrary flags, host display selection, cookie bytes or an HTTP listener.
+[[ $# == 2 && $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ ]]
+(( $1 >= 320 && $1 <= 4096 && $2 >= 200 && $2 <= 2160 ))
+export DISPLAY=:64 XAUTHORITY=/run/ato-native-auth/Xauthority
+[[ -f $XAUTHORITY && -d /tmp/.X11-unix && -d /run/ato-native-rfb ]]
+pid=
+cleanup() {
+  trap - EXIT TERM INT
+  if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+  rm -f /run/ato-native-rfb/application-ready /run/ato-native-rfb/display.sock
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+# Unix-only RFB. The app can connect X11 but has no RFB directory mount.
+# Clipboard is disabled at the producer as well as the scoped common gateway.
+Xtigervnc :64 -geometry "${1}x${2}" -depth 24 -rfbport -1 \
+  -rfbunixpath /run/ato-native-rfb/display.sock -rfbunixmode 0600 \
+  -SecurityTypes None -AcceptCutText=0 -SendCutText=0 \
+  -AcceptSetDesktopSize=1 -FrameRate 30 -AlwaysShared -nolisten tcp -auth "$XAUTHORITY" &
+pid=$!
+# Only a mapped window on this isolated X server is Surface timing evidence.
+# No application-specific class/title/expected pixels are interpreted here.
+while kill -0 "$pid" 2>/dev/null; do
+  if [[ ! -f /run/ato-native-rfb/application-ready ]]; then
+    while IFS= read -r window; do
+      if xwininfo -display :64 -id "$window" -stats 2>/dev/null | grep -q 'Map State: IsViewable'; then
+        : > /run/ato-native-rfb/application-ready
+        break
+      fi
+    done < <(xwininfo -display :64 -root -children 2>/dev/null | awk '/^[[:space:]]+0x[0-9a-f]+/ { print $1 }')
+  fi
+  sleep 0.025
+done
+wait "$pid"

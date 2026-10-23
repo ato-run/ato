@@ -1,0 +1,31 @@
+[package]
+name = "ato-native-surface-gateway"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Runner-owned assembly of shared Native Surface transport and application observations"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[dependencies]
+ato-formation = { path = "../../lib/formation", default-features = false }
+ato-ipc = { path = "../../lib/ipc" }
+netd = { path = "../../services/netd" }
+anyhow = "1"
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+zeroize = "1.7"
+
+[dev-dependencies]
+tempfile = "3"
