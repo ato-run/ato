@@ -20,7 +20,7 @@ fn native_advertisement_requires_opt_in_linux_oci_and_never_claims_pixel() {
                     native,
                 );
                 assert_eq!(caps.contains(&NATIVE_TERMINAL_RUNTIME_FEATURE), native);
-                let surfaces = supported_session_surfaces(native);
+                let surfaces = supported_session_surfaces(native, false);
                 assert_eq!(
                     surfaces.as_array().unwrap().len(),
                     if native { 2 } else { 1 }
@@ -35,6 +35,80 @@ fn native_advertisement_requires_opt_in_linux_oci_and_never_claims_pixel() {
                 }
             }
         }
+    }
+}
+#[test]
+fn pixel_typed_profile_is_separate_from_terminal_and_uses_existing_probe_feature() {
+    let surfaces = supported_session_surfaces(false, true);
+    assert_eq!(
+        surfaces,
+        json!([
+            {"kind":"web","profiles":["ato.web-surface.v1"],"transports":["https"]},
+            {"kind":"pixel_stream","profiles":["ato.pixel-stream.v1"],"transports":["rfb_websocket"]}
+        ])
+    );
+    assert!(
+        with_native_terminal_capability(vec![], true).contains(&NATIVE_TERMINAL_RUNTIME_FEATURE)
+    );
+    assert_eq!(
+        supported_session_surfaces(true, true)
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn pixel_wire_preserves_exact_d_descriptor_and_refuses_promised_tcp_facts() {
+    let (spec, descriptor, _, d) = runtime_launch::native::pixel::tests::fixture(&format!(
+        "example.invalid/gui@sha256:{}",
+        "33".repeat(32)
+    ));
+    let command = native_command(&spec, descriptor, &d.derivation_ref().unwrap());
+    if cfg!(target_os = "linux") {
+        assert!(verified_spec(&command).is_ok());
+    }
+    for invalid in ["missing-ports", "tcp-facts", "wrong-d", "changed-size"] {
+        let mut command = native_command(
+            &spec,
+            command.session_surface.clone().unwrap(),
+            &d.derivation_ref().unwrap(),
+        );
+        let mut spec = spec.clone();
+        let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            unreachable!()
+        };
+        match invalid {
+            "missing-ports" => {
+                oci.native_surface
+                    .as_mut()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("ports");
+            }
+            "tcp-facts" => {
+                oci.native_surface.as_mut().unwrap()["ports"][0]["guest_port"] = json!(5900);
+                oci.native_surface.as_mut().unwrap()["ports"][1]["guest_port"] = json!(8081);
+            }
+            "wrong-d" => {
+                command.portable_derivation_ref = Some(format!("sha256:{}", "ff".repeat(32)))
+            }
+            "changed-size" => {
+                if let Some(ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream {
+                    viewport,
+                    ..
+                }) = &mut command.session_surface
+                {
+                    viewport.width += 1;
+                }
+            }
+            _ => unreachable!(),
+        }
+        command.launch_spec_digest = spec.canonical_digest().unwrap();
+        command.launch_spec = serde_json::to_value(&spec).unwrap();
+        assert!(verified_spec(&command).is_err(), "{invalid}");
     }
 }
 fn native_command(
@@ -153,6 +227,22 @@ fn read_api_request(stream: &mut TcpStream) -> Option<(String, serde_json::Value
 #[test]
 #[ignore = "requires real Linux Docker and explicit already-present pinned CPU Python image"]
 fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
+    run_actual_native_dispatch(false, false);
+}
+
+#[test]
+#[ignore = "requires local Linux Docker, explicit verified warm helper and independent static X11 workspace executable"]
+fn real_pixel_lease_dispatch_owns_two_workloads_mux_original_k_and_stop() {
+    run_actual_native_dispatch(true, false);
+}
+
+#[test]
+#[ignore = "requires real local Linux Docker and independent immutable GUI/helper fixtures"]
+fn real_pixel_contract_mismatch_never_grants_viewer_access_and_reclaims_both() {
+    run_actual_native_dispatch(true, true);
+}
+
+fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
     use ato_formation::verify::{
         RuntimeHttpObservation, VerificationExecutionEvidence, VerificationTargetKind,
     };
@@ -162,16 +252,61 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
     };
     use std::io::Write;
     const KEY: &str = "native-test-key-native-test-key-native-test-key";
-    let image = std::env::var("ATO_NATIVE_TERMINAL_TEST_IMAGE").unwrap();
-    let (mut spec, descriptor, contract, d) = runtime_launch::native::tests::fixture(&image);
+    let image = if pixel {
+        "ubuntu:24.04@sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf"
+            .to_owned()
+    } else {
+        std::env::var("ATO_NATIVE_TERMINAL_TEST_IMAGE").unwrap()
+    };
+    let (mut spec, descriptor, mut contract, mut d) = if pixel {
+        runtime_launch::native::pixel::tests::fixture(&image)
+    } else {
+        runtime_launch::native::tests::fixture(&image)
+    };
+    // Independent negative K authored before the Run, never derived from
+    // its frame or substituted into the positive fixture after measurement.
+    if mismatch {
+        contract.requirements[0].body_digest = Some(format!("sha256:{}", "00".repeat(32)));
+    }
+    let expected_body = if pixel {
+        runtime_launch::native::pixel::tests::expected()
+    } else {
+        b"go\r\n1\r\nEND".to_vec()
+    };
+    if pixel {
+        d.runtimes
+            .insert("oci.entrypoint".into(), "/app/native-app".into());
+        let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::new(
+            d.derivation_ref().unwrap(),
+            d.native_surface.clone().unwrap(),
+        )
+        .unwrap()
+        .with_ports(d.ports.clone())
+        .unwrap();
+        let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            unreachable!()
+        };
+        oci.entrypoint = Some("/app/native-app".into());
+        oci.native_surface = Some(serde_json::to_value(declaration).unwrap());
+    }
     let root = runtime_launch::native::tests::scratch();
     let source = root.path().join("source");
     fs::create_dir(&source).unwrap();
-    fs::write(
-        source.join("main.py"),
-        runtime_launch::native::tests::WORKLOAD,
-    )
-    .unwrap();
+    if pixel {
+        fs::copy(
+            std::env::var_os("ATO_NATIVE_PIXEL_STATIC_APP").unwrap(),
+            source.join("native-app"),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(source.join("native-app"), fs::Permissions::from_mode(0o755)).unwrap();
+    } else {
+        fs::write(
+            source.join("main.py"),
+            runtime_launch::native::tests::WORKLOAD,
+        )
+        .unwrap();
+    }
     let artifact = runtime_launch::state_artifact::pack_state_tree(&source).unwrap();
     spec.workspace.materialization_ref = artifact.digest().to_owned();
     let command = native_command(&spec, descriptor.clone(), &d.derivation_ref().unwrap());
@@ -275,7 +410,7 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
                     .unwrap()
                     .bytes()
                     .unwrap();
-                assert_eq!(actual.as_ref(), b"go\r\n1\r\nEND");
+                assert_eq!(actual.as_ref(), expected_body);
                 let attempt = AttemptSpec {
                     contract: &contract,
                     contract_ref: &contract_ref,
@@ -285,7 +420,13 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
                     input_refs: BTreeMap::new(),
                     instance_snapshot_ref: None,
                 };
-                let evidence:VerificationExecutionEvidence=serde_json::from_value(json!({"realization":"oci","container_id":body["execution"]["container_id"],"lease_id":work_lease})).unwrap();
+                let services: Vec<_> = body["execution"]["services"].as_array().into_iter().flatten().map(|service| json!({
+                    "name":service["name"], "container_id":service["container_id"], "image":service["image"]
+                })).collect();
+                let evidence: VerificationExecutionEvidence = serde_json::from_value(json!({
+                    "realization":"oci", "container_id":body["execution"]["container_id"], "lease_id":work_lease,
+                    "image":body["execution"]["image"], "platform":body["execution"]["platform"], "services": services
+                })).unwrap();
                 let receipt = verify_observed_candidate(
                     &attempt,
                     vec![RuntimeHttpObservation::from_response(
@@ -304,32 +445,62 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
                     },
                 )
                 .receipt;
-                assert!(receipt.fully_satisfied);
+                assert_eq!(receipt.fully_satisfied, !mismatch);
+                assert_eq!(
+                    receipt.execution.as_ref().unwrap().services.len(),
+                    usize::from(pixel)
+                );
                 assert_eq!(contract.contract_ref().unwrap(), contract_ref);
-                worker_verified.store(true, Ordering::Release);
-                // A real API counterpart must enforce this same current-attempt
-                // receipt gate before issuing a browser credential.
-                let keys = netd::pixel_authorization::SurfaceAssertionKeyring::new(BTreeMap::from(
-                    [("ato.runner-surface@1".into(), KEY.into())],
-                ))
-                .unwrap();
-                let scope = ato_ipc::session_surface::SurfaceExecutionScope {
-                    run_id: work_run.clone(),
-                    lease_id: work_lease.clone(),
-                    runner_id: work_runner.clone(),
-                };
-                let assertion = keys
-                    .issue_readiness_assertion_for_execution(&gateway_scope, Some(scope))
-                    .unwrap();
-                let viewed = runtime_launch::native::tests::viewer(
-                    public,
-                    assertion.as_str().to_owned(),
-                    "https://staging.ato.run",
-                    b"go\r",
-                    true,
-                )
-                .unwrap();
-                assert_eq!(viewed.2, b"go\r\n2\r\nEND");
+                if !mismatch {
+                    worker_verified.store(true, Ordering::Release);
+                    // A real API counterpart must enforce this same current-attempt
+                    // receipt gate before issuing a browser credential.
+                    let keys =
+                        netd::pixel_authorization::SurfaceAssertionKeyring::new(BTreeMap::from([
+                            ("ato.runner-surface@1".into(), KEY.into()),
+                        ]))
+                        .unwrap();
+                    let scope = ato_ipc::session_surface::SurfaceExecutionScope {
+                        run_id: work_run.clone(),
+                        lease_id: work_lease.clone(),
+                        runner_id: work_runner.clone(),
+                    };
+                    let assertion = keys
+                        .issue_readiness_assertion_for_execution(&gateway_scope, Some(scope))
+                        .unwrap();
+                    if pixel {
+                        let frame = tokio::runtime::Runtime::new()
+                            .unwrap()
+                            .block_on(netd::rfb_probe::wait_for_authenticated_gateway_frame(
+                                netd::rfb_probe::PixelGatewayProbeRequest::new(
+                                    &format!("http://{public}/__ato/surface"),
+                                    "https://staging.ato.run",
+                                    assertion.as_str(),
+                                ),
+                                Duration::from_secs(3),
+                            ))
+                            .unwrap();
+                        assert_eq!((frame.width, frame.height), (640, 480));
+                        let services = body["execution"]["services"].as_array().unwrap();
+                        assert_eq!(services.len(), 1);
+                        assert_eq!(services[0]["name"], "native-display");
+                        assert_ne!(
+                            services[0]["container_id"],
+                            body["execution"]["container_id"]
+                        );
+                        assert!(services[0]["principal"]["uids"][0].as_u64().unwrap() > 0);
+                    } else {
+                        let viewed = runtime_launch::native::tests::viewer(
+                            public,
+                            assertion.as_str().to_owned(),
+                            "https://staging.ato.run",
+                            b"go\r",
+                            true,
+                        )
+                        .unwrap();
+                        assert_eq!(viewed.2, b"go\r\n2\r\nEND");
+                    }
+                }
                 assert_eq!(
                     client
                         .get(format!("http://{public}/result"))
@@ -363,7 +534,7 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
     let work_root = root.path().join("runner");
     let lease_root = work_root.join("leases").join(&lease_id);
     fs::create_dir_all(work_root.join("leases")).unwrap();
-    let config = WorkerConfig::try_parse_from([
+    let mut config = WorkerConfig::try_parse_from([
         "runner",
         "--api-base",
         &api_base,
@@ -384,6 +555,18 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
         "--native-terminal",
     ])
     .unwrap();
+    if pixel {
+        config.native_pixel.enabled = true;
+        config.native_pixel.helper_archive = Some(
+            std::env::var_os("ATO_NATIVE_PIXEL_HELPER_ARCHIVE")
+                .unwrap()
+                .into(),
+        );
+        config.native_pixel.helper_image =
+            Some(std::env::var("ATO_NATIVE_PIXEL_HELPER_IMAGE").unwrap());
+        config.native_pixel.cgroup_parent = Some("system.slice".into());
+        config.native_pixel.prepare(&work_root, 1).unwrap();
+    }
     let mut worker = ConnectedWorker {
         api: HttpRunnerApi::new(&api_base, &runner_id, "fixture-token").unwrap(),
         config,
@@ -394,14 +577,20 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
     let previous = runtime_launch::recovery::slot_recovered();
     runtime_launch::recovery::mark_slot_recovered(true);
     worker.config.native_terminal = false;
+    worker.config.native_pixel.enabled = false;
     assert!(
         worker
             .execute_runtime_launch_lease(&lease, &command, &lease_root)
             .unwrap_err()
             .to_string()
-            .contains("not enabled")
+            .contains(if pixel {
+                "Pixel is disabled"
+            } else {
+                "not enabled"
+            })
     );
-    worker.config.native_terminal = true;
+    worker.config.native_terminal = !pixel;
+    worker.config.native_pixel.enabled = pixel;
     for invalid in [None, Some("weak".to_owned())] {
         lease.proxy_assertion_key = invalid;
         assert!(
@@ -416,14 +605,21 @@ fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
     lease.proxy_assertion_key = Some(KEY.into());
     lease.command =
         LeaseCommand::RuntimeLaunch(Box::new(native_command(&spec, descriptor, &dispatched_ref)));
+    let evaluated_at = Instant::now();
     let result = worker.execute_lease(&lease);
+    eprintln!(
+        "NATIVE_DISPATCH_EVIDENCE {}",
+        json!({"pixel":pixel,"authored_contract_mismatch":mismatch,
+        "fully_satisfied":verified.load(Ordering::Acquire),"lease_execution_ms":evaluated_at.elapsed().as_millis(),
+        "selected_derivation_ref":dispatched_ref})
+    );
     runtime_launch::recovery::mark_slot_recovered(previous);
     done.store(true, Ordering::Release);
     server.join().unwrap();
     result.unwrap();
     assert!(
         ready.load(Ordering::Acquire)
-            && verified.load(Ordering::Acquire)
+            && verified.load(Ordering::Acquire) != mismatch
             && stopped.load(Ordering::Acquire)
     );
     assert!(TcpStream::connect(public).is_err());
@@ -468,6 +664,7 @@ fn real_native_startup_control_cancels_owned_workload_before_ready() {
         &context,
         &owner,
         runtime_launch::native::tests::config(),
+        None,
         &mut control,
     )
     .err()

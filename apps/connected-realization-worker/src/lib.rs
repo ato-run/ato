@@ -11,6 +11,7 @@ mod activity_controller;
 mod data_plane;
 pub mod diagnostics;
 pub mod host_resources;
+mod native_pixel_config;
 pub mod runtime_launch;
 mod slot_state;
 
@@ -190,12 +191,15 @@ fn with_native_terminal_capability(
     }
     capabilities
 }
-fn supported_session_surfaces(native: bool) -> serde_json::Value {
+fn supported_session_surfaces(native: bool, pixel: bool) -> serde_json::Value {
     let mut surfaces = vec![
         serde_json::json!({"kind":"web","profiles":["ato.web-surface.v1"],"transports":["https"]}),
     ];
     if native {
         surfaces.push(serde_json::json!({"kind":"terminal","profiles":["ato.terminal-surface.v1"],"transports":["terminal_websocket"]}));
+    }
+    if pixel {
+        surfaces.push(serde_json::json!({"kind":"pixel_stream","profiles":["ato.pixel-stream.v1"],"transports":["rfb_websocket"]}));
     }
     serde_json::Value::Array(surfaces)
 }
@@ -1128,6 +1132,8 @@ pub struct WorkerConfig {
     /// Explicit opt-in after API receipt/access counterpart is installed.
     #[arg(long, env = "ATO_RUNNER_NATIVE_TERMINAL", default_value_t = false)]
     pub native_terminal: bool,
+    #[command(flatten)]
+    pub native_pixel: native_pixel_config::NativePixelConfig,
     #[arg(long, env = "ATO_NATIVE_SURFACE_IDLE_SECS", default_value_t = 300)]
     pub native_surface_idle_secs: u64,
     /// Host-reachable guest endpoint behind the candidate-internal relay. This
@@ -1374,6 +1380,9 @@ impl ConnectedWorker {
         resolve_runner_credentials(&mut config)?;
         validate_config(&config)?;
         fs::create_dir_all(&config.work_root)?;
+        config
+            .native_pixel
+            .prepare(&config.work_root, config.max_slots)?;
         if config.isolation == IsolationMode::HostBoundary {
             let (Some(uid), Some(gid)) = (config.workload_uid, config.workload_gid) else {
                 bail!("host-boundary isolation needs --workload-uid and --workload-gid");
@@ -1890,14 +1899,34 @@ impl ConnectedWorker {
                 lease.run_id == command.run_id,
                 "Native lease Run does not match its command"
             );
-            ensure!(
-                native_terminal_available(
-                    self.config.native_terminal,
-                    cfg!(target_os = "linux"),
-                    ato_adapter_oci::docker_runtime_available()
+            match command
+                .session_surface
+                .as_ref()
+                .expect("verified Native descriptor")
+            {
+                ato_ipc::session_surface::SessionSurfaceDescriptor::Terminal { .. } => ensure!(
+                    native_terminal_available(
+                        self.config.native_terminal,
+                        cfg!(target_os = "linux"),
+                        ato_adapter_oci::docker_runtime_available()
+                    ),
+                    "native_surface_unavailable: Native Terminal is not enabled on this Linux OCI Runner"
                 ),
-                "native_surface_unavailable: Native Terminal is not enabled on this Linux OCI Runner"
-            );
+                ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream { .. } => {
+                    #[cfg(unix)]
+                    {
+                        let helper = self.config.native_pixel.helper(&self.config.work_root)?;
+                        let ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::V1(native_spec) = &spec
+                        else {
+                            unreachable!()
+                        };
+                        helper.admit_spec(native_spec)?;
+                    }
+                    #[cfg(not(unix))]
+                    bail!("native_surface_unavailable: Pixel requires Linux");
+                }
+                _ => bail!("native_surface_unavailable: unsupported Native Surface"),
+            }
             ensure!(
                 HttpProxyGate::for_lease(lease, &self.config.runner_id).is_some(),
                 "Native Terminal requires the scoped Runner assertion key"
@@ -2281,6 +2310,16 @@ impl ConnectedWorker {
                         .as_ref()
                         .expect("verified Native descriptor"),
                     config,
+                    if matches!(
+                        command.session_surface,
+                        Some(
+                            ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream { .. }
+                        )
+                    ) {
+                        self.config.native_pixel.prepared_helper()
+                    } else {
+                        None
+                    },
                     &mut check_startup,
                 )
             }
@@ -3166,6 +3205,10 @@ impl WorkerConfig {
 }
 
 fn validate_config(config: &WorkerConfig) -> Result<()> {
+    ensure!(
+        !config.native_pixel.enabled || (cfg!(target_os = "linux") && config.max_slots == 1),
+        "Native Pixel requires one owned local Linux slot"
+    );
     ensure!(
         (1..=86_400).contains(&config.native_surface_idle_secs),
         "invalid Native idle timeout"
@@ -4735,6 +4778,9 @@ impl HttpRunnerApi {
             cfg!(target_os = "linux"),
             oci_available,
         );
+        let pixel = config
+            .native_pixel
+            .available(&config.work_root, oci_available);
         self.authorized(self.client.post(format!(
             "{}/v1/runners/{}/heartbeat",
             self.base, self.runner_id
@@ -4744,12 +4790,12 @@ impl HttpRunnerApi {
                 with_native_terminal_capability(runner_capabilities(
                     config.firecracker_configured(), oci_available, self.persistent_volumes,
                     config.network_controls, !config.fixed_tcp_allowlist.trim().is_empty(),
-                ), native),
+                ), native || pixel),
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
             ),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
-            "supported_session_surfaces": supported_session_surfaces(native),
+            "supported_session_surfaces": supported_session_surfaces(native, pixel),
             "public_base_url": config.public_base_url,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -4764,7 +4810,7 @@ impl HttpRunnerApi {
             // Refresh mutable capacity and device visibility on every heartbeat.
             "host_resources": resources,
         }))
-        .timeout(if config.native_terminal {
+        .timeout(if config.native_terminal || config.native_pixel.enabled {
             Duration::from_millis(500)
         } else {
             Duration::from_secs(60)
@@ -6825,6 +6871,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "0.0.0.0:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             native_terminal: false,
+            native_pixel: Default::default(),
             native_surface_idle_secs: 300,
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: Some("172.16.0.1/24".to_owned()),
@@ -6855,6 +6902,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             native_terminal: false,
+            native_pixel: Default::default(),
             native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),
@@ -6896,6 +6944,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             native_terminal: false,
+            native_pixel: Default::default(),
             native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),
@@ -6955,6 +7004,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             native_terminal: false,
+            native_pixel: Default::default(),
             native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),
@@ -7019,6 +7069,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             native_terminal: false,
+            native_pixel: Default::default(),
             native_surface_idle_secs: 300,
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: tap_host_cidr.map(str::to_owned),
@@ -7143,6 +7194,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             native_terminal: false,
+            native_pixel: Default::default(),
             native_surface_idle_secs: 300,
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: Some("172.30.0.1/24".to_owned()),

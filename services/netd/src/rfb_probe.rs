@@ -146,7 +146,12 @@ pub fn pixel_gateway_probe_url(public_ready_url: &str) -> Result<String, RfbProb
     };
     url.set_scheme(websocket_scheme)
         .map_err(|_| RfbProbeError::InvalidGatewayUrl)?;
-    url.set_path("/surface");
+    // A Native lease explicitly resolves its common scoped app-frame endpoint.
+    // Preserve it through the Runner mux; rewriting it to the legacy `/surface`
+    // would bypass that reserved route and correctly fail the outer HTTP gate.
+    if url.path() != "/__ato/surface" {
+        url.set_path("/surface");
+    }
     Ok(url.into())
 }
 
@@ -1064,6 +1069,14 @@ pub(crate) mod tests {
 
     #[test]
     fn public_probe_url_is_token_free_and_secure_except_on_loopback() {
+        assert_eq!(
+            pixel_gateway_probe_url("https://session.example/__ato/surface").unwrap(),
+            "wss://session.example/__ato/surface"
+        );
+        assert_eq!(
+            pixel_gateway_probe_url("http://127.0.0.1:8420/__ato/surface").unwrap(),
+            "ws://127.0.0.1:8420/__ato/surface"
+        );
         assert_eq!(
             pixel_gateway_probe_url("https://session.example/").unwrap(),
             "wss://session.example/surface"

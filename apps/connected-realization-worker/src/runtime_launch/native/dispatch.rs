@@ -16,6 +16,7 @@ impl NativeLeaseRun {
         context: &ResolvedRuntimeLaunchContext,
         owner: &OciOwner,
         config: NativeLeaseSurfaceConfig,
+        pixel_helper: Option<super::pixel::PixelHelper>,
         check_startup: &mut dyn FnMut() -> Result<()>,
     ) -> std::result::Result<Self, super::super::lease::StartFailure> {
         check_startup()?;
@@ -26,7 +27,14 @@ impl NativeLeaseRun {
             .context("start owned Native executor")?;
         let (alive, owner_rx) = watch::channel(true);
         let result = runtime.block_on(async {
-            let start = start_terminal(spec, selected_ref, descriptor, context, owner, config, owner_rx);
+            let start = async {
+                match descriptor {
+                    SessionSurfaceDescriptor::Terminal { .. } => start_terminal(spec, selected_ref, descriptor, context, owner, config, owner_rx).await,
+                    SessionSurfaceDescriptor::PixelStream { .. } => super::pixel::start_pixel(spec, selected_ref, descriptor, context, owner, config,
+                        pixel_helper.context("native_surface_unavailable: Pixel helper is not owned")?, None, owner_rx).await,
+                    _ => Err(anyhow::anyhow!("native_surface_unavailable: unsupported Native Surface").into()),
+                }
+            };
             tokio::pin!(start);
             let mut control = tokio::time::interval(Duration::from_millis(100));
             loop {
