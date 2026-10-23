@@ -64,8 +64,32 @@ runtime builds have no field in the model and cannot be expressed.
 A single-step route with any step-scoped field is refused: those fields
 belong to groups only.
 
-Services start in authored order, each after the previous one is ready, and
-stop in reverse order. There is no dependency DAG in v0.
+Services start in their compiled order, each after the previous one is ready,
+and stop in reverse order. The evaluator remains sequential.
+
+### Dependency authoring
+
+`[[derivation.service]]` may state `depends_on = ["database", "worker"]`.
+These are references to services in the same selected route. The authoring
+compiler validates the whole graph, rejects undeclared/repeated/self edges and
+cycles, then chooses a stable topological order using authored order to break
+ties. The existing sequence of BoundSteps carries that order. There is no new
+canonical graph, Kernel primitive, runner protocol, or runtime dependency
+resolution. Every predecessor still passes its existing readiness probe before
+the consumer starts; any component failure still fails the whole group.
+
+Absent or empty `depends_on` retains the original authored sequence exactly.
+An explicit graph that compiles to the same sequence yields the same draft and
+therefore the same bound D. Reordering the actual steps changes D, never K.
+This does not introduce parallel launch or independent component restart.
+The parser bounds dependency analysis to 64 nodes/64 edges per node; existing
+runtime admission still enforces the smaller service-group profile above.
+
+The shorthand does not parse Compose includes/interpolation or add per-component
+HTTP observations to K. Internal Ports retain their existing visibility, and
+only the declared Surface is exposed. Those are separate follow-up gates;
+this addition alone is not multi-component Formation acceptance or a staging
+measurement.
 
 ## Validator report
 

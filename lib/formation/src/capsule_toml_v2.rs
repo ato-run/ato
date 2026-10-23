@@ -249,6 +249,10 @@ struct Service {
     state: Vec<String>,
     #[serde(default)]
     bindings: Vec<String>,
+    /// Authoring shorthand only. Resolved into the existing serving-step
+    /// sequence; no dependency graph is added to canonical D or the Kernel.
+    #[serde(default)]
+    depends_on: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -722,6 +726,65 @@ fn parse_single_route(
     })
 }
 
+/// Compile dependency shorthand into the existing serving-step sequence.
+fn order_services(services: Vec<Service>) -> Result<Vec<Service>, CapsuleTomlV2Error> {
+    // Preserve the exact historical order when no dependency is authored.
+    if services.iter().all(|service| service.depends_on.is_empty()) {
+        return Ok(services);
+    }
+    // A parser work bound, not a runtime capability or the group admission
+    // limit. Runtime admission still enforces the existing smaller profile.
+    if services.len() > 64 || services.iter().any(|s| s.depends_on.len() > 64) {
+        return Err(invalid(
+            "derivation.service.depends_on",
+            "dependency graph exceeds parser bounds",
+        ));
+    }
+    let known: BTreeSet<_> = services.iter().map(|s| s.id.as_str()).collect();
+    if known.len() != services.len() {
+        return Err(invalid("derivation.service.id", "duplicate service id"));
+    }
+    for service in &services {
+        let dependencies: BTreeSet<_> = service.depends_on.iter().map(String::as_str).collect();
+        if dependencies.len() != service.depends_on.len()
+            || dependencies
+                .iter()
+                .any(|id| *id == service.id || !known.contains(id))
+        {
+            return Err(invalid(
+                "derivation.service.depends_on",
+                "dependency is undeclared, repeated or self-referential",
+            ));
+        }
+    }
+    let count = services.len();
+    let mut remaining: Vec<_> = services.into_iter().map(Some).collect();
+    let mut ordered = Vec::with_capacity(count);
+    let mut ready = BTreeSet::new();
+    while ordered.len() < count {
+        // Authored order breaks ties. Every dependency precedes its consumer;
+        // the existing executor already waits for each serving step's ready
+        // probe and tears the whole group down if any step fails.
+        let next = remaining
+            .iter()
+            .position(|service| {
+                service
+                    .as_ref()
+                    .is_some_and(|s| s.depends_on.iter().all(|id| ready.contains(id)))
+            })
+            .ok_or_else(|| {
+                invalid(
+                    "derivation.service.depends_on",
+                    "dependency graph contains a cycle",
+                )
+            })?;
+        let service = remaining[next].take().expect("selected remaining service");
+        ready.insert(service.id.clone());
+        ordered.push(service);
+    }
+    Ok(ordered)
+}
+
 /// Grammar and reference integrity of an OCI service group. Resource budgets
 /// and the Surface/Port exposure rules are the portable profile's to judge:
 /// they are checked where the bound Derivation is validated, so a bundle
@@ -762,8 +825,7 @@ fn parse_service_group(
     let mut port_ids = BTreeSet::new();
     let mut state_users = BTreeMap::<String, usize>::new();
     let mut binding_users = BTreeMap::<String, usize>::new();
-    let services = derivation
-        .service
+    let services = order_services(derivation.service)?
         .into_iter()
         .map(|service| {
             validate_id("derivation.service.id", &service.id)?;
@@ -1106,6 +1168,65 @@ default = "pure"
         assert_eq!(route.services[0].cwd, ".");
         assert_eq!(route.services[1].ports[0].id, "app.http");
         assert_eq!(draft.effects, EffectClass::Pure);
+    }
+
+    #[test]
+    fn service_dependencies_resolve_into_the_existing_ready_order() {
+        let mut document: toml::Value = SERVICE_GROUP.parse().unwrap();
+        let services = document["derivation"][0]["service"].as_array_mut().unwrap();
+        services.reverse();
+        services[0].as_table_mut().unwrap().insert(
+            "depends_on".into(),
+            toml::Value::Array(vec![toml::Value::String("backend".into())]),
+        );
+        let result = parse_capsule_toml_v2(&toml::to_string(&document).unwrap()).unwrap();
+        let original = parse_capsule_toml_v2(SERVICE_GROUP).unwrap();
+        assert_eq!(
+            result, original,
+            "a DAG with the same resulting sequence has the same draft"
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_dependencies_preserve_legacy_drafts() {
+        let mut document: toml::Value = SERVICE_GROUP.parse().unwrap();
+        document["derivation"][0]["service"][0]
+            .as_table_mut()
+            .unwrap()
+            .insert("depends_on".into(), toml::Value::Array(vec![]));
+        assert_eq!(
+            parse_capsule_toml_v2(SERVICE_GROUP).unwrap(),
+            parse_capsule_toml_v2(&toml::to_string(&document).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_service_dependency_graphs_fail_before_execution() {
+        for (backend, web) in [
+            (vec!["missing"], vec![]),
+            (vec!["backend"], vec![]),
+            (vec!["web", "web"], vec![]),
+            (vec!["web"], vec!["backend"]),
+        ] {
+            let mut document: toml::Value = SERVICE_GROUP.parse().unwrap();
+            for (index, deps) in [backend, web].into_iter().enumerate() {
+                document["derivation"][0]["service"][index]
+                    .as_table_mut()
+                    .unwrap()
+                    .insert(
+                        "depends_on".into(),
+                        toml::Value::Array(
+                            deps.into_iter()
+                                .map(|id| toml::Value::String(id.into()))
+                                .collect(),
+                        ),
+                    );
+            }
+            let error = parse_capsule_toml_v2(&toml::to_string(&document).unwrap()).unwrap_err();
+            assert!(
+                matches!(error, CapsuleTomlV2Error::Invalid { path, .. } if path == "derivation.service.depends_on")
+            );
+        }
     }
 
     #[test]
