@@ -98,9 +98,9 @@ fn serve(args: &[String]) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(900))
         .build()?;
-    let api = FormationApi::new(client.clone(), api_base.clone(), token.clone());
+    let api = FormationApi::new(client, api_base.clone(), token.clone());
     let shim = std::env::current_exe().context("cannot locate this worker's own binary")?;
-    let fetcher = PinnedSourceFetcher::new(client, api_base, token);
+    let fetcher = PinnedSourceFetcher::new(api_base, token)?;
     let context = JobContext {
         api: &api,
         fetcher: &fetcher,
@@ -249,11 +249,11 @@ fn run_one(args: &[String]) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(900))
         .build()?;
-    let api = FormationApi::new(client.clone(), api_base.clone(), token.clone());
+    let api = FormationApi::new(client, api_base.clone(), token.clone());
     let shim = std::env::current_exe().context("cannot locate this worker's own binary")?;
     // The fetcher needs the API too: an uploaded source is asked for by job,
     // through the control plane, rather than from a public URL.
-    let fetcher = PinnedSourceFetcher::new(client, api_base, token);
+    let fetcher = PinnedSourceFetcher::new(api_base, token)?;
 
     let context = JobContext {
         api: &api,
