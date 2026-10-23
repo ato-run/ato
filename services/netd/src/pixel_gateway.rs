@@ -62,7 +62,7 @@ fn is_private_rfb_address(address: SocketAddr) -> bool {
 }
 
 impl PixelGatewayConfig {
-    fn validate(&self) -> Result<(), PixelGatewayError> {
+    pub fn validate(&self) -> Result<(), PixelGatewayError> {
         if self.scope.session_id.trim().is_empty() {
             return Err(PixelGatewayError::InvalidConfig(
                 "session_id must not be empty",
