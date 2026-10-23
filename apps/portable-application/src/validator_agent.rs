@@ -344,6 +344,11 @@ pub struct PortableBundleVerificationReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableSurfaceReport {
+    /// Present only for explicit native routes. Omitted for legacy Web reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<&'static str>,
     pub id: String,
     pub port: String,
     pub path: String,
@@ -367,6 +372,9 @@ pub struct PortableBindingReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableRouteReport {
+    /// Adapter declaration of this exact D, never a launch authorization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_surface: Option<ato_formation::native_surface::NativeSurfaceAdapter>,
     pub derivation_ref: String,
     pub realization: &'static str,
     pub runtimes: BTreeMap<String, String>,
@@ -624,6 +632,16 @@ fn report(
         static_derivation_ref: static_route.map(|route| route.derivation_ref.to_string()),
         title: validated.application.title.clone(),
         surface: PortableSurfaceReport {
+            kind: validated
+                .derivation
+                .native_surface
+                .as_ref()
+                .map(|native| native.surface.kind()),
+            profile: validated
+                .derivation
+                .native_surface
+                .as_ref()
+                .map(|native| native.surface.profile()),
             id: surface.id.clone(),
             port: surface.port.clone(),
             path: surface.path.clone(),
@@ -737,6 +755,7 @@ fn validated_routes(
                     .find(|port| port.protocol == HTTP_PROTOCOL)
                     .context("service group omitted its Surface Port")?;
                 return Ok(PortableRouteReport {
+                    native_surface: None,
                     derivation_ref: route.derivation_ref.to_string(),
                     realization: "oci_service_group",
                     runtimes: route.derivation.runtimes.clone(),
@@ -795,13 +814,22 @@ fn validated_routes(
             let port = route
                 .derivation
                 .ports
-                .first()
+                .iter()
+                .find(|port| port.id == route.application.surfaces[0].port)
                 .context("route omitted port")?;
             Ok(PortableRouteReport {
+                native_surface: route.derivation.native_surface.clone(),
                 derivation_ref: route.derivation_ref.to_string(),
                 realization: match route.realization {
                     PortableRealizationKind::StaticWeb => "static_web",
                     PortableRealizationKind::LocalProcess => "process",
+                    // Old control planes must refuse rather than discard the
+                    // native declaration and launch this as an ordinary Web OCI.
+                    PortableRealizationKind::OciContainer
+                        if route.derivation.native_surface.is_some() =>
+                    {
+                        "native_oci_container"
+                    }
                     PortableRealizationKind::OciContainer => "oci",
                     PortableRealizationKind::OciServiceGroup => "oci_service_group",
                 },
@@ -1499,6 +1527,46 @@ mod tests {
         assert_eq!(report.root_contract_ref, bundle.index.root_contract_ref);
         assert_eq!(report.derivation_refs, bundle.index.derivations);
         assert_eq!(report.artifact.as_ref().unwrap().files.len(), 2);
+        let wire = serde_json::to_value(&report).unwrap();
+        assert!(wire["surface"].get("kind").is_none());
+        assert!(wire["surface"].get("profile").is_none());
+        assert!(wire["routes"][0].get("native_surface").is_none());
+    }
+
+    #[test]
+    fn native_report_names_the_surface_profile_and_exact_private_observations() {
+        for (pixel, kind, profile) in [
+            (
+                false,
+                "terminal",
+                ato_ipc::session_surface::TERMINAL_SURFACE_PROFILE,
+            ),
+            (
+                true,
+                "pixel_stream",
+                ato_ipc::session_surface::PIXEL_STREAM_PROFILE,
+            ),
+        ] {
+            let bundle = crate::native_surface_tests::fixture(pixel);
+            let bytes = ato_objects::encode_portable_application_bundle(&bundle).unwrap();
+            let (_, validated) = validate_bytes_all(&bytes).unwrap();
+            let job: ValidationJob = serde_json::from_value(serde_json::json!({
+                "job_id":"bvj_native", "claim_id":"claim", "claim_expires_at":"2026-10-24T00:00:00Z",
+                "bundle_id":"bnd_native", "transport_digest":bundle_sha256(&bytes),
+                "size_bytes":bytes.len(), "download_url":"/bundle"
+            })).unwrap();
+            let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
+            assert_eq!(report.surface.kind, Some(kind));
+            assert_eq!(report.surface.profile, Some(profile));
+            assert_eq!(report.surface.port, "app.native");
+            assert_eq!(report.http_observations.len(), 1);
+            assert_eq!(
+                report.http_observations[0].port.as_deref(),
+                Some("app.probe")
+            );
+            assert_eq!(report.routes[0].realization, "native_oci_container");
+            assert_eq!(report.root_contract_ref, bundle.index.root_contract_ref);
+        }
     }
 
     #[test]
