@@ -372,6 +372,9 @@ pub struct PortableBindingReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableRouteReport {
+    /// Rust-authored descriptor of this exact selected D; no access credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_surface: Option<ato_ipc::session_surface::SessionSurfaceDescriptor>,
     /// Adapter declaration of this exact D, never a launch authorization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_surface: Option<ato_formation::native_surface::NativeSurfaceAdapter>,
@@ -793,6 +796,7 @@ fn validated_routes(
                     .find(|port| port.protocol == HTTP_PROTOCOL)
                     .context("service group omitted its Surface Port")?;
                 return Ok(PortableRouteReport {
+                    session_surface: None,
                     native_surface: None,
                     native_ports: None,
                     derivation_ref: route.derivation_ref.to_string(),
@@ -857,6 +861,26 @@ fn validated_routes(
                 .find(|port| port.id == route.application.surfaces[0].port)
                 .context("route omitted port")?;
             Ok(PortableRouteReport {
+                session_surface: route
+                    .derivation
+                    .native_surface
+                    .as_ref()
+                    .map(|adapter| -> Result<_> {
+                        ato_runtime_attempt::native_launch::NativeLaunchDeclaration::new(
+                            route.derivation_ref.to_string(),
+                            adapter.clone(),
+                        )?
+                        .with_ports(route.derivation.ports.clone())?
+                        .session_surface_descriptor(
+                            &route
+                                .application
+                                .surfaces
+                                .first()
+                                .context("native route omitted authored Surface")?
+                                .id,
+                        )
+                    })
+                    .transpose()?,
                 native_surface: route.derivation.native_surface.clone(),
                 native_ports: route
                     .derivation
@@ -1575,6 +1599,7 @@ mod tests {
         assert!(wire["surface"].get("kind").is_none());
         assert!(wire["surface"].get("profile").is_none());
         assert!(wire["routes"][0].get("native_surface").is_none());
+        assert!(wire["routes"][0].get("session_surface").is_none());
     }
 
     #[test]
@@ -1624,6 +1649,21 @@ mod tests {
             .unwrap();
             assert_eq!(declaration.derivation_ref, report.routes[0].derivation_ref);
             assert_eq!(declaration.ports, report.routes[0].native_ports);
+            let descriptor = report.routes[0].session_surface.as_ref().unwrap();
+            declaration
+                .validate_selection(&report.routes[0].derivation_ref, descriptor)
+                .unwrap();
+            assert_eq!(descriptor.surface_id(), Some(report.surface.id.as_str()));
+            let wire = serde_json::to_value(descriptor).unwrap();
+            if pixel {
+                assert_eq!(
+                    wire["viewport"],
+                    serde_json::json!({"width":640,"height":480})
+                );
+            } else {
+                assert_eq!(wire["capabilities"]["cols"], 80);
+                assert_eq!(wire["capabilities"]["rows"], 24);
+            }
             assert_eq!(
                 Some(&declaration.adapter),
                 report.routes[0].native_surface.as_ref()
