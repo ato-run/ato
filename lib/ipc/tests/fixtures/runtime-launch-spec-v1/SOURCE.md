@@ -20,3 +20,12 @@ single-container OCI route that declares `oci.working_dir = /opt/app`, a
 workspace mount at `/.ato-workspace` and a state slot at the image VOLUME
 `/opt/app/server-data`. ato-api's `portableRouteRealization` reproduces it
 byte for byte; the Runner maps it onto the common OCI Adapter.
+
+`native-terminal-oci.json` extends the FastAPI OCI wire fixture with a nonroot
+numeric user and an opaque `{derivation_ref, adapter}` native declaration.
+Its Terminal catalog is strictly decoded and validated by runtime-attempt;
+IPC only checks the JSON object's byte bound. The canonical bytes (without the
+file's trailing newline) digest to
+`sha256:dd69e6a80b94332365f8290ababc295dd723dbf27c07aa817a7bf55f239688dc`.
+This is a cross-language wire fixture, not native execution admission: both
+the Runner and ordinary OCI conversion continue to refuse native launch.

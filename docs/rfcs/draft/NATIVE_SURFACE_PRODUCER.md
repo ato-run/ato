@@ -250,3 +250,29 @@ Frozen evidence does not attest that a workload remains alive. Runner wiring
 must still monitor its owned workload and preserve the existing stop/recovery
 and quarantine fences. This implementation does not advertise Native capability
 or bypass the portable runtime admission guard added in PR #1514.
+
+### Digested native launch declaration (execution remains unavailable)
+
+A v1 OCI Runtime Launch Spec may contain `realization.native_surface` as an
+opaque JSON object, bounded to 256 KiB by IPC. IPC does not depend on Formation
+or interpret Adapter semantics. Omission preserves existing canonical bytes.
+The runtime layer strictly decodes `{derivation_ref, adapter}` using the existing
+`NativeSurfaceAdapter` catalog, rejecting unknown fields at every catalog level.
+The validator report's explicit lowering projects its exact selected D ref and
+unchanged catalog into this field; it never derives or replaces K.
+
+The Connected Runner first verifies the complete spec digest and Run/Instance
+identity, then requires the native declaration's D ref to match the command's
+`portable_derivation_ref`. The separate session descriptor must match its kind,
+profile and dimensions. Pixel uses the existing viewport; Terminal uses explicit
+integer `cols` and `rows` entries in the existing scalar capabilities map, with
+no inferred defaults. A legacy native descriptor without a digested declaration
+cannot authorize execution. This comparison binds a validated control-plane
+projection; it does not independently recompute a D ref from absent D bytes.
+
+Even a correctly bound declaration returns `native_surface_unavailable` until
+Runner-owned native lifecycle integration exists. The ordinary common OCI
+conversion also refuses any native declaration, so another caller cannot ignore
+it and silently execute the Web OCI path. No native capability is advertised.
+API dispatch, native endpoint allocation and lease-owned sidecar attachment are
+separate follow-ups; this wire extension enables none of them by itself.
