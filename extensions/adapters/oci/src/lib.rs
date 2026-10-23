@@ -20,6 +20,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 
 pub mod command_control;
+mod terminal;
+pub use terminal::OciTerminal;
 mod ownership;
 mod principal;
 mod stop;
@@ -339,6 +341,7 @@ pub struct DockerOciAdapter {
     docker: DockerClient,
     spec: OciSpec,
     offline_image: Option<OfflineImage>,
+    attached_terminal: bool,
 }
 
 struct OfflineImage {
@@ -347,6 +350,25 @@ struct OfflineImage {
 }
 
 impl DockerOciAdapter {
+    /// Host-owned PTY for the declared entrypoint; no helper enters the image.
+    /// This deliberately supports no network endpoint or root execution.
+    pub fn with_attached_terminal(mut self) -> Result<Self> {
+        ensure!(
+            cfg!(target_os = "linux"),
+            "native OCI terminal requires a Linux Runner"
+        );
+        ensure!(
+            self.spec.user.is_some(),
+            "native terminal requires explicit nonroot numeric user"
+        );
+        ensure!(
+            self.spec.endpoints.is_empty(),
+            "native terminal cannot silently publish OCI endpoints"
+        );
+        self.attached_terminal = true;
+        Ok(self)
+    }
+
     pub fn with_control(mut self, control: command_control::CommandControl) -> Self {
         self.docker.control = Some(control);
         self
@@ -376,6 +398,7 @@ impl DockerOciAdapter {
             docker,
             spec,
             offline_image: None,
+            attached_terminal: false,
         })
     }
 
@@ -495,7 +518,7 @@ impl DockerOciAdapter {
             &self.spec.id,
             &self.spec.labels,
             "ator",
-            self.docker.owner.is_some() || !direct_egress_enabled(),
+            self.attached_terminal || self.docker.owner.is_some() || !direct_egress_enabled(),
         )?;
         match self.spawn_in_network(workspace, runtime_root, &network, None) {
             Ok(mut handle) => {
@@ -588,7 +611,7 @@ impl DockerOciAdapter {
             .collect::<String>();
         fs::write(&env_file, environment).context("write OCI environment file")?;
 
-        let argv = docker_run_arguments(
+        let mut argv = docker_run_arguments(
             &self.spec,
             workspace,
             &env_file,
@@ -597,6 +620,13 @@ impl DockerOciAdapter {
             alias,
             &image_for_run,
         )?;
+        if self.attached_terminal {
+            // Attach before starting so even the first output is captured.
+            // Every sandbox/resource/ownership argument remains unchanged.
+            argv[0] = "create".to_owned();
+            argv.remove(1); // --detach applies only to run.
+            argv.splice(1..1, ["--interactive".to_owned(), "--tty".to_owned()]);
+        }
         // Persist the chosen name before Docker can create it. A worker crash
         // must not erase the identity needed to inspect an external workload.
         fs::write(
@@ -654,11 +684,40 @@ impl DockerOciAdapter {
                 anyhow::anyhow!("Docker returned no container id"),
             ));
         };
-        let (container_address, execution_principal) =
-            match inspect_container_address(&self.docker, &container_id) {
-                Ok(observation) => observation,
+        let terminal = if self.attached_terminal {
+            match OciTerminal::start(self.docker.clone(), &container_id) {
+                Ok(terminal) => Some(terminal),
                 Err(error) => return Err(failed_launch(&self.docker, &container_id, error)),
-            };
+            }
+        } else {
+            None
+        };
+        let inspect = || inspect_container_address(&self.docker, &container_id);
+        let observation = if terminal.is_some() {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match inspect() {
+                    Ok(value) => break Ok(value),
+                    Err(error)
+                        if std::time::Instant::now() >= deadline
+                            || self
+                                .docker
+                                .control
+                                .as_ref()
+                                .is_some_and(|control| control.remaining().is_err()) =>
+                    {
+                        break Err(error);
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(25)),
+                }
+            }
+        } else {
+            inspect()
+        };
+        let (container_address, execution_principal) = match observation {
+            Ok(observation) => observation,
+            Err(error) => return Err(failed_launch(&self.docker, &container_id, error)),
+        };
         let mut forwarders = Vec::with_capacity(self.spec.endpoints.len());
         for endpoint in &self.spec.endpoints {
             match PortForwarder::start(endpoint.host_port, container_address, endpoint.guest_port) {
@@ -685,6 +744,7 @@ impl DockerOciAdapter {
             endpoints: self.spec.endpoints.clone(),
             forwarders,
             outcome: None,
+            terminal: terminal.map(Box::new),
         })
     }
 
@@ -1173,9 +1233,15 @@ pub struct OciHandle {
     forwarders: Vec<PortForwarder>,
     /// Set once a stop has been attempted, so drop never stops twice.
     outcome: Option<StopOutcome>,
+    terminal: Option<Box<OciTerminal>>,
 }
 
 impl OciHandle {
+    /// Transfer the trusted attach client to the Runner-owned producer.
+    pub fn take_terminal(&mut self) -> Option<OciTerminal> {
+        self.terminal.take().map(|terminal| *terminal)
+    }
+
     pub fn execution_principal(&self) -> Option<&OciExecutionPrincipal> {
         self.execution_principal.as_deref()
     }
@@ -1213,8 +1279,18 @@ impl OciHandle {
     }
 
     pub fn exit_code(&self) -> Result<Option<i32>> {
-        let output = self
-            .docker
+        self.exit_code_with_client(&self.docker)
+    }
+
+    /// A native lifecycle must observe exit without blocking owner cancellation.
+    pub fn exit_code_bounded(&self, budget: Duration) -> Result<Option<i32>> {
+        let mut docker = self.docker.clone();
+        docker.control = Some(command_control::CommandControl::cleanup(budget));
+        self.exit_code_with_client(&docker)
+    }
+
+    fn exit_code_with_client(&self, docker: &DockerClient) -> Result<Option<i32>> {
+        let output = docker
             .command()
             .args([
                 "inspect",
@@ -1274,6 +1350,7 @@ impl OciHandle {
         } else if let Some(network) = self.network.take() {
             network.forget();
         }
+        self.terminal.take();
         self.outcome = Some(outcome.clone());
         outcome
     }

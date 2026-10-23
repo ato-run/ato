@@ -311,3 +311,50 @@ Missing metadata does not authorize a native launch. In multi-D bundles this
 field belongs to each route; the top-level report Surface cannot substitute
 metadata from a different D. Producing a descriptor advertises no Runner
 capability and does not remove any Native admission guard.
+
+### Owned OCI Terminal execution primitive (dispatch still closed)
+
+`runtime_launch::native::start_terminal` executes a validated host-bound Terminal
+D using one existing lease owner and OCI resource handle. It validates the
+selected native declaration, exact D ref and descriptor, omitted guest TCP
+facts, scope/key/Origin, bounded lifetime and numeric nonroot OCI constraints
+before creating an external workload. Legacy declarations without Port facts,
+real guest TCP promises, OCI endpoints, root users and unsupported platforms are
+refused. The existing ordinary OCI conversion continues to reject Native input.
+
+The existing Docker Adapter explicitly creates the declared entrypoint with a
+main-process PTY, then attaches before starting it. It needs no helper, shell,
+Agent or VNC binary in the application image. All existing readonly workspace,
+mount, resource, owner label, unprivileged user and capability restrictions
+remain. This Native profile always uses an internal Docker network; no Docker
+socket or owner credential enters the workload. The trusted host Docker CLI
+performs only a fixed owned-container resize request through its configured
+`system dial-stdio` transport. User input cannot select a daemon URL or method.
+
+A Runner-owned private 0600 Unix socket implements the existing Terminal framing.
+Output and disconnected buffering are bounded; input/resize are the existing
+validated frames. Reader tasks retain partial frames across output arrival.
+A Linux directory fd keeps long owned paths usable without chdir or exposing
+physical paths in D/K. Reconnect attaches the same PTY. The common Native probe
+performs the selected operations once and freezes measured output; its private
+HTTP listener and scoped Surface gateway start only after successful capture.
+Their readiness never supplies a Contract verdict or public Run readiness.
+
+One owner actor holds workload, attach client, producer, observation listener,
+Surface gateway and directory handle. Owner EOF, handle drop/stop, startup
+failure, bounded workload-status failure, producer failure, idle limit, maximum
+lifetime and workload exit tear them down. Creation/capture use the same bounded
+startup/lifetime deadline; cleanup has a separate existing stop budget. Failed
+or unconfirmed cleanup returns the existing physical StopOutcome. The caller
+must preserve existing recovery journals/writer quarantine, never release a
+slot or commit state from unconfirmed termination. Container/network recovery
+uses the existing exact lease labels and StopBudget rather than a second model.
+
+This primitive does not change connected Runner dispatch, native runtime
+admission, capabilities or deployment configuration. Next integration must use
+the existing authenticated lease/control/heartbeat, pass its per-Runner scoped
+assertion key through runtime memory, map the owned private observation address
+to the exact declared logical Port and existing HTTP K authority, and publish
+only after that authority accepts the Run. Surface readiness alone remains
+insufficient. Pixel requires an equivalent explicitly provisioned trusted
+producer; arbitrary OCI images are not assumed to contain Xvnc or an Agent.
