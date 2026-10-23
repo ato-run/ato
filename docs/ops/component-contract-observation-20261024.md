@@ -25,9 +25,14 @@ use is involved in these tests.
 Linux isolated checkout combined this PR with the independent #1505 source-OCI
 compiler correction. Portable library 105/105 PASS. The connected worker library
 initially exhausted the host's 1024-descriptor shell limit under default test
-parallelism. With a process-local limit 8192 and two test threads: 145 pass,
-3 ignored and 3 session fixture process-start failures remain
-(`startup_process_exited: Some(101)`); no claim of a fully passing Runner suite.
+parallelism. Three subsequent session fixture failures were test-environment
+problems: the library test executable was used as the worker shim, and a long
+temporary path exceeded the Unix socket path limit. With a process-local limit
+8192, two test threads, `ATO_TEST_WORKER_BIN` pointing to the actual connected
+worker binary and a fresh short temporary root under the workspace `.tmp`, the
+integrated Runner suite passed: **148 pass, 0 fail, 3 existing ignored** in 19.20s.
+The tested integration SHA is `2d31db6bfd6502a5bbf7069359a0dce61e789d7a`;
+no source skip or implementation change was needed to resolve these failures.
 The new private-observation real-socket test passes on both hosts.
 
 Actual two-container execution used an already-cached pinned Python image,
