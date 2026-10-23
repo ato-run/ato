@@ -255,10 +255,11 @@ impl Workload for PtyChildWorkload {
     }
 
     fn stop(&mut self) -> io::Result<bool> {
-        let Some(generation) = self.generation.take() else {
+        let Some(generation) = self.generation else {
             return Ok(false);
         };
         let Some(pgid) = self.broker.running_pgid(generation) else {
+            self.generation = None;
             return Ok(false);
         };
         unsafe {
@@ -273,9 +274,17 @@ impl Workload for PtyChildWorkload {
                 libc::killpg(pgid, libc::SIGKILL);
             }
         }
+        let kill_deadline = Instant::now() + STOP_GRACE;
         while self.broker.running_pgid(generation).is_some() {
+            if Instant::now() >= kill_deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "PTY workload stop is unconfirmed",
+                ));
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
+        self.generation = None;
         Ok(true)
     }
 
@@ -288,6 +297,12 @@ impl Workload for PtyChildWorkload {
             io::ErrorKind::InvalidInput,
             "run_once cannot use terminal PTY mode",
         ))
+    }
+}
+
+impl Drop for PtyChildWorkload {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 

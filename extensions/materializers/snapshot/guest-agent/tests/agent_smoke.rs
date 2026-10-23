@@ -65,3 +65,99 @@ fn agent_binary_delivers_to_tmpfs_reports_ready_and_scrubs_on_stop() {
         "agent stdout leaked the secret: {stdout}"
     );
 }
+
+/// Exercise owner EOF through the actual Agent binary, with no Stop RPC.
+#[cfg(target_os = "linux")]
+#[test]
+fn private_terminal_owner_eof_closes_connection_socket_and_workload() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = root.join("term.sock");
+    let config = root.join("supervisor.json");
+    std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "stdio_mode":"pty", "cwd":root,
+        "cmd":["/bin/sh","-c","echo $$ > child.pid; while IFS= read -r line; do printf '%s\\n' \"$line\"; done"]
+    })).unwrap()).unwrap();
+    struct AgentOwner {
+        child: std::process::Child,
+        pid_file: std::path::PathBuf,
+    }
+    impl Drop for AgentOwner {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Ok(pid) = std::fs::read_to_string(&self.pid_file)
+                .unwrap_or_default()
+                .trim()
+                .parse::<i32>()
+                && pid > 1
+            {
+                unsafe {
+                    libc::killpg(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let mut agent = AgentOwner {
+        child: Command::new(env!("CARGO_BIN_EXE_guest-agent"))
+            .env("ATO_GUEST_AGENT_MODE", "stdio")
+            .env("ATO_SUPERVISOR_CONFIG", &config)
+            .env("ATO_BINDINGS_ROOT", root.join("bindings"))
+            .env("ATO_GUEST_AGENT_TERMINAL_UNIX_SOCKET", &socket)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+        pid_file: root.join("child.pid"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(socket.exists() && agent.pid_file.exists()) {
+        assert!(Instant::now() < deadline, "private Terminal did not start");
+        assert!(
+            agent.child.try_wait().unwrap().is_none(),
+            "Agent exited before ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = std::fs::read_to_string(&agent.pid_file)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    let mut connection = UnixStream::connect(&socket).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    connection.write_all(b"CONNECT 1026\n").unwrap();
+    let mut response = [0; 8];
+    connection.read_exact(&mut response).unwrap();
+    assert_eq!(&response, b"OK 1026\n");
+    drop(agent.child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if let Some(status) = agent.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "owner EOF did not stop Agent");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!socket.exists());
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "owned workload survived EOF"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    // Prevent cleanup from signalling a PID after successful reap/verification.
+    std::fs::remove_file(&agent.pid_file).unwrap();
+}
