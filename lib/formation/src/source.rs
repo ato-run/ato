@@ -201,6 +201,7 @@ pub struct TreeVerifiedArchive {
     resolver_contract: &'static str,
     /// The content bytes of the tree's regular files, as measured.
     file_bytes: u64,
+    file_count: usize,
 }
 
 impl DownloadedArchive {
@@ -254,6 +255,7 @@ impl DigestVerifiedArchive {
             tree_digest: measured.digest,
             resolver_contract: measured.contract,
             file_bytes: measured.file_bytes,
+            file_count: measured.file_count,
         })
     }
 }
@@ -281,6 +283,12 @@ impl TreeVerifiedArchive {
         self.file_bytes
     }
 
+    /// Regular files plus contained symlinks, excluding directories and tar
+    /// metadata. This is the same counter that enforces `max_files`.
+    pub fn expanded_file_count(&self) -> usize {
+        self.file_count
+    }
+
     /// The closure identity: the tree, plus the rules that measured it.
     pub fn closure_ref(&self, subdirectory: &str) -> Result<SourceClosureRef, SourceError> {
         SourceClosureRef::derive(&self.tree_digest, subdirectory, self.resolver_contract)
@@ -304,6 +312,7 @@ impl TreeVerifiedArchive {
 pub struct FileVerifiedArchive {
     file: std::fs::File,
     measured: Measured,
+    archive_digest: String,
 }
 
 impl FileVerifiedArchive {
@@ -365,10 +374,22 @@ impl FileVerifiedArchive {
             },
             limits,
         )?;
-        Ok(Self { file, measured })
+        Ok(Self {
+            file,
+            measured,
+            archive_digest: actual,
+        })
+    }
+    pub fn archive_digest(&self) -> &str {
+        &self.archive_digest
     }
     pub fn expanded_bytes(&self) -> u64 {
         self.measured.file_bytes
+    }
+    /// The verifier's existing `max_files` counter; never inferred from tar
+    /// headers or re-counted from a subsequently mutable materialized tree.
+    pub fn expanded_file_count(&self) -> usize {
+        self.measured.file_count
     }
     pub fn tree_digest(&self) -> &str {
         &self.measured.digest
@@ -879,6 +900,7 @@ struct Measured {
     digest: String,
     contract: &'static str,
     file_bytes: u64,
+    file_count: usize,
 }
 
 fn measure(archive: &[u8], limits: SourceLimits) -> Result<Measured, SourceError> {
@@ -983,6 +1005,7 @@ fn measure_readers<R: Read>(
         digest: format!("sha256:{:x}", hasher.finalize()),
         contract,
         file_bytes: total,
+        file_count: count,
     })
 }
 
@@ -1953,6 +1976,69 @@ mod tests {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(bytes).unwrap();
         FileVerifiedArchive::verify(file, digest, size, limits)
+    }
+
+    #[test]
+    fn verified_metrics_count_safe_entries_once_and_regular_contents_across_encodings() {
+        use std::io::Write;
+        let bytes = tree(&[
+            E::Dir("repository/site"),
+            E::File("repository/README", b"readme"),
+            E::File("repository/site/index.html", b"hello"),
+            E::File("repository/site/empty", b""),
+            E::Link("repository/site/link", "index.html"),
+        ]);
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&bytes).unwrap();
+        for encoded in [
+            bytes.clone(),
+            gzip.finish().unwrap(),
+            zstd::stream::encode_all(bytes.as_slice(), 1).unwrap(),
+        ] {
+            let digest = content_ref(&encoded);
+            let memory = DownloadedArchive::new(encoded.clone())
+                .verify_archive_digest(&digest)
+                .unwrap()
+                .verify_tree_digest(None, LIMITS)
+                .unwrap();
+            let mut file = file_archive(&encoded, encoded.len() as u64, &digest, LIMITS).unwrap();
+            assert_eq!(file.archive_digest(), digest);
+            assert_eq!(memory.expanded_file_count(), 4);
+            assert_eq!(file.expanded_file_count(), 4);
+            assert_eq!(file.expanded_bytes(), 11);
+            assert_eq!(memory.expanded_bytes(), 11);
+            assert_eq!(file.tree_digest(), memory.tree_digest());
+            assert_eq!(file.resolver_contract(), RESOLVER_CONTRACT_V2);
+            assert_eq!(
+                file.closure_ref("site").unwrap(),
+                memory.closure_ref("site").unwrap()
+            );
+            let selected = tempfile::tempdir().unwrap();
+            file.materialize(selected.path(), "site", LIMITS).unwrap();
+            // Full archive evidence is unchanged by selecting a smaller app.
+            assert_eq!((file.expanded_file_count(), file.expanded_bytes()), (4, 11));
+        }
+        assert!(matches!(
+            file_archive(
+                &bytes,
+                bytes.len() as u64,
+                &content_ref(b"different"),
+                LIMITS
+            ),
+            Err(SourceError::ArchiveDigestMismatch { .. })
+        ));
+        assert!(matches!(
+            file_archive(
+                &bytes,
+                bytes.len() as u64,
+                &content_ref(&bytes),
+                SourceLimits {
+                    max_files: 3,
+                    ..LIMITS
+                }
+            ),
+            Err(SourceError::LimitExceeded { limit: "max_files" })
+        ));
     }
 
     #[test]
