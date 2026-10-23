@@ -38,3 +38,11 @@ worktree `.tmp` as `TMPDIR`:
 The first HTTP fixture run exposed macOS accepted sockets retaining nonblocking
 mode; the fixture explicitly sets blocking mode before its bounded reads. The
 complete relevant regression command was rerun successfully after that fix.
+
+
+Follow-up: the one-shot command accepts optional `--job-id`, forwarded to the
+existing dedicated claim filter, so acceptance cannot take unrelated queued
+source-only work. Invalid IDs and an unrelated returned assignment fail closed;
+no flag preserves dedicated queue polling. The focused source-archive suite
+passes all 11 tests (one additional test over the 944-test run), and Worker
+all-target Clippy was rerun after this additive filter.

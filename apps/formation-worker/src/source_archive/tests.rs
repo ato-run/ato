@@ -553,3 +553,49 @@ fn application_executor_refuses_source_output_before_fetch_or_ledger_reservation
     assert!(!root.path().join("attempt-records").exists());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn exact_job_claim_is_filtered_and_rejects_an_unrelated_assignment() {
+    for mismatch in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let expected = claim("");
+        let requested = if mismatch {
+            "fjob_other".to_owned()
+        } else {
+            expected.job_id.clone()
+        };
+        let query = requested.clone();
+        let task = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (_, path, _, _) = request(&mut stream).unwrap();
+            assert_eq!(
+                path,
+                format!(
+                    "/v1/internal/formation/source-archives/claim?worker_id=source_worker&job_id={query}"
+                )
+            );
+            let payload = json!({"job_id":expected.job_id,"attempt_id":expected.attempt_id,"attempt_fence":expected.attempt_fence,"job_digest":expected.job_digest,"job":expected.job});
+            respond(
+                &mut stream,
+                "200 OK",
+                &serde_json::to_vec(&payload).unwrap(),
+            );
+        });
+        let api = SourceArchiveApi::new(url, "runner-token-canary".into()).unwrap();
+        let result = api.claim("source_worker", &requested);
+        if mismatch {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().unwrap().job_id, requested);
+        }
+        task.join().unwrap();
+    }
+    let api = SourceArchiveApi::new("http://127.0.0.1:1".into(), "unused".into()).unwrap();
+    assert!(
+        api.claim("worker", "../other")
+            .unwrap_err()
+            .to_string()
+            .contains("source_archive_job_id_invalid")
+    );
+}
