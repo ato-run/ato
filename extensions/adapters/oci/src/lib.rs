@@ -537,6 +537,40 @@ impl DockerOciAdapter {
         }
     }
 
+    fn load_offline_if_missing(&self, runtime_root: &Path) -> Result<()> {
+        // The caller verified the complete archive graph before construction.
+        // Reuse only an exact already-loaded config/platform, never a tag or
+        // unverified registry fallback. Large trusted helpers need not be
+        // reloaded on every lease inside its bounded startup budget.
+        if let Some(offline) = &self.offline_image
+            && self
+                .inspect_loaded_image(&offline.config_reference)
+                .is_err()
+        {
+            let path = runtime_root.join("verified-oci-image.tar");
+            fs::write(&path, &offline.archive).context("write verified OCI archive")?;
+            run_checked(
+                &self.docker,
+                [
+                    "image",
+                    "load",
+                    "--platform",
+                    self.spec.platform.as_str(),
+                    "--input",
+                    path.to_str().context("OCI archive path is not UTF-8")?,
+                ],
+                "load verified offline OCI image",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A trusted auxiliary producer must not inherit the legacy direct-egress
+    /// escape hatch. Use this adapter's owner client and command deadline.
+    pub fn create_internal_network(&self, label: &str) -> Result<OciNetwork> {
+        OciNetwork::create_with(&self.docker, label, &self.spec.labels, "ator", true)
+    }
+
     /// Launch into a network the caller owns, optionally under a network
     /// alias sibling containers resolve by DNS. The handle does NOT own the
     /// network: an [`OciServiceGroup`] removes it after its last service.
@@ -558,22 +592,7 @@ impl DockerOciAdapter {
             );
         }
         fs::create_dir_all(runtime_root).context("create OCI runtime directory")?;
-        if let Some(offline) = &self.offline_image {
-            let path = runtime_root.join("verified-oci-image.tar");
-            fs::write(&path, &offline.archive).context("write verified OCI archive")?;
-            run_checked(
-                &self.docker,
-                [
-                    "image",
-                    "load",
-                    "--platform",
-                    self.spec.platform.as_str(),
-                    "--input",
-                    path.to_str().context("OCI archive path is not UTF-8")?,
-                ],
-                "load verified offline OCI image",
-            )?;
-        }
+        self.load_offline_if_missing(runtime_root)?;
         let (_, image_for_run) = self.admit_image()?;
         // Docker silently creates an anonymous, writable volume for every
         // image VOLUME no mount covers. That would be state outside the
@@ -2468,6 +2487,58 @@ mod tests {
         std::fs::write(&fake, script).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         (dir, DockerClient::ambient(fake))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_cache_requires_exact_verified_config_and_platform_and_loads_only_on_miss() {
+        for mode in ["hit", "missing", "wrong-config", "wrong-platform"] {
+            let config = format!("sha256:{}", "ab".repeat(32));
+            let script = format!(
+                r##"#!/bin/sh
+base=$(dirname "$0")
+echo "$*" >> "$base/calls"
+case "$1 $2" in
+  'version --format') echo '29.0.0';;
+  'image inspect')
+    if [ -f "$base/loaded" ] || [ '{mode}' = hit ]; then
+      echo '{config}|linux/amd64'
+    elif [ '{mode}' = wrong-config ]; then echo 'sha256:wrong|linux/amd64'
+    elif [ '{mode}' = wrong-platform ]; then echo '{config}|linux/arm64'
+    else exit 1; fi;;
+  'image load') touch "$base/loaded";;
+  *) exit 91;;
+esac
+"##
+            );
+            let (dir, client) = fake_docker(&script);
+            let mut value = spec();
+            value.endpoints.clear();
+            let adapter = DockerOciAdapter::new_offline_at(
+                value,
+                b"already-verified-archive".to_vec(),
+                config.clone(),
+                client.executable.as_ref().clone(),
+            )
+            .unwrap();
+            adapter.load_offline_if_missing(dir.path()).unwrap();
+            let (_, selected) = adapter.admit_image().unwrap();
+            assert_eq!(selected, config);
+            let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
+            assert_eq!(
+                calls
+                    .lines()
+                    .filter(|line| line.starts_with("image load "))
+                    .count(),
+                usize::from(mode != "hit"),
+                "{mode}: {calls}"
+            );
+            assert!(!calls.contains("pull"));
+            assert_eq!(
+                dir.path().join("verified-oci-image.tar").exists(),
+                mode != "hit"
+            );
+        }
     }
 
     #[cfg(unix)]

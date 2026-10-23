@@ -36,6 +36,7 @@ ato-materializer-api = { path = "../../extensions/materializers/api", version = 
 ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
 ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-portable-application = { path = "../portable-application" }
 ato-native-surface-gateway = { path = "../native-surface-gateway" }
 netd = { path = "../../services/netd" }
 tokio = { version = "1", features = ["full"] }
