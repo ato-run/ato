@@ -142,6 +142,7 @@ fn runner_capabilities(
         }
         if network_controls {
             capabilities.push("network=ato.tcp-egress@1");
+            capabilities.push(runtime_launch::managed_embedding_relay::RUNTIME_FEATURE);
         }
         if network_controls && fixed_tcp {
             capabilities.push("network=ato.fixed-tcp@1");
