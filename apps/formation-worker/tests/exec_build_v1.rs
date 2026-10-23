@@ -73,6 +73,20 @@ fn scratch() -> Scratch {
 }
 
 fn build(at: &Scratch, plan: &EffectiveBuildPlanV1, network: NetworkPolicy) -> anyhow::Result<()> {
+    build_with_shim(
+        at,
+        plan,
+        network,
+        Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+    )
+}
+
+fn build_with_shim(
+    at: &Scratch,
+    plan: &EffectiveBuildPlanV1,
+    network: NetworkPolicy,
+    shim: &Path,
+) -> anyhow::Result<()> {
     run_build(
         plan,
         BuildAttempt {
@@ -84,7 +98,7 @@ fn build(at: &Scratch, plan: &EffectiveBuildPlanV1, network: NetworkPolicy) -> a
             source_root: &at.source,
             workspace_root: &at.workspace,
             cache_root: None,
-            shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+            shim,
             policy_host_path: &at.policy,
             network,
             broker_socket: None,
@@ -108,6 +122,97 @@ fn contained() -> bool {
 }
 
 // ── env ─────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+#[test]
+fn controller_credentials_are_absent_from_every_sandbox_process_environment() {
+    const CHILD: &str = "ATO_ENV_BOUNDARY_TEST_CHILD";
+    const CANARY: &str = "public-formation-environment-test-canary";
+    if std::env::var_os(CHILD).is_none() {
+        if !contained() {
+            return;
+        }
+        let at = scratch();
+        let home = at._dir.path().join("controller-home");
+        let credentials = home.join(".ato-staging/runner/credentials.json");
+        std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+        std::fs::write(&credentials, CANARY).unwrap();
+        // Isolate the canaries in a separate test process: no process-global
+        // environment mutation races with other tests, and no real key is used.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller_credentials_are_absent_from_every_sandbox_process_environment",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("TMPDIR", at._dir.path())
+            .env(CHILD, "1")
+            .env("ATO_FORMATION_TOKEN", CANARY)
+            .env("ATO_RUNNER_TOKEN", CANARY)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert_eq!(std::env::var("ATO_FORMATION_TOKEN").unwrap(), CANARY);
+    let at = scratch();
+    let credentials = PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join(".ato-staging/runner/credentials.json");
+    assert!(credentials.is_file());
+    // Model the documented namespace-only fallback on kernels without
+    // Landlock. On a Landlock host, ptrace-domain checks additionally protect
+    // /proc/1/environ and would otherwise hide this outer-spawn regression.
+    let namespace_only = at._dir.path().join("namespace-only.sh");
+    std::fs::write(
+        &namespace_only,
+        "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&namespace_only, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = format!(
+        r#"/usr/bin/python3 - <<'PY'
+import glob, os
+names = (b'ATO_FORMATION_TOKEN=', b'ATO_RUNNER_TOKEN=')
+assert not any(k in os.environ for k in ('ATO_FORMATION_TOKEN', 'ATO_RUNNER_TOKEN'))
+for path in glob.glob('/proc/[0-9]*/environ'):
+    try:
+        entries = open(path, 'rb').read().split(b'\0')
+    except (FileNotFoundError, PermissionError):
+        continue
+    assert not any(e.startswith(names) for e in entries), 'controller environment visible: ' + path
+assert not os.path.exists({:?}), 'controller credential file visible'
+open('/app/proof.txt', 'w').write('isolated')
+PY"#,
+        credentials.to_str().unwrap()
+    );
+    for shim in [
+        Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+        &namespace_only,
+    ] {
+        for network in [NetworkPolicy::Denied, NetworkPolicy::DependencyResolution] {
+            let mut probe = step("malicious-env-probe", &script);
+            probe.needs_network = network == NetworkPolicy::DependencyResolution;
+            build_with_shim(&at, &plan_of(vec![probe]), network, shim)
+                .expect("build is isolated from controller credentials");
+            assert_eq!(read(&at, "proof.txt"), "isolated");
+            let artifact = ato_formation_worker::pack::pack_tree(&at.workspace).unwrap();
+            assert!(
+                !artifact
+                    .windows(CANARY.len())
+                    .any(|w| w == CANARY.as_bytes())
+            );
+        }
+    }
+}
 
 #[test]
 fn authored_env_is_given_to_the_workload_and_never_to_the_sandbox() {

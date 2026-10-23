@@ -106,6 +106,98 @@ pub fn prepare_proposal_submission(
     Ok(submission)
 }
 
+/// Explicit source-only intake handoff. The existing requester must still
+/// authorize this exact request at `/satisfy`; this is never a normal job's
+/// implicit permission to generate K, select a D, or execute an application.
+/// Original verified transport bytes are copied finitely, never re-tarred.
+pub fn prepare_pinned_proposal_submission(
+    verified: FileVerifiedArchive,
+    request: SatisfyRequest,
+    work_root: &Path,
+) -> Result<Submission> {
+    request.budget.validate()?;
+    anyhow::ensure!(
+        request.protocol == PROTOCOL,
+        "approved_search_protocol_unsupported"
+    );
+    anyhow::ensure!(
+        request.authorized_derivations.is_empty(),
+        "approved_search_known_derivations_unsupported"
+    );
+    let frozen = frozen_request(&request)?;
+    let expected_frozen = frozen.canonical_bytes()?;
+    let closure = verified.closure_ref("")?;
+    anyhow::ensure!(
+        request.source.archive_base64.is_none()
+            && request.source.content_ref.as_deref() == Some(verified.archive_digest())
+            && request.source.archive_digest == verified.archive_digest()
+            && request.source.archive_bytes == Some(verified.archive_bytes())
+            && request.source.closure_ref == closure.as_str()
+            && request
+                .initial_source
+                .as_ref()
+                .is_some_and(|source| source.archive_digest == verified.archive_digest()
+                    && source.closure_ref == closure.as_str()),
+        "approved_search_source_mismatch"
+    );
+    anyhow::ensure!(
+        verified.archive_bytes() <= request.budget.max_transfer_bytes
+            && verified.expanded_bytes() <= request.budget.max_expanded_bytes,
+        "approved_search_source_budget_exhausted"
+    );
+    let authorization = request
+        .policy
+        .proposal
+        .clone()
+        .context("approved_search_proposal_not_authorized")?;
+    std::fs::create_dir_all(work_root)?;
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(request.budget.deadline_seconds)
+            .min(SOURCE_TRANSFER_TIMEOUT);
+    let mut archive =
+        crate::job::source_fetch::temporary_file(work_root, verified.archive_bytes(), deadline)?;
+    let digest = crate::job::source_fetch::copy_bounded(
+        verified.archive_reader()?,
+        &mut archive,
+        verified.archive_bytes(),
+        deadline,
+    )?;
+    anyhow::ensure!(
+        digest == request.source.archive_digest
+            && archive.metadata()?.len() == verified.archive_bytes(),
+        "approved_search_source_copy_mismatch"
+    );
+    let (archive, _) = crate::job::source_fetch::rewind(archive, digest)?;
+    let inventory = local::freeze_verified_file_with_guard(
+        verified,
+        &std::path::absolute(work_root)?,
+        SourceLimits::default(),
+        &|| std::time::Instant::now() < deadline,
+    )?;
+    let mut policy = request.policy.clone();
+    policy.proposal = None;
+    let mut submission = prepare_frozen_submission(
+        archive,
+        inventory,
+        &[],
+        request.browser_contract.clone(),
+        request.runtime_constraint.clone(),
+        policy,
+        request.budget.clone(),
+        &request.search_id,
+        Some(request.base_contract.clone()),
+        false,
+    )?;
+    submission.request.bindings = request.bindings.clone();
+    submission.enable_candidate_producer(authorization)?;
+    anyhow::ensure!(
+        frozen_request(&submission.request)?.canonical_bytes()? == expected_frozen
+            && serde_jcs::to_vec(&submission.request)? == serde_jcs::to_vec(&request)?,
+        "approved_search_request_changed"
+    );
+    Ok(submission)
+}
+
 /// Product entry for frozen K with optional reusable routes. Source and all
 /// routes are checked by the common preparation path; no fallback K is minted.
 #[allow(clippy::too_many_arguments)]
@@ -310,7 +402,7 @@ fn public_log_tail_limit(text: &str, limit: usize) -> String {
     text[start..].to_owned()
 }
 
-pub(super) fn frozen_request(request: &SatisfyRequest) -> Result<FrozenSearchV1> {
+pub(crate) fn frozen_request(request: &SatisfyRequest) -> Result<FrozenSearchV1> {
     let mut budget = serde_json::to_value(&request.budget)?;
     let mode = budget
         .as_object_mut()
