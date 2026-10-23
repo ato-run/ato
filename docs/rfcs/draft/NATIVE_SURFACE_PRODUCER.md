@@ -293,3 +293,21 @@ TCP ports in this profile. Ordinary Web/process/OCI validation is unchanged.
 A backend unable to honor a declared guest TCP listener must refuse that D,
 not lower it into a different physical promise. Port facts change D and the
 launch digest, never K. No provider or runtime address enters Capsule identity.
+
+### Per-route session descriptor projection
+
+An optional `PortableRouteReport.session_surface` reuses the existing IPC
+`SessionSurfaceDescriptor`. Runtime-attempt projects it from that route's exact
+selected native D and the Application's authored Surface id. Terminal uses its
+declared `cols`/`rows` capability integers; Pixel uses its declared viewport.
+The established profile/transport and fixed viewer capability metadata are the
+same v1 contract used by the Coordinator. The descriptor contains no URL, key,
+lease identity or publication grant. Web reports omit it for compatibility.
+
+The Coordinator may validate and forward this existing DTO, without reparsing
+the opaque native catalog or inferring dimensions. The Runner still compares
+kind/profile/dimensions against the catalog in the verified launch digest.
+Missing metadata does not authorize a native launch. In multi-D bundles this
+field belongs to each route; the top-level report Surface cannot substitute
+metadata from a different D. Producing a descriptor advertises no Runner
+capability and does not remove any Native admission guard.
