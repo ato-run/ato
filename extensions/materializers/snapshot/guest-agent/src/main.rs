@@ -423,6 +423,31 @@ fn main() -> std::io::Result<()> {
     // now; every other config no-ops here and stays message-driven.
     runtime.drive_initial_start();
 
+    // Explicit private non-VM transport. No listener is inferred from PTY mode.
+    #[cfg(target_os = "linux")]
+    let _terminal_unix = match std::env::var_os("ATO_GUEST_AGENT_TERMINAL_UNIX_SOCKET") {
+        Some(path) => {
+            if !terminal_enabled || mode != "stdio" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "private Unix terminal requires stdio control and a PTY workload",
+                ));
+            }
+            Some(guest_agent::terminal_unix::start_terminal_unix(
+                std::path::Path::new(&path),
+                std::sync::Arc::clone(&terminal_state),
+            )?)
+        }
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    if std::env::var_os("ATO_GUEST_AGENT_TERMINAL_UNIX_SOCKET").is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "private Unix terminal requires Linux isolation",
+        ));
+    }
+
     match mode.as_str() {
         "stdio" => {
             let stdin = std::io::stdin();
