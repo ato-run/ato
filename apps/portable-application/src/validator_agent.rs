@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ato_formation::authoring::{ClientAddressTransport, HTTP_PROTOCOL, StateAccess};
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, VerificationExecutionEvidence,
@@ -400,6 +400,37 @@ pub struct PortableRouteReport {
     /// manifests. The Coordinator reads what a Run must be granted from here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_sets: Vec<PortableModelSetReport>,
+}
+
+impl PortableRouteReport {
+    /// Project only this validator-selected D into an OCI launch. The physical
+    /// declaration is digested by IPC; it does not change K or authorize launch.
+    pub fn lower_native_surface(
+        &self,
+        oci: &mut ato_ipc::runtime_launch::OciRealizationV1,
+    ) -> Result<()> {
+        match (&self.native_surface, self.realization) {
+            (Some(adapter), "native_oci_container") => {
+                let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::new(
+                    self.derivation_ref.clone(),
+                    adapter.clone(),
+                )?;
+                ensure!(
+                    oci.native_surface.is_none(),
+                    "OCI already has a native declaration"
+                );
+                oci.native_surface = Some(serde_json::to_value(declaration)?);
+            }
+            (None, "native_oci_container") | (Some(_), _) => {
+                anyhow::bail!("native validator route/declaration mismatch")
+            }
+            (None, _) => ensure!(
+                oci.native_surface.is_none(),
+                "non-native route has a native declaration"
+            ),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1565,6 +1596,34 @@ mod tests {
                 Some("app.probe")
             );
             assert_eq!(report.routes[0].realization, "native_oci_container");
+            let mut spec = ato_ipc::runtime_launch::RuntimeLaunchSpecV1::parse(include_str!(
+                "../../../lib/ipc/tests/fixtures/runtime-launch-spec-v1/fastapi-oci.json"
+            ))
+            .unwrap();
+            let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &mut spec.realization
+            else {
+                unreachable!()
+            };
+            report.routes[0].lower_native_surface(oci).unwrap();
+            let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(
+                oci.native_surface.as_ref().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(declaration.derivation_ref, report.routes[0].derivation_ref);
+            assert_eq!(
+                Some(&declaration.adapter),
+                report.routes[0].native_surface.as_ref()
+            );
+            assert!(report.routes[0].lower_native_surface(oci).is_err());
+            oci.native_surface = None;
+            let mut wrong = report.routes[0].clone();
+            wrong.realization = "oci";
+            assert!(wrong.lower_native_surface(oci).is_err());
+            wrong = report.routes[0].clone();
+            wrong.derivation_ref = "sha256:invalid".to_owned();
+            assert!(wrong.lower_native_surface(oci).is_err());
+            assert!(oci.native_surface.is_none());
+
             assert_eq!(report.root_contract_ref, bundle.index.root_contract_ref);
         }
     }
