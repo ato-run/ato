@@ -323,6 +323,8 @@ pub struct PortableBundleVerificationReport {
     pub application_ref: String,
     pub derivation_refs: Vec<String>,
     pub requirement_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub http_observations: Vec<ato_formation::authoring::BoundRequirement>,
     pub required_bindings: Vec<PortableBindingReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_derivation_ref: Option<String>,
@@ -592,6 +594,22 @@ fn report(
             .iter()
             .map(|requirement| requirement.id.clone())
             .collect(),
+        http_observations: if validated.contract.requirements.iter().any(|requirement| {
+            requirement.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER
+                && requirement.port.as_deref() != Some(surface.port.as_str())
+        }) {
+            validated
+                .contract
+                .requirements
+                .iter()
+                .filter(|requirement| {
+                    requirement.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        },
         required_bindings: validated
             .application
             .bindings
