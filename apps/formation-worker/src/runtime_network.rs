@@ -85,7 +85,7 @@ pub const MAX_ATTEMPT_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_ATTEMPT_STORED_BYTES: u64 = 512 * 1024 * 1024;
 /// How long a Runtime may take to fetch a ticket's source: MAX_SOURCE_BYTES
 /// at about 40 KB/s.
-const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 // ─────────────────────────────────────────────────────────────── wire types
 
