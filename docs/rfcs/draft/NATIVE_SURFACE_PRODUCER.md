@@ -64,3 +64,20 @@ network/rootfs sandbox and optionally connects through the actual Rust gateway.
 It observes real pixels, keyboard changes, desktop resize, reconnect, assertion
 rejection, and teardown. These are surface observations; the report deliberately
 contains no Contract success or application acceptance claim.
+
+## Connected Runner assertion scope
+
+Connected Runner gateways accept an optional physical `execution` claim containing
+`run_id`, `lease_id` and `runner_id`. This is authorization metadata, outside
+Capsule identity. The API derives the existing per-Runner verification key and
+uses the Surface audience with key id `ato.runner-surface@1`; a User Runner must
+never receive the deployment-global Surface keyring. The existing signed claim
+shape is byte-compatible when `execution` is omitted.
+
+A gateway configured for a claimed execution requires exact equality of all
+three fields. A legacy gateway rejects scoped assertions, and a scoped gateway
+rejects legacy assertions. The readiness probe uses the same execution scope.
+The Runner-owned sidecar accepts this scope through bounded stdin configuration,
+requires the single Runner key for a scoped execution and never prints key
+material. End-to-end lease launch/placement and native Contract verification
+remain separate integration gates; this change does not advertise native support.
