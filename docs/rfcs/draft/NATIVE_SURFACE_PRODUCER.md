@@ -64,3 +64,20 @@ network/rootfs sandbox and optionally connects through the actual Rust gateway.
 It observes real pixels, keyboard changes, desktop resize, reconnect, assertion
 rejection, and teardown. These are surface observations; the report deliberately
 contains no Contract success or application acceptance claim.
+
+## Explicit guest image selection
+
+The existing `ato-firecracker-guest-image` tool accepts `--terminal-surface` or
+`--pixel-surface-config <json>` as explicit, mutually exclusive physical-profile
+choices. The Pixel JSON is only `{width,height,rfb_port,display}` and is bounded
+at 8 KiB. The image plan records the choice as materialization evidence while
+keeping the same ComputationRef, immutable workspace, and declared argv. Web
+remains the default and omits the new optional plan fields.
+
+Generation writes the existing guest supervisor configuration and checks that
+GUI dependencies exist in the digest-pinned base image. Pixel generates the
+existing guest TCP relay from the guest-private address to loopback RFB. Relay
+port conflicts fail closed. This is not a public mapping or automatic admission:
+the connected Runner still must negotiate the descriptor, validate its declared
+Port, start its authenticated gateway, and pass the app's independent K before
+publishing a hosted session. No GUI Contract is inferred from image generation.
