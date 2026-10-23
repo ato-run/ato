@@ -2305,7 +2305,26 @@ fn run_portable_application(
             bindings: Some(&bindings),
             ..PortableRuntimeState::default()
         },
-    )?;
+    );
+    let started = match started {
+        Ok(started) => started,
+        Err(error) => {
+            // The common attempt has already persisted its immutable verdict,
+            // even when K failed and no live candidate was handed off.
+            if let Some(output) = &args.verification_receipt {
+                match fs::read(runtime_root.join("verification-receipt.json")) {
+                    Ok(bytes) => fs::write(output, bytes).with_context(|| {
+                        format!("write failed verification receipt {}", output.display())
+                    })?,
+                    Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(read_error) => {
+                        return Err(read_error).context("read recorded verification receipt");
+                    }
+                }
+            }
+            return Err(error);
+        }
+    };
     let mut runtime = started.runtime;
     let receipt = started.receipt;
     let result = (|| -> Result<()> {
