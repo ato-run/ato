@@ -294,6 +294,7 @@ impl Workload for PtyChildWorkload {
 pub enum GuestWorkload {
     Log(ChildWorkload),
     Pty(PtyChildWorkload),
+    Pixel(crate::pixel::PixelChildWorkload),
 }
 
 impl Workload for GuestWorkload {
@@ -301,24 +302,28 @@ impl Workload for GuestWorkload {
         match self {
             Self::Log(workload) => workload.start(plan),
             Self::Pty(workload) => workload.start(plan),
+            Self::Pixel(workload) => workload.start(plan),
         }
     }
     fn stop(&mut self) -> io::Result<bool> {
         match self {
             Self::Log(workload) => workload.stop(),
             Self::Pty(workload) => workload.stop(),
+            Self::Pixel(workload) => workload.stop(),
         }
     }
     fn is_running(&self) -> bool {
         match self {
             Self::Log(workload) => workload.is_running(),
             Self::Pty(workload) => workload.is_running(),
+            Self::Pixel(workload) => workload.is_running(),
         }
     }
     fn run_once(&mut self, plan: &SpawnPlan) -> io::Result<i32> {
         match self {
             Self::Log(workload) => workload.run_once(plan),
             Self::Pty(workload) => workload.run_once(plan),
+            Self::Pixel(workload) => workload.run_once(plan),
         }
     }
 }
