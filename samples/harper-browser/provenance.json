@@ -1,0 +1,8 @@
+{
+  "upstream_repository": "https://github.com/Automattic/harper",
+  "inspected_commit": "2b320e5069ad708b900bcd85253c4be637a869e7",
+  "library": "harper.js",
+  "version": "2.13.0",
+  "artifact_integrity": "sha512-kUj+WLx8NSEVxQMoRqoBHGAPECAkATS9eCyYfQHWp1rEcOxtDkSKgjV+N0VHPd5xYKIF6cufJ7+evwaHfRF3WA==",
+  "derivation": "Minimal browser UI; original npm-published WASM; no grammar engine modifications; npm release is pinned independently of inspected source commit"
+}
