@@ -78,6 +78,9 @@ pub fn RUNTIME_LAUNCH_SUPPORTED() -> bool {
 /// What the control plane puts in `runner_leases.command_json`.
 #[derive(Debug, serde::Deserialize)]
 pub struct RuntimeLaunchLeaseCommand {
+    /// Selected validator route, checked against the declaration inside the spec.
+    #[serde(default)]
+    pub portable_derivation_ref: Option<String>,
     /// Negotiated presentation metadata, outside the digested launch spec.
     /// Native execution remains refused until the owning lifecycle is wired.
     #[serde(default)]
@@ -412,10 +415,6 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
         surface
             .validate()
             .map_err(|error| anyhow::anyhow!("invalid runtime launch Surface: {error}"))?;
-        ensure!(
-            surface.kind() == ato_ipc::session_surface::SessionSurfaceKind::Web,
-            "native_surface_unavailable: this Runner has no native workload lifecycle"
-        );
     }
     if let Some(seconds) = command.max_duration_secs {
         ensure!(
@@ -442,6 +441,36 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
             && spec.context().compute_instance_id == command.compute_instance_id,
         "launch spec identity does not match its lease command"
     );
+    // A native payload must never fall through to the ordinary OCI executor,
+    // even if its separate presentation descriptor is absent or says Web.
+    let native = match &spec {
+        RuntimeLaunchSpec::V1(spec) => match &spec.realization {
+            LaunchRealizationV1::Oci(oci) => oci.native_surface.as_ref(),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(value) = native {
+        let declaration =
+            ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(value)?;
+        declaration.validate_selection(
+            command
+                .portable_derivation_ref
+                .as_deref()
+                .context("native launch omitted selected DerivationRef")?,
+            command
+                .session_surface
+                .as_ref()
+                .context("native launch omitted session Surface")?,
+        )?;
+        anyhow::bail!("native_surface_unavailable: this Runner has no native workload lifecycle");
+    }
+    if let Some(surface) = &command.session_surface {
+        ensure!(
+            surface.kind() == ato_ipc::session_surface::SessionSurfaceKind::Web,
+            "native_surface_unavailable: native Surface requires a digested Adapter declaration and workload lifecycle"
+        );
+    }
     verify_group_cpu_reservation(&spec, command.runtime_cpu_request.as_ref())?;
     verify_network_authorization(&spec, command.network_authorization.as_ref())?;
     Ok(spec)
@@ -1168,6 +1197,7 @@ mod tests {
 
     fn command_for(spec: &RuntimeLaunchSpecV1, digest: &str) -> RuntimeLaunchLeaseCommand {
         RuntimeLaunchLeaseCommand {
+            portable_derivation_ref: None,
             session_surface: None,
             run_id: spec.context.run_id.clone(),
             compute_instance_id: spec.context.compute_instance_id.clone(),
@@ -1211,6 +1241,95 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid runtime launch Surface")
+        );
+    }
+
+    #[test]
+    fn native_launch_is_digest_bound_strict_and_never_executed_as_web_oci() {
+        let mut spec = RuntimeLaunchSpecV1::parse(include_str!(
+            "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v1/fastapi-oci.json"
+        ))
+        .unwrap();
+        let declaration = serde_json::json!({
+            "derivation_ref":format!("sha256:{}", "ab".repeat(32)), "adapter":{
+                "surface":{"kind":"terminal","port":"app.native","cols":80,"rows":24},
+                "probe_port":"app.probe","operations":[{"kind":"terminal_exchange","path":"/result",
+                    "input":[50,43,50,13],"output_delimiter":[69,78,68],"max_output_bytes":1024,"timeout_ms":1000}]
+            }
+        });
+        let old_digest = spec.canonical_digest().unwrap();
+        let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            unreachable!()
+        };
+        oci.native_surface = Some(declaration);
+        let mut command = command_for(&spec, &old_digest);
+        assert!(
+            verified_spec(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("digest mismatch")
+        );
+        command.launch_spec_digest = spec.canonical_digest().unwrap();
+        assert!(
+            verified_spec(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("omitted selected")
+        );
+        command.portable_derivation_ref = Some(format!("sha256:{}", "ab".repeat(32)));
+        assert!(
+            verified_spec(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("omitted session")
+        );
+        let descriptor = serde_json::json!({"kind":"terminal","profile":"ato.terminal-surface.v1",
+            "surface_id":"surface_native","transport":"terminal_websocket","capabilities":{"cols":80,"rows":24}});
+        command.session_surface = Some(serde_json::from_value(descriptor.clone()).unwrap());
+        assert!(
+            verified_spec(&command)
+                .unwrap_err()
+                .to_string()
+                .starts_with("native_surface_unavailable")
+        );
+        command.portable_derivation_ref = Some(format!("sha256:{}", "cd".repeat(32)));
+        assert!(
+            verified_spec(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("DerivationRef mismatch")
+        );
+        command.portable_derivation_ref = Some(format!("sha256:{}", "ab".repeat(32)));
+        for value in [
+            serde_json::json!({"kind":"web","profile":"ato.web-surface.v1","surface_id":"surface_native","embed_policy":"sandboxed"}),
+            {
+                let mut v = descriptor.clone();
+                v["capabilities"]["rows"] = serde_json::json!(25);
+                v
+            },
+        ] {
+            command.session_surface = Some(serde_json::from_value(value).unwrap());
+            assert!(
+                verified_spec(&command)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("does not match")
+            );
+        }
+        // Even when the outer digest is recomputed, a domain-level unknown
+        // field cannot become an accepted native declaration.
+        command.launch_spec["realization"]["native_surface"]["adapter"]["operations"][0]["expected_digest"] =
+            serde_json::json!("self-asserted");
+        let raw = serde_json::to_string(&command.launch_spec).unwrap();
+        command.launch_spec_digest = RuntimeLaunchSpec::parse(&raw)
+            .unwrap()
+            .canonical_digest()
+            .unwrap();
+        assert!(
+            verified_spec(&command)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid native launch declaration")
         );
     }
 
@@ -1273,6 +1392,7 @@ mod tests {
         let spec =
             ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2::parse(GROUP_FIXTURE).expect("fixture");
         RuntimeLaunchLeaseCommand {
+            portable_derivation_ref: None,
             session_surface: None,
             run_id: spec.context.run_id.clone(),
             compute_instance_id: spec.context.compute_instance_id.clone(),

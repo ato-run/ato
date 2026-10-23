@@ -84,6 +84,7 @@ fn an_oci_reference_must_be_content_addressed() {
     ] {
         let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
         spec.realization = LaunchRealizationV1::Oci(OciRealizationV1 {
+            native_surface: None,
             image_digest_ref: reference.to_owned(),
             image_reference: None,
             platform: None,
@@ -479,4 +480,64 @@ fn explicit_user_golden_fixture_has_stable_canonical_bytes_and_digest() {
         spec.canonical_digest().unwrap(),
         "sha256:bd0e4c307d947733883896a2ecdfd15da0dcca6d7f168fdde50243b924ce5728"
     );
+}
+
+#[test]
+fn opaque_native_declaration_is_bounded_and_part_of_the_digest() {
+    let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+    let original = spec.canonical_digest().unwrap();
+    assert!(
+        !serde_json::to_string(&spec)
+            .unwrap()
+            .contains("native_surface")
+    );
+    for value in [
+        serde_json::json!([]),
+        serde_json::json!("native"),
+        serde_json::json!({"x":"x".repeat(MAX_NATIVE_LAUNCH_DECLARATION_BYTES)}),
+    ] {
+        let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            unreachable!()
+        };
+        oci.native_surface = Some(value);
+        assert!(spec.validate().is_err());
+    }
+    for value in [
+        serde_json::json!({"derivation_ref":"first"}),
+        serde_json::json!({"derivation_ref":"second"}),
+    ] {
+        let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            unreachable!()
+        };
+        oci.native_surface = Some(value);
+        // IPC deliberately does not interpret Adapter/domain fields.
+        spec.validate().unwrap();
+        assert_ne!(spec.canonical_digest().unwrap(), original);
+        assert_eq!(
+            RuntimeLaunchSpecV1::parse(
+                &String::from_utf8(spec.canonical_bytes().unwrap()).unwrap()
+            )
+            .unwrap(),
+            spec
+        );
+    }
+}
+
+#[test]
+fn native_terminal_launch_golden_is_canonical_and_digest_bound() {
+    let fixture =
+        include_str!("../../tests/fixtures/runtime-launch-spec-v1/native-terminal-oci.json");
+    let spec = RuntimeLaunchSpecV1::parse(fixture).unwrap();
+    assert_eq!(
+        spec.canonical_bytes().unwrap(),
+        fixture.trim_end().as_bytes()
+    );
+    assert_eq!(
+        spec.canonical_digest().unwrap(),
+        "sha256:dd69e6a80b94332365f8290ababc295dd723dbf27c07aa817a7bf55f239688dc"
+    );
+    let LaunchRealizationV1::Oci(oci) = &spec.realization else {
+        unreachable!()
+    };
+    assert!(oci.native_surface.is_some());
 }
