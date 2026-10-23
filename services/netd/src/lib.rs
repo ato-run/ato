@@ -10,8 +10,6 @@ pub mod egress;
 pub mod identity;
 pub mod ingress;
 #[cfg(unix)]
-pub mod native_probe;
-#[cfg(unix)]
 pub mod native_surface;
 pub mod net;
 pub mod pixel_authorization;

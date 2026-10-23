@@ -11,7 +11,20 @@ pixel results use the shared 72-byte measured-frame fingerprint encoder.
 Existing HTTP observation size limits are unchanged. Only existing Rust
 `verify_runtime` decides K; sidecar output always says `contract_verified=false`.
 
+## Assembly boundary
+
+The common `ato-native-surface-gateway` binary is owned by the application
+crate at `apps/native-surface-gateway`. It combines Formation's typed catalog
+with netd's reusable transport; netd itself has no Formation dependency.
+The initial CI correctly rejected service-to-lib coupling. The architecture
+rule is unchanged, and the corrected workspace passes `arch-check` (44 crates).
+The binary name, configuration, transport and observation behavior are unchanged.
+
 ## Verification
+
+- After moving assembly: macOS application all targets (5 probe tests, 1 parser
+  test, 3 actual sidecar process tests), application/netd all-target clippy,
+  locked dependency metadata and workspace format checks passed.
 
 - Linux netd all targets: 118 tests passed before the final additional
   queued-completion regression; the final native module's five tests passed,

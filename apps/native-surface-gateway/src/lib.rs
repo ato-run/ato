@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Runner-owned native Adapter observations, distinct from Surface readiness.
 //!
 //! Authored bounded actions run once before publication. HTTP only retrieves
@@ -16,7 +18,7 @@ use hyper::{body::Incoming, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use tokio::{io::AsyncReadExt, net::TcpListener, task::JoinSet, time::timeout};
 
-use crate::terminal_gateway::{
+use netd::terminal_gateway::{
     FRAME_CONTROL, FRAME_INPUT, FRAME_OUTPUT, connect_guest_terminal, read_guest_frame,
     write_guest_frame,
 };
@@ -141,7 +143,7 @@ pub async fn capture_and_start_native_probe(
                     ..
                 },
             ) => {
-                let frame = crate::rfb_probe::capture_private_rfb_frame(
+                let frame = netd::rfb_probe::capture_private_rfb_frame(
                     *addr,
                     *width,
                     *height,
