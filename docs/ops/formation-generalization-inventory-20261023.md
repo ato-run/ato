@@ -246,3 +246,14 @@ fresh-root成功は各PRのopsへ両方保持している。
 手動staging専用Chromeログインは既存質問の回答待ちで、認証の迂回はしない。
 本番配備・課金GPU作成・運営key本番投入は行っていない。依頼全体の完了、全種のHosted
 実行、既存アプリの保存/再接続回帰完了とは報告しない。
+
+## 2026-10-24 phase17 更新
+
+GUIの実Chrome結合は[ato #1543](https://github.com/ato-run/ato/pull/1543)と
+[PWA #518](https://github.com/ato-run/ato-pwa/pull/518)で成功した。
+接続中の実Xselection一致を必須とし、resize1024×768、BrowserとRust各再接続、権限拒否、
+元K、固定probe、出力保存、全回収を確認。切断後None・未知null・全体ANDを分離した。
+helper6902ms/lease11363ms/Browser8.6s/Root全体21.6sは隔離CPU実測で、Hosted性能ではない。
+初回2失敗と修正・negative拒否を保持し、通常Runner候補のprepare-only検証へ進める。
+詳細はnative-browser-integration-20261024.md/proof JSON。共有Runner6slotは未変更、
+Hosted owner認証・実Source job・専用Runner導入・GPU/運営key実受入は依然別gateである。
