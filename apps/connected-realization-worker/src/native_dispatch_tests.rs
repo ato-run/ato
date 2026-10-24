@@ -1042,7 +1042,10 @@ fn run_actual_native_dispatch_with_browser(
         assert!(!lease_root.join("workspace").exists());
     }
     lease.proxy_assertion_key = Some(key.into());
-    if let Some(boundary) = boundary {
+    // Pixel preflights its helper before workspace creation. Terminal still
+    // uses the existing common OCI user/state admission after materialization;
+    // its wrong-user boundary is covered by the common OCI regression tests.
+    if let Some(boundary) = boundary.filter(|_| pixel) {
         let mut wrong = spec.clone();
         let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &mut wrong.realization else {
             unreachable!()
