@@ -39,3 +39,35 @@ workroot/1slot→明示user_runner placement。従来credentialのコピーやma
 共通の『明示Runner配置のみ受付』制約を、既存capability/Lease経路で調査・追加する。
 新Corekind/auth/tableは増やさず、K/launch_spec/digestへ配置情報を混入させない。
 このbaseline候補はその後続制約を含まない。導入はしない。
+
+## 後続候補 — 明示配置制約とTerminal実Chrome試験
+
+前節はb6341239時点の履歴である。[ato #1544](https://github.com/ato-run/ato/pull/1544)と
+[API #878](https://github.com/ato-run/ato-api/pull/878)で既定offの明示配置制約を実装した。
+既存capability/Lease/認証identityを使い、広告されたRunnerを自動配置から除外し、保存済み
+明示配置・現行Run/Lease・command digestと照合する。Workerは準備・storage副作用の前に
+照合する。K/D/runtime spec/digestやSemantic Coreへ配置情報を含めない。
+共有Runnerへの導入・設定変更は行っていない。
+
+[ato #1545](https://github.com/ato-run/ato/pull/1545)の実行source
+`b69b7cc6b6f142e75f8ec5bf46a290a972b6f8b7`から新しい通常Workerをprepareした。
+Linux x86_64、50,490,512 bytes、mode0555、SHA256
+`0586494e6cb3bac11a00624a6948fdeaf62122e4953746067d5c0c7cc4c7081c`。
+dev/debug0/incremental0/offline/locked/jobs2。--helpで明示配置flagを確認した。
+成果物はubuntu-sugamoの
+`/home/ekohsuke/ato-run/.tmp/terminal-browser-20261024/bin/ato-connected-realization-worker-b69b7cc6b`。
+662inputsのmanifest SHA256
+`8a79c72f79b4314a75d1e730996b270ef44a81cbf29b929c5376b25a9d93e82d`は前後一致した。
+通常Workerとテストbinaryは別物で、release/LTO版や導入済みserviceとは扱わない。
+
+同sourceのWorkerテストはMac192成功/20ignored、Linux193成功/23ignored、all-target
+Clippy/fmt成功。実Chrome Terminal試験は別のtest executableを使用し、元K・受動status・
+再接続・出力保存・全回収が成功した。詳細はnative-terminal-browser-joint-20261024.md。
+test binary SHA256は
+`322fc33cbb733b7b278d3a474fc014e0825ca55c55a11cc5cd5cec2a0e2fd69c`。
+独立postflightで両binaryとsource/launcher不変、所有container/network0・listener/PID終了を
+確認した。共有Linux Cargo占有は解放済みである。
+
+API codeのstaging配備は完了したが、marker広告Runner0であり、機能の導入完了ではない。
+owner手動認証と実machine境界は未充足、旧queue先頭での不正Leaseによる停止を避けるには
+新identity/空queueが必要である。credential流用・共有6slot変更・新Run・本番操作はない。
