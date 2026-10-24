@@ -548,10 +548,6 @@ fn service_oci_spec_rebinding(
     expected_rebindings: &BTreeMap<String, String>,
 ) -> Result<OciSpec> {
     ensure!(
-        context.read_only_inputs().is_empty() && context.output_dir().is_none(),
-        "oci_group_data_plane_unsupported: component-scoped file placement is required"
-    );
-    ensure!(
         expected_rebindings
             .keys()
             .all(|name| name == "OPENAI_BASE_URL" && network_environment.contains_key(name)),
@@ -633,6 +629,15 @@ fn service_oci_spec_rebinding(
         service.name,
         service.working_dir
     );
+    let mut mounts = attachments
+        .iter()
+        .map(|attachment| OciMount {
+            host_path: attachment.working_copy_for_mount().to_path_buf(),
+            guest_path: attachment.guest_target().to_owned(),
+            writable: attachment.access() == StateAccessV1::ReadWrite,
+        })
+        .collect();
+    super::oci_component_inputs::attach(group, service, context, &mut mounts, &mut environment)?;
     Ok(OciSpec {
         id: format!("{}-{}", spec.context.run_id, service.name),
         image: service.image_reference.clone(),
@@ -647,14 +652,7 @@ fn service_oci_spec_rebinding(
         workspace_mount_path: service.workspace_mount_path.clone(),
         environment,
         endpoints,
-        mounts: attachments
-            .iter()
-            .map(|attachment| OciMount {
-                host_path: attachment.working_copy_for_mount().to_path_buf(),
-                guest_path: attachment.guest_target().to_owned(),
-                writable: attachment.access() == StateAccessV1::ReadWrite,
-            })
-            .collect(),
+        mounts,
         limits: OciResourceLimits {
             memory_bytes: service.resource_limits.memory_bytes,
             cpu_limit_millis: service.resource_limits.cpu_limit_millis,
@@ -909,6 +907,7 @@ mod tests {
         );
         let context =
             context.with_read_only_inputs(vec![crate::launch::resolved::ResolvedReadOnlyInput {
+                input_id: None,
                 env_name: "ATO_INPUT_ASSETS_DIR".into(),
                 path: workspace.path().to_path_buf(),
             }]);
@@ -965,10 +964,12 @@ mod tests {
         let context = context
             .with_read_only_inputs(vec![
                 crate::launch::resolved::ResolvedReadOnlyInput {
+                    input_id: None,
                     env_name: "ATO_INPUT_ASSETS_DIR".into(),
                     path: assets.path().to_path_buf(),
                 },
                 crate::launch::resolved::ResolvedReadOnlyInput {
+                    input_id: None,
                     env_name: "ATO_INPUT_PATH_MODELS".into(),
                     path: models.path().to_path_buf(),
                 },
@@ -1148,10 +1149,12 @@ time.sleep(30)
         .unwrap()
         .with_read_only_inputs(vec![
             ResolvedReadOnlyInput {
+                input_id: None,
                 env_name: "ATO_INPUT_ASSETS_DIR".into(),
                 path: assets.clone(),
             },
             ResolvedReadOnlyInput {
+                input_id: None,
                 env_name: "ATO_INPUT_PATH_MODELS".into(),
                 path: models.clone(),
             },

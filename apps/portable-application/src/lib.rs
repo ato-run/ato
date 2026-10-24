@@ -830,11 +830,13 @@ fn validate_selected_derivation(
     if !model_sets.is_empty()
         && !matches!(
             realization,
-            PortableRealizationKind::LocalProcess | PortableRealizationKind::OciContainer
+            PortableRealizationKind::LocalProcess
+                | PortableRealizationKind::OciContainer
+                | PortableRealizationKind::OciServiceGroup
         )
     {
         return Err(profile(
-            "v0 delivers a Model Set only to a process or single OCI route",
+            "v0 delivers a Model Set only to a process or explicitly assigned OCI route",
         ));
     }
 
@@ -2149,6 +2151,13 @@ fn validate_oci_service_group<'a>(
         .iter()
         .map(|state| state.id.as_str())
         .collect::<BTreeSet<_>>();
+    let model_input_ids = derivation
+        .inputs
+        .iter()
+        .filter(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+        .map(|input| input.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut input_readers = BTreeSet::new();
     let mut step_ids = BTreeSet::new();
     let mut state_readers = BTreeMap::<&str, usize>::new();
     let mut binding_readers = BTreeMap::<&str, usize>::new();
@@ -2199,8 +2208,58 @@ fn validate_oci_service_group<'a>(
             }
             None => "/app",
         };
+        if let Some(raw) = step
+            .runtimes
+            .get(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME)
+        {
+            let ids = ato_ipc::oci_component_inputs::parse_input_ids(raw).map_err(profile)?;
+            let projected_names = ids
+                .iter()
+                .map(|id| ato_ipc::oci_component_inputs::input_env_name(id))
+                .chain(std::iter::once("ATO_OUTPUT_DIR".to_owned()))
+                .collect::<BTreeSet<_>>();
+            if step.env.keys().any(|name| projected_names.contains(name))
+                || application
+                    .bindings
+                    .iter()
+                    .filter(|binding| step.bindings.contains(&binding.id))
+                    .any(|binding| {
+                        projected_names.contains(&application_binding_environment_name(binding))
+                    })
+                || std::iter::once(workspace_mount)
+                    .chain(
+                        derivation
+                            .state
+                            .iter()
+                            .filter(|state| step.state.contains(&state.id))
+                            .map(|state| state.mount.as_str()),
+                    )
+                    .any(|target| {
+                        Path::new(target).starts_with("/.ato-data")
+                            || Path::new("/.ato-data").starts_with(target)
+                    })
+            {
+                return Err(profile(
+                    "component input/output conflicts with environment or mounts",
+                ));
+            }
+            for id in ids {
+                if id != ato_ipc::oci_component_inputs::ASSETS_INPUT_ID
+                    && !model_input_ids.contains(id.as_str())
+                {
+                    return Err(profile(format!(
+                        "service `{}` selects undeclared input `{id}`",
+                        step.id
+                    )));
+                }
+                input_readers.insert(id);
+            }
+        }
         if step.runtimes.len()
-            != 4 + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
+            != 4 + usize::from(
+                step.runtimes
+                    .contains_key(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME),
+            ) + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_USER_RUNTIME))
         {
@@ -2257,6 +2316,14 @@ fn validate_oci_service_group<'a>(
             }
             *binding_readers.entry(binding_id.as_str()).or_default() += 1;
         }
+    }
+    if model_input_ids
+        .iter()
+        .any(|id| !input_readers.contains(*id))
+    {
+        return Err(profile(
+            "Model Set input has no explicitly declared service consumer",
+        ));
     }
     if group_totals(limits).is_none() {
         return Err(profile(
@@ -3214,7 +3281,78 @@ default = "pure"
     }
 
     #[test]
-    fn model_inputs_remain_unsupported_for_static_and_service_groups() {
+    fn group_model_input_assignment_is_explicit_and_preserves_k() {
+        let root = authored_root(SERVICE_GROUP_TOML);
+        let (_, mut bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        let k = bundle.index.root_contract_ref.clone();
+        let selected = bundle.index.derivations[0].clone();
+        let selected = attach_model_input(&mut bundle, &selected);
+        replace_derivation(&mut bundle, &selected, |d| {
+            d.steps[0]
+                .runtimes
+                .insert("oci.input_ids".into(), "[\"models\"]".into());
+        });
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(bundle.index.root_contract_ref, k);
+        assert_eq!(routes[0].model_sets[0].input_id, "models");
+        let reports = crate::validator_agent::tests_support::route_reports(&routes).unwrap();
+        assert_eq!(
+            reports[0].services[0].input_ids.as_deref(),
+            Some(["models".to_owned()].as_slice())
+        );
+        assert!(reports[0].services[1].input_ids.is_none());
+        let legacy = serde_json::to_value(&reports[0].services[1]).unwrap();
+        assert!(legacy.get("input_ids").is_none());
+        let route = &routes[0];
+        for invalid in [
+            "[\"unknown\"]",
+            "[\"workspace\"]",
+            "[\"models\",\"models\"]",
+            "[ \"models\" ]",
+            "[]",
+        ] {
+            assert!(
+                revalidate(route, |d| {
+                    d.steps[0]
+                        .runtimes
+                        .insert("oci.input_ids".into(), invalid.into());
+                })
+                .is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            revalidate(route, |d| {
+                d.steps[0]
+                    .env
+                    .insert("ATO_INPUT_PATH_MODELS".into(), "shadow".into());
+            })
+            .is_err()
+        );
+        assert!(
+            revalidate(route, |d| {
+                d.steps[0]
+                    .env
+                    .insert("ATO_OUTPUT_DIR".into(), "shadow".into());
+            })
+            .is_err()
+        );
+        replace_derivation(&mut bundle, routes[0].derivation_ref.as_str(), |d| {
+            d.steps[1]
+                .runtimes
+                .insert("oci.input_ids".into(), "[\"models\"]".into());
+        });
+        let routes = validate_all_derivations(&bundle).unwrap();
+        let reports = crate::validator_agent::tests_support::route_reports(&routes).unwrap();
+        assert_eq!(
+            reports[0].services[0].input_ids,
+            reports[0].services[1].input_ids
+        );
+        assert_eq!(bundle.index.root_contract_ref, k);
+    }
+
+    #[test]
+    fn model_inputs_remain_unsupported_for_static_and_unassigned_service_groups() {
         let (_, static_bundle) =
             build_static_bundle(&fixture_root(), "Static model refusal").unwrap();
         let root = authored_root(SERVICE_GROUP_TOML);
