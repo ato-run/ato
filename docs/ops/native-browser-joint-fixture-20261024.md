@@ -31,7 +31,7 @@ Only after the original K passes and the ready HTTP ACK is written does a held
 owned test thread publish create-new atomic `ready.json` mode0600. It contains
 version1, remote loopback gateway URL, origin, actual session/surface/execution
 IDs, fixture principal, fixed expiry, initial640x480 dimensions and absolute
-`done_file`/`result_file` paths. Tokens and keys never enter metadata. The Node
+`checkpoint_file`/`checkpoint_result_file` and `done_file`/`result_file` paths. Tokens and keys never enter metadata. The Node
 peer signs fresh unique-jti fixture assertions with the existing audience/kid,
 clamped to min(now+60, absolute expiry). It forwards actual browser Origin;
 localhost SSH forwarding is supplied separately, never by rewriting metadata.
@@ -51,11 +51,28 @@ publishes a new done file atomically as its owning UID. `{version:1,action:abort
 is deliberately a rejected record that triggers early failed-stop; it is not a
 second accepted command or a successful outcome.
 
-After normal done, Rust reads its isolated authenticated X11 selection and
-requires exact Latin-1 `caf\xe9\t\n`. Separate permission=false connections send
-paste and resize, must close, and must leave the actual selection unchanged.
-A fresh permitted connection checks current dimensions1024x768 and absence of
-server clipboard; a further authenticated public-path probe requires the entire
+Before resize/reconnect/Stop, the browser publishes the fixed request below and
+waits for the correlated checkpoint ACK. The request uses the same private,
+bounded, no-follow, create-new policy as done. It cannot supply expected state.
+
+```json
+{"version":1,"action":"verify-clipboard","expected_clipboard_latin1_hex":"636166e9090a"}
+```
+
+Rust requires its isolated authenticated X11 selection to be actual
+`Some(caf\xe9\t\n)`, then uses a separate permission=false paste connection,
+requires it to close and confirms the selection remains unchanged. The exact
+12-field ACK carries version/status, the five ready identity fields, the same
+absolute expiry, actual clipboard hex, clipboard-checkpoint and paste-denial
+facts, and error. Browser wire bytes alone cannot satisfy this checkpoint.
+Normal done without a successful checkpoint rejects. Invalid input or an actual
+selection mismatch produces failed ACK/result and bounded stop.
+
+After normal done, Rust records the post-disconnect selection separately; None
+is permitted only after a prior matching actual checkpoint. A permission=false
+resize connection must close without changing that observation. A fresh
+permitted connection checks current dimensions1024x768 and absence of server
+clipboard; a further authenticated public-path probe requires the entire
 canonical raw frame1024x768x4. These probes never paste/resize and never recapture
 or rewrite K. The frozen original probe remains byte-identical after UI input.
 
@@ -64,8 +81,11 @@ Actual browser2socket/2exchange/2canvas reconnect is separate PWA authority,
 combined in the joint record; a denied probe never counts as browser reconnect.
 The result also reports runtime full-frame/permission-denial checks, original K,
 frozen-probe identity, output save and cleanup. It correlates actual
-run/lease/runner/session/surface IDs with ready metadata. Passed is written only
-after all original lifecycle assertions succeed. Failure values are conservative;
+run/lease/runner/session/surface IDs with ready metadata. Passed requires every actual fact and all original lifecycle assertions. Facts
+are recorded individually: observed true/false are retained after later failure;
+unobserved values are null. The actual clipboard field retains the checkpoint
+value, while post-disconnect value/observation are separate. In particular, K
+and output-save observations are not erased by a later Surface failure;
 cleanup is measured independently for OCI resources, public/hidden ports,
 journal and lease directory, including after test panic. Unknown is never passed.
 
@@ -99,15 +119,36 @@ journal and lease directory, including after test panic. Unknown is never passed
   the rejected done still produced statusfailed, output saved and full cleanup
   confirmed. Done03:18:32.711→result03:18:34.604 UTC:1.893 seconds. The result
   includes heartbeats_acked. Both red/green logs are retained.
-- Positive Chrome joint acceptance is pending the coordinated retry.
+- Second Chrome joint attempt reached actual initial640 frame, positive14-byte
+  Latin-1 paste, resize1024x768, second WebSocket/frame reconnect and Stop with
+  zero browser errors/network violations. Runtime's former clipboard check ran
+  after disconnect and observed None, so the overall attempt correctly failed
+  with cleanup confirmed. This did not prove clipboard arrival or persistence.
+  The new checkpoint measures actual arrival while connected; post-disconnect
+  None is a separate observation, not an assumed lifetime guarantee.
+- Checkpoint follow-up: Mac and Linux7 focused fixture tests passed, with
+  Worker/netd all-target Clippy and rustfmt. Strict checkpoint/done, missing
+  checkpoint, private files, partial facts and all-facts AND are covered.
+- Negative real acceptance: fresh root `/opt/ato/.tmp/native-browser.Ux3YXP`,
+  ready then12 seconds and a valid checkpoint request without any paste.
+  Actual Xselection None was rejected; checkpoint ACK reported failed/false,
+  final statusfailed retained original_contract_satisfied=true/output_saved=true,
+  unobserved facts null, one heartbeat ACK, full cleanup=true. All identity
+  fields matched ready/ACK/result. No positive browser Run was started for this
+  negative check.
+- Positive Chrome joint acceptance with the checkpoint remains pending.
 
 Own Linux source:
 `/home/ekohsuke/ato-run/.tmp/native-browser-joint-20261024/source`.
 All658 Rust/Cargo/literal-include input hashes were refreshed on source switch
 and verified before/after: manifestSHA256
-`0ff869b8345bc599f8bbb943d22f7057e2bb71845de69db3ed1498a1f311e7c1`.
+`4c9360e4c2537f4c5aa40082b204a44df5999322eb49f55ba6a44b47ba30416c`.
 The same-source test executable is
 `/home/ekohsuke/ato-run/.tmp/native-surface-20261023/runner-source/target/debug/deps/ato_connected_realization_worker-377b8bdb5c0f0403`.
+Checkpoint candidate test-binary SHA256 is
+`1364ab79c7d39be88d8f90b61aa5981890436f9d5b02b76a823dae131be3fa4a`;
+launcher SHA256 remains
+`88f43ef66033de3f3be0326f5eb37e8a11d11a029503fc2f7a0ba1391cc6d459`.
 Shared target ownership was explicitly transferred; no shared Runner was installed
 or enabled. Fixture root/temporary Docker config/ATO_HOME/TMPDIR are fresh;
 HOME/home/CODEX_HOME and parent permissions are untouched. Source logs and hashes
