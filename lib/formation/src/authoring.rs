@@ -297,6 +297,13 @@ pub struct DerivationDraft {
     pub steps: Vec<StepDraft>,
     pub ports: Vec<PortDraft>,
     pub state: Vec<StateDraft>,
+    /// The native Adapter this route's `runtime_launch` realization runs.
+    ///
+    /// Only an OCI route realizes a Terminal, so binding refuses it anywhere
+    /// else. Omitted when the author declares none — and then it is absent from
+    /// the bound bytes too, which is why every Derivation formed before this
+    /// field existed keeps its exact `DerivationRef`.
+    pub native_surface: Option<crate::native_surface::NativeSurfaceAdapter>,
     /// The route needs the workspace built before it is served, into this
     /// subtree.
     ///
@@ -763,8 +770,32 @@ fn bind_derivation(
             "OCI Port operations are not bound in this release",
         ));
     }
+    // A native Adapter is a declaration about the physical realization of one
+    // OCI `runtime_launch` route. Static Web is a materialization and a process
+    // route has no native Adapter at all, so refuse the declaration instead of
+    // carrying it to a host that cannot honor it.
+    let native_surface = draft.native_surface.clone();
+    if let Some(native) = &native_surface {
+        if steps.len() != 1 || steps[0].protocol != crate::source_oci_plan::OCI_PROTOCOL {
+            return Err(malformed(
+                "derive.native_surface",
+                "a native Surface requires exactly one ato.oci@1 runtime_launch step",
+            ));
+        }
+        native
+            .validate(&ports, &steps)
+            .map_err(|error| malformed("derive.native_surface", error))?;
+    } else if let Some(port) = ports
+        .iter()
+        .find(|port| port.protocol == crate::native_surface::TERMINAL_PORT_PROTOCOL)
+    {
+        return Err(malformed(
+            format!("port.{}", port.id),
+            "an ato.pty@1 Port must be named by a declared native Surface",
+        ));
+    }
     Ok(BoundDerivation {
-        native_surface: None,
+        native_surface,
         runtime_port_operations: draft.runtime_port_operations.clone(),
         variable_bindings,
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
@@ -925,6 +956,7 @@ mod tests {
                 }],
             },
             derivation: DerivationDraft {
+                native_surface: None,
                 runtime_port_operations: vec![],
                 variable_bindings: vec![],
                 requirements: Default::default(),

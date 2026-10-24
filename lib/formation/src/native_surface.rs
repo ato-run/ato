@@ -11,6 +11,13 @@ pub const NATIVE_SURFACE_RUNTIME_FEATURE: &str = "runtime_feature=native_surface
 /// Internal full-frame capture bound. HTTP returns only its measured digest.
 pub const MAX_NATIVE_PROBE_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 pub const TERMINAL_PORT_PROTOCOL: &str = "ato.pty@1";
+
+/// Terminal geometry the wire and every Adapter accept. The authoring grammar
+/// asks this before it builds an Adapter, so an out-of-range declaration is
+/// refused as geometry rather than as a Port problem.
+pub fn terminal_size_in_bounds(cols: u16, rows: u16) -> bool {
+    (2..=500).contains(&cols) && (2..=200).contains(&rows)
+}
 /// RFB semantics belong to the Adapter/profile; the logical transport reuses
 /// the existing opaque TCP Port instead of inventing a registered Protocol.
 pub const PIXEL_PORT_PROTOCOL: &str = TCP_PROTOCOL;
@@ -139,7 +146,7 @@ impl NativeSurfaceAdapter {
     pub fn validate_catalog(&self) -> Result<(), &'static str> {
         let presentation_valid = match &self.surface {
             NativePresentation::Terminal { cols, rows, .. } => {
-                (2..=500).contains(cols) && (2..=200).contains(rows)
+                terminal_size_in_bounds(*cols, *rows)
             }
             NativePresentation::PixelStream { width, height, .. } => {
                 (64..=4096).contains(width) && (64..=4096).contains(height)
