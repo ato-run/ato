@@ -839,6 +839,15 @@ mod tests {
         wait_for_rejection: bool,
         controls: PixelGatewayControls,
     ) -> Vec<u8> {
+        transport_boundary_case(assertion, chunks, wait_for_rejection, Some(controls)).await
+    }
+
+    async fn transport_boundary_case(
+        assertion: &str,
+        chunks: Vec<Vec<u8>>,
+        wait_for_rejection: bool,
+        controls: Option<PixelGatewayControls>,
+    ) -> Vec<u8> {
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let (handshake_ready, ready) = tokio::sync::oneshot::channel();
@@ -851,21 +860,22 @@ mod tests {
             stream.read_to_end(&mut all).await.unwrap();
             all
         });
-        let gateway = start_interactive_pixel_gateway(
-            PixelGatewayConfig {
-                listen_addr: "127.0.0.1:0".parse().unwrap(),
-                private_rfb_addr: upstream_addr,
-                private_rfb_connect_timeout: Duration::from_secs(1),
-                scope: PixelGatewayScope {
-                    session_id: "session-1".into(),
-                    surface_id: "surface-1".into(),
-                },
-                allowed_origins: BTreeSet::from([ORIGIN_VALUE.into()]),
+        let config = PixelGatewayConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            private_rfb_addr: upstream_addr,
+            private_rfb_connect_timeout: Duration::from_secs(1),
+            scope: PixelGatewayScope {
+                session_id: "session-1".into(),
+                surface_id: "surface-1".into(),
             },
-            Arc::new(TestAuthorizer),
-            controls,
-        )
-        .await
+            allowed_origins: BTreeSet::from([ORIGIN_VALUE.into()]),
+        };
+        let gateway = match controls {
+            Some(controls) => {
+                start_interactive_pixel_gateway(config, Arc::new(TestAuthorizer), controls).await
+            }
+            None => start_pixel_gateway(config, Arc::new(TestAuthorizer)).await,
+        }
         .unwrap();
         let (mut ws, _) =
             connect_async(request(gateway.local_addr(), ORIGIN_VALUE, Some(assertion)))
@@ -1066,5 +1076,91 @@ mod tests {
                 b"RFB 003.008\n\x01\x01"
             );
         }
+    }
+    fn novnc_packet() -> (Vec<u8>, Vec<u8>) {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/novnc-1.5-encodings.json"))
+                .unwrap();
+        let original: Vec<u8> = fixture["packet"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| u8::try_from(n.as_u64().unwrap()).unwrap())
+            .collect();
+        let mut filtered = original.clone();
+        filtered.drain(80..84);
+        filtered[2..4].copy_from_slice(&21u16.to_be_bytes());
+        (original, filtered)
+    }
+    #[tokio::test]
+    async fn bounded_gateway_filters_pinned_novnc_negotiation_for_every_physical_mask() {
+        let (packet, filtered) = novnc_packet();
+        let mut expected = b"RFB 003.008\n\x01\x01".to_vec();
+        expected.extend(filtered);
+        for controls in [
+            PixelGatewayControls::default(),
+            PixelGatewayControls {
+                text_paste: true,
+                framebuffer_resize: false,
+            },
+            PixelGatewayControls {
+                text_paste: false,
+                framebuffer_resize: true,
+            },
+            PixelGatewayControls {
+                text_paste: true,
+                framebuffer_resize: true,
+            },
+        ] {
+            assert_eq!(
+                bounded_boundary_case(
+                    "valid",
+                    packet.chunks(1).map(Vec::from).collect(),
+                    false,
+                    controls
+                )
+                .await,
+                expected
+            );
+        }
+    }
+    #[tokio::test]
+    async fn legacy_gateway_keeps_the_exact_pinned_novnc_advertisement() {
+        let (packet, _) = novnc_packet();
+        let mut expected = b"RFB 003.008\n\x01\x01".to_vec();
+        expected.extend(&packet);
+        assert_eq!(
+            transport_boundary_case("valid", vec![packet], false, None).await,
+            expected
+        );
+    }
+    #[tokio::test]
+    async fn no_novnc_encoding_prefix_leaks_and_negative_cuttext_stays_denied() {
+        let (packet, filtered) = novnc_packet();
+        assert_eq!(
+            bounded_boundary_case(
+                "valid",
+                vec![packet[..91].to_vec()],
+                true,
+                PixelGatewayControls::default()
+            )
+            .await,
+            b"RFB 003.008\n\x01\x01"
+        );
+        let mut expected = b"RFB 003.008\n\x01\x01".to_vec();
+        expected.extend(filtered);
+        assert_eq!(
+            bounded_boundary_case(
+                "valid-paste",
+                vec![packet, vec![6, 0, 0, 0, 255, 255, 255, 255]],
+                true,
+                PixelGatewayControls {
+                    text_paste: true,
+                    framebuffer_resize: false
+                }
+            )
+            .await,
+            expected
+        );
     }
 }
