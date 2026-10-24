@@ -16,6 +16,19 @@ pub struct NativePixelConfig {
         default_value_t = false
     )]
     pub enabled: bool,
+    /// Trusted operator opt-in; never read from a lease or application input.
+    #[arg(
+        long = "native-pixel-text-paste",
+        env = "ATO_NATIVE_PIXEL_TEXT_PASTE",
+        default_value_t = false
+    )]
+    pub text_paste: bool,
+    #[arg(
+        long = "native-pixel-framebuffer-resize",
+        env = "ATO_NATIVE_PIXEL_FRAMEBUFFER_RESIZE",
+        default_value_t = false
+    )]
+    pub framebuffer_resize: bool,
     #[arg(
         long = "native-pixel-helper-archive",
         env = "ATO_NATIVE_PIXEL_HELPER_ARCHIVE"
@@ -58,6 +71,8 @@ impl Default for NativePixelConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            text_paste: false,
+            framebuffer_resize: false,
             helper_archive: None,
             helper_image: None,
             cgroup_parent: None,
@@ -79,6 +94,10 @@ impl fmt::Debug for NativePixelConfig {
 }
 impl NativePixelConfig {
     pub(crate) fn prepare(&mut self, work_root: &Path, slots: u32) -> Result<()> {
+        ensure!(
+            self.enabled || (!self.text_paste && !self.framebuffer_resize),
+            "native_surface_controls_unsupported: controls require enabled Native Pixel"
+        );
         if !self.enabled {
             return Ok(());
         }
@@ -114,7 +133,7 @@ impl NativePixelConfig {
                 archive.image == expected,
                 "trusted helper differs from configured immutable image"
             );
-            let helper = PixelHelper::from_archive(
+            let helper = PixelHelper::from_archive_with_controls(
                 archive,
                 ato_adapter_oci::OciResourceLimits {
                     memory_bytes: self
@@ -124,6 +143,7 @@ impl NativePixelConfig {
                     cpu_limit_millis: self.helper_cpu_millis,
                     pids_limit: self.helper_pids,
                 },
+                self.requested_controls(),
             )?
             .with_runtime_user(work_root)?
             .with_local_owner(
@@ -144,6 +164,25 @@ impl NativePixelConfig {
         {
             let _ = work_root;
             anyhow::bail!("Native Pixel requires Linux")
+        }
+    }
+    fn requested_controls(&self) -> netd::pixel_gateway::PixelGatewayControls {
+        netd::pixel_gateway::PixelGatewayControls {
+            text_paste: self.text_paste,
+            framebuffer_resize: self.framebuffer_resize,
+        }
+    }
+    pub(crate) fn prepared_controls(&self) -> netd::pixel_gateway::PixelGatewayControls {
+        #[cfg(unix)]
+        {
+            self.prepared
+                .as_ref()
+                .map(|helper| helper.controls())
+                .unwrap_or_default()
+        }
+        #[cfg(not(unix))]
+        {
+            netd::pixel_gateway::PixelGatewayControls::default()
         }
     }
     pub(crate) fn available(&self, work_root: &Path, oci: bool) -> bool {
@@ -233,6 +272,37 @@ fn ensure_local_recovery_endpoint() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_controls_are_explicit_operator_options() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct OperatorArgs {
+            #[command(flatten)]
+            pixel: NativePixelConfig,
+        }
+        assert!(OperatorArgs::try_parse_from(["worker", "--native-pixel-text-paste"]).is_ok());
+        assert!(
+            OperatorArgs::try_parse_from(["worker", "--native-pixel-framebuffer-resize"]).is_ok()
+        );
+        assert!(
+            OperatorArgs::try_parse_from(["worker", "--native-pixel-text-paste=arbitrary"])
+                .is_err()
+        );
+    }
+    #[test]
+    fn controls_default_off_and_disabled_pixel_cannot_silently_ignore_opt_in() {
+        let mut config = NativePixelConfig::default();
+        assert!(!config.text_paste && !config.framebuffer_resize);
+        config.text_paste = true;
+        let error = config
+            .prepare(Path::new("missing-helper-root"), 1)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("native_surface_controls_unsupported:")
+        );
+    }
     #[test]
     fn disabled_or_unprepared_pixel_never_advertises_or_supplies_a_helper() {
         let root = Path::new("missing-native-fixture-root");

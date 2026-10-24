@@ -199,6 +199,20 @@ fn with_native_terminal_capability(
     }
     capabilities
 }
+fn with_native_pixel_control_capabilities(
+    mut capabilities: Vec<&'static str>,
+    pixel_available: bool,
+    controls: netd::pixel_gateway::PixelGatewayControls,
+) -> Vec<&'static str> {
+    if pixel_available && controls.text_paste {
+        capabilities.push("runtime_feature=native_text_paste_v1");
+    }
+    if pixel_available && controls.framebuffer_resize {
+        capabilities.push("runtime_feature=native_framebuffer_resize_v1");
+    }
+    capabilities
+}
+
 fn supported_session_surfaces(native: bool, pixel: bool) -> serde_json::Value {
     let mut surfaces = vec![
         serde_json::json!({"kind":"web","profiles":["ato.web-surface.v1"],"transports":["https"]}),
@@ -2312,6 +2326,16 @@ impl ConnectedWorker {
                     surface_listen: self.config.hidden_surface_listen,
                     startup_timeout: Duration::from_millis(timeout_ms.min(120_000)),
                     idle_timeout: Duration::from_secs(self.config.native_surface_idle_secs),
+                    controls: if matches!(
+                        command.session_surface,
+                        Some(
+                            ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream { .. }
+                        )
+                    ) {
+                        self.config.native_pixel.prepared_controls()
+                    } else {
+                        netd::pixel_gateway::PixelGatewayControls::default()
+                    },
                     maximum_lifetime: hard_deadline
                         .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
                         .unwrap_or(Duration::from_secs(1)),
@@ -2644,6 +2668,16 @@ impl ConnectedWorker {
             local_port: Some(port),
             execution: Some(&execution_evidence),
             port_mapping: oci_port_mapping.as_ref(),
+            surface_controls: {
+                #[cfg(unix)]
+                {
+                    native.and_then(|run| NativeSurfaceControlsReport::from_ready(run.controls()))
+                }
+                #[cfg(not(unix))]
+                {
+                    None
+                }
+            },
             control: None,
         };
         self.api.report_ready_with_budget(
@@ -2867,6 +2901,7 @@ impl ConnectedWorker {
                 local_port: Some(ready_local_port(&self.config)),
                 execution: None,
                 port_mapping: None,
+                surface_controls: None,
                 control: control.as_ref().map(|capability| BrowserControlReport {
                     protocol: &capability.protocol,
                     port: &capability.port,
@@ -4736,6 +4771,21 @@ struct OciPortMappingReport {
     runner_forward_port: u16,
 }
 
+/// Physical support from a ready guarded gateway, separate from D and receipt.
+#[derive(Serialize)]
+struct NativeSurfaceControlsReport {
+    clipboard_paste: bool,
+    framebuffer_resize: bool,
+}
+impl NativeSurfaceControlsReport {
+    fn from_ready(controls: netd::pixel_gateway::PixelGatewayControls) -> Option<Self> {
+        (controls.text_paste || controls.framebuffer_resize).then_some(Self {
+            clipboard_paste: controls.text_paste,
+            framebuffer_resize: controls.framebuffer_resize,
+        })
+    }
+}
+
 #[derive(Serialize)]
 struct ReadyReport<'a> {
     execution_id: &'a str,
@@ -4755,6 +4805,8 @@ struct ReadyReport<'a> {
     execution: Option<&'a runtime_launch::lease::RuntimeExecutionEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     port_mapping: Option<&'a OciPortMappingReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    surface_controls: Option<NativeSurfaceControlsReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<BrowserControlReport<'a>>,
 }
@@ -4807,10 +4859,14 @@ impl HttpRunnerApi {
         )))
         .json(&serde_json::json!({
             "capabilities": advertised_capabilities(
-                with_native_terminal_capability(runner_capabilities(
-                    config.firecracker_configured(), oci_available, self.persistent_volumes,
-                    config.network_controls, !config.fixed_tcp_allowlist.trim().is_empty(),
-                ), native || pixel),
+                with_native_pixel_control_capabilities(
+                    with_native_terminal_capability(runner_capabilities(
+                        config.firecracker_configured(), oci_available, self.persistent_volumes,
+                        config.network_controls, !config.fixed_tcp_allowlist.trim().is_empty(),
+                    ), native || pixel),
+                    pixel,
+                    config.native_pixel.prepared_controls(),
+                ),
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
             ),
@@ -7107,6 +7163,61 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         }
     }
 
+    #[test]
+    fn pixel_controls_only_advertise_when_the_trusted_helper_is_available() {
+        use netd::pixel_gateway::PixelGatewayControls;
+        let base = vec!["execution_abi=oci"];
+        let both = PixelGatewayControls {
+            text_paste: true,
+            framebuffer_resize: true,
+        };
+        assert_eq!(
+            with_native_pixel_control_capabilities(base.clone(), false, both),
+            base
+        );
+        assert_eq!(
+            with_native_pixel_control_capabilities(
+                base.clone(),
+                true,
+                PixelGatewayControls::default()
+            ),
+            base
+        );
+        let supported = with_native_pixel_control_capabilities(base, true, both);
+        assert!(supported.contains(&"runtime_feature=native_text_paste_v1"));
+        assert!(supported.contains(&"runtime_feature=native_framebuffer_resize_v1"));
+    }
+    #[test]
+    fn ready_controls_are_optional_operational_fields_outside_execution_and_receipts() {
+        let mut report = ReadyReport {
+            execution_id: "exec",
+            ready_url: None,
+            local_port: None,
+            execution: None,
+            port_mapping: None,
+            control: None,
+            surface_controls: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::json!({"execution_id":"exec"})
+        );
+        assert!(
+            NativeSurfaceControlsReport::from_ready(
+                netd::pixel_gateway::PixelGatewayControls::default()
+            )
+            .is_none()
+        );
+        report.surface_controls =
+            NativeSurfaceControlsReport::from_ready(netd::pixel_gateway::PixelGatewayControls {
+                text_paste: true,
+                framebuffer_resize: false,
+            });
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::json!({"execution_id":"exec","surface_controls":{"clipboard_paste":true,"framebuffer_resize":false}})
+        );
+    }
     #[test]
     fn a_host_boundary_runner_never_advertises_namespace_isolation() {
         let base = runner_capabilities(false, false, false, false, false);
