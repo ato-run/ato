@@ -26,6 +26,27 @@ fn signed(
     allowed: bool,
     jti: &str,
 ) -> String {
+    signed_until(
+        scope,
+        execution,
+        key,
+        allowed,
+        jti,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60,
+    )
+}
+fn signed_until(
+    scope: &SurfaceGatewayScope,
+    execution: &SurfaceExecutionScope,
+    key: &str,
+    allowed: bool,
+    jti: &str,
+    exp: u64,
+) -> String {
     let claims = SurfaceAssertionClaims {
         clipboard_paste: allowed,
         framebuffer_resize: allowed,
@@ -37,11 +58,7 @@ fn signed(
             kind: SurfacePrincipalKind::User,
             id: "fixture-owner".into(),
         },
-        exp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 60,
+        exp,
         jti: jti.into(),
         kid: "ato.runner-surface@1".into(),
     };
@@ -293,4 +310,109 @@ pub(crate) async fn exercise(
         assert!(matches!(ws.read(), Err(tungstenite::Error::Io(e)) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)));
         let _ = ws.close(None);
     }).await.unwrap();
+}
+
+/// Reads only this Run's isolated authenticated X selection. None is an actual
+/// observation, not a fabricated empty successful paste.
+pub(crate) async fn browser_clipboard(root: &Path) -> Option<Vec<u8>> {
+    use std::os::fd::AsRawFd;
+    let authority = std::fs::read(root.join("oci-runtime/display/auth/Xauthority")).unwrap();
+    let directory = std::fs::File::open(root.join("oci-runtime/display/x11")).unwrap();
+    let socket = PathBuf::from(format!("/proc/self/fd/{}/X64", directory.as_raw_fd()));
+    SelectionClient::open(&socket, &authority[authority.len() - 16..])
+        .await
+        .read()
+        .await
+}
+/// A denied probe is never counted as browser reconnect evidence.
+pub(crate) async fn browser_denied_input(
+    surface: SocketAddr,
+    scope: &SurfaceGatewayScope,
+    key: &str,
+    origin: &str,
+    execution: &SurfaceExecutionScope,
+    expiry: u64,
+    resize: bool,
+) -> bool {
+    let suffix = if resize { "resize" } else { "paste" };
+    let token = signed_until(
+        scope,
+        execution,
+        key,
+        false,
+        &format!("native-browser-denied-{suffix}"),
+        expiry,
+    );
+    let message = if resize {
+        let mut bytes = vec![251, 0];
+        bytes.extend(800u16.to_be_bytes());
+        bytes.extend(600u16.to_be_bytes());
+        bytes.extend([1, 0]);
+        bytes.extend([0; 8]);
+        bytes.extend(800u16.to_be_bytes());
+        bytes.extend(600u16.to_be_bytes());
+        bytes.extend([0; 4]);
+        bytes
+    } else {
+        cut(b"denied replacement")
+    };
+    let origin = origin.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let (mut ws, _) = connect(surface, &origin, &token);
+        ws.send(Message::binary(message)).unwrap();
+        matches!(ws.read(), Err(_) | Ok(Message::Close(_)))
+    })
+    .await
+    .unwrap()
+}
+pub(crate) async fn browser_reconnect(
+    surface: SocketAddr,
+    scope: &SurfaceGatewayScope,
+    key: &str,
+    origin: &str,
+    execution: &SurfaceExecutionScope,
+    expiry: u64,
+) -> ((u16, u16), bool) {
+    let token = signed_until(
+        scope,
+        execution,
+        key,
+        true,
+        "native-browser-state-verifier",
+        expiry,
+    );
+    let origin = origin.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let (mut ws,size)=connect(surface,&origin,&token);
+        ws.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let quiet=matches!(ws.read(),Err(tungstenite::Error::Io(e)) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut));
+        let _=ws.close(None);(size,quiet)
+    }).await.unwrap()
+}
+pub(crate) async fn browser_full_frame(
+    surface: SocketAddr,
+    scope: &SurfaceGatewayScope,
+    key: &str,
+    origin: &str,
+    execution: &SurfaceExecutionScope,
+    expiry: u64,
+) -> netd::rfb_probe::RfbFrameInfo {
+    let token = signed_until(
+        scope,
+        execution,
+        key,
+        true,
+        "native-browser-full-frame-verifier",
+        expiry,
+    );
+    netd::rfb_probe::wait_for_authenticated_gateway_frame(
+        netd::rfb_probe::PixelGatewayProbeRequest::new(
+            &format!("http://{surface}/__ato/surface"),
+            origin,
+            &token,
+        ),
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap()
 }
