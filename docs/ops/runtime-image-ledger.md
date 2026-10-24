@@ -83,7 +83,7 @@ and missing required fields fail parsing (exit 1). A full example is
     {
       "image_digest": "sha256:1111…64 lowercase hex…",
       "base_digests": ["sha256:2222…"],
-      "runtime_versions": {"node": "20.20.2", "python": "3.12.7"},
+      "runtime_versions": {"node": "22.23.4", "python": "3.12.7"},
       "created_from": "formation",
       "sbom": {"format": "spdx-json", "digest": "sha256:3333…"},
       "scan": {
