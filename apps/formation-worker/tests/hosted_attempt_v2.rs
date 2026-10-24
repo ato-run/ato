@@ -146,7 +146,14 @@ fn scratch_dir() -> tempfile::TempDir {
     tempfile::tempdir_in(root).unwrap()
 }
 
-fn hosted(fail_upload: bool, wrong_status: bool, process: Option<&str>) -> Value {
+/// What one hosted run produced: the durable outcome record, and the published
+/// result when the run published one.
+struct Hosted {
+    record: Value,
+    result: Option<Value>,
+}
+
+fn hosted(fail_upload: bool, wrong_status: bool, process: Option<&str>) -> Hosted {
     hosted_with_fault(fail_upload, wrong_status, process, None)
 }
 fn hosted_with_fault(
@@ -154,7 +161,7 @@ fn hosted_with_fault(
     wrong_status: bool,
     process: Option<&str>,
     fault: Option<&str>,
-) -> Value {
+) -> Hosted {
     let source = scratch_dir();
     std::fs::write(
         source.path().join("index.html"),
@@ -378,7 +385,10 @@ status = 200
                     .is_err()
                 );
             }
-            return report;
+            return Hosted {
+                record: report,
+                result: None,
+            };
         }
     }
     let path = scratch.path().join("hosted_attempt/hosted-outcome.json");
@@ -391,12 +401,14 @@ status = 200
         reqwest::blocking::get(endpoint).is_err(),
         "candidate still answering after Stop: {endpoint}"
     );
+    let mut published = None;
     if fail_upload || wrong_status {
         assert!(outcome.is_err());
         assert!(server.result.lock().unwrap().is_none());
     } else {
         assert!(outcome.is_ok(), "{outcome:?}");
         let result = server.result.lock().unwrap().clone().unwrap();
+        published = Some(result.clone());
         assert_eq!(result["protocol"], "ato.formation-result.v2");
         assert!(result.get("program_intent_ref").is_none());
         assert!(result.get("effective_build_plan_ref").is_none());
@@ -436,19 +448,41 @@ status = 200
         1,
         "redelivery must stop before fetching or execution"
     );
-    record
+    Hosted {
+        record,
+        result: published,
+    }
 }
 #[test]
 fn hosted_static_is_observed_then_published() {
-    let r = hosted(false, false, None);
+    let hosted = hosted(false, false, None);
+    let r = &hosted.record;
     assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], true);
     for name in ["seal", "runtime_verification", "cleanup", "publication"] {
         assert_eq!(r["outcomes"][name]["state"], "succeeded");
     }
+    // The observed Contract still has its HTTP evidence (the receipt above),
+    // but the published result cannot name a port a Static Web lane does not
+    // export — the control plane refuses exactly that.
+    let result = hosted
+        .result
+        .as_ref()
+        .expect("a successful hosted static run publishes a result");
+    assert_eq!(result["exported_ports"], json!([]));
+    assert_eq!(
+        result["readiness_contracts"],
+        json!([]),
+        "a Static Web result must not claim a readiness port it never exports"
+    );
+    assert_eq!(
+        result["contract_verification"]["observations"][0]["id"],
+        "root"
+    );
 }
 #[test]
 fn publication_failure_keeps_the_satisfied_receipt() {
-    let r = hosted(true, false, None);
+    let hosted = hosted(true, false, None);
+    let r = &hosted.record;
     assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], true);
     assert_eq!(r["outcomes"]["runtime_verification"]["state"], "succeeded");
     assert_eq!(r["outcomes"]["cleanup"]["state"], "succeeded");
@@ -456,7 +490,8 @@ fn publication_failure_keeps_the_satisfied_receipt() {
 }
 #[test]
 fn a_failed_http_contract_is_not_published() {
-    let r = hosted(false, true, None);
+    let hosted = hosted(false, true, None);
+    let r = &hosted.record;
     assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], false);
     assert_eq!(r["outcomes"]["runtime_verification"]["state"], "failed");
     assert_eq!(r["outcomes"]["cleanup"]["state"], "succeeded");
@@ -467,12 +502,36 @@ fn a_failed_http_contract_is_not_published() {
 #[test]
 fn hosted_python_and_node_use_the_common_process_runtime() {
     for runtime in ["python", "node"] {
-        let record = hosted(false, false, Some(runtime));
+        let hosted = hosted(false, false, Some(runtime));
+        let record = &hosted.record;
         assert_eq!(
             record["attempt"]["receipt"]["fully_satisfied"], true,
             "{runtime}: {record}"
         );
         assert_eq!(record["outcomes"]["cleanup"]["state"], "succeeded");
+        // A process lane exports the serving port, so its readiness contract
+        // must name one of the ports the result actually exports.
+        let result = hosted
+            .result
+            .as_ref()
+            .expect("a successful hosted process run publishes a result");
+        let exported = result["exported_ports"]
+            .as_array()
+            .expect("exported_ports is a list");
+        assert!(!exported.is_empty(), "{runtime}: {result}");
+        let readiness = result["readiness_contracts"]
+            .as_array()
+            .expect("readiness_contracts is a list");
+        assert_eq!(readiness.len(), 1, "{runtime}: {result}");
+        let port_name = readiness[0]["port_name"]
+            .as_str()
+            .expect("readiness names a port");
+        assert!(
+            exported
+                .iter()
+                .any(|port| port["name"].as_str() == Some(port_name)),
+            "{runtime}: readiness names {port_name:?}, not exported: {exported:?}"
+        );
     }
 }
 
