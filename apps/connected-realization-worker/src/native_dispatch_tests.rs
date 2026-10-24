@@ -1,5 +1,8 @@
 //! Actual lease evaluator tests: fake control-plane transport, real isolated
 //! Docker workload/PTY/Native probe/scoped proxy, existing Rust K authority.
+#[cfg(unix)]
+#[path = "native_dispatch_tests/browser_fixture.rs"]
+mod browser_fixture;
 use super::*;
 use runtime_launch::lease::{RuntimeLaunchLeaseCommand, verified_spec};
 use serde_json::json;
@@ -249,8 +252,29 @@ fn real_host_boundary_pixel_lease_preserves_original_k_and_instance_files() {
     run_actual_native_dispatch(true, false, true);
 }
 
+#[test]
+#[ignore = "explicit test-owned Linux root Native browser joint fixture; no Hosted credentials"]
+fn real_host_boundary_native_pixel_browser_joint_fixture() {
+    let fixture = Arc::new(browser_fixture::BrowserFixture::create());
+    let result = std::panic::catch_unwind({
+        let fixture = Arc::clone(&fixture);
+        move || run_actual_native_dispatch_with_browser(true, false, true, Some(fixture))
+    });
+    fixture.finish(result.is_ok());
+    result.unwrap();
+}
 fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
-    let controls = pixel && std::env::var("ATO_NATIVE_PIXEL_TEST_CONTROLS").as_deref() == Ok("1");
+    run_actual_native_dispatch_with_browser(pixel, mismatch, files, None);
+}
+fn run_actual_native_dispatch_with_browser(
+    pixel: bool,
+    mismatch: bool,
+    files: bool,
+    browser: Option<Arc<browser_fixture::BrowserFixture>>,
+) {
+    let controls = pixel
+        && (browser.is_some()
+            || std::env::var("ATO_NATIVE_PIXEL_TEST_CONTROLS").as_deref() == Ok("1"));
     use ato_formation::verify::{
         RuntimeHttpObservation, VerificationExecutionEvidence, VerificationTargetKind,
     };
@@ -259,7 +283,15 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
         verification::{ReceiptContext, verify_observed_candidate},
     };
     use std::io::Write;
-    const KEY: &str = "native-test-key-native-test-key-native-test-key";
+    let key: &'static str = if browser.is_some() {
+        browser_fixture::KEY
+    } else {
+        "native-test-key-native-test-key-native-test-key"
+    };
+    let origin = browser.as_ref().map_or_else(
+        || "https://staging.ato.run".to_owned(),
+        |fixture| fixture.origin.clone(),
+    );
     const INPUT: &[u8] = b"{\"native\":\"owned input\"}";
     let boundary = files.then(|| {
         assert!(
@@ -353,7 +385,10 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
     }
     let artifact = runtime_launch::state_artifact::pack_state_tree(&source).unwrap();
     spec.workspace.materialization_ref = artifact.digest().to_owned();
-    let command = native_command(&spec, descriptor.clone(), &d.derivation_ref().unwrap());
+    let mut command = native_command(&spec, descriptor.clone(), &d.derivation_ref().unwrap());
+    if let Some(fixture) = &browser {
+        fixture.configure(&mut command);
+    }
     assert!(verified_spec(&command).is_ok());
     let run_id = spec.context.run_id.clone();
     let lease_id = format!(
@@ -391,6 +426,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
     };
     let bytes = artifact.bytes().to_vec();
     let digest = spec.canonical_digest().unwrap();
+    let server_browser = browser.clone();
     let server = thread::spawn(move || {
         let controls_done = Arc::new(AtomicBool::new(!controls));
         let mut interactions = Vec::new();
@@ -448,7 +484,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                 (
                     200,
                     serde_json::to_vec(
-                        &json!({"stop_requested":worker_ready.load(Ordering::Acquire) && controls_done.load(Ordering::Acquire)}),
+                        &json!({"stop_requested":worker_ready.load(Ordering::Acquire) && (controls_done.load(Ordering::Acquire) || server_browser.as_ref().is_some_and(|fixture|fixture.expired()))}),
                     )
                     .unwrap(),
                 )
@@ -534,7 +570,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                     .unwrap();
                 assert_eq!(denied.status().as_u16(), 403);
                 let wrong =
-                    observation_proof(KEY, &work_run, &work_lease, &work_runner, "app.native");
+                    observation_proof(key, &work_run, &work_lease, &work_runner, "app.native");
                 assert_eq!(
                     client
                         .get(format!("http://{public}/result"))
@@ -546,7 +582,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                     403
                 );
                 let proof =
-                    observation_proof(KEY, &work_run, &work_lease, &work_runner, "app.probe");
+                    observation_proof(key, &work_run, &work_lease, &work_runner, "app.probe");
                 let actual = client
                     .get(format!("http://{public}/result"))
                     .header(RUN_ASSERTION_HEADER, &proof)
@@ -601,7 +637,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                     // receipt gate before issuing a browser credential.
                     let keys =
                         netd::pixel_authorization::SurfaceAssertionKeyring::new(BTreeMap::from([
-                            ("ato.runner-surface@1".into(), KEY.into()),
+                            ("ato.runner-surface@1".into(), key.into()),
                         ]))
                         .unwrap();
                     let scope = ato_ipc::session_surface::SurfaceExecutionScope {
@@ -621,7 +657,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                             .block_on(netd::rfb_probe::wait_for_authenticated_gateway_frame(
                                 netd::rfb_probe::PixelGatewayProbeRequest::new(
                                     &format!("http://{public}/__ato/surface"),
-                                    "https://staging.ato.run",
+                                    &origin,
                                     assertion.as_str(),
                                 ),
                                 Duration::from_secs(3),
@@ -650,7 +686,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                         let viewed = runtime_launch::native::tests::viewer(
                             public,
                             assertion.as_str().to_owned(),
-                            "https://staging.ato.run",
+                            &origin,
                             b"go\r",
                             true,
                         )
@@ -698,20 +734,30 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                     runner_id: work_runner.clone(),
                 };
                 let expected = expected_body.clone();
+                let origin = origin.clone();
+                let browser = server_browser.clone();
                 interactions.push(thread::spawn(move || {
                     let result = std::panic::catch_unwind(|| {
-                        tokio::runtime::Runtime::new().unwrap().block_on(
-                            runtime_launch::native::pixel::tests::controls_acceptance::exercise(
-                                public,
-                                &root,
-                                &gateway_scope,
-                                KEY,
-                                "https://staging.ato.run",
-                                &scope,
-                            ),
-                        );
+                        if let Some(fixture) = &browser {
+                            fixture.publish(public, &gateway_scope, &scope);
+                            let expiry = fixture.wait_done().unwrap();
+                            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                                tokio::time::timeout(
+                                    fixture.remaining(),
+                                    runtime_launch::native::pixel::tests::controls_acceptance::verify_browser_result(
+                                        public, &root, &gateway_scope, key, &origin, &scope, expiry,
+                                    ),
+                                ).await.unwrap();
+                            });
+                        } else {
+                            tokio::runtime::Runtime::new().unwrap().block_on(
+                                runtime_launch::native::pixel::tests::controls_acceptance::exercise(
+                                    public, &root, &gateway_scope, key, &origin, &scope,
+                                ),
+                            );
+                        }
                         let proof = observation_proof(
-                            KEY,
+                            key,
                             &scope.run_id,
                             &scope.lease_id,
                             &scope.runner_id,
@@ -744,6 +790,15 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
     });
     let work_root = root.path().join("runner");
     let lease_root = work_root.join("leases").join(&lease_id);
+    if let Some(fixture) = &browser {
+        fixture.register_cleanup(
+            public,
+            hidden,
+            work_root.clone(),
+            lease_root.clone(),
+            runner_id.clone(),
+        );
+    }
     fs::create_dir_all(work_root.join("leases")).unwrap();
     if files {
         use std::os::unix::fs::PermissionsExt;
@@ -820,7 +875,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
             json!({"preparation_ms":preparation_started.elapsed().as_millis(),"workload_uid":expected_uid})
         );
     }
-    let mut lease=ClaimedLease{id:lease_id.clone(),run_id:run_id.clone(),command:LeaseCommand::RuntimeLaunch(serde_json::from_value(json!({"run_id":"unused","compute_instance_id":"unused","launch_spec_digest":"unused","launch_spec":null})).unwrap()),expires_at:None,proxy_assertion_key:Some(KEY.into())};
+    let mut lease=ClaimedLease{id:lease_id.clone(),run_id:run_id.clone(),command:LeaseCommand::RuntimeLaunch(serde_json::from_value(json!({"run_id":"unused","compute_instance_id":"unused","launch_spec_digest":"unused","launch_spec":null})).unwrap()),expires_at:None,proxy_assertion_key:Some(key.into())};
     let previous = runtime_launch::recovery::slot_recovered();
     runtime_launch::recovery::mark_slot_recovered(true);
     worker.config.native_terminal = false;
@@ -849,7 +904,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
         );
         assert!(!lease_root.join("workspace").exists());
     }
-    lease.proxy_assertion_key = Some(KEY.into());
+    lease.proxy_assertion_key = Some(key.into());
     if let Some(boundary) = boundary {
         let mut wrong = spec.clone();
         let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &mut wrong.realization else {
@@ -869,8 +924,14 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
         );
         assert!(!lease_root.join("workspace").exists());
     }
-    lease.command =
-        LeaseCommand::RuntimeLaunch(Box::new(native_command(&spec, descriptor, &dispatched_ref)));
+    let mut live_command = native_command(&spec, descriptor, &dispatched_ref);
+    if let Some(fixture) = &browser {
+        fixture.configure(&mut live_command);
+    }
+    lease.command = LeaseCommand::RuntimeLaunch(Box::new(live_command));
+    if let Some(fixture) = &browser {
+        fixture.arm();
+    }
     let evaluated_at = Instant::now();
     let result = worker.execute_lease(&lease);
     if let Err(error) = &result {
