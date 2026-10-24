@@ -1012,6 +1012,7 @@ pub(crate) mod tests {
             }
             Ok(crate::pixel_gateway::AuthorizedSurfaceAccess {
                 clipboard_paste_until: None,
+                framebuffer_resize_until: None,
                 principal: "user-1".to_string(),
                 grant_id: "probe-grant-1".to_string(),
             })

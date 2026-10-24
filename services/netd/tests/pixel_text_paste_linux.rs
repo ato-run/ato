@@ -54,6 +54,7 @@ fn docker(args: &[&str]) -> String {
 fn signed(permission: bool, jti: &str, key: &str, execution: SurfaceExecutionScope) -> String {
     let claims = SurfaceAssertionClaims {
         clipboard_paste: permission,
+        framebuffer_resize: false,
         execution: Some(execution),
         aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.into(),
         session_id: "paste-test".into(),

@@ -14,6 +14,7 @@ pub mod native_surface;
 pub mod net;
 pub mod pixel_authorization;
 pub mod pixel_gateway;
+mod pixel_resize;
 mod pixel_text_paste;
 pub mod rfb_probe;
 pub mod server;

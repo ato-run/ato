@@ -1,0 +1,24 @@
+{
+  "secret": "fixture-only-native-interaction-assertion-key",
+  "claims": {
+    "aud": "ato.runner.surface-gateway",
+    "session_id": "session",
+    "surface_id": "surface",
+    "principal": {
+      "kind": "user",
+      "id": "owner"
+    },
+    "exp": 200,
+    "jti": "cross-language-native-controls",
+    "kid": "fixture",
+    "execution": {
+      "run_id": "run",
+      "lease_id": "lease",
+      "runner_id": "runner"
+    },
+    "clipboard_paste": true,
+    "framebuffer_resize": true
+  },
+  "nowSeconds": 100,
+  "token": "eyJhdWQiOiJhdG8ucnVubmVyLnN1cmZhY2UtZ2F0ZXdheSIsInNlc3Npb25faWQiOiJzZXNzaW9uIiwic3VyZmFjZV9pZCI6InN1cmZhY2UiLCJwcmluY2lwYWwiOnsia2luZCI6InVzZXIiLCJpZCI6Im93bmVyIn0sImV4cCI6MjAwLCJqdGkiOiJjcm9zcy1sYW5ndWFnZS1uYXRpdmUtY29udHJvbHMiLCJraWQiOiJmaXh0dXJlIiwiZXhlY3V0aW9uIjp7InJ1bl9pZCI6InJ1biIsImxlYXNlX2lkIjoibGVhc2UiLCJydW5uZXJfaWQiOiJydW5uZXIifSwiY2xpcGJvYXJkX3Bhc3RlIjp0cnVlLCJmcmFtZWJ1ZmZlcl9yZXNpemUiOnRydWV9.3d84a93c76d77b048291d64751db21b8970a04e6359206ad6836f36d31416f91"
+}
