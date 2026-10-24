@@ -21,6 +21,35 @@ const AUTH: &str = "/run/ato-native-auth";
 const RFB: &str = "/run/ato-native-rfb";
 const HELPER: &str = "/usr/local/lib/ato/native-display";
 
+/// Physical identity comes from the existing trusted HostBoundary, never D.
+/// Ordinary local Runners retain the owner of their private runtime directory.
+fn helper_user(directory: &Path) -> Result<OciUser> {
+    let user = if let Some(boundary) = super::super::host_boundary::active() {
+        OciUser {
+            uid: boundary.uid,
+            gid: boundary.gid,
+        }
+    } else {
+        let owner = std::fs::metadata(directory)?;
+        OciUser {
+            uid: owner.uid(),
+            gid: owner.gid(),
+        }
+    };
+    user.validate()
+}
+
+fn validate_application_user(user: OciUser) -> Result<()> {
+    user.validate()?;
+    if let Some(boundary) = super::super::host_boundary::active() {
+        ensure!(
+            user.uid == boundary.uid && user.gid == boundary.gid,
+            "oci_user_state_owner_mismatch: Native GUI requires the configured workload identity"
+        );
+    }
+    Ok(())
+}
+
 /// Explicit trusted Runner configuration, default absent. Only a verified
 /// immutable OCI archive is admitted; no registry fallback, mutable tag, shell
 /// supplied by the application, or image package installation occurs at Run.
@@ -33,6 +62,7 @@ pub struct PixelHelper {
     config_reference: String,
     limits: OciResourceLimits,
     owner: Option<super::pixel_capacity::PixelOwner>,
+    prepared_user: Option<OciUser>,
 }
 impl PixelHelper {
     pub fn from_archive(archive: PortableOciArchive, limits: OciResourceLimits) -> Result<Self> {
@@ -50,7 +80,13 @@ impl PixelHelper {
             config_reference: verified.config_reference,
             limits,
             owner: None,
+            prepared_user: None,
         })
+    }
+
+    pub(crate) fn with_runtime_user(mut self, work_root: &Path) -> Result<Self> {
+        self.prepared_user = Some(helper_user(work_root)?);
+        Ok(self)
     }
 
     pub(crate) fn with_local_owner(mut self, socket: PathBuf, parent: String) -> Result<Self> {
@@ -73,18 +109,14 @@ impl PixelHelper {
             },
             &self.limits,
         )?;
-        let metadata = std::fs::metadata(work_root)?;
         let spec = OciSpec {
             id: "native-display-admission".into(),
             image: self.image.clone(),
             platform: self.platform.clone(),
             entrypoint: Some(HELPER.into()),
             user: Some(
-                OciUser {
-                    uid: metadata.uid(),
-                    gid: metadata.gid(),
-                }
-                .validate()?,
+                self.prepared_user
+                    .context("Pixel omitted prepared workload identity")?,
             ),
             argv: vec!["320".into(), "200".into()],
             working_dir: "/run".into(),
@@ -113,6 +145,13 @@ impl PixelHelper {
         let LaunchRealizationV1::Oci(oci) = &spec.realization else {
             anyhow::bail!("Pixel requires OCI");
         };
+        let user = oci
+            .user
+            .context("native GUI requires explicit nonroot user")?;
+        validate_application_user(OciUser {
+            uid: user.uid,
+            gid: user.gid,
+        })?;
         let limits = oci
             .resource_limits
             .as_ref()
@@ -143,6 +182,7 @@ impl DisplayDirectories {
     fn create(runtime: &Path) -> Result<Self> {
         std::fs::create_dir_all(runtime)?;
         std::fs::set_permissions(runtime, std::fs::Permissions::from_mode(0o700))?;
+        let user = helper_user(runtime)?;
         let root = runtime.join("display");
         std::fs::create_dir(&root).context("create fresh owned display directory")?;
         let dirs = Self {
@@ -158,7 +198,12 @@ impl DisplayDirectories {
         ] {
             let path = dirs.root.join(name);
             std::fs::create_dir(&path)?;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+            if super::super::host_boundary::active().is_some() && matches!(name, "x11" | "rfb") {
+                // Fresh owned children only. The credential/runtime parent,
+                // workspace and Runner configuration remain Runner-owned.
+                std::os::unix::fs::chown(&path, Some(user.uid), Some(user.gid))?;
+            }
         }
         // Xauthority binary format: FamilyWild, address, display, protocol,
         // and a cryptographically random cookie. No command/log contains it.
@@ -278,10 +323,10 @@ fn reserved_mount(path: &str) -> bool {
     })
 }
 fn validate_app(app: &OciSpec) -> Result<()> {
-    ensure!(
-        app.user.is_some(),
-        "native GUI requires explicit nonroot user"
-    );
+    validate_application_user(
+        app.user
+            .context("native GUI requires explicit nonroot user")?,
+    )?;
     ensure!(
         app.endpoints.is_empty(),
         "host GUI cannot erase declared OCI endpoints"
@@ -435,6 +480,10 @@ pub async fn start_pixel(
             gid: metadata.gid(),
         }
         .validate()?;
+        ensure!(
+            helper.prepared_user.is_none_or(|prepared| prepared == user),
+            "Native display identity differs from prepared helper"
+        );
         let mounts = |writable: bool| {
             vec![
                 OciMount {
