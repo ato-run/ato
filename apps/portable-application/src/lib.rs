@@ -40,6 +40,8 @@ pub mod instance_snapshot;
 pub mod local_instance;
 #[cfg(test)]
 mod native_surface_tests;
+#[cfg(test)]
+mod native_terminal_authoring_tests;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
@@ -1079,6 +1081,7 @@ pub fn build_multi_derivation_bundle(
     let static_draft = AuthoringDraft {
         contract: process_draft.contract.clone(),
         derivation: DerivationDraft {
+            native_surface: None,
             runtime_port_operations: vec![],
             variable_bindings: vec![],
             requirements: Default::default(),
@@ -1324,6 +1327,69 @@ pub fn build_authored_bundle_v2(
                 .collect::<Result<_, PortableApplicationError>>()?,
         },
     )
+}
+
+/// Compile one `ato.capsule/1` route that declares a Terminal `native_surface`
+/// into the canonical wire v3 bundle the hosted validator imports.
+///
+/// The manifest is authoring input and is never embedded in the artifact tree.
+/// Only an OCI derivation is realized through the `runtime_launch` lease that
+/// owns a native Adapter, so nothing else is emitted; binding has already
+/// refused every other shape.
+pub fn build_native_terminal_bundle(
+    source_root: &Path,
+    manifest: &Path,
+    title: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    if title.trim().is_empty() {
+        return Err(profile("application title must not be empty"));
+    }
+    let text = read(manifest.to_path_buf())?;
+    let text = std::str::from_utf8(&text)
+        .map_err(|error| profile(format!("capsule.toml is not UTF-8: {error}")))?;
+    let draft = parse_capsule_toml(text)
+        .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
+    let native =
+        draft.derivation.native_surface.clone().ok_or_else(|| {
+            profile("native bundle requires a [derive.native_surface] declaration")
+        })?;
+    if native.surface.kind() != "terminal" {
+        return Err(profile(
+            "this bundle profile carries one declared Terminal native Surface",
+        ));
+    }
+    let excluded = manifest
+        .strip_prefix(source_root)
+        .ok()
+        .and_then(|path| path.to_str())
+        .map(|path| vec![path.replace(std::path::MAIN_SEPARATOR, "/")])
+        .unwrap_or_default();
+    let (mut objects, tree_ref) =
+        build_portable_tree_with_schema(source_root, PORTABLE_TREE_V2_SCHEMA, &excluded)?;
+    let (contract, derivation) = bind(
+        &draft,
+        &BindingContext {
+            source_closure_ref: &tree_ref,
+        },
+    )
+    .map_err(|error| PortableApplicationError::Binding(error.to_string()))?;
+    let application = ApplicationV2 {
+        schema: APPLICATION_V2_SCHEMA.to_owned(),
+        title: title.to_owned(),
+        surfaces: vec![ApplicationSurfaceV2 {
+            id: "main".to_owned(),
+            port: native.surface.port().to_owned(),
+            path: "/".to_owned(),
+        }],
+        bindings: Vec::new(),
+    };
+    let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
+    let derivation_ref = add_structured(&mut objects, &derivation, BOUND_DERIVATION_SCHEMA)?;
+    let application_ref = add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?;
+    let bundle = finish_bundle(objects, contract_ref, application_ref, vec![derivation_ref]);
+    validate_bundle(&bundle)?;
+    let bytes = encode_portable_application_bundle(&bundle)?;
+    Ok((bytes, bundle))
 }
 
 pub fn build_dynamic_routes_bundle(
