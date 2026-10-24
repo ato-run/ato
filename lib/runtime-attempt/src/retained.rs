@@ -96,7 +96,20 @@ impl CandidateRealizer for RetainedCandidateRealizer<'_> {
                 "retained artifact exceeds ticket cap".into(),
             );
         }
-        if let RetainedShape::ProcessWorkspace { .. } = &self.descriptor.shape {
+        if let RetainedShape::ProcessWorkspace { binding } = &self.descriptor.shape {
+            // Replay runs the toolchain the descriptor recorded, not one it
+            // resolves now. The recorded binding is therefore an execution
+            // input and is policy-checked before the host is even asked
+            // whether that toolchain exists: a host that still has an
+            // affected Node must not make it runnable.
+            if let Err(refusal) =
+                ato_formation::runtime_policy::node_toolchain_policy(&binding.toolchains)
+            {
+                return refuse(refusal.code, refusal.message);
+            }
+            if let Err(refusal) = ato_formation::runtime_policy::derivation_runtime_policy(d) {
+                return refuse(refusal.code, refusal.message);
+            }
             if profile.get("formation.containment") != Some("bwrap+landlock") {
                 return refuse(
                     "runtime_cannot_contain_candidate",
