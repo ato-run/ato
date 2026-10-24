@@ -38,7 +38,7 @@ fn replay_case(kind: &str) {
         if kind == "node" {
             std::fs::write(source.path().join("app.js"), "require('http').createServer((q,s)=>{s.writeHead(200);s.end('fresh node')}).listen(8000,'0.0.0.0')").unwrap();
             text.replace("name = \"python\"", "name = \"node\"")
-                .replace("version = \"3.12.7\"", "version = \"22.14.0\"")
+                .replace("version = \"3.12.7\"", "version = \"22.23.4\"")
                 .replace(
                     "[\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/app.py\"]",
                     "[\"node\", \"app.js\"]",

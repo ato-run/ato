@@ -124,13 +124,13 @@ const NODE_SOURCE: &[(&str, &str)] = &[
     ("build.js", "1"),
 ];
 
-const NODE_HOME: &str = "/opt/ato/toolchains/node/22.14.0";
+const NODE_HOME: &str = "/opt/ato/toolchains/node/22.23.4";
 
 #[test]
 fn a_node_route_is_a_generic_process_with_its_declared_node() {
     let route = format!(
         "{HEAD}{}{}{}",
-        runtime("node", "22.14.0"),
+        runtime("node", "22.23.4"),
         exec("build", &["node", "build.js"], false),
         serve(&["node", "server.js"])
     );
@@ -138,12 +138,12 @@ fn a_node_route_is_a_generic_process_with_its_declared_node() {
     assert_eq!(planned.plan.lane, Lane::Process);
     assert_eq!(
         planned.plan.toolchains,
-        BTreeMap::from([("node".to_owned(), "22.14.0".to_owned())])
+        BTreeMap::from([("node".to_owned(), "22.23.4".to_owned())])
     );
     assert_eq!(names(&planned), ["provision-node", "build"]);
     assert!(
         planned.plan.steps(&planned.derivation).unwrap()[0].argv[2]
-            .contains("node-v22.14.0-linux-x64")
+            .contains("node-v22.23.4-linux-x64")
     );
     assert_eq!(planned.plan.toolchain_path, [format!("{NODE_HOME}/bin")]);
     // The Run finds the same Node first, and nothing of the host's.
@@ -172,14 +172,14 @@ fn a_node_route_is_a_generic_process_with_its_declared_node() {
             .iter()
             .any(|r| r.fact.starts_with("runtime.node"))
     );
-    assert_eq!(provisions, ["toolchain.node.22.14.0"]);
+    assert_eq!(provisions, ["toolchain.node.22.23.4"]);
 }
 
 #[test]
 fn an_authored_path_is_kept_as_written() {
     let route = format!(
         "{HEAD}{}{}\n[derive.step.env]\nPATH = \"/app/bin:/usr/bin\"\n",
-        runtime("node", "22.14.0"),
+        runtime("node", "22.23.4"),
         serve(&["node", "server.js"])
     );
     let planned = plan(&route, NODE_SOURCE).expect("plans");
@@ -204,15 +204,26 @@ fn a_node_argv_without_a_declared_node_gets_no_node() {
     assert!(!names(&planned).contains(&"provision-node".to_owned()));
 }
 
+/// The retirement of the EOL 18.x / 20.x lines and the pre-fix 22.x / 24.x
+/// releases (CVE-2026-111497) is enforced, not just a doc change: every one of
+/// them is refused by name before anything is provisioned.
 #[test]
-fn an_unsupported_node_is_refused_by_name() {
-    let route = format!(
-        "{HEAD}{}{}",
-        runtime("node", "18.20.4"),
-        serve(&["node", "server.js"])
-    );
-    let error = plan(&route, NODE_SOURCE).err().expect("refused");
-    assert_eq!(code(&error), "intent_unsupported_runtime", "{error:#}");
+fn an_eol_or_cve_affected_node_is_refused_by_name() {
+    for removed in ["18.20.4", "20.20.2", "22.14.0", "24.18.0"] {
+        let route = format!(
+            "{HEAD}{}{}",
+            runtime("node", removed),
+            serve(&["node", "server.js"])
+        );
+        let error = plan(&route, NODE_SOURCE)
+            .err()
+            .unwrap_or_else(|| panic!("{removed} was not refused"));
+        assert_eq!(
+            code(&error),
+            "intent_unsupported_runtime",
+            "{removed}: {error:#}"
+        );
+    }
 }
 
 // ── package managers ────────────────────────────────────────────────────────
@@ -247,7 +258,7 @@ fn plan_pm(
     let files: Vec<(&str, &str)> = files.iter().map(|(n, c)| (*n, c.as_str())).collect();
     let route = format!(
         "{HEAD}{}{extra}{}{}",
-        runtime("node", "22.14.0"),
+        runtime("node", "22.23.4"),
         exec("install", &["pnpm", "install"], true),
         serve(&["pnpm", "start"])
     );
@@ -294,7 +305,7 @@ fn an_exact_pnpm_pin_is_provisioned_and_heads_the_path() {
     let (_, provisions) = derivation_requirements(&planned);
     assert_eq!(
         provisions,
-        ["toolchain.node.22.14.0", "toolchain.pnpm.10.4.1"]
+        ["toolchain.node.22.23.4", "toolchain.pnpm.10.4.1"]
     );
 }
 
@@ -370,7 +381,7 @@ fn a_python_and_node_route_provisions_both_and_serves_python() {
     let route = format!(
         "{HEAD}{}{}{}{}",
         runtime("python", "3.12.7"),
-        runtime("node", "22.14.0"),
+        runtime("node", "22.23.4"),
         exec("frontend", &["npm", "run", "build"], false),
         serve(&["python3", "-m", "backend"])
     );
@@ -402,7 +413,7 @@ fn a_python_and_node_route_provisions_both_and_serves_python() {
     let (_, provisions) = derivation_requirements(&planned);
     assert_eq!(
         provisions,
-        ["toolchain.node.22.14.0", "toolchain.python.3.12.7"]
+        ["toolchain.node.22.23.4", "toolchain.python.3.12.7"]
     );
 }
 
@@ -433,7 +444,7 @@ path = "/"
 [contract.require.expect]
 status = 200
 "#,
-        runtime("node", "20.20.2"),
+        runtime("node", "22.23.4"),
         exec("build", &["npm", "run", "build"], false),
     );
     let planned = plan(
@@ -452,7 +463,7 @@ status = 200
     assert_eq!(names(&planned), ["provision-node", "build"]);
     assert_eq!(
         planned.plan.toolchain_path,
-        ["/opt/ato/toolchains/node/20.20.2/bin"]
+        ["/opt/ato/toolchains/node/22.23.4/bin"]
     );
 }
 
@@ -460,13 +471,13 @@ status = 200
 fn the_same_route_plans_its_own_node_per_target_and_keeps_one_derivation() {
     let route = format!(
         "{HEAD}{}{}",
-        runtime("node", "22.14.0"),
+        runtime("node", "22.23.4"),
         serve(&["node", "server.js"])
     );
     let x86 = plan_on(&route, NODE_SOURCE, "x86_64-linux-gnu").expect("plans");
     let arm = plan_on(&route, NODE_SOURCE, "aarch64-linux-gnu").expect("plans");
     assert!(
-        arm.plan.steps(&arm.derivation).unwrap()[0].argv[2].contains("node-v22.14.0-linux-arm64")
+        arm.plan.steps(&arm.derivation).unwrap()[0].argv[2].contains("node-v22.23.4-linux-arm64")
     );
     assert_ne!(x86.plan, arm.plan);
     assert_eq!(x86.derivation_ref, arm.derivation_ref);

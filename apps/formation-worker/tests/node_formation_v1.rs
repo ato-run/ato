@@ -27,7 +27,7 @@ use ato_formation_worker::sandbox::{BuildLimits, TOOLCHAIN_ROOT, containment_ava
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
-const NODE: &str = "22.14.0";
+const NODE: &str = "22.23.4";
 
 fn site(files: &[(&str, String)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -263,7 +263,7 @@ fn a_node_process_is_built_and_served_by_the_declared_node() {
                 r#"["node", "server.js"]
 
 [derive.step.env]
-EXPECT_NODE = "22.14.0""#,
+EXPECT_NODE = "22.23.4""#,
                 "",
             ),
         ),
@@ -292,7 +292,7 @@ fn npm_builds_and_starts_on_the_declared_node() {
                 r#"["npm", "start"]
 
 [derive.step.env]
-EXPECT_NODE = "22.14.0""#,
+EXPECT_NODE = "22.23.4""#,
                 "",
             ),
         ),
@@ -336,7 +336,7 @@ fn package_manager_route(manager: &str, version: &str) {
                     r#"["{manager}", "run", "start"]
 
 [derive.step.env]
-EXPECT_NODE = "22.14.0""#
+EXPECT_NODE = "22.23.4""#
                 ),
                 "",
             ),

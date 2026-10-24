@@ -64,7 +64,13 @@ pub const SINGLE_JSX_OUTPUT_ROOT: &str = "dist";
 /// Provisioned out of band with the compiler asset, never downloaded by the
 /// build — a build that fetched its own toolchain would need a network, and
 /// the whole point of this preset is that an untrusted upload does not.
-pub const SINGLE_JSX_NODE_VERSION: &str = "20.20.2";
+///
+/// Pinned to the lowest Node release patched for CVE-2026-111497 (the Brotli
+/// decoder out-of-bounds write), matching `DEFAULT_NODE`; the 20.x line this
+/// used to name is end-of-life and has no fixed release. The host-side compiler
+/// asset must be re-provisioned with this Node before the preset is offered —
+/// see `docs/ops/cve-2026-111497-node-brotli-20261024.md`.
+pub const SINGLE_JSX_NODE_VERSION: &str = "22.23.4";
 /// The React `single-jsx/v1` links, pinned by the platform. A different React
 /// is a different preset id.
 pub const SINGLE_JSX_REACT_VERSION: &str = "18.3.1";
