@@ -112,6 +112,10 @@ enum Commands {
     Encap(EncapArgs),
     /// Compile an ato.capsule/2 source directory into a portable Application.
     Pack(PackArgs),
+    /// Experimental: compile an ato.capsule/1 route that declares a Terminal
+    /// native Surface into a portable wire v3 `.capsule` bundle.
+    #[command(name = "__native-bundle", hide = true)]
+    NativeBundle(NativeBundleArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
     /// Import immutable model objects into this host's verified cache.
@@ -320,6 +324,22 @@ struct AppStartArgs {
 struct AppExportArgs {
     instance: String,
     #[arg(short, long, default_value = "application.capsule")]
+    output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct NativeBundleArgs {
+    /// The source directory whose tree the bundle carries.
+    #[arg(default_value = ".")]
+    source: PathBuf,
+    /// The `ato.capsule/1` manifest. Defaults to `<source>/capsule.toml`.
+    #[arg(long)]
+    manifest: Option<PathBuf>,
+    /// Application title, part of the bundled Application object.
+    #[arg(long)]
+    title: String,
+    /// New bundle file.
+    #[arg(short, long, default_value = "native.capsule")]
     output: PathBuf,
 }
 
@@ -614,6 +634,7 @@ pub fn run() -> Result<()> {
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
         Commands::Pack(args) => pack(args),
+        Commands::NativeBundle(args) => native_bundle(args),
         Commands::Run(args) => run_capsule(args),
         Commands::ModelSet { command } => model_cache::execute(command),
         Commands::App { command } => match command {
@@ -773,6 +794,34 @@ fn pack(args: PackArgs) -> Result<()> {
     })?;
     fs::write(&args.output, &bytes)
         .with_context(|| format!("write portable Application {}", args.output.display()))?;
+    println!("Packed: {}", args.output.display());
+    println!("bundle_sha256={}", bundle_sha256(&bytes));
+    println!("contract_ref={}", bundle.index.root_contract_ref);
+    for derivation in &bundle.index.derivations {
+        println!("derivation_ref={derivation}");
+    }
+    Ok(())
+}
+
+fn native_bundle(args: NativeBundleArgs) -> Result<()> {
+    let manifest = args.manifest.unwrap_or_else(|| {
+        args.source
+            .join(ato_formation::capsule_toml::CAPSULE_FILE_NAME)
+    });
+    let (bytes, bundle) = ato_portable_application::build_native_terminal_bundle(
+        &args.source,
+        &manifest,
+        &args.title,
+    )
+    .with_context(|| {
+        format!(
+            "compile native bundle from {} and {}",
+            manifest.display(),
+            args.source.display()
+        )
+    })?;
+    fs::write(&args.output, &bytes)
+        .with_context(|| format!("write native bundle {}", args.output.display()))?;
     println!("Packed: {}", args.output.display());
     println!("bundle_sha256={}", bundle_sha256(&bytes));
     println!("contract_ref={}", bundle.index.root_contract_ref);
