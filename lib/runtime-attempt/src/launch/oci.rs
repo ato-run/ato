@@ -958,17 +958,24 @@ mod tests {
         ato_adapter_oci::validate_oci_spec(&adapter_spec).expect("the Adapter accepts it");
 
         let assets = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
         let output = state.path().join("output");
         // Run output must be distinct from an attached state directory.
         let separate_output = tempfile::tempdir().unwrap();
         let context = context
-            .with_read_only_inputs(vec![crate::launch::resolved::ResolvedReadOnlyInput {
-                env_name: "ATO_INPUT_ASSETS_DIR".into(),
-                path: assets.path().to_path_buf(),
-            }])
+            .with_read_only_inputs(vec![
+                crate::launch::resolved::ResolvedReadOnlyInput {
+                    env_name: "ATO_INPUT_ASSETS_DIR".into(),
+                    path: assets.path().to_path_buf(),
+                },
+                crate::launch::resolved::ResolvedReadOnlyInput {
+                    env_name: "ATO_INPUT_PATH_MODELS".into(),
+                    path: models.path().to_path_buf(),
+                },
+            ])
             .with_output_dir(Some(separate_output.path().to_path_buf()));
         let data_spec = container_oci_spec(&spec, oci, &context, BTreeMap::new()).unwrap();
-        assert_eq!(data_spec.mounts.len(), 3);
+        assert_eq!(data_spec.mounts.len(), 4);
         assert_eq!(
             data_spec.environment["ATO_INPUT_ASSETS_DIR"],
             "/.ato-data/inputs/0"
@@ -977,7 +984,15 @@ mod tests {
             data_spec.environment["ATO_OUTPUT_DIR"],
             "/.ato-data/outputs"
         );
-        assert!(!data_spec.mounts[1].writable && data_spec.mounts[2].writable);
+        assert_eq!(
+            data_spec.environment["ATO_INPUT_PATH_MODELS"],
+            "/.ato-data/inputs/1"
+        );
+        assert!(
+            !data_spec.mounts[1].writable
+                && !data_spec.mounts[2].writable
+                && data_spec.mounts[3].writable
+        );
         ato_adapter_oci::validate_oci_spec(&data_spec).unwrap();
         let context = context.with_output_dir(Some(output));
         assert!(container_oci_spec(&spec, oci, &context, BTreeMap::new()).is_err());
@@ -1018,8 +1033,12 @@ mod tests {
     #[test]
     #[ignore = "requires native Linux Docker and ATO_OCI_DATA_TEST_IMAGE pinned Python"]
     fn delivered_files_are_read_only_and_outputs_survive_owned_container_stop() {
+        use crate::data_plane::{
+            GrantedOutputs, LeaseData, ModelCache, ModelSetEntry, ModelSetManifest, save_outputs,
+        };
         use crate::launch::resolved::ResolvedReadOnlyInput;
         use ato_ipc::runtime_launch::LaunchRealizationV1;
+        use sha2::{Digest, Sha256};
         use std::os::unix::fs::MetadataExt;
         let boundary = if std::env::var("ATO_OCI_DATA_TEST_HOST_BOUNDARY").as_deref() == Ok("1") {
             let boundary = super::super::host_boundary::HostBoundary {
@@ -1042,6 +1061,34 @@ mod tests {
         let workspace = root.path().join("workspace");
         let assets = root.path().join("assets");
         let output = root.path().join("outputs");
+        let models = root.path().join("inputs/models");
+        let model_bytes = b"verified model weights\n";
+        let entry = ModelSetEntry {
+            path: "weights/model.bin".into(),
+            digest: format!("sha256:{:x}", Sha256::digest(model_bytes)),
+            bytes: model_bytes.len() as u64,
+        };
+        let cache = ModelCache::open(root.path()).unwrap();
+        cache
+            .ensure(
+                &entry,
+                |start, end| {
+                    Ok(Box::new(std::io::Cursor::new(
+                        model_bytes[start as usize..=end as usize].to_vec(),
+                    )))
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        cache
+            .materialize(
+                &ModelSetManifest {
+                    schema: "ato.model-set/1".into(),
+                    objects: vec![entry.clone()],
+                },
+                &models,
+            )
+            .unwrap();
         std::fs::create_dir(&workspace).unwrap();
         std::fs::create_dir(&assets).unwrap();
         std::fs::write(assets.join("seed.txt"), b"owned input\n").unwrap();
@@ -1068,7 +1115,14 @@ mod tests {
             r#"
 import os, pathlib, time
 source = pathlib.Path(os.environ['ATO_INPUT_ASSETS_DIR']) / 'seed.txt'
-value = source.read_bytes()
+model = pathlib.Path(os.environ['ATO_INPUT_PATH_MODELS']) / 'weights/model.bin'
+value = source.read_bytes() + model.read_bytes()
+try:
+    model.write_bytes(b'unexpected model write')
+except OSError:
+    pass
+else:
+    raise RuntimeError('model was writable')
 try:
     source.write_bytes(b'unexpected write')
 except OSError:
@@ -1092,10 +1146,16 @@ time.sleep(30)
             vec![],
         )
         .unwrap()
-        .with_read_only_inputs(vec![ResolvedReadOnlyInput {
-            env_name: "ATO_INPUT_ASSETS_DIR".into(),
-            path: assets.clone(),
-        }])
+        .with_read_only_inputs(vec![
+            ResolvedReadOnlyInput {
+                env_name: "ATO_INPUT_ASSETS_DIR".into(),
+                path: assets.clone(),
+            },
+            ResolvedReadOnlyInput {
+                env_name: "ATO_INPUT_PATH_MODELS".into(),
+                path: models.clone(),
+            },
+        ])
         .with_output_dir(Some(output.clone()));
         let owner = OciOwner {
             runner_id: "data-fixture".into(),
@@ -1120,7 +1180,7 @@ time.sleep(30)
         }
         assert_eq!(
             std::fs::read(output.join("result.txt")).unwrap(),
-            b"owned input\n"
+            b"owned input\nverified model weights\n"
         );
         assert_eq!(
             std::fs::read(assets.join("seed.txt")).unwrap(),
@@ -1136,8 +1196,86 @@ time.sleep(30)
         );
         assert_eq!(
             std::fs::read(output.join("result.txt")).unwrap(),
-            b"owned input\n"
+            b"owned input\nverified model weights\n"
         );
+        assert_eq!(
+            std::fs::read(models.join("weights/model.bin")).unwrap(),
+            model_bytes
+        );
+        cache.verify_cached(&entry).unwrap();
+        // Real container bytes, then the unchanged Coordinator save protocol.
+        // The HTTP coordinator below is a local fixture, not staging or R2.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let mut requests = Vec::new();
+            for step in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let method_path = line.trim().to_owned();
+                let mut length = 0;
+                let mut authorized = false;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if lower.trim() == "authorization: bearer model-save-fixture" {
+                        authorized = true;
+                    }
+                }
+                assert!(authorized);
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                drop(reader);
+                requests.push((method_path, body));
+                let response = match step {
+                    0 => r#"{"output_id":"out_model","part_bytes":65536}"#,
+                    1 => r#"{"part_number":1,"etag":"fixture"}"#,
+                    _ => r#"{"asset_id":"ast_model_output"}"#,
+                };
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+            }
+            requests
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let saved = save_outputs(
+            &LeaseData {
+                client: &client,
+                base: &base,
+                token: "model-save-fixture",
+                lease_id: &owner.lease_id,
+            },
+            &output,
+            &GrantedOutputs {
+                max_count: 8,
+                max_bytes_each: 32768,
+            },
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].save_status, "saved");
+        assert_eq!(saved[0].asset_id.as_deref(), Some("ast_model_output"));
+        assert!(requests[0].0.contains("/data/outputs "));
+        let generated: serde_json::Value = serde_json::from_slice(&requests[0].1).unwrap();
+        assert_eq!(generated["output_key"], "result.txt");
+        assert_eq!(requests[1].1, b"owned input\nverified model weights\n");
+        assert!(requests[2].0.contains("/complete "));
         let resources =
             ato_adapter_oci::OwnedResourceScanner::new(&owner.runner_id, &owner.slot_id)
                 .unwrap()
