@@ -2372,6 +2372,12 @@ impl ConnectedWorker {
                         .surface_origin
                         .clone()
                         .expect("verified Native origin"),
+                    public_base_origin: self
+                        .config
+                        .public_base_url
+                        .as_deref()
+                        .and_then(|value| url::Url::parse(value).ok())
+                        .map(|url| url.origin().ascii_serialization()),
                     surface_listen: self.config.hidden_surface_listen,
                     startup_timeout: Duration::from_millis(timeout_ms.min(120_000)),
                     idle_timeout: Duration::from_secs(self.config.native_surface_idle_secs),
