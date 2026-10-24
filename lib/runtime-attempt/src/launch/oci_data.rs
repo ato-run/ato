@@ -140,6 +140,7 @@ mod tests {
         let output = root.path().join("outputs");
         let context = context(&workspace)
             .with_read_only_inputs(vec![ResolvedReadOnlyInput {
+                input_id: None,
                 env_name: "ATO_INPUT_ASSETS_DIR".into(),
                 path: assets.clone(),
             }])
@@ -164,6 +165,7 @@ mod tests {
     fn overlapping_guest_workspace_or_state_and_environment_are_refused() {
         let root = tempfile::tempdir().unwrap();
         let context = context(root.path()).with_read_only_inputs(vec![ResolvedReadOnlyInput {
+            input_id: None,
             env_name: "ATO_INPUT_ASSETS_DIR".into(),
             path: root.path().to_path_buf(),
         }]);
@@ -185,6 +187,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         for name in ["HOME", "ATO_INPUT_PATH_", "ATO_INPUT_PATH_lowercase"] {
             let c = context(root.path()).with_read_only_inputs(vec![ResolvedReadOnlyInput {
+                input_id: None,
                 env_name: name.into(),
                 path: root.path().to_path_buf(),
             }]);
@@ -195,6 +198,7 @@ mod tests {
         assert!(attach(&c, "/app", &mut vec![], &mut BTreeMap::new()).is_err());
         assert!(!output.exists());
         let duplicate = ResolvedReadOnlyInput {
+            input_id: None,
             env_name: "ATO_INPUT_ASSETS_DIR".into(),
             path: root.path().to_path_buf(),
         };
@@ -209,6 +213,7 @@ mod tests {
         let link = root.path().join("link");
         std::os::unix::fs::symlink(root.path(), &link).unwrap();
         let c = context(root.path()).with_read_only_inputs(vec![ResolvedReadOnlyInput {
+            input_id: None,
             env_name: "ATO_INPUT_ASSETS_DIR".into(),
             path: link.clone(),
         }]);
