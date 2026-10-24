@@ -182,6 +182,42 @@ fn advertised_capabilities(
     capabilities
 }
 
+const EXPLICIT_RUNNER_ASSIGNMENT_RUNTIME_FEATURE: &str =
+    "runtime_feature=explicit_runner_assignment_v1";
+fn with_explicit_runtime_placement_capability(
+    mut capabilities: Vec<&'static str>,
+    required: bool,
+) -> Vec<&'static str> {
+    if required {
+        capabilities.push(EXPLICIT_RUNNER_ASSIGNMENT_RUNTIME_FEATURE);
+    }
+    capabilities
+}
+fn explicit_runtime_placement_kinds(
+    mut kinds: Vec<&'static str>,
+    required: bool,
+) -> Vec<&'static str> {
+    if required {
+        kinds.retain(|kind| *kind == runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+    }
+    kinds
+}
+fn validate_explicit_runner_placement(config: &WorkerConfig, command: &LeaseCommand) -> Result<()> {
+    match command {
+        LeaseCommand::RuntimeLaunch(command) => command.validate_runner_assignment(
+            &config.runner_id,
+            config.require_explicit_runtime_placement,
+        ),
+        _ => {
+            ensure!(
+                !config.require_explicit_runtime_placement,
+                "explicit_runner_assignment_unsupported_lease: explicit-only Runner accepts runtime_launch only"
+            );
+            Ok(())
+        }
+    }
+}
+
 const NAMESPACE_ISOLATION_CAPABILITY: &str = "isolation=untrusted-v1";
 /// The capability the control plane requires for a `gpu` runtime requirement.
 const GPU_CAPABILITY: &str = "gpu";
@@ -1122,6 +1158,14 @@ pub struct WorkerConfig {
     pub api_base: String,
     #[arg(long, env = "ATO_RUNNER_ID", default_value = "")]
     pub runner_id: String,
+    /// Restrict this Runner to explicitly assigned runtime-launch leases.
+    /// Other lease kinds carry no explicit routing evidence in this version.
+    #[arg(
+        long,
+        env = "ATO_RUNNER_REQUIRE_EXPLICIT_RUNTIME_PLACEMENT",
+        default_value_t = false
+    )]
+    pub require_explicit_runtime_placement: bool,
     #[arg(
         long,
         env = "ATO_RUNNER_TOKEN",
@@ -1787,6 +1831,7 @@ impl ConnectedWorker {
 
     fn execute_lease(&self, lease: &ClaimedLease) -> Result<()> {
         validate_lease(lease, SystemTime::now())?;
+        validate_explicit_runner_placement(&self.config, &lease.command)?;
         // Refuse a full filesystem before any lease directory, journal,
         // workspace download, state writer or workload can be created.
         ato_runtime_attempt::launch::storage_capacity::require_capacity(&self.config.work_root, 1)?;
@@ -1906,6 +1951,10 @@ impl ConnectedWorker {
         command: &runtime_launch::lease::RuntimeLaunchLeaseCommand,
         lease_root: &Path,
     ) -> Result<()> {
+        command.validate_runner_assignment(
+            &self.config.runner_id,
+            self.config.require_explicit_runtime_placement,
+        )?;
         // A slot that has not finished recovering may still have a previous
         // incarnation's workload running; it takes no runtime work.
         ensure!(
@@ -4858,7 +4907,7 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": advertised_capabilities(
+            "capabilities": with_explicit_runtime_placement_capability(advertised_capabilities(
                 with_native_pixel_control_capabilities(
                     with_native_terminal_capability(runner_capabilities(
                         config.firecracker_configured(), oci_available, self.persistent_volumes,
@@ -4869,7 +4918,7 @@ impl HttpRunnerApi {
                 ),
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
-            ),
+            ), config.require_explicit_runtime_placement),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
             "public_base_url": config.public_base_url,
@@ -5257,7 +5306,7 @@ fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec
     {
         kinds.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
     }
-    kinds
+    explicit_runtime_placement_kinds(kinds, config.require_explicit_runtime_placement)
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -6941,6 +6990,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
+            require_explicit_runtime_placement: false,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
@@ -6972,6 +7022,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
+            require_explicit_runtime_placement: false,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
@@ -7014,6 +7065,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: String::new(),
             runner_token: String::new(),
+            require_explicit_runtime_placement: false,
             runner_credentials_file: Some(credentials),
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: directory.path().join("work"),
@@ -7074,6 +7126,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
+            require_explicit_runtime_placement: false,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
@@ -7139,6 +7192,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
+            require_explicit_runtime_placement: false,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
@@ -7342,6 +7396,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
+            require_explicit_runtime_placement: false,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
@@ -7731,3 +7786,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 
 #[cfg(all(test, unix))]
 mod native_dispatch_tests;
+
+#[cfg(test)]
+mod explicit_placement_tests;
