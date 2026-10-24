@@ -428,13 +428,35 @@ fn launch_process_inner(
         super::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)?;
     }
     let process_spec = process_spec_for(spec, context)?;
+    // The final executable gate: what would this spawn actually exec, given
+    // ctx argv and the environment PATH? Admission checked declarations; argv
+    // and PATH can name another toolchain. It runs before any spawn.
+    // The environment the gate must judge is the one the child would get: the
+    // host-boundary launch supplies a default PATH when the spec states none.
+    let mut gate_environment = process_spec.environment.clone();
+    if super::host_boundary::active().is_some() {
+        gate_environment
+            .entry("PATH".into())
+            .or_insert_with(|| "/usr/local/bin:/usr/bin:/bin".into());
+    }
+    let node_implied = launch_node_implied(spec, &process_spec.command[0]);
+    let validated = super::executable_gate::validate_and_resolve(
+        &process_spec.command[0],
+        context.effective_cwd(),
+        &gate_environment,
+        node_implied,
+    )?;
+    let toolchain_roots =
+        super::executable_gate::toolchain_roots(&gate_environment, Some(&validated.path));
     let (runtime_executable, runtime_version) = match &spec.realization {
         LaunchRealizationV1::Process(process) => match &process.executable {
             Some(requirement) => {
                 let (path, version) = resolve_executable(requirement)?;
                 (path, Some(version))
             }
-            None => (process_spec.command[0].clone(), None),
+            // The resolved path, not the bare name, so the receipt names what
+            // actually ran and which toolchain release it came from.
+            None => (validated.path_text(), validated.node_version.clone()),
         },
         LaunchRealizationV1::Oci(_) => unreachable!("process_spec_for refused OCI"),
     };
@@ -476,6 +498,7 @@ fn launch_process_inner(
             boundary,
             runtime_executable,
             runtime_version,
+            &toolchain_roots,
         );
     }
     let mut sandboxed = match scoped {
@@ -486,6 +509,7 @@ fn launch_process_inner(
             &policy_path,
             socket,
             ingress,
+            &toolchain_roots,
         )?,
         None => super::sandbox::sandboxed_command(
             context,
@@ -493,6 +517,7 @@ fn launch_process_inner(
             &host.shim,
             &policy_path,
             true,
+            &toolchain_roots,
         )?,
     };
     if let Some(parent) = policy_path.parent() {
@@ -579,6 +604,7 @@ fn launch_host_boundary(
     boundary: super::host_boundary::HostBoundary,
     runtime_executable: String,
     runtime_version: Option<String>,
+    toolchain_roots: &[std::path::PathBuf],
 ) -> Result<LaunchedProcess> {
     let scratch = host.runtime_root.join("scratch");
     super::host_boundary::prepare_ownership(context, &scratch, boundary)?;
@@ -589,6 +615,7 @@ fn launch_host_boundary(
         policy_path,
         &scratch,
         boundary,
+        toolchain_roots,
     )?;
     std::fs::write(
         policy_path,
@@ -654,6 +681,25 @@ fn launch_host_boundary(
         stopped: false,
         startup_record: host.runtime_root.join("process-startup.json"),
     })
+}
+
+/// Does this launch imply Node, even though the launch spec carries no
+/// Derivation? Either the spec declares a Node executable requirement, or the
+/// program the spawner would exec is named `node`/`nodejs`. Anything else is
+/// not the Node runtime policy's business.
+fn launch_node_implied(spec: &RuntimeLaunchSpecV1, program: &str) -> bool {
+    let required = match &spec.realization {
+        LaunchRealizationV1::Process(process) => process
+            .executable
+            .as_ref()
+            .is_some_and(|requirement| matches!(requirement.name.as_str(), "node" | "nodejs")),
+        LaunchRealizationV1::Oci(_) => false,
+    };
+    let named = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "node" | "nodejs"));
+    required || named
 }
 
 fn resolve_executable(
