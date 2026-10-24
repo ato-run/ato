@@ -645,6 +645,10 @@ impl SourceOciRealizer<'_> {
                 image: built.image_reference.clone(),
                 platform: recipe.platform.clone(),
                 entrypoint: None,
+                // A source-OCI recipe has no declared user: the Dockerfile and the
+                // image config decide it. Declaring one here would override that
+                // without anyone asking for it.
+                user: None,
                 argv: facts.cmd,
                 working_dir: if facts.working_dir.is_empty() {
                     "/app".into()
