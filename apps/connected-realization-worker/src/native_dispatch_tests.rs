@@ -177,7 +177,7 @@ fn observation_proof(key: &str, run: &str, lease: &str, runner: &str, port: &str
     mac.update(encoded.as_bytes());
     format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()))
 }
-fn read_api_request(stream: &mut TcpStream) -> Option<(String, serde_json::Value)> {
+fn read_api_request(stream: &mut TcpStream) -> Option<(String, String, serde_json::Value)> {
     use std::io::Read;
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
@@ -196,6 +196,14 @@ fn read_api_request(stream: &mut TcpStream) -> Option<(String, serde_json::Value
         }
     };
     let header = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+    let method = header
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
     let path = header
         .lines()
         .next()
@@ -225,7 +233,7 @@ fn read_api_request(stream: &mut TcpStream) -> Option<(String, serde_json::Value
     } else {
         serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()
     };
-    Some((path, body))
+    Some((method, path, body))
 }
 
 #[test]
@@ -444,10 +452,16 @@ fn run_actual_native_dispatch_with_browser(
                 }
                 Err(e) => panic!("{e}"),
             };
-            let Some((path, body)) = read_api_request(&mut stream) else {
+            let Some((method, path, body)) = read_api_request(&mut stream) else {
                 continue;
             };
-            let (status, response) = if path.contains("/workspace/") {
+            let (status, response) = if path.ends_with("/heartbeat") {
+                browser_fixture::validate_heartbeat(&method, &path, &body, &work_runner).unwrap();
+                if let Some(fixture) = &server_browser {
+                    fixture.ack_heartbeat();
+                }
+                (200, b"{}".to_vec())
+            } else if path.contains("/workspace/") {
                 (200, bytes.clone())
             } else if path.ends_with("/data") {
                 if files {

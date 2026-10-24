@@ -71,9 +71,11 @@ journal and lease directory, including after test panic. Unknown is never passed
 
 ## Verification so far
 
-- Mac Worker180 passed /18 existing ignored, fixture4 tests passed; all-target
+- Mac Worker180 passed /18 existing ignored before the heartbeat follow-up;
+  final focused fixture5 tests passed; all-target
   Worker/netd Clippy and rustfmt passed.
-- Linux Worker/netd330 passed /23 existing ignored; final fixture4 tests and
+- Linux Worker/netd330 passed /23 existing ignored before the heartbeat follow-up;
+  final focused fixture5 tests and
   all-target Clippy passed. The source includes #1541's pinned noVNC packet
   negotiation regression. Same-source process tests explicitly use its Worker
   binary through existing ATO_TEST_WORKER_BIN.
@@ -84,13 +86,26 @@ journal and lease directory, including after test panic. Unknown is never passed
   abort record, stopped/saved output, returned expected nonzero test exit and
   result.status=failed with cleanup_confirmed=true and
   oci_resources_cleanup_confirmed=true. It did not report application success.
-- Positive Chrome joint acceptance is pending the coordinated run.
+- Initial Chrome joint attempt failed before a canvas appeared; it is not
+  acceptance. The orchestrator's upstream URL omitted the actual Surface path;
+  that forwarding/diagnostic work belongs to the browser peer.
+- A separate >10-second delayed-abort red run proved the fake control plane
+  lacked the existing10-second heartbeat endpoint, panicked and left the real
+  Runner safely bounded to90 seconds. The test-only server now validates POST,
+  exact Runner path, recovered/active/max slot facts and basic collection/host
+  shapes, then ACKs200{}. This is fixture shape validation, not a replacement
+  for production API authorization/schema. No production timer was changed.
+- Green actual: after ready12 seconds then abort, one real heartbeat was ACKed,
+  the rejected done still produced statusfailed, output saved and full cleanup
+  confirmed. Done03:18:32.711→result03:18:34.604 UTC:1.893 seconds. The result
+  includes heartbeats_acked. Both red/green logs are retained.
+- Positive Chrome joint acceptance is pending the coordinated retry.
 
 Own Linux source:
 `/home/ekohsuke/ato-run/.tmp/native-browser-joint-20261024/source`.
 All658 Rust/Cargo/literal-include input hashes were refreshed on source switch
 and verified before/after: manifestSHA256
-`90bd6a28725a079745f06ba8a74a48d83bda28e87fc02f5c1f95d2e97f02b389`.
+`0ff869b8345bc599f8bbb943d22f7057e2bb71845de69db3ed1498a1f311e7c1`.
 The same-source test executable is
 `/home/ekohsuke/ato-run/.tmp/native-surface-20261023/runner-source/target/debug/deps/ato_connected_realization_worker-377b8bdb5c0f0403`.
 Shared target ownership was explicitly transferred; no shared Runner was installed
