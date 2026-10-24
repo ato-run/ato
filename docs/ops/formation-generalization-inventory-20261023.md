@@ -257,3 +257,48 @@ helper6902ms/lease11363ms/Browser8.6s/Root全体21.6sは隔離CPU実測で、Hos
 初回2失敗と修正・negative拒否を保持し、通常Runner候補のprepare-only検証へ進める。
 詳細はnative-browser-integration-20261024.md/proof JSON。共有Runner6slotは未変更、
 Hosted owner認証・実Source job・専用Runner導入・GPU/運営key実受入は依然別gateである。
+
+## 2026-10-24 phase18–21 更新
+
+| 範囲 | 追加Draftと検証 | 現時点の残り |
+|---|---|---|
+| 明示Runner配置 | [ato #1544](https://github.com/ato-run/ato/pull/1544)、[API #878](https://github.com/ato-run/ato-api/pull/878)。既定offの既存capability markerとLeaseで自動選択除外・明示配置・claim CAS・実行前照合を強制。K/D/spec/digestに配置を混ぜない | 新identity/実machine/owner認証後に導入。共有Runnerは未変更。旧pending先頭の不正Leaseは後続を止め得るため、新identityは空queueが前提 |
+| TUI共通フレーム | [ato #1545](https://github.com/ato-run/ato/pull/1545)、[PWA #519](https://github.com/ato-run/ato-pwa/pull/519)。実Chrome keyboard→実PTY120×40、同Surface再接続counter2→3、同PID、固定K、保存、全回収 | fake Coordinator認証の隔離CPU試験。認証済みHosted/実OSSの受入は未達 |
+| test runner境界 | PWA #519でNode guardがVitestに誤収集される実不具合を修正。内容不変renameとNode22 CI step、Node11/skip0・Vitest39/4suite成功 | 元の2失敗ログを保持。最新CI成功は未確認。ブラウザ実行6ファイルはbyte不変 |
+
+明示配置はRust Mac189 tests、API226 focused tests/typecheckと独立reviewが成功。
+API生成のv1/v2/v3 JSONを凍結Linux receiverで直接検証し、明示ON3件受入・必須証明なし
+OFF2件拒否の5期待が一致した。これはworkloadを起動しないcross-wire試験である。
+先行MacではTerminalのLinux OCI条件により1件が拒否され、元の失敗記録を保持した。
+
+TUIの実行PWA sourceはa6ea2478、Rust sourceはb69b7cc6b。Mac192/Linux193 tests、
+all-target Clippy/fmtが成功。Browser case6.6s/lease8437ms/Rust8.77s/Root全体11.482sは
+隔離試験の単発値であり、Hosted起動性能ではない。Stopはbounded forced137である。
+同sourceの12秒abort負例は1.653秒でfailedとなり、未知null・元K/保存・全回収を維持した。
+初回Ready前のtest-only前提誤流用による失敗も保持している。詳細は
+native-terminal-browser-joint-20261024.mdとPWA側acceptance記録。
+
+phase20ではAPI source11d75a2cをsafe deployし、active100%
+3f7e0c43-2c86-4d2c-abfd-14ff5a9e62cbを確認した。119bindings/36Secret参照とruntimeを
+保持し、7つのSELECT rowset前後一致・各書込0・Harper既存状態/liveGPU0/policy0/
+明示marker Runner0を独立監査した。Admin271d6291、PWA23a4c432は変更なし。
+未適用migration0、適用なし。health200/262msと未認証6経路401/55–382msは
+HTTP境界の確認であり、認証済み受入や起動時間ではない。最初のD1 --fileが返した
+import transport metadataを保持し、個別結果はSELECT-only --commandで採取し直した。
+非version設定の前後検査はsafe script内部で実施、独立before snapshotはない。
+共有lockは解放し、許可済み両チャットへ配備結果を通知した。
+
+通常Linux Workerは同source b69b7cc6bのdev/debug0候補50,490,512 bytesをprepare済み。
+インストール・Enrollment・capability広告・flag変更・実owner Runは行っていない。
+PWA #519はtest/CI/opsだけのため、製品資産が配備済みb065887aと差分0であることを確認し、
+追加配備していない。API6 jobとPWA旧SHA2 jobは支払い/spending limitでstep0未開始。
+ローカル収集不具合とは別に記録し、CI成功扱いや手動再実行はしない。
+
+残る受入条件は、手動のstaging専用Chrome owner認証、1owner/1Runの実machine境界、
+Source job→選択D→同attemptのRust receipt永続化、Hosted保存/復旧・多利用者分離、
+実Providerと運営key workloadである。既存Chrome接続はprofile使用中エラーで、共有browserを
+停止したりcookieを取得したりしていない。専用VMは未準備、KVM/Firecrackerの存在だけで
+成立したと扱わない。異種runtime混在、自由prompt/URL向け運営keyは未対応。
+GPUは既存31未予約intentの保守的9300c計上に対する300c上限でclosedであり、実請求額ではない。
+Vast設定なし、Broker無効/policy0。本番・課金GPU作成・運営key本番投入は未実施で、
+現時点で承認待ちの作成要求はない。
