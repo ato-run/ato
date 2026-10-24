@@ -21,7 +21,7 @@
         "status": "findings",
         "checked_at": "2026-10-20T03:12:04Z",
         "advisory_refs": [
-          "GHSA-aaaa-bbbb-cccc"
+          "CVE-2026-111497"
         ]
       },
       "provenance": {
@@ -39,7 +39,7 @@
         "observed_at": "2026-10-21T09:00:00Z"
       },
       "findings_waiver": {
-        "reason": "advisory is not reachable from the declared route",
+        "reason": "CVE-2026-111497: the app serves no attacker-controlled content-encoding; replacement is in progress",
         "approved_by": "koh0920",
         "expires_at": "2099-12-31T00:00:00Z"
       }
@@ -51,7 +51,7 @@
         "sha256:6f401ac044ec79bc93fbc11185042af5ab830336925f9e70ddebdbaebc679461"
       ],
       "runtime_versions": {
-        "node": "20.20.2",
+        "node": "22.23.4",
         "python": "3.12.7"
       },
       "created_from": "formation",
@@ -86,7 +86,7 @@
       "from_digest": "sha256:259e8f0a0c3ec4e94df6b990e36f76a33224b8623f3dcde609c972729b3ba0d5",
       "to_digest": "sha256:97e67a5645969953f1a4cfe2ea75649864ff99789189cdd3f6db03e59f8a8ebf",
       "advisories": [
-        "GHSA-aaaa-bbbb-cccc"
+        "CVE-2026-111497"
       ],
       "rebuild": {
         "derivation_ref": "sha256:18ca526876d6f37e0a8ffe25d5e39fcc9471962d1e63df71f14c81f330be97e1",
