@@ -61,3 +61,26 @@ assembly to 5 seconds from its first byte, including Upgrade read-ahead. Idle
 between messages has no such deadline. Control Ping/Pong inside fragmented data
 cannot reset it. The observer stores only framing metadata, never clipboard
 text; tungstenite retains protocol validation and the 1 MiB message cap.
+
+## Pinned noVNC negotiation prerequisite
+
+Pinned noVNC 1.5.0 advertises ExtendedClipboard in every SetEncodings message.
+A server capability reply can then make it emit negative ClientCutText before
+any user gesture. The bounded listener deliberately rejects all such messages;
+that negotiation must therefore be suppressed before it reaches the isolated
+server. This is physical transport compatibility, not clipboard permission.
+
+After original complete-message size/framing/deadline validation, the bounded
+filter removes every four-byte encoding `0xc0a1e5ce` from SetEncodings and
+recomputes its big-endian u16 count. Every other encoding byte and preference
+order, the message header padding, other RFB message types and handshake bytes
+remain unchanged. Zero remaining encodings is valid. Original oversized or
+incomplete messages cannot become admissible merely because rewriting could
+make them smaller. Every subsequent/reconnected SetEncodings is filtered too.
+
+This applies to the common bounded listener regardless of its physical mask or
+signed permissions. It grants neither paste, remote copy nor resize. Negative
+ClientCutText is still refused before a prefix, and positive Latin-1 text still
+requires physical support, signed User/execution permission, expiry, size and
+rate checks. Legacy byte-transparent listeners are unchanged. There is no
+noVNC private-property patch, custom application server, new auth or K change.
