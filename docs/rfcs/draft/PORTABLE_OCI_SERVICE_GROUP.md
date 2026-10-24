@@ -416,3 +416,54 @@ The additional observation path is described in
 Ports retain their transport and isolation. HTTP observation semantics live in
 the existing Contract verifier; a component's TCP readiness remains distinct
 from K satisfaction.
+
+## Explicit component data placement (draft extension)
+
+`BoundStep.runtimes["oci.input_ids"]` is an OCI Adapter fact, encoded as a
+compact JSON array of safe, sorted, unique IDs. It selects only declared Model
+Set input IDs and the existing reserved `assets` channel. `workspace` is not a
+selector. Unknown IDs, repeated IDs, environment normalization collisions and
+any declared Model Set without an explicit consumer are refused. Multiple
+services may explicitly select the same Model Set; all such mounts are
+read-only. Assets remain operational Instance inputs, not a fabricated
+`BoundInput`, source reference, secret Binding or component-wide broadcast.
+
+The Rust route report and `OciServiceV2` carry optional `input_ids`. An omitted
+field keeps the previous no-data/no-output behavior and canonical bytes;
+`Some([])` explicitly requests no inputs but opts that service into available
+Run-bounded outputs. An explicit `null` is refused. The new capability is
+`runtime_feature=oci_component_data_plane_v1`, advertised only with OCI and the
+trusted HostBoundary mode. The API must require that capability, the existing
+OCI data-plane tuple and active execution authorization, and repeat capability
+checks at the selected Runner fence. A group without any mapping must not
+receive a new Data Grant. Nonempty Assets without an explicit consumer are
+refused, not silently dropped.
+
+The selected-D Rust report and existing lease-bound Data Grant remain the
+authority for Model Set digest correspondence. Runner-private delivery retains
+each logical ID from that Grant alongside its verified cache tree. The Worker
+requires exact equality between delivered IDs and the union of all selectors;
+it never reconstructs IDs from environment strings or ignores extra Grant
+inputs. Existing manifest and object hash verification is unchanged. A selector
+for empty Assets receives an owned empty read-only directory only after the
+actual Grant confirms that the channel is empty; a missing Grant is an error.
+
+Each mapped service gets a filtered data-only context. Existing OCI data mount,
+overlap, path, collision and ownership checks apply. Neither sibling inputs nor
+Runner credentials are added to it. Authored public/secret environment or
+workspace/state mount collisions with the selected data namespace are refused.
+A service without a mapping receives neither data environment nor data mounts.
+A mapped service receives only its own `outputs/<safe-service-id>` directory at
+`ATO_OUTPUT_DIR`, when the Grant permits outputs. HostBoundary output ownership
+requires the service's explicit user to match the trusted workload UID/GID;
+foreign or missing output principals are refused. The global output root is
+never mounted into a component. Output count and byte limits remain one set of
+Run-wide limits; stop-time save preserves the component-relative file keys.
+
+This extends D and its physical Adapter projection only. K, Core structs,
+profiles, receipt success criteria and tables are unchanged. Every required
+component observation must still satisfy the same Rust Contract verifier;
+readiness, one successful component or a delivered model is not group success.
+Local generic admission still refuses Model Sets that it cannot actually
+materialize. Hosted capability admission and actual staging delivery are
+separate rollout gates.

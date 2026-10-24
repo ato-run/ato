@@ -456,6 +456,8 @@ pub struct PortableModelSetReport {
 #[serde(deny_unknown_fields)]
 pub struct PortableServiceReport {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_ids: Option<Vec<String>>,
     pub runtimes: BTreeMap<String, String>,
     pub argv: Vec<String>,
     pub cwd: String,
@@ -818,6 +820,14 @@ fn validated_routes(
                         .map(|step| {
                             Ok(PortableServiceReport {
                                 name: step.id.clone(),
+                                input_ids: step
+                                    .runtimes
+                                    .get(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME)
+                                    .map(|raw| {
+                                        ato_ipc::oci_component_inputs::parse_input_ids(raw)
+                                            .map_err(anyhow::Error::msg)
+                                    })
+                                    .transpose()?,
                                 runtimes: step.runtimes.clone(),
                                 argv: step.argv.clone(),
                                 cwd: step.cwd.clone(),

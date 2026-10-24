@@ -164,12 +164,16 @@ pub struct ResolvedRuntimeLaunchContext {
     endpoints: Vec<ResolvedEndpoint>,
     read_only_inputs: Vec<ResolvedReadOnlyInput>,
     output_dir: Option<PathBuf>,
+    data_grant_present: bool,
 }
 
 /// An immutable input the Runner delivered for this Run (a Model Set): a host
 /// path the workload may read and never write, named to it by `env_name`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedReadOnlyInput {
+    /// Runner-private logical identity, carried from the lease-bound Grant.
+    /// Legacy local callers omit it; component assignment never infers from env.
+    pub input_id: Option<String>,
     pub env_name: String,
     pub path: PathBuf,
 }
@@ -229,7 +233,48 @@ impl ResolvedRuntimeLaunchContext {
             endpoints,
             read_only_inputs: Vec::new(),
             output_dir: None,
+            data_grant_present: false,
         })
+    }
+
+    /// Only the existing authenticated delivery path may assert a Grant exists.
+    pub fn with_data_grant_present(mut self, present: bool) -> Self {
+        self.data_grant_present = present;
+        self
+    }
+
+    pub(super) fn data_grant_present(&self) -> bool {
+        self.data_grant_present
+    }
+
+    /// Data-only view for one component. No public environment or redeemed
+    /// secret crosses into this view; all state paths remain for overlap checks.
+    pub(super) fn component_data_view(
+        &self,
+        inputs: Vec<ResolvedReadOnlyInput>,
+        output: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            workspace_root: self.workspace_root.clone(),
+            effective_cwd: self.effective_cwd.clone(),
+            public_env: BTreeMap::new(),
+            secrets: Vec::new(),
+            state_attachments: self
+                .state_attachments
+                .iter()
+                .map(|state| ResolvedStateAttachment {
+                    state_key: state.state_key.clone(),
+                    revision_ref: state.revision_ref.clone(),
+                    working_copy: state.working_copy.clone(),
+                    guest_target: state.guest_target.clone(),
+                    access: state.access,
+                })
+                .collect(),
+            endpoints: Vec::new(),
+            read_only_inputs: inputs,
+            output_dir: output,
+            data_grant_present: self.data_grant_present,
+        }
     }
 
     /// Delivered read-only inputs. Only a host-boundary launch can honour

@@ -172,6 +172,8 @@ fn advertised_capabilities(
         capabilities.push(runtime_launch::host_boundary::ISOLATION_CAPABILITY);
         if capabilities.contains(&"execution_abi=oci") {
             capabilities.push(ato_runtime_attempt::launch::oci::OCI_DATA_PLANE_RUNTIME_FEATURE);
+            capabilities
+                .push(ato_ipc::oci_component_inputs::OCI_COMPONENT_DATA_PLANE_RUNTIME_FEATURE);
         }
     }
     if has_accelerator {
@@ -2158,11 +2160,20 @@ impl ConnectedWorker {
             token: &self.api.token,
             lease_id: &lease.id,
         };
-        let delivered = match data_plane::deliver(
+        let component_assets = spec.service_group_spec().is_some_and(|spec| {
+            spec.service_group().services.iter().any(|service| {
+                service
+                    .input_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.iter().any(|id| id == "assets"))
+            })
+        });
+        let delivered = match data_plane::deliver_with_assets_channel(
             &data,
             &lease.run_id,
             &self.config.work_root,
             lease_root,
+            component_assets,
             || {
                 if poll_runtime_launch_control(
                     || self.control_stop_requested_runtime(&lease.id, native),
@@ -2182,7 +2193,7 @@ impl ConnectedWorker {
             Ok(delivered) => delivered,
             Err(error) => return not_started(Err(error.context("data delivery failed"))),
         };
-        let (read_only_inputs, output_plan) = match delivered {
+        let (read_only_inputs, output_plan, data_grant_present) = match delivered {
             Some(delivered) => {
                 if self.config.isolation != IsolationMode::HostBoundary {
                     return not_started(Err(anyhow::anyhow!(
@@ -2196,6 +2207,7 @@ impl ConnectedWorker {
                     .inputs
                     .into_iter()
                     .map(|input| runtime_launch::resolved::ResolvedReadOnlyInput {
+                        input_id: Some(input.input_id),
                         env_name: input.env_name,
                         path: input.path,
                     })
@@ -2203,9 +2215,10 @@ impl ConnectedWorker {
                 (
                     inputs,
                     delivered.output_dir.map(|dir| (dir, delivered.outputs)),
+                    true,
                 )
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, false),
         };
         let mut resolved = match runtime_launch::lease::resolve_run(
             spec,
@@ -2222,7 +2235,8 @@ impl ConnectedWorker {
         resolved.context = resolved
             .context
             .with_read_only_inputs(read_only_inputs)
-            .with_output_dir(output_plan.as_ref().map(|(dir, _)| dir.clone()));
+            .with_output_dir(output_plan.as_ref().map(|(dir, _)| dir.clone()))
+            .with_data_grant_present(data_grant_present);
         entry.writer_fences = resolved.prepared.writer_fences();
         entry.phase = runtime_launch::recovery::RunPhase::Launching;
         if let Err(error) = journal.record(entry) {
@@ -7128,6 +7142,12 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 );
                 assert_eq!(
                     capabilities.contains(&"runtime_feature=oci_data_plane_v1"),
+                    host && oci
+                );
+                assert_eq!(
+                    capabilities.contains(
+                        &ato_ipc::oci_component_inputs::OCI_COMPONENT_DATA_PLANE_RUNTIME_FEATURE
+                    ),
                     host && oci
                 );
             }
