@@ -760,6 +760,11 @@ fn validate_selected_derivation(
             "HTTP Port operation grants are not bound in this portable profile",
         ));
     }
+    // A bundle is a sealed Derivation. Import and Run validate its shape but
+    // never re-resolve its runtimes, so the execution-time runtime policy has
+    // to be applied here too: a `.capsule` pinned to a Node affected by
+    // CVE-2026-111497 is not admitted, whichever entry reads it.
+    validate_runtime_policy(&derivation)?;
     let realization = validate_initial_route(&contract, &application, &derivation)?;
     if let Some(snapshot_ref) = instance_snapshot_ref.as_ref() {
         let snapshot: InstanceSnapshotV1 =
@@ -2778,6 +2783,16 @@ fn parse_ref(value: &str, field: &str) -> Result<ContentRef, PortableApplication
     Ok(reference)
 }
 
+/// The execution-time runtime policy for a sealed Derivation.
+///
+/// The refusal code is the first token of the message on purpose: the
+/// validator agent classifies by message, and a reporting path must be able
+/// to say "this bundle pins an affected Node" instead of "unknown failure".
+fn validate_runtime_policy(derivation: &BoundDerivation) -> Result<(), PortableApplicationError> {
+    ato_formation::runtime_policy::derivation_runtime_policy(derivation)
+        .map_err(|refusal| profile(format!("{}: {}", refusal.code, refusal.message)))
+}
+
 fn profile(message: impl Into<String>) -> PortableApplicationError {
     PortableApplicationError::Profile(message.into())
 }
@@ -3084,6 +3099,49 @@ default = "pure"
         mutate(&mut derivation);
         validate_initial_route(&route.contract, &route.application, &derivation)?;
         validated_model_sets(bundle, &derivation).map(|_| ())
+    }
+
+    #[test]
+    fn a_bundle_pinned_to_an_affected_node_is_not_admitted() {
+        // A sealed portable bundle is admitted by shape, digest and closure,
+        // but never re-resolves its runtimes. The execution-time policy must
+        // therefore be part of bundle validation: this is the only Rust check
+        // that sees a `.capsule`'s selected Derivation before it runs.
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");
+        let (_, mut bundle) = build_authored_bundle_v2(&root).unwrap();
+        let reference = bundle.index.derivations[0].clone();
+
+        let affected = replace_derivation(&mut bundle, &reference, |derivation| {
+            derivation
+                .runtimes
+                .insert("node".to_owned(), "22.14.0".to_owned());
+        });
+        let error =
+            validate_bundle_for_derivation(&bundle, &affected).expect_err("affected Node refused");
+        assert!(
+            format!("{error}").contains("runtime_version_not_patched"),
+            "{error}"
+        );
+
+        let patched = replace_derivation(&mut bundle, &affected, |derivation| {
+            derivation
+                .runtimes
+                .insert("node".to_owned(), "22.23.4".to_owned());
+        });
+        assert!(validate_bundle_for_derivation(&bundle, &patched).is_ok());
+
+        let unverifiable = replace_derivation(&mut bundle, &patched, |derivation| {
+            derivation
+                .runtimes
+                .insert("node".to_owned(), ">=22".to_owned());
+        });
+        let error = validate_bundle_for_derivation(&bundle, &unverifiable)
+            .expect_err("unverifiable Node refused");
+        assert!(
+            format!("{error}").contains("runtime_version_unverifiable"),
+            "{error}"
+        );
     }
 
     #[test]

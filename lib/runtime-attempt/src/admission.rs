@@ -203,6 +203,15 @@ pub(crate) fn admit_with_model_delivery(
             ),
         );
     }
+    // A sealed Derivation keeps the runtime it pinned; nothing re-resolves it.
+    // So the runtime catalog that governed authoring must be stated again here,
+    // as an execution input: refusing an affected Node is not a request-level
+    // policy a grant can widen, and it must hold for every entry into
+    // `run_attempt` — a CLI Run, a hosted Formation, a retained replay.
+    if let Err(refusal) = ato_formation::runtime_policy::derivation_runtime_policy(spec.derivation)
+    {
+        return refused(refusal.code, refusal.message);
+    }
     if browser.is_some() && spec.shape != CandidateShape::Process {
         // Browser verification has not moved onto the common observation
         // path for every shape; a request it cannot decide is refused rather
@@ -270,6 +279,126 @@ mod tests {
             instance_snapshot_ref: None,
         };
         admit(&spec, authorization, None).map(|failure| failure.code)
+    }
+
+    /// The policy gate in front of every entry, as an attempt would see it.
+    fn check_derivation(derivation: &BoundDerivation) -> Option<String> {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+        };
+        admit(&spec, EffectAuthorization::Unattended, None).map(|failure| failure.code)
+    }
+
+    fn node_step(version: &str) -> ato_formation::authoring::BoundStep {
+        ato_formation::authoring::BoundStep {
+            id: "build".to_owned(),
+            protocol: "ato.process@1".to_owned(),
+            op: "exec".to_owned(),
+            argv: vec!["node".to_owned(), "build.js".to_owned()],
+            cwd: String::new(),
+            env: Default::default(),
+            source: None,
+            root: None,
+            entry: None,
+            spa_fallback: None,
+            network: Default::default(),
+            runtimes: [("node".to_owned(), version.to_owned())].into(),
+            state: Vec::new(),
+            bindings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_sealed_route_pinned_to_an_affected_node_is_refused_before_it_starts() {
+        let mut route = derivation(EffectClass::Pure);
+        for version in ["18.20.4", "20.20.2", "22.14.0", "24.18.0"] {
+            route.runtimes.insert("node".to_owned(), version.to_owned());
+            assert_eq!(
+                check_derivation(&route).as_deref(),
+                Some("runtime_version_not_patched"),
+                "{version} must be refused"
+            );
+        }
+        // A patched pin is execution's business as usual.
+        route
+            .runtimes
+            .insert("node".to_owned(), "22.23.4".to_owned());
+        assert_eq!(check_derivation(&route), None);
+        // A declaration this build cannot classify fails closed, with its own
+        // code so reporting never calls it patched or an unknown failure.
+        route.runtimes.insert("node".to_owned(), ">=22".to_owned());
+        assert_eq!(
+            check_derivation(&route).as_deref(),
+            Some("runtime_version_unverifiable")
+        );
+        // An exploration grant covers requirements, not this policy.
+        route
+            .runtimes
+            .insert("node".to_owned(), "22.14.0".to_owned());
+        route.requirements = serde_json::from_value(serde_json::json!({
+            "network": [{ "phase": "runtime", "host": "example.com", "port": 443 }]
+        }))
+        .expect("a network requirement");
+        let grant = route.requirements.clone();
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &route,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+        };
+        assert_eq!(
+            admit(
+                &spec,
+                EffectAuthorization::Exploration {
+                    derivation_ref: "sha256:d",
+                    grant: &grant,
+                },
+                None
+            )
+            .map(|failure| failure.code)
+            .as_deref(),
+            Some("runtime_version_not_patched")
+        );
+    }
+
+    #[test]
+    fn a_step_scoped_affected_node_is_refused_too() {
+        let mut route = derivation(EffectClass::Pure);
+        route.steps.push(node_step("24.18.0"));
+        assert_eq!(
+            check_derivation(&route).as_deref(),
+            Some("runtime_version_not_patched")
+        );
+
+        route.steps.clear();
+        route.steps.push(node_step("24.22.1"));
+        assert_eq!(check_derivation(&route), None);
+    }
+
+    #[test]
+    fn a_route_without_node_is_not_affected_by_this_policy() {
+        let mut route = derivation(EffectClass::Pure);
+        route
+            .runtimes
+            .insert("python".to_owned(), "3.12.7".to_owned());
+        assert_eq!(check_derivation(&route), None);
     }
 
     #[test]
