@@ -319,3 +319,75 @@ What is still **not** proven, and must not be reported as done:
   code plus the declared Derivation remain the only evidence. Do not render
   "Patched" from a successful run.
 - Auto-build from advisories and Auto-rollout (PR8 in §6) are not started.
+
+## 10. Runtime-gate coverage and non-goals (CVE-2026-111497)
+
+PRs #1551 (Rust) and #880 (ato-api) refuse a NEW execution whose **declared**
+Node runtime is affected. This section records what that promise is, and what it
+is not, so the product never renders "Patched" beyond the evidence.
+
+### 10.1 Contract K identity (why a runtime patch does not change K)
+
+`ContractRef` is `sha256(JCS({"schema":"ato.contract/1","requirements":[...]}))`
+(`ato:lib/formation/src/authoring.rs:381-386,513-526`). A `BoundContract` holds
+only the schema constant and the requirement set. Requirements that *capture* an
+input identity embed the captured source-closure digest
+(`authoring.rs:842-872`), and the preset lane always captures the source
+identity (`preset.rs:408-437`).
+
+Therefore:
+
+- the runtime catalog, toolchain version, platform, target triple, policy and
+  realization kind are **Derivation inputs, never K inputs**;
+- changing the runtime catalog changes D and leaves K unchanged;
+- a re-formation has **no pre-pinned target K**: `FormationJobV1` has no
+  `contract_ref` and no table stores one. K exists only in the accepted
+  `formation_results.result_json`, so "same K" can only be established
+  **after** acceptance, by comparing the old and new refs;
+- for that comparison to mean "the same contract was re-verified", it must also
+  establish that the **same source closure** was rebuilt. K identity alone is
+  not input identity for a weak authored contract (an author who does not
+  capture source identity can have the same K over different sources). The
+  re-formation record therefore compares K **and** the source closure, and
+  refuses to call a different-source rebuild "accepted".
+
+### 10.2 What the gates cover
+
+| Path | Guarded? | Evidence |
+|---|---|---|
+| Sealed D declared `node` runtime — CLI `ato run` / `app start` / bundle import | yes | Rust bundle validation + attempt admission (#1551) |
+| Sealed D declared `node` runtime — Formation worker / exploration / retained replay | yes (new binary) | attempt admission + retained policy (#1551) |
+| Portable hosted start (import / wake / always-on) | yes (new API) | ato-api `launchPortableRoute` (#880) |
+| Registered process schema start | yes (new API) | ato-api `launchComputeInstanceRun` (#880) |
+| Hosted retained functional Run | **no** | `ato-api:src/services/runtime_network/functional_run.ts:313-330` bypasses both API gates; CRW holds no D |
+| VM-internal execution on legacy/managed providers | **no** | runs whatever binary the VM image carries; rollout-dependent |
+| v2 computation replay / compose / local-runtime / desktop | **n/a** | the `[[runtime]]` declaration does not exist in that model |
+| Activity / room browser executor | **n/a** | not user Node |
+| Platform browser verifier Node | **n/a** | not the app's runtime |
+| Node bundled inside a user OCI image | **no** | digest pin only; the platform cannot know without an image SBOM/scan. `runtime_image_index` records `not_run`, never green |
+| Undeclared runtime: `argv` = `node`, `sh -c "node …"`, `npx`, shell scripts | **no** | gates read runtime declarations, not argv |
+| Authored `env.PATH` pointing at an affected toolchain while D declares patched | **partial** | Rust gate does not inspect env; #880 checks `public_env.PATH` only on the compute path |
+| App changes `PATH` at runtime (dotenv, export, child process) | **no** | static pre-launch gates |
+| Already-issued leases, running Runs, old binaries/old API | **no** | no retroactive stop; a gate is not a kill switch |
+
+### 10.3 Non-goals (do not over-claim)
+
+1. The gate does **not** guarantee that an affected Node is never executed
+   during a Run. It guarantees that this Run did not **declare** one (or
+   declared a patched release).
+2. Undeclared execution (`argv`, shell, `npx`, script) is out of scope by
+   design; static detection of arbitrary command construction is not attempted.
+3. Image contents, including a Node binary inside a user OCI image, are out of
+   scope. That needs image-level SBOM/scan and advisory matching, which does not
+   exist yet.
+4. Hosted functional Runs and VM-internal executions are not covered until
+   their dispatch paths get a gate (tracked as a real gap, not a non-goal).
+5. Runtime SHA-256 / version evidence is not yet projected into
+   `ContractVerificationReceipt.execution`, so a successful Run is **not**
+   evidence of "Patched". Report the refusal code and the declared Derivation;
+   never render "Patched" from a successful run.
+6. Old workers/old API are not retroactively protected. Rollout skew is expected
+   and reported; a new API protects hosted starts even with old workers, while a
+   new worker does not protect hosted starts behind an old API.
+7. The gate is specific to CVE-2026-111497's Node version ranges; it is not a
+   general advisory policy engine.
