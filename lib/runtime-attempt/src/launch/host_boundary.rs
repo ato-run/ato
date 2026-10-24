@@ -37,7 +37,7 @@ use ato_ipc::runtime_launch::StateAccessV1;
 use ato_sandbox::{SandboxPolicy, filter_sensitive_paths};
 
 use super::resolved::ResolvedRuntimeLaunchContext;
-use super::sandbox::{SandboxedCommand, TOOLCHAIN_ROOT};
+use super::sandbox::SandboxedCommand;
 
 /// What a Runner in this mode advertises in place of the namespace capability.
 pub const ISOLATION_CAPABILITY: &str = "isolation=host-boundary-v1";
@@ -111,7 +111,19 @@ fn writable_devices() -> Vec<PathBuf> {
 /// under the Runner's work root is listed beyond those, so the Runner's
 /// credentials and other leases stay unreadable even before file permissions
 /// are considered.
-pub fn landlock_policy(context: &ResolvedRuntimeLaunchContext, scratch: &Path) -> SandboxPolicy {
+///
+/// `toolchain_roots` replaces the old whole-`/opt/ato/toolchains` allow: only
+/// the toolchains this launch resolved are readable. Note that the generic
+/// `/opt` entry below is retained for workloads that need other system
+/// packages, so on this Runner the material toolchain narrowing is the bwrap
+/// mount set (namespace launches) and the executable gate; the Landlock entry
+/// alone does not hide `/opt/ato/toolchains`. Removing `/opt` is a separate
+/// behavioural change and deliberately not taken here.
+pub fn landlock_policy(
+    context: &ResolvedRuntimeLaunchContext,
+    scratch: &Path,
+    toolchain_roots: &[PathBuf],
+) -> SandboxPolicy {
     let mut read_write: Vec<PathBuf> = vec![scratch.to_path_buf()];
     let mut read_only: Vec<PathBuf> = vec![context.workspace_root().to_path_buf()];
     for attachment in context.state_attachments() {
@@ -132,7 +144,7 @@ pub fn landlock_policy(context: &ResolvedRuntimeLaunchContext, scratch: &Path) -
         .iter()
         .map(PathBuf::from),
     );
-    read_only.push(PathBuf::from(TOOLCHAIN_ROOT));
+    read_only.extend(toolchain_roots.iter().cloned());
     read_only.extend(
         context
             .read_only_inputs()
@@ -244,6 +256,7 @@ pub fn host_boundary_command(
     policy_host_path: &Path,
     scratch: &Path,
     boundary: HostBoundary,
+    toolchain_roots: &[PathBuf],
 ) -> Result<SandboxedCommand> {
     ensure!(!workload_argv.is_empty(), "workload argv is empty");
     let utf8 = |path: &Path, what: &str| -> Result<String> {
@@ -268,7 +281,7 @@ pub fn host_boundary_command(
     argv.extend(workload_argv.iter().cloned());
     Ok(SandboxedCommand {
         argv,
-        policy: landlock_policy(context, scratch),
+        policy: landlock_policy(context, scratch, toolchain_roots),
     })
 }
 
@@ -330,6 +343,7 @@ mod tests {
                 uid: 20001,
                 gid: 20001,
             },
+            &[],
         )
         .unwrap();
         let workspace_text = workspace.path().to_str().unwrap();
@@ -363,9 +377,11 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(&state).unwrap();
 
+        let roots = [PathBuf::from("/opt/ato/toolchains/node/22.23.4")];
         let writable = landlock_policy(
             &context(workspace.path(), &state, StateAccessV1::ReadWrite),
             scratch.path(),
+            &roots,
         );
         assert!(writable.read_write_paths.contains(&state));
         assert!(
@@ -387,6 +403,7 @@ mod tests {
         let read_only = landlock_policy(
             &context(workspace.path(), &state, StateAccessV1::ReadOnly),
             scratch.path(),
+            &roots,
         );
         assert!(!read_only.read_write_paths.contains(&state));
         assert!(read_only.read_only_paths.contains(&state));
@@ -407,6 +424,7 @@ mod tests {
                 }],
             ),
             scratch.path(),
+            &[],
         );
         assert!(
             policy
@@ -428,10 +446,34 @@ mod tests {
         let policy = landlock_policy(
             &context(workspace.path(), &state, StateAccessV1::ReadWrite),
             Path::new("/work/scratch"),
+            &[],
         );
         assert!(!policy.allow_network);
         assert_eq!(policy.allowed_bind_tcp_ports, vec![18420]);
         assert!(policy.allowed_connect_tcp_ports.is_empty());
+    }
+
+    #[test]
+    fn only_the_needed_toolchains_are_allowed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = workspace.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let roots = [PathBuf::from("/opt/ato/toolchains/node/22.23.4")];
+        let policy = landlock_policy(
+            &context(workspace.path(), &state, StateAccessV1::ReadWrite),
+            Path::new("/work/scratch"),
+            &roots,
+        );
+        assert!(
+            policy.read_only_paths.contains(&roots[0]),
+            "the resolved toolchain is not readable"
+        );
+        assert!(
+            !policy
+                .read_only_paths
+                .contains(&PathBuf::from("/opt/ato/toolchains")),
+            "the whole toolchain root is in the policy"
+        );
     }
 
     #[test]

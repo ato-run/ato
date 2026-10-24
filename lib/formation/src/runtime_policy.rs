@@ -26,6 +26,7 @@
 //! the authoring catalog references it rather than repeating the literals.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::authoring::BoundDerivation;
 
@@ -35,6 +36,10 @@ pub const NODE_CVE_2026_111497: &str = "CVE-2026-111497";
 
 /// The runtime key a Node process route declares in `[[runtime]]`.
 pub const NODE_RUNTIME: &str = "node";
+
+/// Where provisioned Node toolchains live, with a trailing separator so a
+/// bare root (`/opt/ato/toolchains/node`) is not mistaken for a release.
+pub const NODE_TOOLCHAIN_PREFIX: &str = "/opt/ato/toolchains/node/";
 
 /// The lowest release of the 22.x line that contains the fix. It is also the
 /// authoring catalog's first entry and default, on purpose: new work and
@@ -117,6 +122,31 @@ impl RuntimePolicyRefusal {
             ),
         }
     }
+
+    fn unproven_executable(executable: &Path) -> Self {
+        Self {
+            code: RUNTIME_VERSION_UNVERIFIABLE,
+            message: format!(
+                "the route declares a Node runtime but would execute {}: a Node binary outside \
+                 {NODE_TOOLCHAIN_PREFIX}<patched release> cannot be proven to include the \
+                 {NODE_CVE_2026_111497} fix (patched releases: {})",
+                executable.display(),
+                patched_releases_text()
+            ),
+        }
+    }
+
+    fn missing_executable(executable: &Path) -> Self {
+        Self {
+            code: RUNTIME_VERSION_UNVERIFIABLE,
+            message: format!(
+                "the route declares a Node runtime but its executable {} does not resolve; a \
+                 Node this Runtime cannot inspect is not executed (patched releases: {})",
+                executable.display(),
+                patched_releases_text()
+            ),
+        }
+    }
 }
 
 fn patched_releases_text() -> String {
@@ -166,7 +196,14 @@ fn check_node(version: &str) -> Result<(), RuntimePolicyRefusal> {
 /// `node` runtime must be patched. Other runtimes (Python, OCI facts, package
 /// managers) are not this policy's business.
 ///
-/// A route with no Node runtime is admitted: it cannot run Node at all.
+/// A declaration is not the only way a Derivation names Node. `argv` may be an
+/// absolute `/opt/ato/toolchains/node/<release>/bin/node`, and an authored
+/// `env.PATH` may put one first. Both are deterministic references to a
+/// toolchain, so both are classified too: a Derivation that declares a patched
+/// runtime must not execute an affected one through either.
+///
+/// A route with no Node runtime and no toolchain reference is admitted: it
+/// cannot run Node at all.
 pub fn derivation_runtime_policy(derivation: &BoundDerivation) -> Result<(), RuntimePolicyRefusal> {
     if let Some(version) = derivation.runtimes.get(NODE_RUNTIME) {
         check_node(version)?;
@@ -175,6 +212,114 @@ pub fn derivation_runtime_policy(derivation: &BoundDerivation) -> Result<(), Run
         if let Some(version) = step.runtimes.get(NODE_RUNTIME) {
             check_node(version)?;
         }
+        for argument in &step.argv {
+            string_runtime_policy(argument)?;
+        }
+        // Every value, not only PATH: an environment value that references an
+        // affected toolchain is the same execution input, and scanning all of
+        // them is the cheaper mistake.
+        for value in step.env.values() {
+            string_runtime_policy(value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Does this Derivation declare that it runs Node?
+///
+/// Used to decide whether executing a `node`-named binary outside a known
+/// toolchain is "unverifiable" rather than "not this policy's business".
+pub fn derivation_declares_node_runtime(derivation: &BoundDerivation) -> bool {
+    derivation.runtimes.contains_key(NODE_RUNTIME)
+        || derivation
+            .steps
+            .iter()
+            .any(|step| step.runtimes.contains_key(NODE_RUNTIME))
+}
+
+/// The release named by the first `/opt/ato/toolchains/node/<release>` in
+/// `value`, if any. The release segment ends at the next path separator,
+/// whitespace, a PATH `:`, or a shell/JSON quote, so
+/// `/opt/ato/toolchains/node/22.14.0/bin/node` yields `22.14.0`.
+pub fn node_toolchain_version(value: &str) -> Option<&str> {
+    let (index, _) = value.match_indices(NODE_TOOLCHAIN_PREFIX).next()?;
+    let after = &value[index + NODE_TOOLCHAIN_PREFIX.len()..];
+    let end = after
+        .find(|character: char| {
+            character == '/'
+                || character == ':'
+                || character.is_whitespace()
+                || matches!(character, ';' | '"' | '\'' | '\0')
+        })
+        .unwrap_or(after.len());
+    Some(&after[..end])
+}
+
+/// Classify every Node-toolchain reference inside one string.
+///
+/// A string may be a single path, a PATH list, or a shell-ish value; any
+/// occurrence counts. An empty release segment (`/opt/ato/toolchains/node/`)
+/// is unverifiable, and an affected one is refused, never skipped.
+pub fn string_runtime_policy(value: &str) -> Result<(), RuntimePolicyRefusal> {
+    for (index, _) in value.match_indices(NODE_TOOLCHAIN_PREFIX) {
+        let after = &value[index + NODE_TOOLCHAIN_PREFIX.len()..];
+        let end = after
+            .find(|character: char| {
+                character == '/'
+                    || character == ':'
+                    || character.is_whitespace()
+                    || matches!(character, ';' | '"' | '\'' | '\0')
+            })
+            .unwrap_or(after.len());
+        check_node(&after[..end])?;
+    }
+    Ok(())
+}
+
+/// Classify every value of an environment a process would be spawned with.
+pub fn environment_runtime_policy(
+    environment: &BTreeMap<String, String>,
+) -> Result<(), RuntimePolicyRefusal> {
+    for value in environment.values() {
+        string_runtime_policy(value)?;
+    }
+    Ok(())
+}
+
+/// The policy for the executable a process launch would actually exec.
+///
+/// `lexical` is the path the spawner would try (absolute, or resolved against
+/// PATH); `canonical` is that path with symlinks resolved, when it exists.
+/// Both are checked: a symlink can point at an affected toolchain even when
+/// the name written in the PATH entry looks innocent.
+///
+/// When a Node runtime is implied and the target is a `node`/`nodejs` binary,
+/// it must live under a `/opt/ato/toolchains/node/<patched>` directory. A
+/// `node` from anywhere else — `/usr/bin/node`, a workspace copy, a symlink to
+/// either — is unverifiable, not patched.
+pub fn executable_runtime_policy(
+    lexical: &Path,
+    canonical: Option<&Path>,
+    node_implied: bool,
+) -> Result<(), RuntimePolicyRefusal> {
+    let lexical_text = lexical.to_string_lossy();
+    string_runtime_policy(&lexical_text)?;
+    if let Some(canonical) = canonical {
+        string_runtime_policy(&canonical.to_string_lossy())?;
+    }
+    if !node_implied {
+        return Ok(());
+    }
+    let effective = canonical.unwrap_or(lexical);
+    let file_name = effective.file_name().and_then(|name| name.to_str());
+    if !matches!(file_name, Some("node" | "nodejs")) {
+        return Ok(());
+    }
+    if canonical.is_none() {
+        return Err(RuntimePolicyRefusal::missing_executable(lexical));
+    }
+    if node_toolchain_version(&effective.to_string_lossy()).is_none() {
+        return Err(RuntimePolicyRefusal::unproven_executable(effective));
     }
     Ok(())
 }
@@ -370,5 +515,223 @@ mod tests {
 
         toolchains.insert("node".to_owned(), "22.23.4".to_owned());
         assert!(node_toolchain_policy(&toolchains).is_ok());
+    }
+
+    // ── toolchain references in argv / PATH / the executable ───────────────
+
+    fn route_with_step(step: serde_json::Value) -> BoundDerivation {
+        serde_json::from_value(serde_json::json!({
+            "schema": "ato.derivation/1",
+            "inputs": [], "runtimes": {"node": "22.23.4"}, "steps": [step],
+            "ports": [], "state": [], "effects": "pure"
+        }))
+        .expect("a derivation with one step")
+    }
+
+    fn serve_step(extra: serde_json::Value) -> serde_json::Value {
+        let mut step = serde_json::json!({
+            "id": "app", "protocol": "ato.process@1", "op": "serve", "argv": ["node", "app.js"]
+        });
+        if let Some(map) = extra.as_object() {
+            for (key, value) in map {
+                step[key] = value.clone();
+            }
+        }
+        step
+    }
+
+    #[test]
+    fn a_toolchain_reference_in_argv_is_classified() {
+        let affected = route_with_step(serve_step(serde_json::json!({
+            "argv": ["/opt/ato/toolchains/node/22.14.0/bin/node", "app.js"]
+        })));
+        let refusal = derivation_runtime_policy(&affected).expect_err("affected argv");
+        assert_eq!(refusal.code, RUNTIME_VERSION_NOT_PATCHED);
+        assert!(refusal.message.contains("22.14.0"), "{refusal:?}");
+
+        let patched = route_with_step(serve_step(serde_json::json!({
+            "argv": ["/opt/ato/toolchains/node/22.23.4/bin/node", "app.js"]
+        })));
+        assert!(derivation_runtime_policy(&patched).is_ok());
+
+        let unverifiable = route_with_step(serve_step(serde_json::json!({
+            "argv": ["/opt/ato/toolchains/node/22/bin/node", "app.js"]
+        })));
+        assert_eq!(
+            derivation_runtime_policy(&unverifiable)
+                .expect_err("unverifiable argv")
+                .code,
+            RUNTIME_VERSION_UNVERIFIABLE
+        );
+    }
+
+    #[test]
+    fn a_toolchain_reference_in_an_authored_path_is_classified() {
+        let affected = route_with_step(serve_step(serde_json::json!({
+            "env": {
+                "PATH": "/opt/ato/toolchains/node/22.14.0/bin:/usr/local/bin:/usr/bin:/bin"
+            }
+        })));
+        assert_eq!(
+            derivation_runtime_policy(&affected)
+                .expect_err("affected PATH")
+                .code,
+            RUNTIME_VERSION_NOT_PATCHED
+        );
+
+        let patched = route_with_step(serve_step(serde_json::json!({
+            "env": {
+                "PATH": "/opt/ato/toolchains/node/22.23.4/bin:/usr/local/bin:/usr/bin:/bin"
+            }
+        })));
+        assert!(derivation_runtime_policy(&patched).is_ok());
+
+        // A non-PATH variable is the same execution input.
+        let in_other_value = route_with_step(serve_step(serde_json::json!({
+            "env": {"NODE_HOME": "/opt/ato/toolchains/node/20.20.2"}
+        })));
+        assert_eq!(
+            derivation_runtime_policy(&in_other_value)
+                .expect_err("affected env value")
+                .code,
+            RUNTIME_VERSION_NOT_PATCHED
+        );
+    }
+
+    #[test]
+    fn a_toolchain_reference_is_a_declaration_too() {
+        // No `node` runtime key at all, only the absolute reference: the gate
+        // must still see what would actually run.
+        let derivation: BoundDerivation = serde_json::from_value(serde_json::json!({
+            "schema": "ato.derivation/1",
+            "inputs": [], "runtimes": {"python": "3.12.7"},
+            "steps": [{
+                "id": "app", "protocol": "ato.process@1", "op": "serve",
+                "argv": ["/opt/ato/toolchains/node/18.20.4/bin/node", "app.js"]
+            }],
+            "ports": [], "state": [], "effects": "pure"
+        }))
+        .unwrap();
+        assert_eq!(
+            derivation_runtime_policy(&derivation)
+                .expect_err("undeclared affected Node")
+                .code,
+            RUNTIME_VERSION_NOT_PATCHED
+        );
+        assert!(!derivation_declares_node_runtime(&derivation));
+    }
+
+    #[test]
+    fn the_release_segment_stops_at_a_separator_or_a_colon() {
+        assert_eq!(
+            node_toolchain_version("/opt/ato/toolchains/node/22.14.0/bin/node"),
+            Some("22.14.0")
+        );
+        assert_eq!(
+            node_toolchain_version("PATH=/opt/ato/toolchains/node/v22.23.4/bin:/usr/bin"),
+            Some("v22.23.4")
+        );
+        assert_eq!(
+            node_toolchain_version("/opt/ato/toolchains/node/22.14.0"),
+            Some("22.14.0")
+        );
+        assert_eq!(
+            node_toolchain_version("/opt/ato/toolchains/node/"),
+            Some("")
+        );
+        assert_eq!(node_toolchain_version("/usr/bin/node"), None);
+        // The bare root is not a release reference.
+        assert_eq!(node_toolchain_version("/opt/ato/toolchains/node"), None);
+    }
+
+    #[test]
+    fn an_environment_is_scanned_value_by_value() {
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "PATH".to_owned(),
+            "/opt/ato/toolchains/python/3.12.7/bin".to_owned(),
+        );
+        assert!(environment_runtime_policy(&environment).is_ok());
+        environment.insert(
+            "PATH".to_owned(),
+            "/opt/ato/toolchains/node/24.18.0/bin:/usr/bin".to_owned(),
+        );
+        assert_eq!(
+            environment_runtime_policy(&environment)
+                .expect_err("affected PATH")
+                .code,
+            RUNTIME_VERSION_NOT_PATCHED
+        );
+    }
+
+    #[test]
+    fn a_node_outside_the_toolchain_cannot_prove_patched() {
+        // The normal case: a patched toolchain path is fine.
+        assert!(
+            executable_runtime_policy(
+                Path::new("/opt/ato/toolchains/node/22.23.4/bin/node"),
+                Some(Path::new("/opt/ato/toolchains/node/22.23.4/bin/node")),
+                true
+            )
+            .is_ok()
+        );
+        // An affected path is refused even when a symlink hides it.
+        assert_eq!(
+            executable_runtime_policy(
+                Path::new("/usr/local/bin/node"),
+                Some(Path::new("/opt/ato/toolchains/node/22.14.0/bin/node")),
+                true
+            )
+            .expect_err("symlink to affected")
+            .code,
+            RUNTIME_VERSION_NOT_PATCHED
+        );
+        // A system Node, or a workspace copy, cannot be proven patched.
+        assert_eq!(
+            executable_runtime_policy(
+                Path::new("/usr/bin/node"),
+                Some(Path::new("/usr/bin/node")),
+                true
+            )
+            .expect_err("system node")
+            .code,
+            RUNTIME_VERSION_UNVERIFIABLE
+        );
+        // A missing executable the spawner would try is fail-closed.
+        assert_eq!(
+            executable_runtime_policy(Path::new("node"), None, true)
+                .expect_err("missing node")
+                .code,
+            RUNTIME_VERSION_UNVERIFIABLE
+        );
+        // No Node is implied: a non-node executable is not this policy's.
+        assert!(
+            executable_runtime_policy(
+                Path::new("/usr/bin/python3"),
+                Some(Path::new("/usr/bin/python3")),
+                false
+            )
+            .is_ok()
+        );
+        // A non-node basename under a Node toolchain is still classified by
+        // path (here: patched), and an affected one is refused.
+        assert!(
+            executable_runtime_policy(
+                Path::new("/opt/ato/toolchains/node/22.23.4/bin/npm"),
+                None,
+                true
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            executable_runtime_policy(
+                Path::new("/opt/ato/toolchains/node/22.14.0/bin/npm"),
+                None,
+                true
+            )
+            .expect_err("affected npm")
+            .code,
+            RUNTIME_VERSION_NOT_PATCHED
+        );
     }
 }

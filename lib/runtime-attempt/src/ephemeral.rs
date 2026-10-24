@@ -340,6 +340,18 @@ impl TemporaryRealization {
             .map_err(anyhow::Error::msg)?;
         let argv = serve.argv.clone();
         let mut public_env = request.plan.process_environment(request.derivation);
+        // The final executable gate, with the Derivation in hand: admission
+        // checked what D declares, but `argv` and an authored PATH can name a
+        // different toolchain. Resolve what the spawn would exec and refuse a
+        // Node this build cannot prove patched. The process executor repeats
+        // the check for its own spec; this one knows the declaration.
+        crate::launch::executable_gate::validate_derivation_executable(
+            &argv[0],
+            &request.workspace.join(&serve.cwd),
+            &public_env,
+            request.derivation,
+        )
+        .context(crate::launch::executable_gate::context_for_launch())?;
         let mut state_attachments = Vec::new();
         let mut resolved_state = Vec::new();
         if let Some(state) = state {
@@ -567,6 +579,22 @@ impl TemporaryRealization {
     /// Where each logical port is reachable.
     pub fn endpoints(&self) -> &[RealizedEndpoint] {
         &self.endpoints
+    }
+
+    /// The executable the launch actually resolved, for the attempt's
+    /// execution evidence. `None` before launch or when nothing was spawned.
+    pub fn runtime_executable(&self) -> Option<&str> {
+        self.launched
+            .as_ref()
+            .map(LaunchedProcess::runtime_executable)
+    }
+
+    /// The runtime version resolved from the executable's toolchain path, when
+    /// that path names one. A `node` outside `/opt/ato/toolchains` has none.
+    pub fn runtime_version(&self) -> Option<&str> {
+        self.launched
+            .as_ref()
+            .and_then(LaunchedProcess::runtime_version)
     }
 
     /// GET every required path through the endpoint its logical port maps to.
