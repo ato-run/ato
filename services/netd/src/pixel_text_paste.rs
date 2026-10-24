@@ -21,6 +21,8 @@ pub(crate) struct ClientFilter {
     pending: Vec<u8>,
     started: Option<Instant>,
     paste_until: Option<u64>,
+    resize_until: Option<u64>,
+    resize_limiter: Arc<crate::pixel_resize::ResizeLimiter>,
     rate_limit: PasteRateLimit,
     paste_activity: bool,
 }
@@ -31,9 +33,20 @@ impl ClientFilter {
             pending: Vec::new(),
             started: None,
             paste_until,
+            resize_until: None,
+            resize_limiter: Arc::new(crate::pixel_resize::ResizeLimiter::default()),
             rate_limit: Arc::new(Mutex::new(None)),
             paste_activity: false,
         }
+    }
+    pub(crate) fn with_resize(
+        mut self,
+        until: Option<u64>,
+        limiter: Arc<crate::pixel_resize::ResizeLimiter>,
+    ) -> Self {
+        self.resize_until = until;
+        self.resize_limiter = limiter;
+        self
     }
     pub(crate) fn with_rate_limit(mut self, limit: PasteRateLimit) -> Self {
         self.rate_limit = limit;
@@ -67,7 +80,7 @@ impl ClientFilter {
             }
             let length = self.length(unix_seconds)?;
             if self.pending.len() == length {
-                self.validate(now)?;
+                self.validate(now, unix_seconds)?;
                 forwarded.extend_from_slice(&self.pending);
                 self.pending.clear();
                 self.started = None;
@@ -122,15 +135,19 @@ impl ClientFilter {
             }
             250 => 4, // XvpOp
             251 => {
-                // SetDesktopSize: bounded variable screen list, not a fixed 24 bytes.
+                if self
+                    .resize_until
+                    .is_none_or(|expiry| unix_seconds >= expiry)
+                {
+                    return Err(Rejected);
+                }
                 if self.pending.len() < 8 {
                     return Ok(8);
                 }
-                let screens = usize::from(self.pending[6]);
-                if screens == 0 || screens > 16 {
+                if self.pending[6] != 1 {
                     return Err(Rejected);
                 }
-                8 + 16 * screens
+                24
             }
             255 => 12, // QEMUExtendedKeyEvent
             _ => return Err(Rejected),
@@ -140,7 +157,7 @@ impl ClientFilter {
         }
         Ok(length)
     }
-    fn validate(&mut self, now: Instant) -> Result<(), Rejected> {
+    fn validate(&mut self, now: Instant, unix_seconds: u64) -> Result<(), Rejected> {
         if self.handshake < 3 {
             match self.handshake {
                 0 if self.pending != b"RFB 003.008\n" => return Err(Rejected),
@@ -162,6 +179,16 @@ impl ClientFilter {
                 return Err(Rejected);
             }
             *last = Some(now);
+            self.paste_activity = true;
+        } else if self.pending[0] == 251 {
+            self.resize_limiter
+                .accept(
+                    &self.pending,
+                    self.resize_until,
+                    now.into_std(),
+                    unix_seconds,
+                )
+                .map_err(|_| Rejected)?;
             self.paste_activity = true;
         }
         Ok(())
@@ -275,7 +302,7 @@ mod tests {
         assert_eq!(f.feed(&bytes, Instant::now(), 100).unwrap(), bytes);
         let mut screens = vec![251, 0, 0, 32, 0, 32, 2, 0];
         screens.extend([0; 32]);
-        assert_eq!(f.feed(&screens, Instant::now(), 100).unwrap(), screens);
+        assert!(f.feed(&screens, Instant::now(), 100).is_err());
         let mut f = ClientFilter::new(None);
         assert!(f.feed(b"RFB 003.003\n", Instant::now(), 100).is_err());
     }
@@ -297,5 +324,84 @@ mod tests {
                 .unwrap(),
             packet(b"two")
         );
+    }
+    fn resize_packet() -> Vec<u8> {
+        let mut bytes = vec![251, 0, 4, 0, 3, 0, 1, 0];
+        bytes.extend([0; 8]);
+        bytes.extend([4, 0, 3, 0]);
+        bytes.extend([0; 4]);
+        bytes
+    }
+    fn resizable(
+        until: Option<u64>,
+        limiter: Arc<crate::pixel_resize::ResizeLimiter>,
+    ) -> ClientFilter {
+        filter(None).with_resize(until, limiter)
+    }
+    #[test]
+    fn resize_fragments_are_forwarded_only_after_complete_authorized_message() {
+        let packet = resize_packet();
+        for split in 1..packet.len() {
+            let mut f = resizable(Some(200), Arc::default());
+            let now = Instant::now();
+            assert!(f.feed(&packet[..split], now, 100).unwrap().is_empty());
+            assert_eq!(f.feed(&packet[split..], now, 100).unwrap(), packet);
+            assert!(f.take_paste_activity());
+        }
+    }
+    #[test]
+    fn resize_expiry_is_rechecked_when_the_last_fragment_arrives() {
+        let mut f = resizable(Some(101), Arc::default());
+        let now = Instant::now();
+        let packet = resize_packet();
+        assert!(f.feed(&packet[..23], now, 100).unwrap().is_empty());
+        assert!(
+            f.feed(&packet[23..], now + Duration::from_secs(1), 101)
+                .is_err()
+        );
+        assert!(filter(Some(200)).feed(&packet, now, 100).is_err());
+    }
+    #[test]
+    fn resize_shares_the_absolute_fragment_deadline_and_reconnect_rate_limit() {
+        let now = Instant::now();
+        let packet = resize_packet();
+        let mut f = resizable(Some(200), Arc::default());
+        assert!(f.feed(&packet[..1], now, 100).unwrap().is_empty());
+        let deadline = f.deadline();
+        assert!(
+            f.feed(&packet[1..8], now + Duration::from_secs(4), 104)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(f.deadline(), deadline);
+        assert!(f.feed(&packet[8..], now + ASSEMBLY_TIMEOUT, 105).is_err());
+        let shared = Arc::default();
+        let mut first = resizable(Some(200), Arc::clone(&shared));
+        assert_eq!(first.feed(&packet, now, 100).unwrap(), packet);
+        let mut reconnected = resizable(Some(200), Arc::clone(&shared));
+        assert!(
+            reconnected
+                .feed(&packet, now + Duration::from_millis(999), 100)
+                .is_err()
+        );
+        let mut later = resizable(Some(200), shared);
+        assert_eq!(
+            later
+                .feed(&packet, now + Duration::from_secs(1), 101)
+                .unwrap(),
+            packet
+        );
+    }
+    #[test]
+    fn resize_rejects_multiscreen_and_oversize_without_forwarding_a_prefix() {
+        for packet in [vec![251, 0, 4, 0, 3, 0, 2, 0], {
+            let mut bytes = resize_packet();
+            bytes[2] = 17;
+            bytes[16] = 17;
+            bytes
+        }] {
+            let mut f = resizable(Some(200), Arc::default());
+            assert!(f.feed(&packet, Instant::now(), 100).is_err());
+        }
     }
 }

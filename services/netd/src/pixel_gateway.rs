@@ -162,7 +162,7 @@ pub async fn start_pixel_gateway(
     config: PixelGatewayConfig,
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
 ) -> Result<PixelGatewayHandle, PixelGatewayError> {
-    start_gateway(config, authorizer, false).await
+    start_gateway(config, authorizer, None).await
 }
 
 /// Receive-only text paste boundary. The caller must own an isolated RFB
@@ -173,13 +173,40 @@ pub async fn start_text_paste_pixel_gateway(
     config: PixelGatewayConfig,
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
 ) -> Result<PixelGatewayHandle, PixelGatewayError> {
-    start_gateway(config, authorizer, true).await
+    start_interactive_pixel_gateway(
+        config,
+        authorizer,
+        PixelGatewayControls {
+            text_paste: true,
+            framebuffer_resize: false,
+        },
+    )
+    .await
+}
+
+/// The same bounded listener with independently signed paste/resize permission.
+/// Its trusted caller must own a producer implementing the allowed operation;
+/// neither this entry nor a signed claim enables a production capability.
+pub async fn start_interactive_pixel_gateway(
+    config: PixelGatewayConfig,
+    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+    controls: PixelGatewayControls,
+) -> Result<PixelGatewayHandle, PixelGatewayError> {
+    start_gateway(config, authorizer, Some(controls)).await
+}
+
+/// Trusted physical producer support. Signed permission is additionally
+/// required per connection; caller configuration alone grants no operation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PixelGatewayControls {
+    pub text_paste: bool,
+    pub framebuffer_resize: bool,
 }
 
 async fn start_gateway(
     config: PixelGatewayConfig,
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
-    text_paste_boundary: bool,
+    controls: Option<PixelGatewayControls>,
 ) -> Result<PixelGatewayHandle, PixelGatewayError> {
     config.validate()?;
     let listener = TcpListener::bind(config.listen_addr)
@@ -188,14 +215,14 @@ async fn start_gateway(
     let local_addr = listener.local_addr().map_err(PixelGatewayError::Bind)?;
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let last_input_activity_unix_millis = Arc::new(AtomicU64::new(now_unix_millis()));
-    let paste_limiter = text_paste_boundary.then(|| Arc::new(std::sync::Mutex::new(None)));
+    let input_policy = controls.map(|controls| (controls, Arc::new(std::sync::Mutex::new(None))));
     let task = tokio::spawn(run_gateway(
         listener,
         config,
         authorizer,
         cancel_rx,
         Arc::clone(&last_input_activity_unix_millis),
-        paste_limiter,
+        input_policy,
     ));
 
     Ok(PixelGatewayHandle {
@@ -212,9 +239,10 @@ async fn run_gateway(
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
     mut cancel_rx: watch::Receiver<bool>,
     last_input_activity_unix_millis: Arc<AtomicU64>,
-    paste_limiter: Option<PasteRateLimit>,
+    input_policy: Option<(PixelGatewayControls, PasteRateLimit)>,
 ) -> Result<(), PixelGatewayError> {
     let consumed_grants = new_consumed_surface_grants();
+    let resize_limiter = Arc::new(crate::pixel_resize::ResizeLimiter::default());
     let mut connections = tokio::task::JoinSet::new();
 
     loop {
@@ -231,7 +259,8 @@ async fn run_gateway(
                 let consumed_grants = Arc::clone(&consumed_grants);
                 let last_input_activity_unix_millis =
                     Arc::clone(&last_input_activity_unix_millis);
-                let paste_limiter = paste_limiter.clone();
+                let input_policy = input_policy.clone();
+                let resize_limiter = Arc::clone(&resize_limiter);
                 connections.spawn(async move {
                     if let Err(error) = serve_pixel_connection(
                         stream,
@@ -239,7 +268,8 @@ async fn run_gateway(
                         authorizer,
                         consumed_grants,
                         last_input_activity_unix_millis,
-                        paste_limiter,
+                        input_policy,
+                        resize_limiter,
                     ).await {
                         tracing::debug!(%peer, %error, "pixel gateway connection closed");
                     }
@@ -258,7 +288,8 @@ async fn serve_pixel_connection(
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
     consumed_grants: crate::surface_websocket_auth::ConsumedSurfaceGrants,
     last_input_activity_unix_millis: Arc<AtomicU64>,
-    paste_limiter: Option<PasteRateLimit>,
+    input_policy: Option<(PixelGatewayControls, PasteRateLimit)>,
+    resize_limiter: Arc<crate::pixel_resize::ResizeLimiter>,
 ) -> Result<(), PixelGatewayError> {
     let access = Arc::new(OnceLock::new());
     let callback = SurfaceHandshakeAuthorizer::new(
@@ -273,19 +304,31 @@ async fn serve_pixel_connection(
     let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(MAX_CLIENT_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_CLIENT_MESSAGE_BYTES));
-    let stream = crate::surface_message_budget::BoundedSocket::new(stream, paste_limiter.is_some());
+    let stream = crate::surface_message_budget::BoundedSocket::new(stream, input_policy.is_some());
     let websocket = accept_hdr_async_with_config(stream, callback, Some(ws_config)).await?;
     let rfb = connect_private_rfb(config.private_rfb_addr, config.private_rfb_connect_timeout)
         .await
         .map_err(PixelGatewayError::RfbConnect)?;
 
-    let filter = if let Some(limiter) = paste_limiter {
+    let filter = if let Some((controls, limiter)) = input_policy {
         let authorized = access.get().ok_or(PixelGatewayError::InvalidConfig(
             "missing authorized surface scope",
         ))?;
         Some(
-            crate::pixel_text_paste::ClientFilter::new(authorized.clipboard_paste_until)
-                .with_rate_limit(limiter),
+            crate::pixel_text_paste::ClientFilter::new(if controls.text_paste {
+                authorized.clipboard_paste_until
+            } else {
+                None
+            })
+            .with_rate_limit(limiter)
+            .with_resize(
+                if controls.framebuffer_resize {
+                    authorized.framebuffer_resize_until
+                } else {
+                    None
+                },
+                resize_limiter,
+            ),
         )
     } else {
         None
@@ -577,13 +620,14 @@ mod tests {
             assertion: &str,
             scope: &PixelGatewayScope,
         ) -> Result<AuthorizedSurfaceAccess, SurfaceAuthorizationError> {
-            if !["valid", "valid-paste"].contains(&assertion)
+            if !["valid", "valid-paste", "valid-resize"].contains(&assertion)
                 || scope.session_id != "session-1"
                 || scope.surface_id != "surface-1"
             {
                 return Err(SurfaceAuthorizationError);
             }
             Ok(AuthorizedSurfaceAccess {
+                framebuffer_resize_until: (assertion == "valid-resize").then_some(u64::MAX),
                 clipboard_paste_until: (assertion == "valid-paste")
                     .then_some(now_unix_millis() / 1000 + 60),
                 principal: "user:1".to_string(),
@@ -777,6 +821,24 @@ mod tests {
         chunks: Vec<Vec<u8>>,
         wait_for_rejection: bool,
     ) -> Vec<u8> {
+        bounded_boundary_case(
+            assertion,
+            chunks,
+            wait_for_rejection,
+            PixelGatewayControls {
+                text_paste: true,
+                framebuffer_resize: false,
+            },
+        )
+        .await
+    }
+
+    async fn bounded_boundary_case(
+        assertion: &str,
+        chunks: Vec<Vec<u8>>,
+        wait_for_rejection: bool,
+        controls: PixelGatewayControls,
+    ) -> Vec<u8> {
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let (handshake_ready, ready) = tokio::sync::oneshot::channel();
@@ -789,7 +851,7 @@ mod tests {
             stream.read_to_end(&mut all).await.unwrap();
             all
         });
-        let gateway = start_text_paste_pixel_gateway(
+        let gateway = start_interactive_pixel_gateway(
             PixelGatewayConfig {
                 listen_addr: "127.0.0.1:0".parse().unwrap(),
                 private_rfb_addr: upstream_addr,
@@ -801,6 +863,7 @@ mod tests {
                 allowed_origins: BTreeSet::from([ORIGIN_VALUE.into()]),
             },
             Arc::new(TestAuthorizer),
+            controls,
         )
         .await
         .unwrap();
@@ -932,5 +995,76 @@ mod tests {
             "partial RFB handshake must not leak"
         );
         gateway.stop().await.unwrap();
+    }
+    fn resize_packet() -> Vec<u8> {
+        let mut bytes = vec![251, 0, 4, 0, 3, 0, 1, 0];
+        bytes.extend([0; 8]);
+        bytes.extend([4, 0, 3, 0]);
+        bytes.extend([0; 4]);
+        bytes
+    }
+    #[tokio::test]
+    async fn resize_gateway_requires_both_physical_support_and_signed_permission() {
+        assert_eq!(
+            paste_boundary_case("valid-resize", vec![resize_packet()], true).await,
+            b"RFB 003.008\n\x01\x01"
+        );
+        for (assertion, packet) in [
+            ("valid-resize", resize_packet()),
+            ("valid-paste", cut_text(b"secret")),
+        ] {
+            assert_eq!(
+                bounded_boundary_case(
+                    assertion,
+                    vec![packet],
+                    true,
+                    PixelGatewayControls::default()
+                )
+                .await,
+                b"RFB 003.008\n\x01\x01"
+            );
+        }
+        let resize_only = PixelGatewayControls {
+            text_paste: false,
+            framebuffer_resize: true,
+        };
+        assert_eq!(
+            bounded_boundary_case("valid", vec![resize_packet()], true, resize_only).await,
+            b"RFB 003.008\n\x01\x01"
+        );
+        assert_eq!(
+            bounded_boundary_case("valid-paste", vec![cut_text(b"secret")], true, resize_only)
+                .await,
+            b"RFB 003.008\n\x01\x01"
+        );
+        let bytes = resize_packet();
+        let mut expected = b"RFB 003.008\n\x01\x01".to_vec();
+        expected.extend(&bytes);
+        assert_eq!(
+            bounded_boundary_case(
+                "valid-resize",
+                bytes.chunks(1).map(Vec::from).collect(),
+                false,
+                resize_only
+            )
+            .await,
+            expected
+        );
+    }
+    #[tokio::test]
+    async fn resize_gateway_closes_malformed_or_incomplete_message_without_any_prefix() {
+        let resize_only = PixelGatewayControls {
+            text_paste: false,
+            framebuffer_resize: true,
+        };
+        for bytes in [
+            vec![251, 0, 4, 0, 3, 0, 2, 0],
+            resize_packet()[..23].to_vec(),
+        ] {
+            assert_eq!(
+                bounded_boundary_case("valid-resize", vec![bytes], true, resize_only).await,
+                b"RFB 003.008\n\x01\x01"
+            );
+        }
     }
 }

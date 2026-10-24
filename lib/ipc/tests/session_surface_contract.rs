@@ -309,6 +309,7 @@ fn client_omission_and_empty_advertisement_are_distinct_errors() {
 fn surface_assertion_claims_reject_empty_session_binding() {
     let claims = SurfaceAssertionClaims {
         clipboard_paste: false,
+        framebuffer_resize: false,
         execution: None,
         aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
         session_id: String::new(),
@@ -498,5 +499,34 @@ fn text_paste_claim_requires_execution_scoped_user_and_is_absent_by_default() {
     assert!(
         guest.validate().is_err(),
         "guest Surface access cannot authorize paste"
+    );
+}
+
+#[test]
+fn framebuffer_resize_claim_requires_execution_scoped_user_and_is_absent_by_default() {
+    let legacy = serde_json::json!({
+        "aud": SURFACE_GATEWAY_ASSERTION_AUDIENCE, "session_id":"session-1",
+        "surface_id":"surface-1", "principal":{"kind":"user","id":"user-1"},
+        "exp":1800000000u64,"jti":"grant-1","kid":"key-1"
+    });
+    let decoded: SurfaceAssertionClaims = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+    let mut allowed = legacy;
+    allowed["framebuffer_resize"] = serde_json::json!(true);
+    let unscoped: SurfaceAssertionClaims = serde_json::from_value(allowed.clone()).unwrap();
+    assert!(
+        unscoped.validate().is_err(),
+        "resize cannot reuse legacy scope"
+    );
+    allowed["execution"] =
+        serde_json::json!({"run_id":"run-1","lease_id":"lease-1","runner_id":"runner-1"});
+    let user: SurfaceAssertionClaims = serde_json::from_value(allowed.clone()).unwrap();
+    assert!(user.validate().is_ok());
+    assert_eq!(serde_json::to_value(user).unwrap(), allowed);
+    allowed["principal"]["kind"] = serde_json::json!("guest");
+    let guest: SurfaceAssertionClaims = serde_json::from_value(allowed).unwrap();
+    assert!(
+        guest.validate().is_err(),
+        "guest Surface access cannot authorize resize"
     );
 }
