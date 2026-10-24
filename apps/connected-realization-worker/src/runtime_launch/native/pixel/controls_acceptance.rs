@@ -26,6 +26,27 @@ fn signed(
     allowed: bool,
     jti: &str,
 ) -> String {
+    signed_until(
+        scope,
+        execution,
+        key,
+        allowed,
+        jti,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60,
+    )
+}
+fn signed_until(
+    scope: &SurfaceGatewayScope,
+    execution: &SurfaceExecutionScope,
+    key: &str,
+    allowed: bool,
+    jti: &str,
+    exp: u64,
+) -> String {
     let claims = SurfaceAssertionClaims {
         clipboard_paste: allowed,
         framebuffer_resize: allowed,
@@ -37,11 +58,7 @@ fn signed(
             kind: SurfacePrincipalKind::User,
             id: "fixture-owner".into(),
         },
-        exp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 60,
+        exp,
         jti: jti.into(),
         kid: "ato.runner-surface@1".into(),
     };
@@ -293,4 +310,106 @@ pub(crate) async fn exercise(
         assert!(matches!(ws.read(), Err(tungstenite::Error::Io(e)) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)));
         let _ = ws.close(None);
     }).await.unwrap();
+}
+
+/// Independent state observation after the browser has finished. This never
+/// injects a paste or resize and cannot make a browser failure look successful.
+pub(crate) async fn verify_browser_result(
+    surface: SocketAddr,
+    root: &Path,
+    scope: &SurfaceGatewayScope,
+    key: &str,
+    origin: &str,
+    execution: &SurfaceExecutionScope,
+    expiry: u64,
+) {
+    use std::os::fd::AsRawFd;
+    let authority = std::fs::read(root.join("oci-runtime/display/auth/Xauthority")).unwrap();
+    let directory = std::fs::File::open(root.join("oci-runtime/display/x11")).unwrap();
+    let socket = PathBuf::from(format!("/proc/self/fd/{}/X64", directory.as_raw_fd()));
+    let mut selection = SelectionClient::open(&socket, &authority[authority.len() - 16..]).await;
+    assert_eq!(
+        selection.read().await,
+        Some(b"caf\xe9\t\n".to_vec()),
+        "browser paste must reach only the owned display"
+    );
+    for (suffix, message) in [
+        ("paste", cut(b"denied replacement")),
+        ("resize", {
+            let mut bytes = vec![251, 0];
+            bytes.extend(800u16.to_be_bytes());
+            bytes.extend(600u16.to_be_bytes());
+            bytes.extend([1, 0]);
+            bytes.extend([0; 8]);
+            bytes.extend(800u16.to_be_bytes());
+            bytes.extend(600u16.to_be_bytes());
+            bytes.extend([0; 4]);
+            bytes
+        }),
+    ] {
+        let denied = signed_until(
+            scope,
+            execution,
+            key,
+            false,
+            &format!("native-browser-denied-{suffix}"),
+            expiry,
+        );
+        let origin = origin.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let (mut ws, size) = connect(surface, &origin, &denied);
+            assert_eq!(size, (1024, 768));
+            ws.send(Message::binary(message)).unwrap();
+            assert!(
+                matches!(ws.read(), Err(_) | Ok(Message::Close(_))),
+                "permission=false must close without forwarding input"
+            );
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            selection.read().await,
+            Some(b"caf\xe9\t\n".to_vec()),
+            "denied input must leave the actual clipboard unchanged"
+        );
+    }
+    let token = signed_until(
+        scope,
+        execution,
+        key,
+        true,
+        "native-browser-state-verifier",
+        expiry,
+    );
+    let origin_owned = origin.to_owned();
+    let token_for_init = token.clone();
+    tokio::task::spawn_blocking(move || {
+        let (mut ws,size)=connect(surface,&origin_owned,&token_for_init);
+        assert_eq!(size,(1024,768));
+        ws.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        assert!(matches!(ws.read(),Err(tungstenite::Error::Io(e)) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut)));
+        let _=ws.close(None);
+    }).await.unwrap();
+    let frame_token = signed_until(
+        scope,
+        execution,
+        key,
+        true,
+        "native-browser-full-frame-verifier",
+        expiry,
+    );
+    let frame = netd::rfb_probe::wait_for_authenticated_gateway_frame(
+        netd::rfb_probe::PixelGatewayProbeRequest::new(
+            &format!("http://{surface}/__ato/surface"),
+            origin,
+            &frame_token,
+        ),
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (frame.width, frame.height, frame.bytes),
+        (1024, 768, 1024 * 768 * 4)
+    );
 }
