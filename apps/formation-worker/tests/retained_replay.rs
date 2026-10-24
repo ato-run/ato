@@ -1,8 +1,10 @@
 //! Real Formation → retained bytes → source deletion → fresh common attempt.
 use ato_formation::{
+    authoring::{BoundContract, BoundDerivation},
     capsule_toml::parse_capsule_toml,
     detect::detect,
     execution::lower_retained,
+    request::RuntimeProfile,
     retained::*,
     source::{DownloadedArchive, SourceLimits},
 };
@@ -268,4 +270,129 @@ fn python_source_unavailable_fresh_replay() {
 #[test]
 fn node_source_unavailable_fresh_replay() {
     replay_case("node");
+}
+
+/// A sealed Derivation, hand-built because the patched authoring catalog can no
+/// longer produce an affected Node pin. This stands in for a candidate sealed
+/// before the catalog changed: its descriptor is internally consistent, so only
+/// the execution-time runtime policy can refuse it.
+fn retained_process_fixture(
+    node_version: &str,
+) -> (RetainedCandidateV1, std::path::PathBuf, tempfile::TempDir) {
+    let closure = format!("sha256:{}", "a".repeat(64));
+    let base_contract: BoundContract = serde_json::from_value(serde_json::json!({
+        "schema": "ato.contract/1",
+        "requirements": []
+    }))
+    .expect("a minimal contract");
+    let base_contract_ref = base_contract.contract_ref().expect("contract ref");
+    let derivation: BoundDerivation = serde_json::from_value(serde_json::json!({
+        "schema": "ato.derivation/1",
+        "inputs": [{
+            "id": "workspace",
+            "protocol": "ato.workspace@1",
+            "content_ref": closure,
+        }],
+        "runtimes": { "node": node_version },
+        "steps": [{
+            "id": "app",
+            "protocol": "ato.process@1",
+            "op": "serve",
+            "argv": ["node", "app.js"],
+        }],
+        "ports": [{
+            "id": "app.http",
+            "protocol": "ato.http@1",
+            "from": "app",
+            "guest_port": 8000,
+        }],
+        "state": [],
+        "effects": "pure"
+    }))
+    .expect("a sealed process derivation");
+    let derivation_ref = derivation.derivation_ref().expect("derivation ref");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let bytes = b"retained process archive placeholder".to_vec();
+    let content = content_ref(&bytes);
+    let path = scratch.path().join("retained.tar");
+    std::fs::write(&path, &bytes).expect("archive placeholder");
+    let descriptor = RetainedCandidateV1 {
+        schema: RETAINED_SCHEMA.into(),
+        shape: RetainedShape::ProcessWorkspace {
+            binding: RetainedProcessBinding {
+                toolchains: [("node".to_owned(), node_version.to_owned())].into(),
+                package_manager: None,
+                python_environment: false,
+            },
+        },
+        artifact: RetainedArtifact {
+            content_ref: content.clone(),
+            bytes: bytes.len() as u64,
+            expanded_bytes: bytes.len() as u64,
+        },
+        materialization_ref: content,
+        source_closure_ref: closure,
+        derivation_ref: derivation_ref.clone(),
+        base_contract_ref: base_contract_ref.clone(),
+        contract_ref: base_contract_ref,
+        derivation,
+        base_contract,
+        browser_contract: None,
+        creation_attempt_id: "pre-catalog-change".into(),
+        validation_profile: "ato.retained-process-workspace/1".into(),
+    };
+    let canonical = descriptor.canonical_bytes().expect("canonical descriptor");
+    let retained_ref = descriptor.retained_ref().expect("retained ref");
+    let parsed =
+        RetainedCandidateV1::parse(&canonical, &retained_ref).expect("a valid retained descriptor");
+    (parsed, path, scratch)
+}
+
+fn retained_admission_code(node_version: &str) -> Option<String> {
+    use ato_runtime_attempt::realize::CandidateRealizer;
+    let (descriptor, path, _scratch) = retained_process_fixture(node_version);
+    let realizer = RetainedCandidateRealizer {
+        exploration: None,
+        descriptor: &descriptor,
+        archive: &path,
+        expected_contract_ref: &descriptor.contract_ref,
+        expected_derivation_ref: &descriptor.derivation_ref,
+        expanded_limit: descriptor.artifact.expanded_bytes,
+        shim: Path::new("/nonexistent-shim"),
+    };
+    realizer
+        .admit(&RuntimeProfile::default())
+        .map(|failure| failure.code)
+}
+
+#[test]
+fn a_retained_toolchain_pin_is_policy_checked_before_the_host_has_it() {
+    // The directory check ("retained_toolchain_unavailable") asks whether the
+    // host still has the recorded Node. The policy asks whether that Node may
+    // run at all, and it must answer first: a host that kept an affected
+    // toolchain must not make it executable.
+    for version in ["18.20.4", "20.20.2", "22.14.0", "24.18.0"] {
+        assert_eq!(
+            retained_admission_code(version).as_deref(),
+            Some("runtime_version_not_patched"),
+            "{version} must be refused by policy"
+        );
+    }
+    // A retained binding must be exact semver; an unknown major is the
+    // unverifiable shape it can actually carry.
+    assert_eq!(
+        retained_admission_code("28.0.0").as_deref(),
+        Some("runtime_version_unverifiable"),
+        "an unclassifiable pin must fail closed"
+    );
+    // A patched pin passes the policy. This host (macOS) cannot contain the
+    // candidate, so the next refusal is the containment one — not the policy.
+    let patched = retained_admission_code("22.23.4");
+    assert!(
+        !matches!(
+            patched.as_deref(),
+            Some("runtime_version_not_patched") | Some("runtime_version_unverifiable")
+        ),
+        "{patched:?}"
+    );
 }
