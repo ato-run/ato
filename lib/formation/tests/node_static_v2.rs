@@ -146,7 +146,7 @@ fn t10_bun_deferred() {
 fn t11_exact_requirements_in_d() {
     let (_, _, d) = v2("pnpm@9.1.0", "pnpm-lock.yaml");
     assert_eq!(d.runtimes.len(), 2);
-    assert_eq!(d.runtimes["node"], "20.20.2");
+    assert_eq!(d.runtimes["node"], "22.23.4");
     assert_eq!(d.runtimes["pnpm"], "9.1.0");
 }
 #[test]
