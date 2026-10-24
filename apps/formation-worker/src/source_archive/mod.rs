@@ -99,7 +99,7 @@ pub struct SourceArchiveOutput {
     pub archive_descriptor: ArchiveDescriptor,
 }
 impl SourceArchiveOutput {
-    fn validate(&self, binding: &Binding) -> Result<()> {
+    pub(crate) fn validate(&self, binding: &Binding) -> Result<()> {
         let actual = Binding {
             job_id: self.job_id.clone(),
             attempt_id: self.attempt_id.clone(),
