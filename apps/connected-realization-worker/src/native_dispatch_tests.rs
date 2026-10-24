@@ -250,6 +250,7 @@ fn real_host_boundary_pixel_lease_preserves_original_k_and_instance_files() {
 }
 
 fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
+    let controls = pixel && std::env::var("ATO_NATIVE_PIXEL_TEST_CONTROLS").as_deref() == Ok("1");
     use ato_formation::verify::{
         RuntimeHttpObservation, VerificationExecutionEvidence, VerificationTargetKind,
     };
@@ -391,6 +392,8 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
     let bytes = artifact.bytes().to_vec();
     let digest = spec.canonical_digest().unwrap();
     let server = thread::spawn(move || {
+        let controls_done = Arc::new(AtomicBool::new(!controls));
+        let mut interactions = Vec::new();
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(3))
@@ -445,7 +448,7 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                 (
                     200,
                     serde_json::to_vec(
-                        &json!({"stop_requested":worker_ready.load(Ordering::Acquire)}),
+                        &json!({"stop_requested":worker_ready.load(Ordering::Acquire) && controls_done.load(Ordering::Acquire)}),
                     )
                     .unwrap(),
                 )
@@ -454,6 +457,15 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                 assert_eq!(body["execution_id"], digest);
                 assert_eq!(body["local_port"], hidden.port());
                 assert!(body.get("port_mapping").is_none());
+                assert!(body["execution"].get("surface_controls").is_none());
+                if controls {
+                    assert_eq!(
+                        body["surface_controls"],
+                        json!({"clipboard_paste":true,"framebuffer_resize":true})
+                    );
+                } else {
+                    assert!(body.get("surface_controls").is_none());
+                }
                 assert_eq!(body["execution"]["realization"], "oci");
                 assert_eq!(
                     body["execution"]["principal"]["uids"],
@@ -598,7 +610,10 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                         runner_id: work_runner.clone(),
                     };
                     let assertion = keys
-                        .issue_readiness_assertion_for_execution(&gateway_scope, Some(scope))
+                        .issue_readiness_assertion_for_execution(
+                            &gateway_scope,
+                            Some(scope.clone()),
+                        )
                         .unwrap();
                     if pixel {
                         let frame = tokio::runtime::Runtime::new()
@@ -621,6 +636,16 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
                             body["execution"]["container_id"]
                         );
                         assert!(services[0]["principal"]["uids"][0].as_u64().unwrap() > 0);
+                        if controls {
+                            assert!(
+                                serde_json::to_value(&receipt)
+                                    .unwrap()
+                                    .get("surface_controls")
+                                    .is_none()
+                            );
+                            assert_eq!(contract.contract_ref().unwrap(), contract_ref);
+                            assert_eq!(d.derivation_ref().unwrap(), selected_ref);
+                        }
                     } else {
                         let viewed = runtime_launch::native::tests::viewer(
                             public,
@@ -661,6 +686,60 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
             )
             .unwrap();
             stream.write_all(&response).unwrap();
+            // Browser input happens after ready ACK. The real Runner's bounded
+            // 500ms live-ready report must never wait on interactive actions.
+            if controls && path.ends_with("/ready") {
+                let controls_done = Arc::clone(&controls_done);
+                let root = observed_lease_root.clone();
+                let gateway_scope = gateway_scope.clone();
+                let scope = ato_ipc::session_surface::SurfaceExecutionScope {
+                    run_id: work_run.clone(),
+                    lease_id: work_lease.clone(),
+                    runner_id: work_runner.clone(),
+                };
+                let expected = expected_body.clone();
+                interactions.push(thread::spawn(move || {
+                    let result = std::panic::catch_unwind(|| {
+                        tokio::runtime::Runtime::new().unwrap().block_on(
+                            runtime_launch::native::pixel::tests::controls_acceptance::exercise(
+                                public,
+                                &root,
+                                &gateway_scope,
+                                KEY,
+                                "https://staging.ato.run",
+                                &scope,
+                            ),
+                        );
+                        let proof = observation_proof(
+                            KEY,
+                            &scope.run_id,
+                            &scope.lease_id,
+                            &scope.runner_id,
+                            "app.probe",
+                        );
+                        assert_eq!(
+                            reqwest::blocking::Client::builder()
+                                .no_proxy()
+                                .timeout(Duration::from_secs(3))
+                                .build()
+                                .unwrap()
+                                .get(format!("http://{public}/result"))
+                                .header(RUN_ASSERTION_HEADER, proof)
+                                .send()
+                                .unwrap()
+                                .bytes()
+                                .unwrap()
+                                .as_ref(),
+                            expected.as_slice()
+                        );
+                    });
+                    controls_done.store(true, Ordering::Release);
+                    result.unwrap();
+                }));
+            }
+        }
+        for interaction in interactions {
+            interaction.join().unwrap();
         }
     });
     let work_root = root.path().join("runner");
@@ -707,6 +786,8 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
     }
     if pixel {
         config.native_pixel.enabled = true;
+        config.native_pixel.text_paste = controls;
+        config.native_pixel.framebuffer_resize = controls;
         config.native_pixel.helper_archive = Some(
             std::env::var_os("ATO_NATIVE_PIXEL_HELPER_ARCHIVE")
                 .unwrap()
@@ -792,9 +873,12 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
         LeaseCommand::RuntimeLaunch(Box::new(native_command(&spec, descriptor, &dispatched_ref)));
     let evaluated_at = Instant::now();
     let result = worker.execute_lease(&lease);
+    if let Err(error) = &result {
+        eprintln!("NATIVE_FIXTURE_FAILURE {error:#}");
+    }
     eprintln!(
         "NATIVE_DISPATCH_EVIDENCE {}",
-        json!({"pixel":pixel,"files":files,"authored_contract_mismatch":mismatch,
+        json!({"pixel":pixel,"files":files,"surface_controls":controls,"authored_contract_mismatch":mismatch,
         "fully_satisfied":verified.load(Ordering::Acquire),"lease_execution_ms":evaluated_at.elapsed().as_millis(),
         "selected_derivation_ref":dispatched_ref})
     );
