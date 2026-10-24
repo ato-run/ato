@@ -125,6 +125,7 @@ impl NativePixelConfig {
                     pids_limit: self.helper_pids,
                 },
             )?
+            .with_runtime_user(work_root)?
             .with_local_owner(
                 PathBuf::from("/var/run/docker.sock"),
                 self.cgroup_parent

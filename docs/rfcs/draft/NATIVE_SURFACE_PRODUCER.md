@@ -2,6 +2,30 @@
 
 Status: Draft. Adapter/runtime orchestration, outside Capsule identity.
 
+## Trusted HostBoundary identity for GUI file exchange
+
+The accepted Materialization and Protocol Adapter contracts keep physical
+placement outside identity, keep credentials outside capture, and require the
+same owned Adapter lifecycle through shutdown. A root HostBoundary Runner uses
+its existing configured nonroot workload UID/GID for both its GUI application
+and display helper. Neither the application's authored UID nor an HTTP request
+may select a different helper identity. An explicit conflicting application
+identity is refused before materialization or native actions. The existing trusted
+boundary is enabled and its workspace reachability is checked before helper
+preparation. Preparation freezes that physical helper identity; a later launch
+cannot silently choose a different user from changed directory metadata.
+
+Only freshly created private display children that the helper must write
+(`x11` and `rfb`) are handed to that configured identity. The private runtime
+parent, work root, credential files and application source retain their original
+ownership; no world-writable mode is introduced. The read-only per-Run auth
+mount and ephemeral cookie retain their existing capture exclusion and lifetime
+cleanup. Ordinary nonroot local Runners keep their existing helper ownership.
+The shared OCI data-plane projection mounts granted inputs and output only into
+the application; the ancillary display helper receives neither. Original K,
+scoped viewer authorization, lease recovery and physical resource admission
+remain the same independent gates.
+
 A native application uses the existing session-surface profiles, gateway
 assertions, Runner lease, and workload supervisor. Surface readiness is transport
 evidence. It cannot replace or rewrite Contract K or issue a satisfied receipt.
