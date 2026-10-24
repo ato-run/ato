@@ -102,6 +102,7 @@ impl SurfaceAssertionKeyring {
             .try_fill_bytes(&mut random)
             .map_err(|_| SurfaceAssertionIssueError::Entropy)?;
         let claims = SurfaceAssertionClaims {
+            clipboard_paste: false,
             execution,
             aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
             session_id: scope.session_id.clone(),
@@ -251,6 +252,7 @@ impl HmacSurfaceAccessAuthorizer {
         }
 
         Ok(AuthorizedSurfaceAccess {
+            clipboard_paste_until: claims.clipboard_paste.then_some(claims.exp),
             principal: claims.principal.id,
             grant_id: claims.jti,
         })
@@ -284,6 +286,7 @@ mod tests {
 
     fn claims() -> SurfaceAssertionClaims {
         SurfaceAssertionClaims {
+            clipboard_paste: false,
             execution: None,
             aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
             session_id: "session-1".to_string(),
@@ -473,6 +476,49 @@ mod tests {
         assert_eq!(
             weak.expect_err("must reject weak key"),
             SurfaceKeyringError::WeakKey("weak".to_string())
+        );
+    }
+    #[test]
+    fn signed_text_paste_retains_user_execution_and_expiry_checks() {
+        let authorizer = HmacSurfaceAccessAuthorizer::with_clock(keyring(), || NOW)
+            .with_execution_scope(execution());
+        let mut value = claims();
+        value.execution = Some(execution());
+        value.clipboard_paste = true;
+        let token = sign(&value, KEY.as_bytes());
+        assert_eq!(
+            authorizer
+                .authorize(&token, &scope())
+                .unwrap()
+                .clipboard_paste_until,
+            Some(value.exp)
+        );
+        value.principal.kind = SurfacePrincipalKind::Guest;
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+        value.principal.kind = SurfacePrincipalKind::User;
+        value.execution = None;
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+        value.execution = Some(execution());
+        value.exp = NOW;
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+        value.exp = NOW + 30;
+        value.execution.as_mut().unwrap().run_id = "foreign-run".into();
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
         );
     }
 }

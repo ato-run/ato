@@ -4,11 +4,12 @@
 //! accepts a browser-facing WebSocket only after a session-bound assertion has
 //! been authorized, then relays binary messages to a private RFB TCP endpoint.
 
+use crate::pixel_text_paste::PasteRateLimit;
 use std::{
     collections::BTreeSet,
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -161,6 +162,25 @@ pub async fn start_pixel_gateway(
     config: PixelGatewayConfig,
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
 ) -> Result<PixelGatewayHandle, PixelGatewayError> {
+    start_gateway(config, authorizer, false).await
+}
+
+/// Receive-only text paste boundary. The caller must own an isolated RFB
+/// producer with server CutText disabled, and must not advertise support until
+/// that producer has a verified receive-only ABI. A signed permission alone
+/// never upgrades a legacy listener. No production Runner uses this entry yet.
+pub async fn start_text_paste_pixel_gateway(
+    config: PixelGatewayConfig,
+    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+) -> Result<PixelGatewayHandle, PixelGatewayError> {
+    start_gateway(config, authorizer, true).await
+}
+
+async fn start_gateway(
+    config: PixelGatewayConfig,
+    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+    text_paste_boundary: bool,
+) -> Result<PixelGatewayHandle, PixelGatewayError> {
     config.validate()?;
     let listener = TcpListener::bind(config.listen_addr)
         .await
@@ -168,12 +188,14 @@ pub async fn start_pixel_gateway(
     let local_addr = listener.local_addr().map_err(PixelGatewayError::Bind)?;
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let last_input_activity_unix_millis = Arc::new(AtomicU64::new(now_unix_millis()));
+    let paste_limiter = text_paste_boundary.then(|| Arc::new(std::sync::Mutex::new(None)));
     let task = tokio::spawn(run_gateway(
         listener,
         config,
         authorizer,
         cancel_rx,
         Arc::clone(&last_input_activity_unix_millis),
+        paste_limiter,
     ));
 
     Ok(PixelGatewayHandle {
@@ -190,6 +212,7 @@ async fn run_gateway(
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
     mut cancel_rx: watch::Receiver<bool>,
     last_input_activity_unix_millis: Arc<AtomicU64>,
+    paste_limiter: Option<PasteRateLimit>,
 ) -> Result<(), PixelGatewayError> {
     let consumed_grants = new_consumed_surface_grants();
     let mut connections = tokio::task::JoinSet::new();
@@ -208,6 +231,7 @@ async fn run_gateway(
                 let consumed_grants = Arc::clone(&consumed_grants);
                 let last_input_activity_unix_millis =
                     Arc::clone(&last_input_activity_unix_millis);
+                let paste_limiter = paste_limiter.clone();
                 connections.spawn(async move {
                     if let Err(error) = serve_pixel_connection(
                         stream,
@@ -215,6 +239,7 @@ async fn run_gateway(
                         authorizer,
                         consumed_grants,
                         last_input_activity_unix_millis,
+                        paste_limiter,
                     ).await {
                         tracing::debug!(%peer, %error, "pixel gateway connection closed");
                     }
@@ -233,7 +258,9 @@ async fn serve_pixel_connection(
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
     consumed_grants: crate::surface_websocket_auth::ConsumedSurfaceGrants,
     last_input_activity_unix_millis: Arc<AtomicU64>,
+    paste_limiter: Option<PasteRateLimit>,
 ) -> Result<(), PixelGatewayError> {
+    let access = Arc::new(OnceLock::new());
     let callback = SurfaceHandshakeAuthorizer::new(
         config.allowed_origins.clone(),
         config.scope.clone(),
@@ -241,16 +268,29 @@ async fn serve_pixel_connection(
         consumed_grants,
         "binary",
         false,
-    );
+    )
+    .with_access_capture(Arc::clone(&access));
     let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(MAX_CLIENT_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_CLIENT_MESSAGE_BYTES));
+    let stream = crate::surface_message_budget::BoundedSocket::new(stream, paste_limiter.is_some());
     let websocket = accept_hdr_async_with_config(stream, callback, Some(ws_config)).await?;
     let rfb = connect_private_rfb(config.private_rfb_addr, config.private_rfb_connect_timeout)
         .await
         .map_err(PixelGatewayError::RfbConnect)?;
 
-    relay_rfb(websocket, rfb, last_input_activity_unix_millis).await
+    let filter = if let Some(limiter) = paste_limiter {
+        let authorized = access.get().ok_or(PixelGatewayError::InvalidConfig(
+            "missing authorized surface scope",
+        ))?;
+        Some(
+            crate::pixel_text_paste::ClientFilter::new(authorized.clipboard_paste_until)
+                .with_rate_limit(limiter),
+        )
+    } else {
+        None
+    };
+    relay_rfb(websocket, rfb, last_input_activity_unix_millis, filter).await
 }
 
 async fn connect_private_rfb(
@@ -397,6 +437,7 @@ async fn relay_rfb<S>(
     websocket: tokio_tungstenite::WebSocketStream<S>,
     rfb: TcpStream,
     last_input_activity_unix_millis: Arc<AtomicU64>,
+    mut text_filter: Option<crate::pixel_text_paste::ClientFilter>,
 ) -> Result<(), PixelGatewayError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -414,11 +455,52 @@ where
 
     let client_to_rfb = async {
         let mut input_tracker = RfbClientInputTracker::new();
-        while let Some(message) = ws_stream.next().await {
+        loop {
+            let message =
+                if let Some(deadline) = text_filter.as_ref().and_then(|filter| filter.deadline()) {
+                    tokio::time::timeout_at(deadline, ws_stream.next())
+                        .await
+                        .map_err(|_| {
+                            PixelGatewayError::InvalidConfig("RFB client message assembly expired")
+                        })?
+                } else {
+                    ws_stream.next().await
+                };
+            let Some(message) = message else {
+                break;
+            };
             match message? {
                 Message::Binary(bytes) => {
-                    rfb_write.write_all(&bytes).await?;
-                    if input_tracker.observe(&bytes) {
+                    let filtered;
+                    let mut paste_activity = false;
+                    let bytes = if let Some(filter) = &mut text_filter {
+                        filtered = filter
+                            .feed(
+                                &bytes,
+                                tokio::time::Instant::now(),
+                                now_unix_millis() / 1000,
+                            )
+                            .map_err(|_| {
+                                PixelGatewayError::InvalidConfig("RFB client message rejected")
+                            })?;
+                        paste_activity = filter.take_paste_activity();
+                        filtered.as_slice()
+                    } else {
+                        &bytes
+                    };
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    if text_filter.is_some() {
+                        tokio::time::timeout(Duration::from_secs(2), rfb_write.write_all(bytes))
+                            .await
+                            .map_err(|_| {
+                                PixelGatewayError::InvalidConfig("private RFB write expired")
+                            })??;
+                    } else {
+                        rfb_write.write_all(bytes).await?;
+                    }
+                    if input_tracker.observe(bytes) || paste_activity {
                         last_input_activity_unix_millis.store(now_unix_millis(), Ordering::Relaxed);
                     }
                 }
@@ -495,13 +577,15 @@ mod tests {
             assertion: &str,
             scope: &PixelGatewayScope,
         ) -> Result<AuthorizedSurfaceAccess, SurfaceAuthorizationError> {
-            if assertion != "valid"
+            if !["valid", "valid-paste"].contains(&assertion)
                 || scope.session_id != "session-1"
                 || scope.surface_id != "surface-1"
             {
                 return Err(SurfaceAuthorizationError);
             }
             Ok(AuthorizedSurfaceAccess {
+                clipboard_paste_until: (assertion == "valid-paste")
+                    .then_some(now_unix_millis() / 1000 + 60),
                 principal: "user:1".to_string(),
                 grant_id: "grant-1".to_string(),
             })
@@ -680,5 +764,173 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_err());
+    }
+    fn cut_text(text: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![6, 0, 0, 0];
+        bytes.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(text);
+        bytes
+    }
+
+    async fn paste_boundary_case(
+        assertion: &str,
+        chunks: Vec<Vec<u8>>,
+        wait_for_rejection: bool,
+    ) -> Vec<u8> {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (handshake_ready, ready) = tokio::sync::oneshot::channel();
+        let received = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut handshake = [0; 14];
+            stream.read_exact(&mut handshake).await.unwrap();
+            let _ = handshake_ready.send(());
+            let mut all = handshake.to_vec();
+            stream.read_to_end(&mut all).await.unwrap();
+            all
+        });
+        let gateway = start_text_paste_pixel_gateway(
+            PixelGatewayConfig {
+                listen_addr: "127.0.0.1:0".parse().unwrap(),
+                private_rfb_addr: upstream_addr,
+                private_rfb_connect_timeout: Duration::from_secs(1),
+                scope: PixelGatewayScope {
+                    session_id: "session-1".into(),
+                    surface_id: "surface-1".into(),
+                },
+                allowed_origins: BTreeSet::from([ORIGIN_VALUE.into()]),
+            },
+            Arc::new(TestAuthorizer),
+        )
+        .await
+        .unwrap();
+        let (mut ws, _) =
+            connect_async(request(gateway.local_addr(), ORIGIN_VALUE, Some(assertion)))
+                .await
+                .unwrap();
+        ws.send(Message::binary(b"RFB 003.008\n\x01\x01".to_vec()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        for chunk in chunks {
+            ws.send(Message::binary(chunk)).await.unwrap();
+        }
+        if wait_for_rejection {
+            let closed = tokio::time::timeout(Duration::from_secs(7), ws.next())
+                .await
+                .expect("boundary must close rejected/incomplete input");
+            assert!(!matches!(closed, Some(Ok(Message::Binary(_)))));
+        } else {
+            // Allow the gateway to drain client bytes before closing the session.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            ws.close(None).await.unwrap();
+        }
+        let bytes = tokio::time::timeout(Duration::from_secs(1), received)
+            .await
+            .unwrap()
+            .unwrap();
+        gateway.stop().await.unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn paste_gateway_requires_permission_and_never_forwards_denied_prefix() {
+        // Valid handshake bytes may be forwarded; no CutText type/header/body may.
+        let actual = paste_boundary_case("valid", vec![cut_text(b"secret")], true).await;
+        assert_eq!(actual, b"RFB 003.008\n\x01\x01");
+    }
+
+    #[tokio::test]
+    async fn paste_gateway_forwards_complete_latin1_only_after_fragment_assembly() {
+        let bytes = cut_text(b"caf\xe9 \xff");
+        let actual = paste_boundary_case(
+            "valid-paste",
+            bytes.chunks(1).map(Vec::from).collect(),
+            false,
+        )
+        .await;
+        let mut expected = b"RFB 003.008\n\x01\x01".to_vec();
+        expected.extend(bytes);
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn paste_gateway_rejects_negative_and_oversized_headers_without_leak() {
+        for bytes in [
+            vec![6, 0, 0, 0, 255, 255, 255, 255],
+            vec![6, 0, 0, 0, 0, 1, 0, 1],
+        ] {
+            let actual = paste_boundary_case("valid-paste", vec![bytes], true).await;
+            assert_eq!(actual, b"RFB 003.008\n\x01\x01");
+        }
+    }
+
+    #[tokio::test]
+    async fn paste_gateway_closes_incomplete_fragment_without_prefix_leak() {
+        let actual = paste_boundary_case(
+            "valid-paste",
+            vec![vec![6, 0, 0, 0, 0, 0, 0, 4, b'a']],
+            true,
+        )
+        .await;
+        assert_eq!(actual, b"RFB 003.008\n\x01\x01");
+    }
+    #[tokio::test]
+    async fn raw_websocket_fragments_cannot_hold_a_gateway_open_with_pings() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let received = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            bytes
+        });
+        let gateway = start_text_paste_pixel_gateway(
+            PixelGatewayConfig {
+                listen_addr: "127.0.0.1:0".parse().unwrap(),
+                private_rfb_addr: upstream_addr,
+                private_rfb_connect_timeout: Duration::from_secs(1),
+                scope: PixelGatewayScope {
+                    session_id: "session-1".into(),
+                    surface_id: "surface-1".into(),
+                },
+                allowed_origins: BTreeSet::from([ORIGIN_VALUE.into()]),
+            },
+            Arc::new(TestAuthorizer),
+        )
+        .await
+        .unwrap();
+        let mut raw = TcpStream::connect(gateway.local_addr()).await.unwrap();
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nOrigin: {ORIGIN_VALUE}\r\nx-ato-surface-assertion: valid-paste\r\n\r\n",
+            gateway.local_addr()
+        );
+        raw.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            raw.read_exact(&mut byte).await.unwrap();
+            response.push(byte[0]);
+            assert!(response.len() < 8192);
+        }
+        assert!(response.starts_with(b"HTTP/1.1 101"));
+        raw.write_all(&[2, 129, 0, 0, 0, 0, b'R']).await.unwrap();
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            raw.write_all(&[137, 128, 0, 0, 0, 0]).await.unwrap();
+        }
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), raw.read_to_end(&mut tail))
+            .await
+            .expect("Ping cannot reset open fragmented-message deadline")
+            .unwrap();
+        assert!(
+            received.await.unwrap().is_empty(),
+            "partial RFB handshake must not leak"
+        );
+        gateway.stop().await.unwrap();
     }
 }
