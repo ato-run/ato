@@ -13,9 +13,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
-use crate::pixel_gateway::{PixelGatewayConfig, PixelGatewayError, PixelGatewayHandle};
+use crate::pixel_gateway::{
+    PixelGatewayConfig, PixelGatewayControls, PixelGatewayError, PixelGatewayHandle,
+};
 use crate::rfb_probe::{
-    PixelGatewayProbeRequest, PixelGatewayReadyError, RfbFrameInfo, start_ready_pixel_gateway,
+    PixelGatewayProbeRequest, PixelGatewayReadyError, RfbFrameInfo,
+    start_ready_interactive_pixel_gateway, start_ready_pixel_gateway,
 };
 use crate::surface_authorization::SurfaceAccessAuthorizer;
 use crate::terminal_gateway::{TerminalGatewayConfig, TerminalGatewayError, TerminalGatewayHandle};
@@ -66,6 +69,8 @@ pub enum NativeSurfaceReady {
 
 #[derive(Debug, Error)]
 pub enum NativeSurfaceError {
+    #[error("interactive controls require a Pixel surface")]
+    UnsupportedControls,
     #[error("native surface idle timeout must be between 1 second and 24 hours")]
     InvalidIdleTimeout,
     #[error(transparent)]
@@ -141,18 +146,66 @@ pub async fn start_ready_native_surface(
     readiness_timeout: Duration,
     idle_timeout: Duration,
 ) -> Result<NativeSurfaceHandle, NativeSurfaceError> {
+    start_native_surface(
+        config,
+        authorizer,
+        probe,
+        readiness_timeout,
+        idle_timeout,
+        None,
+    )
+    .await
+}
+
+pub async fn start_ready_interactive_native_surface(
+    config: NativeSurfaceConfig,
+    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+    probe: NativeSurfaceProbe<'_>,
+    readiness_timeout: Duration,
+    idle_timeout: Duration,
+    controls: PixelGatewayControls,
+) -> Result<NativeSurfaceHandle, NativeSurfaceError> {
+    if !matches!(config, NativeSurfaceConfig::Pixel(_)) {
+        return Err(NativeSurfaceError::UnsupportedControls);
+    }
+    start_native_surface(
+        config,
+        authorizer,
+        probe,
+        readiness_timeout,
+        idle_timeout,
+        Some(controls),
+    )
+    .await
+}
+
+async fn start_native_surface(
+    config: NativeSurfaceConfig,
+    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+    probe: NativeSurfaceProbe<'_>,
+    readiness_timeout: Duration,
+    idle_timeout: Duration,
+    controls: Option<PixelGatewayControls>,
+) -> Result<NativeSurfaceHandle, NativeSurfaceError> {
     if !(Duration::from_secs(1)..=Duration::from_secs(86_400)).contains(&idle_timeout) {
         return Err(NativeSurfaceError::InvalidIdleTimeout);
     }
     let (gateway, ready) = match config {
         NativeSurfaceConfig::Pixel(config) => {
-            let (handle, frame) = start_ready_pixel_gateway(
-                config,
-                authorizer,
-                PixelGatewayProbeRequest::new(probe.connect_url, probe.origin, probe.assertion),
-                readiness_timeout,
-            )
-            .await?;
+            let request =
+                PixelGatewayProbeRequest::new(probe.connect_url, probe.origin, probe.assertion);
+            let (handle, frame) = if let Some(controls) = controls {
+                start_ready_interactive_pixel_gateway(
+                    config,
+                    authorizer,
+                    request,
+                    readiness_timeout,
+                    controls,
+                )
+                .await?
+            } else {
+                start_ready_pixel_gateway(config, authorizer, request, readiness_timeout).await?
+            };
             (Gateway::Pixel(handle), NativeSurfaceReady::Pixel(frame))
         }
         NativeSurfaceConfig::Terminal(config) => {
@@ -208,56 +261,64 @@ mod tests {
     }
     #[tokio::test]
     async fn synthetic_rfb_uses_authenticated_first_frame_and_idle_closes_listener() {
-        use crate::pixel_authorization::{HmacSurfaceAccessAuthorizer, SurfaceAssertionKeyring};
-        use crate::surface_authorization::SurfaceGatewayScope;
-        use std::collections::{BTreeMap, BTreeSet};
-        let upstream = crate::rfb_probe::tests::fixture_server_with_input(vec![1], true).await;
-        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listen_addr = reserved.local_addr().unwrap();
-        drop(reserved);
-        let scope = SurfaceGatewayScope {
-            session_id: "session-native".into(),
-            surface_id: "surface-native".into(),
-        };
-        let keys = Arc::new(
-            SurfaceAssertionKeyring::new(BTreeMap::from([("test".into(), "k".repeat(32))]))
-                .unwrap(),
-        );
-        let assertion = keys.issue_readiness_assertion(&scope).unwrap();
-        let url = format!("http://{listen_addr}/");
-        let origin = "http://localhost:5173";
-        let handle = start_ready_native_surface(
-            NativeSurfaceConfig::Pixel(PixelGatewayConfig {
-                listen_addr,
-                private_rfb_addr: upstream,
-                private_rfb_connect_timeout: Duration::from_secs(2),
-                scope,
-                allowed_origins: BTreeSet::from([origin.into()]),
-            }),
-            Arc::new(HmacSurfaceAccessAuthorizer::new(keys)),
-            NativeSurfaceProbe {
-                connect_url: &url,
-                origin,
-                assertion: assertion.as_str(),
-            },
-            Duration::from_secs(2),
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            handle.ready,
-            NativeSurfaceReady::Pixel(RfbFrameInfo {
-                width: 2,
-                height: 1,
-                bytes: 8
-            })
-        );
-        assert!(!handle.idle_expired());
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert!(handle.idle_expired());
-        assert!(tokio::net::TcpStream::connect(listen_addr).await.is_err());
-        handle.stop().await.unwrap();
-        handle.stop().await.unwrap();
+        for interactive in [false, true] {
+            use crate::pixel_authorization::{
+                HmacSurfaceAccessAuthorizer, SurfaceAssertionKeyring,
+            };
+            use crate::surface_authorization::SurfaceGatewayScope;
+            use std::collections::{BTreeMap, BTreeSet};
+            let upstream = crate::rfb_probe::tests::fixture_server_with_input(vec![1], true).await;
+            let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listen_addr = reserved.local_addr().unwrap();
+            drop(reserved);
+            let scope = SurfaceGatewayScope {
+                session_id: "session-native".into(),
+                surface_id: "surface-native".into(),
+            };
+            let keys = Arc::new(
+                SurfaceAssertionKeyring::new(BTreeMap::from([("test".into(), "k".repeat(32))]))
+                    .unwrap(),
+            );
+            let assertion = keys.issue_readiness_assertion(&scope).unwrap();
+            let url = format!("http://{listen_addr}/");
+            let origin = "http://localhost:5173";
+            let handle = start_native_surface(
+                NativeSurfaceConfig::Pixel(PixelGatewayConfig {
+                    listen_addr,
+                    private_rfb_addr: upstream,
+                    private_rfb_connect_timeout: Duration::from_secs(2),
+                    scope,
+                    allowed_origins: BTreeSet::from([origin.into()]),
+                }),
+                Arc::new(HmacSurfaceAccessAuthorizer::new(keys)),
+                NativeSurfaceProbe {
+                    connect_url: &url,
+                    origin,
+                    assertion: assertion.as_str(),
+                },
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+                interactive.then_some(PixelGatewayControls {
+                    text_paste: true,
+                    framebuffer_resize: true,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                handle.ready,
+                NativeSurfaceReady::Pixel(RfbFrameInfo {
+                    width: 2,
+                    height: 1,
+                    bytes: 8
+                })
+            );
+            assert!(!handle.idle_expired());
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            assert!(handle.idle_expired());
+            assert!(tokio::net::TcpStream::connect(listen_addr).await.is_err());
+            handle.stop().await.unwrap();
+            handle.stop().await.unwrap();
+        }
     }
 }
