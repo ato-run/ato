@@ -32,6 +32,7 @@ pub mod build_record;
 pub mod decision_provider;
 pub mod generation_provider;
 pub mod job;
+pub mod lifecycle;
 pub mod local;
 pub mod pack;
 pub mod runtime_network;
