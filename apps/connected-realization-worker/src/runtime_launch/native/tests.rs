@@ -87,6 +87,7 @@ pub(crate) fn config() -> NativeLeaseSurfaceConfig {
     let address = socket.local_addr().unwrap();
     drop(socket);
     NativeLeaseSurfaceConfig {
+        controls: netd::pixel_gateway::PixelGatewayControls::default(),
         scope: SurfaceGatewayScope {
             session_id: "native-test-session".into(),
             surface_id: "native-terminal".into(),
@@ -247,6 +248,7 @@ async fn invalid_native_scope_or_port_facts_are_refused_before_oci_or_any_action
         "guest_ports",
         "selection",
         "owner",
+        "gui_controls",
     ] {
         let (mut spec, descriptor, _, derivation) = fixture(&format!(
             "example.invalid/missing@sha256:{}",
@@ -258,6 +260,7 @@ async fn invalid_native_scope_or_port_facts_are_refused_before_oci_or_any_action
         let mut selected = derivation.derivation_ref().unwrap();
         let mut owner = owner(&spec);
         match invalid {
+            "gui_controls" => config.controls.text_paste = true,
             "key" => config.verification_key = "weak".into(),
             "origin" => config.origin = "not-an-origin".into(),
             "surface_scope" => config.scope.surface_id = "wrong-surface".into(),
