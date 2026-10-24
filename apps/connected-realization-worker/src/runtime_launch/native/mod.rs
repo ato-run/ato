@@ -51,6 +51,11 @@ pub struct NativeLeaseSurfaceConfig {
     pub scope: SurfaceGatewayScope,
     pub verification_key: String,
     pub origin: String,
+    /// The Runner's own public ingress origin. The app proxy rebases a
+    /// same-origin WebSocket handshake from the app host onto the upstream
+    /// (this Runner's `public_base_url`), so the in-guest gateway must accept
+    /// that origin in addition to the lease's authored `surface_origin`.
+    pub public_base_origin: Option<String>,
     pub surface_listen: SocketAddr,
     pub startup_timeout: Duration,
     pub idle_timeout: Duration,
@@ -285,7 +290,17 @@ pub async fn start_terminal(
             firecracker_vsock_uds: socket.clone(),
             guest_connect_timeout: config.startup_timeout,
             scope: config.scope.clone(),
-            allowed_origins: BTreeSet::from([config.origin.clone()]),
+            allowed_origins: {
+                let mut origins = BTreeSet::from([config.origin.clone()]);
+                if let Some(origin) = config
+                    .public_base_origin
+                    .as_ref()
+                    .filter(|origin| origin.starts_with("https://"))
+                {
+                    origins.insert(origin.clone());
+                }
+                origins
+            },
         };
         gateway_config.validate()?;
         let keys = Arc::new(SurfaceAssertionKeyring::new(BTreeMap::from([(

@@ -94,6 +94,7 @@ pub(crate) fn config() -> NativeLeaseSurfaceConfig {
         },
         verification_key: "native-test-key-native-test-key-native-test-key".into(),
         origin: "https://staging.ato.run".into(),
+        public_base_origin: None,
         surface_listen: address,
         startup_timeout: Duration::from_secs(5),
         idle_timeout: Duration::from_secs(60),
