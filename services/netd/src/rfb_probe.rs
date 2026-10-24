@@ -25,8 +25,9 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::pixel_gateway::{
-    PixelGatewayConfig, PixelGatewayError, PixelGatewayHandle, SURFACE_ASSERTION_HEADER,
-    SurfaceAccessAuthorizer, start_pixel_gateway,
+    PixelGatewayConfig, PixelGatewayControls, PixelGatewayError, PixelGatewayHandle,
+    SURFACE_ASSERTION_HEADER, SurfaceAccessAuthorizer, start_interactive_pixel_gateway,
+    start_pixel_gateway,
 };
 
 const RFB_3_8_VERSION: &[u8; 12] = b"RFB 003.008\n";
@@ -167,6 +168,29 @@ pub async fn start_ready_pixel_gateway(
     let handle = start_pixel_gateway(config, authorizer)
         .await
         .map_err(PixelGatewayReadyError::Start)?;
+    finish_gateway_readiness(handle, request, wait).await
+}
+
+/// Same authenticated readiness and cleanup for an explicitly controlled
+/// isolated producer. Readiness proves transport only, never Contract K.
+pub async fn start_ready_interactive_pixel_gateway(
+    config: PixelGatewayConfig,
+    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+    request: PixelGatewayProbeRequest<'_>,
+    wait: Duration,
+    controls: PixelGatewayControls,
+) -> Result<(PixelGatewayHandle, RfbFrameInfo), PixelGatewayReadyError> {
+    let handle = start_interactive_pixel_gateway(config, authorizer, controls)
+        .await
+        .map_err(PixelGatewayReadyError::Start)?;
+    finish_gateway_readiness(handle, request, wait).await
+}
+
+async fn finish_gateway_readiness(
+    handle: PixelGatewayHandle,
+    request: PixelGatewayProbeRequest<'_>,
+    wait: Duration,
+) -> Result<(PixelGatewayHandle, RfbFrameInfo), PixelGatewayReadyError> {
     match wait_for_authenticated_gateway_frame(request, wait).await {
         Ok(frame) => Ok((handle, frame)),
         Err(probe) => match handle.stop().await {
@@ -1011,6 +1035,8 @@ pub(crate) mod tests {
                 return Err(crate::pixel_gateway::SurfaceAuthorizationError);
             }
             Ok(crate::pixel_gateway::AuthorizedSurfaceAccess {
+                clipboard_paste_until: None,
+                framebuffer_resize_until: None,
                 principal: "user-1".to_string(),
                 grant_id: "probe-grant-1".to_string(),
             })
@@ -1155,22 +1181,35 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn authenticated_gateway_probe_failure_stops_listener_and_prevents_ready() {
-        // Authorization fails before the gateway may contact this deliberately
-        // unused private endpoint.
-        let private_rfb_addr = reserved_listen_addr().await;
-        let listen_addr = reserved_listen_addr().await;
-        let ready_url = format!("http://{listen_addr}/");
-        let request = PixelGatewayProbeRequest::new(&ready_url, "http://localhost:5173", "invalid");
+        for interactive in [false, true] {
+            // Authorization fails before the gateway may contact this deliberately
+            // unused private endpoint.
+            let private_rfb_addr = reserved_listen_addr().await;
+            let listen_addr = reserved_listen_addr().await;
+            let ready_url = format!("http://{listen_addr}/");
+            let request =
+                PixelGatewayProbeRequest::new(&ready_url, "http://localhost:5173", "invalid");
 
-        let result = start_ready_pixel_gateway(
-            gateway_config(listen_addr, private_rfb_addr),
-            Arc::new(TestAuthorizer),
-            request,
-            Duration::from_secs(1),
-        )
-        .await;
+            let config = gateway_config(listen_addr, private_rfb_addr);
+            let authorizer = Arc::new(TestAuthorizer);
+            let result = if interactive {
+                start_ready_interactive_pixel_gateway(
+                    config,
+                    authorizer,
+                    request,
+                    Duration::from_secs(1),
+                    PixelGatewayControls {
+                        text_paste: true,
+                        framebuffer_resize: true,
+                    },
+                )
+                .await
+            } else {
+                start_ready_pixel_gateway(config, authorizer, request, Duration::from_secs(1)).await
+            };
 
-        assert!(matches!(result, Err(PixelGatewayReadyError::Probe(_))));
-        assert!(TcpStream::connect(listen_addr).await.is_err());
+            assert!(matches!(result, Err(PixelGatewayReadyError::Probe(_))));
+            assert!(TcpStream::connect(listen_addr).await.is_err());
+        }
     }
 }

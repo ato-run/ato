@@ -838,6 +838,13 @@ pub struct SurfaceExecutionScope {
 /// signature container and key material intentionally live outside this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceAssertionClaims {
+    /// Explicit client-to-isolated-display text paste. Never remote copy.
+    /// Absent/false retains legacy bytes and grants no clipboard permission.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clipboard_paste: bool,
+    /// Explicit physical framebuffer resize on the already-bound isolated display.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub framebuffer_resize: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<SurfaceExecutionScope>,
     pub aud: String,
@@ -877,6 +884,16 @@ impl SurfaceAssertionClaims {
         if self.principal.kind == SurfacePrincipalKind::Unknown {
             return Err(SurfaceAssertionError::UnsupportedPrincipalKind);
         }
+        if self.clipboard_paste
+            && (self.execution.is_none() || self.principal.kind != SurfacePrincipalKind::User)
+        {
+            return Err(SurfaceAssertionError::InvalidClipboardPasteScope);
+        }
+        if self.framebuffer_resize
+            && (self.execution.is_none() || self.principal.kind != SurfacePrincipalKind::User)
+        {
+            return Err(SurfaceAssertionError::InvalidFramebufferResizeScope);
+        }
         if self.exp == 0 {
             return Err(SurfaceAssertionError::InvalidExpiry);
         }
@@ -894,6 +911,10 @@ fn validate_claim(name: &'static str, value: &str) -> Result<(), SurfaceAssertio
 /// Structural validation failures for surface-gateway assertions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SurfaceAssertionError {
+    #[error("framebuffer resize requires a user principal and execution scope")]
+    InvalidFramebufferResizeScope,
+    #[error("text paste requires an execution-scoped user assertion")]
+    InvalidClipboardPasteScope,
     #[error("surface execution scope exceeds limits")]
     InvalidExecutionScope,
     #[error("surface assertion audience is invalid")]

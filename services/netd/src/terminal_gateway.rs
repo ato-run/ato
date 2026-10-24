@@ -478,6 +478,8 @@ mod tests {
             }
             self.seen.lock().unwrap().push(assertion.to_string());
             Ok(AuthorizedSurfaceAccess {
+                clipboard_paste_until: None,
+                framebuffer_resize_until: None,
                 principal: "user-1".into(),
                 grant_id: assertion.to_string(),
             })

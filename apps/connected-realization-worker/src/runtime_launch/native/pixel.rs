@@ -5,7 +5,7 @@ use super::*;
 use ato_adapter_oci::{OciMount, OciResourceLimits, OciServiceGroup, OciSpec, OciUser};
 use ato_objects::PortableOciArchive;
 use ato_portable_application::oci_archive::verify_oci_archive;
-use netd::pixel_gateway::PixelGatewayConfig;
+use netd::pixel_gateway::{PixelGatewayConfig, PixelGatewayControls};
 use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -63,9 +63,18 @@ pub struct PixelHelper {
     limits: OciResourceLimits,
     owner: Option<super::pixel_capacity::PixelOwner>,
     prepared_user: Option<OciUser>,
+    controls: PixelGatewayControls,
 }
 impl PixelHelper {
     pub fn from_archive(archive: PortableOciArchive, limits: OciResourceLimits) -> Result<Self> {
+        Self::from_archive_with_controls(archive, limits, PixelGatewayControls::default())
+    }
+
+    pub fn from_archive_with_controls(
+        archive: PortableOciArchive,
+        limits: OciResourceLimits,
+        controls: PixelGatewayControls,
+    ) -> Result<Self> {
         ensure!(
             (64 * 1024 * 1024..=1024 * 1024 * 1024).contains(&limits.memory_bytes)
                 && (100..=2000).contains(&limits.cpu_limit_millis)
@@ -73,6 +82,12 @@ impl PixelHelper {
             "invalid bounded display helper resources"
         );
         let verified = verify_oci_archive(&archive)?;
+        if controls.text_paste || controls.framebuffer_resize {
+            ensure!(
+                super::pixel_controls::verified_controls_abi(&verified)?,
+                "native_surface_controls_unsupported: trusted helper controls ABI is unavailable"
+            );
+        }
         Ok(Self {
             image: archive.image,
             platform: archive.platform,
@@ -81,7 +96,24 @@ impl PixelHelper {
             limits,
             owner: None,
             prepared_user: None,
+            controls,
         })
+    }
+
+    pub(crate) fn controls(&self) -> PixelGatewayControls {
+        self.controls
+    }
+
+    fn launch_argv(&self, width: u32, height: u32) -> Vec<String> {
+        let mut argv = vec![width.to_string(), height.to_string()];
+        if self.controls.text_paste || self.controls.framebuffer_resize {
+            argv.extend([
+                "--controls-v1".into(),
+                u8::from(self.controls.text_paste).to_string(),
+                u8::from(self.controls.framebuffer_resize).to_string(),
+            ]);
+        }
+        argv
     }
 
     pub(crate) fn with_runtime_user(mut self, work_root: &Path) -> Result<Self> {
@@ -118,7 +150,7 @@ impl PixelHelper {
                 self.prepared_user
                     .context("Pixel omitted prepared workload identity")?,
             ),
-            argv: vec!["320".into(), "200".into()],
+            argv: self.launch_argv(320, 200),
             working_dir: "/run".into(),
             workspace_mount_path: "/run/ato-unused-workspace".into(),
             environment: BTreeMap::new(),
@@ -421,6 +453,11 @@ pub async fn start_pixel(
                 && spec.lifecycle.force_kill_after_ms <= 15000,
             "native cleanup exceeds supported budget"
         );
+        ensure!(
+            helper.controls.text_paste == config.controls.text_paste
+                && helper.controls.framebuffer_resize == config.controls.framebuffer_resize,
+            "native_surface_controls_unsupported: helper and guarded gateway masks differ"
+        );
         let gateway = PixelGatewayConfig {
             listen_addr: config.surface_listen,
             private_rfb_addr: "127.0.0.1:1".parse().unwrap(),
@@ -514,7 +551,7 @@ pub async fn start_pixel(
             platform: helper.platform.clone(),
             entrypoint: Some(HELPER.into()),
             user: Some(user),
-            argv: vec![viewport.width.to_string(), viewport.height.to_string()],
+            argv: helper.launch_argv(viewport.width, viewport.height),
             working_dir: "/run".into(),
             workspace_mount_path: "/run/ato-unused-workspace".into(),
             environment: BTreeMap::new(),
@@ -586,6 +623,7 @@ pub async fn start_pixel(
         pixel_directories: Some(dirs),
         probe: None,
         surface: None,
+        controls: PixelGatewayControls::default(),
         budget: super::super::recovery::stop_budget(&spec.lifecycle),
         _socket_directory: Some(socket_directory),
     };
@@ -661,20 +699,37 @@ pub async fn start_pixel(
         let assertion =
             keys.issue_readiness_assertion_for_execution(&config.scope, Some(execution))?;
         let connect_url = format!("http://{}/__ato/surface", config.surface_listen);
+        let gateway = NativeSurfaceConfig::Pixel(gateway);
+        let probe = NativeSurfaceProbe {
+            connect_url: &connect_url,
+            origin: &config.origin,
+            assertion: assertion.as_str(),
+        };
         parts.surface = Some(
-            start_ready_native_surface(
-                NativeSurfaceConfig::Pixel(gateway),
-                authorizer,
-                NativeSurfaceProbe {
-                    connect_url: &connect_url,
-                    origin: &config.origin,
-                    assertion: assertion.as_str(),
-                },
-                config.startup_timeout,
-                config.idle_timeout,
-            )
-            .await?,
+            if config.controls.text_paste || config.controls.framebuffer_resize {
+                netd::native_surface::start_ready_interactive_native_surface(
+                    gateway,
+                    authorizer,
+                    probe,
+                    config.startup_timeout,
+                    config.idle_timeout,
+                    config.controls,
+                )
+                .await?
+            } else {
+                start_ready_native_surface(
+                    gateway,
+                    authorizer,
+                    probe,
+                    config.startup_timeout,
+                    config.idle_timeout,
+                )
+                .await?
+            },
         );
+        // This value exists only after the authenticated guarded gateway proved
+        // transport readiness. It is not a Contract/receipt or D modification.
+        parts.controls = config.controls;
         ensure!(
             !parts.workload_exited()?,
             "native GUI exited during startup"
