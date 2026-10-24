@@ -6,6 +6,7 @@
 //! a Formation attempt launch through the same code. OCI containers and
 //! service groups ([`oci`]) followed in stage 2e-c.
 
+pub mod executable_gate;
 pub mod host_boundary;
 pub mod oci;
 pub mod process_abi;

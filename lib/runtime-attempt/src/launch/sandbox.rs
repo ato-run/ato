@@ -126,7 +126,16 @@ pub fn guest_mounts(context: &ResolvedRuntimeLaunchContext) -> Result<Vec<GuestM
 /// Expressed in GUEST paths, because that is the namespace the shim runs in.
 /// Sensitive host paths are filtered out of the allow-lists by the shared
 /// crate rather than by a list maintained here.
-pub fn landlock_policy(mounts: &[GuestMount], bind_tcp_ports: &[u16]) -> SandboxPolicy {
+///
+/// `toolchain_roots` is the exact set of provisioned toolchains this launch
+/// needs (see `launch::executable_gate::toolchain_roots`). The whole
+/// `/opt/ato/toolchains` tree is deliberately NOT listed: a workload that
+/// declared one Node release must not be able to read another from disk.
+pub fn landlock_policy(
+    mounts: &[GuestMount],
+    bind_tcp_ports: &[u16],
+    toolchain_roots: &[PathBuf],
+) -> SandboxPolicy {
     let (read_write, _) = filter_sensitive_paths(
         &mounts
             .iter()
@@ -147,13 +156,13 @@ pub fn landlock_policy(mounts: &[GuestMount], bind_tcp_ports: &[u16]) -> Sandbox
                 PathBuf::from("/lib"),
                 PathBuf::from("/lib64"),
                 PathBuf::from("/etc"),
-                PathBuf::from(TOOLCHAIN_ROOT),
                 // bwrap provides these with --proc and --dev rather than a
                 // bind. Without /dev, CPython cannot open /dev/urandom and dies
                 // during pre-initialization.
                 PathBuf::from("/dev"),
                 PathBuf::from("/proc"),
             ])
+            .chain(toolchain_roots.iter().cloned())
             .collect::<Vec<_>>(),
     );
     SandboxPolicy::new()
@@ -176,6 +185,7 @@ pub fn sandboxed_command(
     shim: &Path,
     policy_host_path: &Path,
     share_network: bool,
+    toolchain_roots: &[PathBuf],
 ) -> Result<SandboxedCommand> {
     ensure!(!workload_argv.is_empty(), "workload argv is empty");
     let mounts = guest_mounts(context)?;
@@ -209,15 +219,15 @@ pub fn sandboxed_command(
         ]);
     }
 
-    // The toolchain root, read-only. A Run may use an interpreter; it may not
-    // change one, and a workload that could would change it for every other
-    // tenant on the host.
-    if std::path::Path::new(TOOLCHAIN_ROOT).is_dir() {
-        argv.extend([
-            "--ro-bind".to_owned(),
-            TOOLCHAIN_ROOT.to_owned(),
-            TOOLCHAIN_ROOT.to_owned(),
-        ]);
+    // Only the toolchain directories this launch needs, read-only, at the
+    // SAME path Formation provisioned them at (a venv's interpreter symlinks
+    // resolve there). A Run may use an interpreter; it may not change one, and
+    // it must not be able to reach a different Node release the host kept.
+    for root in toolchain_roots {
+        let root = root
+            .to_str()
+            .with_context(|| format!("toolchain root is not valid UTF-8: {}", root.display()))?;
+        argv.extend(["--ro-bind".to_owned(), root.to_owned(), root.to_owned()]);
     }
 
     for mount in &mounts {
@@ -271,6 +281,7 @@ pub fn sandboxed_command(
                 .iter()
                 .map(|endpoint| endpoint.host_port)
                 .collect::<Vec<_>>(),
+            toolchain_roots,
         ),
     })
 }
@@ -284,8 +295,16 @@ pub fn sandboxed_command_scoped(
     policy_host_path: &Path,
     egress_socket: &Path,
     ingress_root: &Path,
+    toolchain_roots: &[PathBuf],
 ) -> Result<SandboxedCommand> {
-    let mut command = sandboxed_command(context, workload_argv, shim, policy_host_path, false)?;
+    let mut command = sandboxed_command(
+        context,
+        workload_argv,
+        shim,
+        policy_host_path,
+        false,
+        toolchain_roots,
+    )?;
     let at = command
         .argv
         .windows(2)
@@ -471,6 +490,7 @@ mod tests {
             Path::new("/bin/true"),
             Path::new("/tmp/policy.json"),
             true,
+            &[],
         )
         .unwrap();
         let chdir = command
@@ -481,6 +501,77 @@ mod tests {
         assert_eq!(command.argv[chdir + 1], "/app/server");
         // No host path is handed to the guest as its cwd.
         assert!(!command.argv[chdir + 1].contains(&*root.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn only_the_needed_toolchains_are_mounted_and_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        let resolved = context(root.path(), "").unwrap();
+        let roots = vec![
+            PathBuf::from("/opt/ato/toolchains/node/22.23.4"),
+            PathBuf::from("/opt/ato/toolchains/python/3.12.7"),
+        ];
+        let command = sandboxed_command(
+            &resolved,
+            &["node".to_owned(), "app.js".to_owned()],
+            Path::new("/bin/true"),
+            Path::new("/tmp/policy.json"),
+            false,
+            &roots,
+        )
+        .unwrap();
+        for root in &roots {
+            let text = root.to_str().expect("utf-8 toolchain root");
+            assert!(
+                command
+                    .argv
+                    .windows(3)
+                    .any(|window| window == ["--ro-bind", text, text]),
+                "{root:?} is not bound at its own guest path"
+            );
+        }
+        // The shared root is never exposed: another Node release a host kept
+        // must not be reachable from this launch.
+        let whole = Path::new(TOOLCHAIN_ROOT);
+        assert!(
+            !command
+                .argv
+                .windows(3)
+                .any(|window| window == ["--ro-bind", TOOLCHAIN_ROOT, TOOLCHAIN_ROOT]),
+            "the whole toolchain root was bound"
+        );
+        assert!(
+            roots
+                .iter()
+                .all(|root| command.policy.read_only_paths.contains(root)),
+            "the needed toolchains are not in the Landlock policy"
+        );
+        assert!(
+            !command
+                .policy
+                .read_only_paths
+                .contains(&whole.to_path_buf()),
+            "the whole toolchain root is in the Landlock policy"
+        );
+
+        // Nothing needed means nothing mounted (a browser-only evaluation
+        // never execs).
+        let empty = sandboxed_command(
+            &resolved,
+            &["true".to_owned()],
+            Path::new("/bin/true"),
+            Path::new("/tmp/policy.json"),
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            !empty
+                .argv
+                .windows(3)
+                .any(|window| window[0] == "--ro-bind" && window[1].starts_with(TOOLCHAIN_ROOT)),
+            "an empty toolchain list mounted something"
+        );
     }
 
     #[test]

@@ -117,6 +117,11 @@ impl CandidateRealizer for FormationRealizer<'_> {
     }
 }
 
+/// What a process launch actually resolved: the executable path and, when the
+/// path names one, its toolchain release. Fed to the receipt's existing
+/// execution evidence; `None` when the realizer launched no process.
+pub(crate) type ResolvedRuntime = Option<(String, Option<String>)>;
+
 /// Shared launch boundary for built and retained candidates. No build/source
 /// authority lives here; callers supply an already validated materialization.
 pub(crate) struct CandidateLauncher<'a> {
@@ -158,16 +163,16 @@ impl CandidateLauncher<'_> {
         let _launch = control
             .map(|c| c.phase(crate::control::AttemptPhase::Launch))
             .transpose()?;
-        let (candidate, mut evidence, realization) = match &executed {
+        let (candidate, mut evidence, realization, runtime) = match &executed {
             ExecutedCandidate::Process { workspace_root } => {
-                let (candidate, evidence) = self.realize_process(
+                let (candidate, evidence, runtime) = self.realize_process(
                     workspace_root,
                     attempt_id,
                     attempt_root,
                     bindings,
                     control,
                 )?;
-                (candidate, evidence, "process")
+                (candidate, evidence, "process", runtime)
             }
             ExecutedCandidate::StaticWeb { output } => {
                 if bindings.state.is_some() {
@@ -183,7 +188,7 @@ impl CandidateLauncher<'_> {
                             evidence: None,
                         }
                     })?;
-                (candidate, evidence, "static_web")
+                (candidate, evidence, "static_web", None)
             }
         };
         if let Err(error) = crate::port_operations::execute(
@@ -219,7 +224,7 @@ impl CandidateLauncher<'_> {
         Ok(Realized {
             candidate,
             evidence: Some(evidence),
-            execution: execution_evidence(realization, endpoint),
+            execution: execution_evidence(realization, endpoint, runtime),
             kept: Some(executed),
         })
     }
@@ -235,7 +240,14 @@ impl CandidateLauncher<'_> {
         attempt_root: &Path,
         bindings: &RuntimeBindings<'_>,
         control: Option<&crate::control::ExecutionControl>,
-    ) -> Result<(Box<dyn RunningCandidate>, RealizationEvidence), RealizeFailure> {
+    ) -> Result<
+        (
+            Box<dyn RunningCandidate>,
+            RealizationEvidence,
+            ResolvedRuntime,
+        ),
+        RealizeFailure,
+    > {
         let planned = self.planned;
         let mut ports: Vec<RequiredPort> = Vec::new();
         for port_id in http_ports(planned) {
@@ -334,12 +346,23 @@ impl CandidateLauncher<'_> {
                 )
             })
             .collect();
+        // What the launch actually resolved, for the receipt's existing
+        // execution evidence fields. A bare `node` recorded as "node" would
+        // not say which release ran; the resolved path and its toolchain
+        // version do.
+        let runtime = realization.runtime_executable().map(|executable| {
+            (
+                executable.to_owned(),
+                realization.runtime_version().map(str::to_owned),
+            )
+        });
         Ok((
             Box::new(ProcessCandidate {
                 realization: Some(realization),
                 endpoints,
             }),
             evidence,
+            runtime,
         ))
     }
 }
@@ -450,11 +473,16 @@ fn http_ports(planned: &PlannedCandidate) -> Vec<String> {
 fn execution_evidence(
     realization: &str,
     endpoint: Option<String>,
+    runtime: ResolvedRuntime,
 ) -> VerificationExecutionEvidence {
+    let (runtime_executable, runtime_version) = match runtime {
+        Some((executable, version)) => (Some(executable), version),
+        None => (None, None),
+    };
     VerificationExecutionEvidence {
         realization: realization.to_owned(),
-        runtime_executable: None,
-        runtime_version: None,
+        runtime_executable,
+        runtime_version,
         pid: None,
         container_id: None,
         image: None,

@@ -346,6 +346,16 @@ impl PortableBundleExecutor<'_> {
             }
             environment.insert("XDG_CACHE_HOME".to_owned(), "/tmp/.cache".to_owned());
         }
+        // The sealed bundle's declaration was checked at admission; this is the
+        // final check of what this local launch would exec. A `.capsule` can
+        // still name an absolute toolchain path in argv or an authored PATH.
+        ato_runtime_attempt::launch::executable_gate::validate_derivation_executable(
+            &step.argv[0],
+            &workspace.join(&step.cwd),
+            &environment,
+            &route.derivation,
+        )
+        .context(ato_runtime_attempt::launch::executable_gate::context_for_launch())?;
         let command = portable_process_sandbox_command(
             &workspace,
             &process_runtime,
