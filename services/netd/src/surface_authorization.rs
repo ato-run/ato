@@ -11,6 +11,9 @@ pub struct SurfaceGatewayScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedSurfaceAccess {
     pub principal: String,
+    /// Only the existing signed User/execution claim may set this deadline.
+    /// None is default deny; no remote-to-client permission is represented.
+    pub clipboard_paste_until: Option<u64>,
     /// Unique assertion identifier (`jti`). A gateway consumes it once.
     pub grant_id: String,
 }

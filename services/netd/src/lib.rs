@@ -14,10 +14,12 @@ pub mod native_surface;
 pub mod net;
 pub mod pixel_authorization;
 pub mod pixel_gateway;
+mod pixel_text_paste;
 pub mod rfb_probe;
 pub mod server;
 pub mod state;
 pub mod surface_authorization;
+mod surface_message_budget;
 pub mod surface_websocket_auth;
 #[cfg(unix)]
 pub mod terminal_gateway;
