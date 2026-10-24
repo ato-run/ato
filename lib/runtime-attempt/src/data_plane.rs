@@ -102,6 +102,7 @@ pub struct DeliveryReport {
 /// A read-only input the workload receives: env var name and host path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveredInput {
+    pub input_id: String,
     pub env_name: String,
     pub path: PathBuf,
 }
@@ -733,6 +734,20 @@ pub fn deliver(
     run_id: &str,
     work_root: &Path,
     lease_root: &Path,
+    keepalive: impl FnMut() -> Result<()> + Send,
+) -> Result<Option<Delivered>> {
+    deliver_with_assets_channel(data, run_id, work_root, lease_root, false, keepalive)
+}
+
+/// An explicit component assets selector may receive a verified empty channel.
+/// It is created only after the real lease-bound Grant has been read, never
+/// when the Grant is missing. Existing callers keep the omitted-channel lane.
+pub fn deliver_with_assets_channel(
+    data: &LeaseData<'_>,
+    run_id: &str,
+    work_root: &Path,
+    lease_root: &Path,
+    include_empty_assets: bool,
     mut keepalive: impl FnMut() -> Result<()> + Send,
 ) -> Result<Option<Delivered>> {
     let Some(grant) = data.grant()? else {
@@ -767,11 +782,12 @@ pub fn deliver(
         let dest = lease_root.join("inputs").join(&set.input_id);
         cache.materialize(manifest, &dest)?;
         inputs.push(DeliveredInput {
+            input_id: set.input_id.clone(),
             env_name: env_name(&set.input_id),
             path: dest,
         });
     }
-    if !grant.input_assets.is_empty() {
+    if !grant.input_assets.is_empty() || include_empty_assets {
         let dest = lease_root.join("inputs").join("assets");
         fs::create_dir_all(&dest)?;
         set_mode(&dest, 0o755)?;
@@ -780,6 +796,7 @@ pub fn deliver(
             data.asset(asset_id, &dest)?;
         }
         inputs.push(DeliveredInput {
+            input_id: "assets".into(),
             env_name: "ATO_INPUT_ASSETS_DIR".to_owned(),
             path: dest,
         });
@@ -1026,6 +1043,82 @@ fn save_one(data: &LeaseData<'_>, key: &str, path: &Path, max_bytes: u64) -> Out
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn explicit_empty_assets_are_materialized_only_after_a_real_matching_grant() {
+        use std::io::{BufRead, BufReader};
+        for (status, body, include, expected) in [
+            (404, "{}", true, None),
+            (
+                200,
+                r#"{"run_id":"run-fixture","model_sets":[],"input_assets":[],"outputs":{"max_count":0,"max_bytes_each":0}}"#,
+                false,
+                Some(false),
+            ),
+            (
+                200,
+                r#"{"run_id":"run-fixture","model_sets":[],"input_assets":[],"outputs":{"max_count":0,"max_bytes_each":0}}"#,
+                true,
+                Some(true),
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let lease = root.path().join("lease");
+            fs::create_dir(&lease).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("GET /v1/runner-leases/lease-fixture/data "));
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                drop(reader);
+                write!(stream,"HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            });
+            let client = Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap();
+            let data = LeaseData {
+                client: &client,
+                base: &base,
+                token: "fixture-canary",
+                lease_id: "lease-fixture",
+            };
+            let delivered = deliver_with_assets_channel(
+                &data,
+                "run-fixture",
+                root.path(),
+                &lease,
+                include,
+                || Ok(()),
+            )
+            .unwrap();
+            server.join().unwrap();
+            assert_eq!(delivered.as_ref().map(|d| !d.inputs.is_empty()), expected);
+            if expected == Some(true) {
+                let delivered = delivered.unwrap();
+                assert_eq!(delivered.inputs[0].input_id, "assets");
+                assert_eq!(delivered.inputs[0].env_name, "ATO_INPUT_ASSETS_DIR");
+                assert_eq!(fs::read_dir(&delivered.inputs[0].path).unwrap().count(), 0);
+                assert!(delivered.output_dir.is_none());
+            } else {
+                assert!(!lease.join("inputs/assets").exists());
+            }
+        }
+    }
 
     fn entry(data: &[u8]) -> ModelSetEntry {
         ModelSetEntry {
