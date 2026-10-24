@@ -491,14 +491,18 @@ fn choose_lane(
 /// did not ask for, and a previously sealed Derivation that already names one
 /// keeps the version it pinned — it is not rewritten.
 ///
+/// The list itself lives in [`crate::runtime_policy::PATCHED_NODE_RELEASES`]
+/// so authoring and execution cannot disagree about which releases are
+/// patched; this constant is the authoring view of that one table.
+///
 /// Both entries were confirmed to exist as `linux-x64` tarballs on nodejs.org
 /// with an HTTP HEAD on 2026-10-24; see
 /// `docs/ops/cve-2026-111497-node-brotli-20261024.md`.
-pub const NODE_VERSION_LADDER: &[&str] = &["22.23.4", "24.22.1"];
+pub const NODE_VERSION_LADDER: &[&str] = crate::runtime_policy::PATCHED_NODE_RELEASES;
 
 /// The version used when the source declares nothing: the lowest patched
 /// line, not the newest major.
-pub const DEFAULT_NODE: &str = "22.23.4";
+pub const DEFAULT_NODE: &str = crate::runtime_policy::PATCHED_NODE_LOWEST;
 
 /// Packages whose presence means the repository serves itself.
 ///
@@ -1060,10 +1064,14 @@ fn compile_static(
 /// CVE-2026-111497 affects the EOL 18.x / 20.x lines and every release before
 /// 22.23.4 / 24.22.1, so none of those may be selected for new work.
 ///
+/// The list is [`crate::runtime_policy::PATCHED_NODE_RELEASES`]: the same
+/// table execution admission uses to refuse a sealed Derivation, so authoring
+/// and execution cannot drift apart.
+///
 /// A sealed Derivation that names a removed version is not rewritten: it keeps
 /// its pin and is refused when it cannot be provisioned, rather than silently
 /// running on a different Node.
-pub const SUPPORTED_NODE_RUNTIME: &[&str] = &["22.23.4", "24.22.1"];
+pub const SUPPORTED_NODE_RUNTIME: &[&str] = crate::runtime_policy::PATCHED_NODE_RELEASES;
 
 /// Where a pinned package manager is provisioned, shared by every build and
 /// Run on the host, read-only at run time.
