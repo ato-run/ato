@@ -4,6 +4,7 @@ mod dispatch;
 pub mod pixel;
 mod producer;
 pub use dispatch::NativeLeaseRun;
+pub(crate) mod pixel_capacity;
 #[cfg(test)]
 pub(crate) mod tests;
 

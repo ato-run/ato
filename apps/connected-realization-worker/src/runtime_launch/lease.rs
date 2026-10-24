@@ -472,7 +472,26 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
                 .as_ref()
                 .context("native launch omitted session Surface")?,
         )?;
-        declaration.require_host_terminal_ports()?;
+        match command
+            .session_surface
+            .as_ref()
+            .expect("validated Native descriptor")
+        {
+            ato_ipc::session_surface::SessionSurfaceDescriptor::Terminal { .. } => {
+                declaration.require_host_terminal_ports()?
+            }
+            ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream {
+                viewport, ..
+            } => {
+                declaration.require_host_pixel_ports()?;
+                ensure!(
+                    (320..=4096).contains(&viewport.width)
+                        && (200..=2160).contains(&viewport.height),
+                    "native_surface_unavailable: unsupported physical display geometry"
+                );
+            }
+            _ => anyhow::bail!("native_surface_unavailable: unsupported Native Surface"),
+        }
         ensure!(
             cfg!(target_os = "linux"),
             "native_surface_unavailable: Terminal requires Linux OCI"
@@ -1172,6 +1191,7 @@ pub fn start_native(
     selected_ref: &str,
     descriptor: &ato_ipc::session_surface::SessionSurfaceDescriptor,
     config: super::native::NativeLeaseSurfaceConfig,
+    pixel_helper: Option<super::native::pixel::PixelHelper>,
     check_startup: &mut dyn FnMut() -> Result<()>,
 ) -> std::result::Result<ActiveRun, StartFailure> {
     match super::native::NativeLeaseRun::start(
@@ -1181,6 +1201,7 @@ pub fn start_native(
         &resolved.context,
         owner,
         config,
+        pixel_helper,
         check_startup,
     ) {
         Ok(native) => Ok(ActiveRun {
