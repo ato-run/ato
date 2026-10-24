@@ -365,10 +365,12 @@ Therefore:
 | Activity / room browser executor | **n/a** | not user Node |
 | Platform browser verifier Node | **n/a** | not the app's runtime |
 | Node bundled inside a user OCI image | **no** | digest pin only; the platform cannot know without an image SBOM/scan. `runtime_image_index` records `not_run`, never green |
-| Undeclared runtime: `argv` = `node`, `sh -c "node …"`, `npx`, shell scripts | **no** | gates read runtime declarations, not argv |
-| **Declared patched, but `argv[0]` is an absolute `/opt/ato/toolchains/node/<affected>/bin/…`** | **no (real bypass)** | `execution.rs:256-271` allows absolute argv; the gate reads only `runtimes` |
-| Authored `env.PATH` pointing at an affected toolchain while D declares patched | **partial (real bypass outside compute)** | Rust gate does not inspect env (`execution.rs:72-86`); #880 checks `public_env.PATH` only on the compute path |
-| App changes `PATH` at runtime (dotenv, export, child process) | **no** | static pre-launch gates |
+| Undeclared runtime: `argv` = `node` | partial | closed for a `node`/`nodejs` basename: `argv`/`PATH` are resolved and a Node outside a patched toolchain is `runtime_version_unverifiable` (`launch/executable_gate.rs`). `sh -c "node …"`, `npx`, and script-built commands remain out of scope |
+| Declared patched, but `argv[0]` is an absolute `/opt/ato/toolchains/node/<affected>/bin/…` | **yes (closed)** | `launch/executable_gate.rs` resolves `argv[0]` and classifies the toolchain reference; the derivation policy also scans argv (`lib/formation/src/runtime_policy.rs`); tested in `runtime_policy` and `executable_gate` |
+| Authored `env.PATH` pointing at an affected toolchain while D declares patched | **yes (closed)** | the derivation policy scans every step env value, and the spawn gate scans the launch environment; tested |
+| Symlinked executable / PATH entry pointing at an affected toolchain | **yes (closed)** | `std::fs::canonicalize` target is classified; a missing target with a Node name is fail-closed |
+| Child process spawning an absolute old toolchain path after the spawn | **partial** | static pre-launch gates cannot see it. Namespace launches bind only the needed toolchain roots (not `/opt/ato/toolchains`), so no other Node release is reachable from disk; host-boundary Landlock still allows generic `/opt`, so only the executable gate stands in front there |
+| App changes `PATH` at runtime (dotenv, export) before spawning a child | **no** | static pre-launch gates; namespace mount restriction limits which toolchains exist on disk |
 | Already-issued leases, running Runs, old binaries/old API | **no** | no retroactive stop; a gate is not a kill switch |
 
 ### 10.3 Non-goals (do not over-claim)
@@ -378,12 +380,13 @@ Therefore:
    declared a patched release).
 2. Undeclared execution (`argv`, shell, `npx`, script) is out of scope by
    design; static detection of arbitrary command construction is not attempted.
-   **Exception, tracked as a real bypass rather than a non-goal:** an absolute
+   **Deterministic toolchain references are no longer a non-goal:** an absolute
    `/opt/ato/toolchains/node/<version>/bin/...` path in `argv` or in an authored
-   `env.PATH` is a deterministic reference the gate *could* classify, and it
-   currently does not. Until a follow-up closes it, a Derivation can declare a
-   patched runtime and still execute an affected toolchain on a host that kept
-   it. Do not read "admitted" as "patched" until this is fixed and tested.
+   `env.PATH` is classified before the spawn, and a symlinked executable is
+   classified by its canonical target. What stays out of scope is a process
+   that *constructs* such a path after launch (a shell, `npx`, a script); the
+   namespace launch limits what it could reach on disk, but it is not proven
+   impossible. Do not read "admitted" as "patched" for that residual case.
 3. Image contents, including a Node binary inside a user OCI image, are out of
    scope. That needs image-level SBOM/scan and advisory matching, which does not
    exist yet.
