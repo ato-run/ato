@@ -3,6 +3,7 @@
 use super::*;
 use runtime_launch::lease::{RuntimeLaunchLeaseCommand, verified_spec};
 use serde_json::json;
+use sha2::Digest;
 
 #[test]
 fn native_advertisement_requires_opt_in_linux_oci_and_never_claims_pixel() {
@@ -227,22 +228,28 @@ fn read_api_request(stream: &mut TcpStream) -> Option<(String, serde_json::Value
 #[test]
 #[ignore = "requires real Linux Docker and explicit already-present pinned CPU Python image"]
 fn real_native_lease_dispatch_owns_journal_mux_ready_and_stop_with_actual_k() {
-    run_actual_native_dispatch(false, false);
+    run_actual_native_dispatch(false, false, false);
 }
 
 #[test]
 #[ignore = "requires local Linux Docker, explicit verified warm helper and independent static X11 workspace executable"]
 fn real_pixel_lease_dispatch_owns_two_workloads_mux_original_k_and_stop() {
-    run_actual_native_dispatch(true, false);
+    run_actual_native_dispatch(true, false, false);
 }
 
 #[test]
 #[ignore = "requires real local Linux Docker and independent immutable GUI/helper fixtures"]
 fn real_pixel_contract_mismatch_never_grants_viewer_access_and_reclaims_both() {
-    run_actual_native_dispatch(true, true);
+    run_actual_native_dispatch(true, true, false);
 }
 
-fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
+#[test]
+#[ignore = "requires root, local Linux Docker, explicit trusted workload UID/GID and GUI/helper fixtures"]
+fn real_host_boundary_pixel_lease_preserves_original_k_and_instance_files() {
+    run_actual_native_dispatch(true, false, true);
+}
+
+fn run_actual_native_dispatch(pixel: bool, mismatch: bool, files: bool) {
     use ato_formation::verify::{
         RuntimeHttpObservation, VerificationExecutionEvidence, VerificationTargetKind,
     };
@@ -252,6 +259,24 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
     };
     use std::io::Write;
     const KEY: &str = "native-test-key-native-test-key-native-test-key";
+    const INPUT: &[u8] = b"{\"native\":\"owned input\"}";
+    let boundary = files.then(|| {
+        assert!(
+            runtime_launch::host_boundary::active().is_none(),
+            "root-start acceptance requires a fresh process"
+        );
+        runtime_launch::host_boundary::HostBoundary {
+            uid: std::env::var("ATO_NATIVE_PIXEL_WORKLOAD_UID")
+                .unwrap()
+                .parse()
+                .unwrap(),
+            gid: std::env::var("ATO_NATIVE_PIXEL_WORKLOAD_GID")
+                .unwrap()
+                .parse()
+                .unwrap(),
+        }
+    });
+    let expected_uid = boundary.map_or(65532, |b| b.uid);
     let image = if pixel {
         "ubuntu:24.04@sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf"
             .to_owned()
@@ -274,6 +299,12 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
         b"go\r\n1\r\nEND".to_vec()
     };
     if pixel {
+        if let Some(boundary) = boundary {
+            d.runtimes.insert(
+                "oci.user".into(),
+                format!("{}:{}", boundary.uid, boundary.gid),
+            );
+        }
         d.runtimes
             .insert("oci.entrypoint".into(), "/app/native-app".into());
         let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::new(
@@ -287,9 +318,21 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
             unreachable!()
         };
         oci.entrypoint = Some("/app/native-app".into());
+        if let Some(boundary) = boundary {
+            oci.user = Some(ato_ipc::runtime_launch::OciUserV1 {
+                uid: boundary.uid,
+                gid: boundary.gid,
+            });
+        }
         oci.native_surface = Some(serde_json::to_value(declaration).unwrap());
     }
     let root = runtime_launch::native::tests::scratch();
+    if files {
+        use std::os::unix::fs::PermissionsExt;
+        // Existing HostBoundary admission requires searchable ancestors. Only
+        // this test-owned temporary parent changes; credentials stay 0600.
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o711)).unwrap();
+    }
     let source = root.path().join("source");
     fs::create_dir(&source).unwrap();
     if pixel {
@@ -326,6 +369,8 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
     let done = Arc::new(AtomicBool::new(false));
     let stopped = Arc::new(AtomicBool::new(false));
     let verified = Arc::new(AtomicBool::new(false));
+    let output_saved = Arc::new(AtomicBool::new(false));
+    let worker_output_saved = Arc::clone(&output_saved);
     let ready = Arc::new(AtomicBool::new(false));
     let worker_done = Arc::clone(&done);
     let worker_stopped = Arc::clone(&stopped);
@@ -336,6 +381,8 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
     let work_runner = runner_id.clone();
     let selected_ref = d.derivation_ref().unwrap();
     let dispatched_ref = selected_ref.clone();
+    let observed_lease_root = root.path().join("runner/leases").join(&lease_id);
+    let input_digest = format!("sha256:{}", hex::encode(Sha256::digest(INPUT)));
     let contract_ref = contract.contract_ref().unwrap();
     let gateway_scope = netd::surface_authorization::SurfaceGatewayScope {
         session_id: format!("run:{run_id}"),
@@ -364,7 +411,36 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
             let (status, response) = if path.contains("/workspace/") {
                 (200, bytes.clone())
             } else if path.ends_with("/data") {
-                (404, b"{}".to_vec())
+                if files {
+                    (200,serde_json::to_vec(&json!({"run_id":work_run,"model_sets":[],"input_assets":["ast_native"],"outputs":{"max_count":1,"max_bytes_each":4096}})).unwrap())
+                } else {
+                    (404, b"{}".to_vec())
+                }
+            } else if files && path.ends_with("/data/assets/ast_native") {
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nx-ato-asset-sha256: {}\r\nx-ato-asset-filename: seed.json\r\nConnection: close\r\n\r\n",INPUT.len(),input_digest).unwrap();
+                stream.write_all(INPUT).unwrap();
+                continue;
+            } else if files && path.ends_with("/data/delivery-report") {
+                (200, b"{}".to_vec())
+            } else if files && path.ends_with("/data/outputs") {
+                assert_eq!(body["output_key"], "result.json");
+                assert_eq!(body["checksum_sha256"], input_digest);
+                assert_eq!(body["byte_size"], INPUT.len());
+                (
+                    200,
+                    serde_json::to_vec(&json!({"output_id":"native-output","part_bytes":4096}))
+                        .unwrap(),
+                )
+            } else if files && path.ends_with("/data/outputs/native-output/parts/1") {
+                assert_eq!(
+                    body,
+                    serde_json::from_slice::<serde_json::Value>(INPUT).unwrap()
+                );
+                (200, b"{\"part_number\":1}".to_vec())
+            } else if files && path.ends_with("/data/outputs/native-output/complete") {
+                assert_eq!(body["parts"], json!([{"part_number":1}]));
+                worker_output_saved.store(true, Ordering::Release);
+                (200, b"{\"asset_id\":\"ast_native_saved\"}".to_vec())
             } else if path.ends_with("/control") {
                 (
                     200,
@@ -381,8 +457,64 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
                 assert_eq!(body["execution"]["realization"], "oci");
                 assert_eq!(
                     body["execution"]["principal"]["uids"],
-                    json!([65532, 65532, 65532, 65532])
+                    json!([expected_uid, expected_uid, expected_uid, expected_uid])
                 );
+                if files {
+                    use std::os::unix::fs::MetadataExt;
+                    for name in ["x11", "rfb"] {
+                        assert_eq!(
+                            fs::metadata(
+                                observed_lease_root.join("oci-runtime/display").join(name)
+                            )
+                            .unwrap()
+                            .uid(),
+                            expected_uid
+                        );
+                    }
+                    assert_eq!(
+                        fs::metadata(observed_lease_root.parent().unwrap().parent().unwrap())
+                            .unwrap()
+                            .uid(),
+                        0
+                    );
+                    let inspect = |container: &str| {
+                        let output = std::process::Command::new("docker")
+                            .args(["inspect", container])
+                            .output()
+                            .unwrap();
+                        assert!(output.status.success());
+                        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()[0]
+                            .clone()
+                    };
+                    let app = inspect(body["execution"]["container_id"].as_str().unwrap());
+                    let mounts = app["Mounts"].as_array().unwrap();
+                    assert!(
+                        mounts
+                            .iter()
+                            .any(|m| m["Destination"] == "/.ato-data/inputs/0" && m["RW"] == false)
+                    );
+                    assert!(
+                        mounts
+                            .iter()
+                            .any(|m| m["Destination"] == "/.ato-data/outputs" && m["RW"] == true)
+                    );
+                    let helper = inspect(
+                        body["execution"]["services"][0]["container_id"]
+                            .as_str()
+                            .unwrap(),
+                    );
+                    assert!(
+                        helper["Mounts"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|m| !m["Destination"].as_str().unwrap().starts_with("/.ato-data"))
+                    );
+                    assert_eq!(
+                        helper["Config"]["User"],
+                        format!("{}:{}", boundary.unwrap().uid, boundary.unwrap().gid)
+                    );
+                }
                 assert!(!worker_verified.load(Ordering::Acquire));
                 let denied = client
                     .get(format!("http://{public}/result"))
@@ -534,6 +666,19 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
     let work_root = root.path().join("runner");
     let lease_root = work_root.join("leases").join(&lease_id);
     fs::create_dir_all(work_root.join("leases")).unwrap();
+    if files {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(
+            work_root.join("runner-credential-canary"),
+            b"private-test-canary",
+        )
+        .unwrap();
+        fs::set_permissions(
+            work_root.join("runner-credential-canary"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let mut config = WorkerConfig::try_parse_from([
         "runner",
         "--api-base",
@@ -555,6 +700,11 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
         "--native-terminal",
     ])
     .unwrap();
+    if let Some(boundary) = boundary {
+        config.isolation = IsolationMode::HostBoundary;
+        config.workload_uid = Some(boundary.uid);
+        config.workload_gid = Some(boundary.gid);
+    }
     if pixel {
         config.native_pixel.enabled = true;
         config.native_pixel.helper_archive = Some(
@@ -565,14 +715,30 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
         config.native_pixel.helper_image =
             Some(std::env::var("ATO_NATIVE_PIXEL_HELPER_IMAGE").unwrap());
         config.native_pixel.cgroup_parent = Some("system.slice".into());
-        config.native_pixel.prepare(&work_root, 1).unwrap();
+        if !files {
+            config.native_pixel.prepare(&work_root, 1).unwrap();
+        }
     }
-    let mut worker = ConnectedWorker {
-        api: HttpRunnerApi::new(&api_base, &runner_id, "fixture-token").unwrap(),
-        config,
-        volume_store: None,
-        fixed_tcp: runtime_launch::network_broker::FixedTcpRegistry::new("").unwrap(),
+    let preparation_started = Instant::now();
+    let mut worker = if files {
+        let worker =
+            ConnectedWorker::new(config).expect("root-start through trusted Runner initialization");
+        assert!(worker.config.native_pixel.available(&work_root, true));
+        worker
+    } else {
+        ConnectedWorker {
+            api: HttpRunnerApi::new(&api_base, &runner_id, "fixture-token").unwrap(),
+            config,
+            volume_store: None,
+            fixed_tcp: runtime_launch::network_broker::FixedTcpRegistry::new("").unwrap(),
+        }
     };
+    if files {
+        eprintln!(
+            "NATIVE_ROOT_STARTUP_EVIDENCE {}",
+            json!({"preparation_ms":preparation_started.elapsed().as_millis(),"workload_uid":expected_uid})
+        );
+    }
     let mut lease=ClaimedLease{id:lease_id.clone(),run_id:run_id.clone(),command:LeaseCommand::RuntimeLaunch(serde_json::from_value(json!({"run_id":"unused","compute_instance_id":"unused","launch_spec_digest":"unused","launch_spec":null})).unwrap()),expires_at:None,proxy_assertion_key:Some(KEY.into())};
     let previous = runtime_launch::recovery::slot_recovered();
     runtime_launch::recovery::mark_slot_recovered(true);
@@ -603,13 +769,32 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
         assert!(!lease_root.join("workspace").exists());
     }
     lease.proxy_assertion_key = Some(KEY.into());
+    if let Some(boundary) = boundary {
+        let mut wrong = spec.clone();
+        let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &mut wrong.realization else {
+            unreachable!()
+        };
+        oci.user = Some(ato_ipc::runtime_launch::OciUserV1 {
+            uid: boundary.uid.checked_add(1).unwrap(),
+            gid: boundary.gid,
+        });
+        let wrong = native_command(&wrong, descriptor.clone(), &dispatched_ref);
+        assert!(
+            worker
+                .execute_runtime_launch_lease(&lease, &wrong, &lease_root)
+                .unwrap_err()
+                .to_string()
+                .contains("oci_user_state_owner_mismatch")
+        );
+        assert!(!lease_root.join("workspace").exists());
+    }
     lease.command =
         LeaseCommand::RuntimeLaunch(Box::new(native_command(&spec, descriptor, &dispatched_ref)));
     let evaluated_at = Instant::now();
     let result = worker.execute_lease(&lease);
     eprintln!(
         "NATIVE_DISPATCH_EVIDENCE {}",
-        json!({"pixel":pixel,"authored_contract_mismatch":mismatch,
+        json!({"pixel":pixel,"files":files,"authored_contract_mismatch":mismatch,
         "fully_satisfied":verified.load(Ordering::Acquire),"lease_execution_ms":evaluated_at.elapsed().as_millis(),
         "selected_derivation_ref":dispatched_ref})
     );
@@ -635,6 +820,15 @@ fn run_actual_native_dispatch(pixel: bool, mismatch: bool) {
         .scan()
         .unwrap();
     assert!(resources.containers.is_empty() && resources.networks.is_empty());
+    if files {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        assert!(output_saved.load(Ordering::Acquire));
+        let credential = work_root.join("runner-credential-canary");
+        let metadata = fs::metadata(&credential).unwrap();
+        assert_eq!((metadata.uid(), metadata.gid()), (0, 0));
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read(&credential).unwrap(), b"private-test-canary");
+    }
 }
 
 #[test]

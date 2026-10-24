@@ -1386,9 +1386,6 @@ impl ConnectedWorker {
         resolve_runner_credentials(&mut config)?;
         validate_config(&config)?;
         fs::create_dir_all(&config.work_root)?;
-        config
-            .native_pixel
-            .prepare(&config.work_root, config.max_slots)?;
         if config.isolation == IsolationMode::HostBoundary {
             let (Some(uid), Some(gid)) = (config.workload_uid, config.workload_gid) else {
                 bail!("host-boundary isolation needs --workload-uid and --workload-gid");
@@ -1399,6 +1396,9 @@ impl ConnectedWorker {
             })?;
             ensure_reachable_by_workload(&config.work_root)?;
         }
+        config
+            .native_pixel
+            .prepare(&config.work_root, config.max_slots)?;
         let mut api =
             HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
         if config.network_controls {
