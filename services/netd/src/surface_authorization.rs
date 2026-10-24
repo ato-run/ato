@@ -14,6 +14,8 @@ pub struct AuthorizedSurfaceAccess {
     /// Only the existing signed User/execution claim may set this deadline.
     /// None is default deny; no remote-to-client permission is represented.
     pub clipboard_paste_until: Option<u64>,
+    /// Default deny; bound to the same signed User/execution assertion expiry.
+    pub framebuffer_resize_until: Option<u64>,
     /// Unique assertion identifier (`jti`). A gateway consumes it once.
     pub grant_id: String,
 }

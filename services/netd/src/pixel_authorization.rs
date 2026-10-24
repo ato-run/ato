@@ -103,6 +103,7 @@ impl SurfaceAssertionKeyring {
             .map_err(|_| SurfaceAssertionIssueError::Entropy)?;
         let claims = SurfaceAssertionClaims {
             clipboard_paste: false,
+            framebuffer_resize: false,
             execution,
             aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
             session_id: scope.session_id.clone(),
@@ -253,6 +254,7 @@ impl HmacSurfaceAccessAuthorizer {
 
         Ok(AuthorizedSurfaceAccess {
             clipboard_paste_until: claims.clipboard_paste.then_some(claims.exp),
+            framebuffer_resize_until: claims.framebuffer_resize.then_some(claims.exp),
             principal: claims.principal.id,
             grant_id: claims.jti,
         })
@@ -287,6 +289,7 @@ mod tests {
     fn claims() -> SurfaceAssertionClaims {
         SurfaceAssertionClaims {
             clipboard_paste: false,
+            framebuffer_resize: false,
             execution: None,
             aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
             session_id: "session-1".to_string(),
@@ -518,6 +521,101 @@ mod tests {
         assert!(
             authorizer
                 .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+    }
+    #[test]
+    fn signed_framebuffer_resize_retains_user_execution_and_expiry_checks() {
+        let authorizer = HmacSurfaceAccessAuthorizer::with_clock(keyring(), || NOW)
+            .with_execution_scope(execution());
+        let mut value = claims();
+        value.execution = Some(execution());
+        value.framebuffer_resize = true;
+        let token = sign(&value, KEY.as_bytes());
+        assert_eq!(
+            authorizer
+                .authorize(&token, &scope())
+                .unwrap()
+                .framebuffer_resize_until,
+            Some(value.exp)
+        );
+        value.principal.kind = SurfacePrincipalKind::Guest;
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+        value.principal.kind = SurfacePrincipalKind::User;
+        value.execution = None;
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+        value.execution = Some(execution());
+        value.exp = NOW;
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+        value.exp = NOW + 30;
+        value.execution.as_mut().unwrap().run_id = "foreign-run".into();
+        assert!(
+            authorizer
+                .authorize(&sign(&value, KEY.as_bytes()), &scope())
+                .is_err()
+        );
+    }
+    #[test]
+    fn api_native_interaction_token_verifies_exact_cross_language_bytes() {
+        use sha2::Digest;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native-interaction-assertion-v1.json"
+        ))
+        .unwrap();
+        // Authenticate the API's exact literal token, never a Rust re-encoding.
+        let token = fixture["token"].as_str().unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(token.as_bytes())),
+            "a57eb0809b251ebd3fd571301d1020fa20f42f83bac3c2cf9458ad7afc6f49f4"
+        );
+        let secret = fixture["secret"].as_str().unwrap();
+        let keys = Arc::new(
+            SurfaceAssertionKeyring::new(BTreeMap::from([("fixture".into(), secret.into())]))
+                .unwrap(),
+        );
+        let expected = SurfaceExecutionScope {
+            run_id: "run".into(),
+            lease_id: "lease".into(),
+            runner_id: "runner".into(),
+        };
+        let scope = PixelGatewayScope {
+            session_id: "session".into(),
+            surface_id: "surface".into(),
+        };
+        let authorizer = HmacSurfaceAccessAuthorizer::with_clock(Arc::clone(&keys), || 100)
+            .with_execution_scope(expected.clone());
+        let accepted = authorizer.authorize(token, &scope).unwrap();
+        assert_eq!(accepted.clipboard_paste_until, Some(200));
+        assert_eq!(accepted.framebuffer_resize_until, Some(200));
+        assert_eq!(accepted.principal, "owner");
+        let expired =
+            HmacSurfaceAccessAuthorizer::with_clock(keys, || 200).with_execution_scope(expected);
+        assert!(expired.authorize(token, &scope).is_err());
+        let mut changed: SurfaceAssertionClaims =
+            serde_json::from_value(fixture["claims"].clone()).unwrap();
+        changed.principal.kind = SurfacePrincipalKind::Guest;
+        assert!(
+            authorizer
+                .authorize(&sign(&changed, secret.as_bytes()), &scope)
+                .is_err()
+        );
+        changed.principal.kind = SurfacePrincipalKind::User;
+        changed.execution = None;
+        assert!(
+            authorizer
+                .authorize(&sign(&changed, secret.as_bytes()), &scope)
                 .is_err()
         );
     }
