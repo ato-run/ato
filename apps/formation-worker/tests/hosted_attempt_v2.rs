@@ -195,10 +195,10 @@ status = 201
     if let Some(runtime) = process {
         let (version, binary, filename, source_code) = if runtime == "node" {
             (
-                "22.14.0",
+                "22.23.4",
                 "node",
                 "server.js",
-                r#"require('http').createServer((req,res)=>{res.writeHead(process.version === 'v22.14.0' ? 200 : 500); res.end('node hosted');}).listen(Number(process.env.ATO_ENDPOINT_APP_HTTP_PORT),'127.0.0.1');"#,
+                r#"require('http').createServer((req,res)=>{res.writeHead(process.version === 'v22.23.4' ? 200 : 500); res.end('node hosted');}).listen(Number(process.env.ATO_ENDPOINT_APP_HTTP_PORT),'127.0.0.1');"#,
             )
         } else {
             (

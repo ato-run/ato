@@ -740,7 +740,7 @@ mod autonomous_tests {
     fn lowering_capabilities_are_source_independent_and_toolchain_scoped() {
         use ato_formation::proposal::{PlanAuthorization, ProposalAuthorization};
         let mut auth: ProposalAuthorization=serde_json::from_value(json!({
-            "execution_plan":{"files":{},"toolchains":{"node":"22.14.0","npm":"10.9.2"}},
+            "execution_plan":{"files":{},"toolchains":{"node":"22.23.4","npm":"10.9.2"}},
             "modifiable_derivation_refs":[],"source_domain":{"entrypoints":{},"modules":{}},
             "policy":{"max_proposal_rounds":3,"max_proposals":1,"timeout_ms":30000,"allow_source_text":true,"max_source_bytes":16384}
         })).unwrap();

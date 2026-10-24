@@ -476,14 +476,29 @@ fn choose_lane(
 
 /// Node versions this resolver will provision, lowest first.
 ///
-/// Carried over verbatim from the existing Builder's ladder so that a source
-/// which resolved to a given Node there resolves to the same one here. All
-/// four are published on nodejs.org as `linux-x64` tarballs (verified).
-pub const NODE_VERSION_LADDER: &[&str] = &["18.20.4", "20.20.2", "22.14.0", "24.18.0"];
+/// This is a security boundary, not a convenience list. CVE-2026-111497 is an
+/// out-of-bounds write in the Google Brotli decoder that Node.js ships inside
+/// its `zlib` module; it is fixed in Brotli 1.0.10 / 1.1.1 / 1.2.1, which
+/// reached Node in the 22.23.4, 24.22.1 and 26.12.1 releases. The 18.x and
+/// 20.x lines are end-of-life and will never receive a fix, so every release
+/// on those lines is affected by construction.
+///
+/// The catalog therefore names only patched releases. The ladder this
+/// resolver was originally carried over from (`18.20.4`, `20.20.2`, `22.14.0`,
+/// `24.18.0`) is deliberately gone: new provisioning must never select an
+/// affected or EOL Node. A source that pins a removed version is refused
+/// (`intent_unsupported_node`) instead of being silently moved to a version it
+/// did not ask for, and a previously sealed Derivation that already names one
+/// keeps the version it pinned — it is not rewritten.
+///
+/// Both entries were confirmed to exist as `linux-x64` tarballs on nodejs.org
+/// with an HTTP HEAD on 2026-10-24; see
+/// `docs/ops/cve-2026-111497-node-brotli-20261024.md`.
+pub const NODE_VERSION_LADDER: &[&str] = &["22.23.4", "24.22.1"];
 
-/// The version used when the source declares nothing. Also the existing
-/// Builder's default, for the same reason.
-pub const DEFAULT_NODE: &str = "20.20.2";
+/// The version used when the source declares nothing: the lowest patched
+/// line, not the newest major.
+pub const DEFAULT_NODE: &str = "22.23.4";
 
 /// Packages whose presence means the repository serves itself.
 ///
@@ -633,6 +648,14 @@ fn resolve_package_manager(node: &NodeEvidence) -> Result<PackageManager, Intent
 /// property of the source, not of whichever machine claimed the job — the same
 /// lesson the Python lane learned when a host's 3.14 silently changed what
 /// `pydantic-core` did.
+///
+/// A pin the source writes itself (`.nvmrc`, `.node-version`, `volta`) is
+/// still bound by [`NODE_VERSION_LADDER`]: a version this resolver cannot
+/// provision — and in particular an end-of-life or CVE-2026-111497-affected
+/// one — is refused rather than fetched from nodejs.org. Refusing keeps the
+/// answer honest: the alternative is either provisioning a version the
+/// platform has decided is unsafe, or substituting a different version behind
+/// the source's back.
 pub(crate) fn resolve_node_version(node: &NodeEvidence) -> Result<String, IntentError> {
     let exact = |raw: &str| -> Result<String, IntentError> {
         let trimmed = raw.trim().trim_start_matches('v');
@@ -640,7 +663,14 @@ pub(crate) fn resolve_node_version(node: &NodeEvidence) -> Result<String, Intent
             field: "node version",
             detail: format!("{raw:?} is not an exact version: {error}"),
         })?;
-        Ok(version.to_string())
+        let version = version.to_string();
+        if NODE_VERSION_LADDER.contains(&version.as_str()) {
+            Ok(version)
+        } else {
+            Err(IntentError::UnsupportedNode {
+                requested: raw.trim().to_owned(),
+            })
+        }
     };
     if let Some(raw) = node.node_version_file.as_deref() {
         return exact(raw);
@@ -1023,9 +1053,17 @@ fn compile_static(
 
 /// Node versions a Derivation may declare as a `[[runtime]]`, exactly.
 ///
-/// Exact, not a ladder: the Derivation names the Node it runs on, and a
-/// route that ran on another one would be a different route.
-pub const SUPPORTED_NODE_RUNTIME: &[&str] = &["20.20.2", "22.14.0"];
+/// Exact, not a ladder: the Derivation names the Node it runs on, and a route
+/// that ran on another one would be a different route. These are the patched
+/// releases from [`NODE_VERSION_LADDER`] and nothing else, because this
+/// catalog provisions a Node process the application's own code runs on:
+/// CVE-2026-111497 affects the EOL 18.x / 20.x lines and every release before
+/// 22.23.4 / 24.22.1, so none of those may be selected for new work.
+///
+/// A sealed Derivation that names a removed version is not rewritten: it keeps
+/// its pin and is refused when it cannot be provisioned, rather than silently
+/// running on a different Node.
+pub const SUPPORTED_NODE_RUNTIME: &[&str] = &["22.23.4", "24.22.1"];
 
 /// Where a pinned package manager is provisioned, shared by every build and
 /// Run on the host, read-only at run time.

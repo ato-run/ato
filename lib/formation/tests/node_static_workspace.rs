@@ -190,7 +190,7 @@ fn w1_one_static_workspace_is_one_opaque_id_and_no_path_reaches_the_provider() {
         "dist",
         "yarn",
         "1.22.22",
-        "20.20.2",
+        "22.23.4",
         "frozen-lockfile",
     ] {
         assert!(!request.contains(private), "{private} leaked");
@@ -245,7 +245,7 @@ fn w1_fixed_selection_compiles_the_canonical_route_with_separate_scopes() {
     assert_eq!(candidate.candidate().effects, "pure");
     assert_eq!(
         candidate.candidate().provisions,
-        vec!["toolchain.node.20.20.2", "toolchain.yarn.1.22.22"]
+        vec!["toolchain.node.22.23.4", "toolchain.yarn.1.22.22"]
     );
     validate_candidate_scope(&frozen, &[candidate.candidate().clone()]).unwrap();
 }
@@ -438,7 +438,7 @@ fn w8_manager_or_version_conflicts_are_excluded() {
             .to_string(),
     );
     static_ws(dir.path(), "apps/node", "node");
-    write(dir.path(), "apps/node/.nvmrc", "22.14.0\n");
+    write(dir.path(), "apps/node/.nvmrc", "24.22.1\n");
     static_ws(dir.path(), "apps/lock", "lock");
     write(dir.path(), "apps/lock/package-lock.json", "{}");
     static_ws(dir.path(), "apps/rc", "rc");

@@ -32,7 +32,7 @@ fn lowering_preserves_canonical_identity_and_physical_behavior() {
             let (runtime, version) = if case == "python" || case == "exec" {
                 ("python", "3.12.7")
             } else {
-                ("node", "22.14.0")
+                ("node", "22.23.4")
             };
             text += &format!("[[runtime]]\nname = {runtime:?}\nversion = {version:?}\n");
         }

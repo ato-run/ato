@@ -640,7 +640,7 @@ fn native_helper_bytes_do_not_block_failure_feedback_or_success_context() {
     d.steps[0].argv = vec![helper.repeat(4)];
     let identity = d.derivation_ref().unwrap();
     let manifest = json!({"file_id":"manifest","digest":format!("sha256:{}","b".repeat(64))});
-    let plan = json!({"runtime":{"name":"node","version":"22.14.0"},"entrypoint":manifest,
+    let plan = json!({"runtime":{"name":"node","version":"22.23.4"},"entrypoint":manifest,
         "static_output":"build","argv":[],"cwd":".","guest_port":0,"dependencies":[],
         "build_scripts":["build"],"requirements":{},"basis":[],"unknowns":[]});
     let mut context: ato_formation::proposal::ExplorationContext = serde_json::from_value(json!({

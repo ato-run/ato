@@ -625,12 +625,12 @@ fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
         .as_mut()
         .unwrap();
     domain.toolchains = BTreeMap::from([
-        ("node".into(), "22.14.0".into()),
+        ("node".into(), "22.23.4".into()),
         ("npm".into(), "10.9.2".into()),
     ]);
     domain.files.get_mut("server").unwrap().path = "package.json".into();
     let mut p = plan();
-    p["runtime"] = json!({"name":"node","version":"22.14.0"});
+    p["runtime"] = json!({"name":"node","version":"22.23.4"});
     p["static_output"] = json!("build");
     let outcomes = compile(&s, p.clone());
     let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
@@ -1198,10 +1198,10 @@ fn source_owned_startup_script_keeps_k_and_cannot_select_an_unbound_manifest() {
             digest: format!("sha256:{}", "c".repeat(64)),
         },
     );
-    auth.toolchains.insert("node".into(), "22.14.0".into());
+    auth.toolchains.insert("node".into(), "22.23.4".into());
     auth.toolchains.insert("npm".into(), "10.9.2".into());
     let mut p = plan();
-    p["runtime"] = json!({"name":"node","version":"22.14.0"});
+    p["runtime"] = json!({"name":"node","version":"22.23.4"});
     p["entrypoint"] = json!({"file_id":"manifest","digest":format!("sha256:{}","c".repeat(64))});
     p["launch_script"] = json!("start");
     p["argv"] = json!(["--port", "8000"]);
@@ -1225,7 +1225,7 @@ fn source_owned_startup_script_keeps_k_and_cannot_select_an_unbound_manifest() {
     assert_eq!(
         steps.last().unwrap().argv,
         [
-            "/opt/ato/toolchains/node/22.14.0/bin/npm",
+            "/opt/ato/toolchains/node/22.23.4/bin/npm",
             "run",
             "start",
             "--",
@@ -1314,13 +1314,13 @@ fn npm_acquisition_is_audited_and_rebuild_requires_a_preceding_frozen_lock() {
             },
         );
     }
-    auth.toolchains.insert("node".into(), "22.14.0".into());
+    auth.toolchains.insert("node".into(), "22.23.4".into());
     auth.toolchains.insert("npm".into(), "10.9.2".into());
     auth.toolchains.insert("gcc".into(), "13.3.0".into());
     auth.toolchains.insert("make".into(), "4.3.0".into());
     let reference = |id| json!({"file_id":id,"digest":format!("sha256:{}","c".repeat(64))});
     let mut p = plan();
-    p["runtime"] = json!({"name":"node","version":"22.14.0"});
+    p["runtime"] = json!({"name":"node","version":"22.23.4"});
     let ci =
         json!({"kind":"npm_ci","manifest":reference("manifest"),"lockfile":reference("lockfile")});
     let rebuild = json!({"kind":"npm_rebuild","manifest":reference("manifest"),"lockfile":reference("lockfile"),

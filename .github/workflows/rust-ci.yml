@@ -35,7 +35,9 @@ jobs:
           python-version: "3.12.7"
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.14.0"
+          # Patched for CVE-2026-111497 (Node's bundled Brotli decoder); see
+          # docs/ops/cve-2026-111497-node-brotli-20261024.md.
+          node-version: "22.23.4"
       - name: Install Linux sandbox dependency
         if: runner.os == 'Linux'
         shell: bash
@@ -50,14 +52,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo mkdir -p /opt/ato/toolchains/python/3.12.7 /opt/ato/toolchains/node/22.14.0/bin
+          sudo mkdir -p /opt/ato/toolchains/python/3.12.7 /opt/ato/toolchains/node/22.23.4/bin
           sudo cp -a "$(python3 -c 'import sys; print(sys.prefix)')/." /opt/ato/toolchains/python/3.12.7/
-          sudo cp "$(command -v node)" /opt/ato/toolchains/node/22.14.0/bin/node
+          sudo cp "$(command -v node)" /opt/ato/toolchains/node/22.23.4/bin/node
           # The build sandbox clears LD_LIBRARY_PATH. Resolve the exact copied
           # libpython instead of the runner's different system libpython.
           sudo patchelf --set-rpath '$ORIGIN/../lib' /opt/ato/toolchains/python/3.12.7/bin/python3.12
           env -i PATH=/usr/bin:/bin /opt/ato/toolchains/python/3.12.7/bin/python3 -I -S -c 'import sys; assert sys.version_info[:3] == (3, 12, 7), sys.version'
-          /opt/ato/toolchains/node/22.14.0/bin/node --version
+          /opt/ato/toolchains/node/22.23.4/bin/node --version
       - run: cargo fmt --all -- --check
       - name: Check workspace
         if: runner.os != 'Windows'
