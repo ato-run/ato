@@ -39,6 +39,9 @@ use super::resolved::ResolvedRuntimeLaunchContext;
 use crate::realize::{CandidateStopFailure, RunningCandidate};
 
 const INTERNAL_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Delivered input Assets/Model Sets and stop-time outputs for a single OCI
+/// workload. Host-boundary authority is additionally required by the Runner.
+pub const OCI_DATA_PLANE_RUNTIME_FEATURE: &str = "runtime_feature=oci_data_plane_v1";
 
 /// A running OCI workload.
 pub enum LaunchedOci {
@@ -203,7 +206,7 @@ pub fn container_oci_spec(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let mounts = context
+    let mut mounts = context
         .state_attachments()
         .iter()
         .map(|attachment| OciMount {
@@ -219,6 +222,21 @@ pub fn container_oci_spec(
             attachment.guest_target().to_owned(),
         );
     }
+    if context.output_dir().is_some()
+        && let Some(boundary) = super::host_boundary::active()
+    {
+        ensure!(
+            oci.user
+                .is_none_or(|user| user.uid == boundary.uid && user.gid == boundary.gid),
+            "oci_user_state_owner_mismatch: output requires the configured workload identity"
+        );
+    }
+    super::oci_data::attach(
+        context,
+        oci.workspace_mount_path.as_deref().unwrap_or("/app"),
+        &mut mounts,
+        &mut environment,
+    )?;
     Ok(OciSpec {
         id: spec.context.run_id.clone(),
         image,
@@ -529,6 +547,10 @@ fn service_oci_spec_rebinding(
     network_environment: &BTreeMap<String, String>,
     expected_rebindings: &BTreeMap<String, String>,
 ) -> Result<OciSpec> {
+    ensure!(
+        context.read_only_inputs().is_empty() && context.output_dir().is_none(),
+        "oci_group_data_plane_unsupported: component-scoped file placement is required"
+    );
     ensure!(
         expected_rebindings
             .keys()
@@ -885,6 +907,17 @@ mod tests {
             service_oci_spec_rebinding(spec, service, &context, &owner, &local, &forbidden)
                 .is_err()
         );
+        let context =
+            context.with_read_only_inputs(vec![crate::launch::resolved::ResolvedReadOnlyInput {
+                env_name: "ATO_INPUT_ASSETS_DIR".into(),
+                path: workspace.path().to_path_buf(),
+            }]);
+        assert!(
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &expected)
+                .unwrap_err()
+                .to_string()
+                .contains("oci_group_data_plane_unsupported")
+        );
     }
 
     #[test]
@@ -924,6 +957,32 @@ mod tests {
         assert!(adapter_spec.mounts[0].writable);
         ato_adapter_oci::validate_oci_spec(&adapter_spec).expect("the Adapter accepts it");
 
+        let assets = tempfile::tempdir().unwrap();
+        let output = state.path().join("output");
+        // Run output must be distinct from an attached state directory.
+        let separate_output = tempfile::tempdir().unwrap();
+        let context = context
+            .with_read_only_inputs(vec![crate::launch::resolved::ResolvedReadOnlyInput {
+                env_name: "ATO_INPUT_ASSETS_DIR".into(),
+                path: assets.path().to_path_buf(),
+            }])
+            .with_output_dir(Some(separate_output.path().to_path_buf()));
+        let data_spec = container_oci_spec(&spec, oci, &context, BTreeMap::new()).unwrap();
+        assert_eq!(data_spec.mounts.len(), 3);
+        assert_eq!(
+            data_spec.environment["ATO_INPUT_ASSETS_DIR"],
+            "/.ato-data/inputs/0"
+        );
+        assert_eq!(
+            data_spec.environment["ATO_OUTPUT_DIR"],
+            "/.ato-data/outputs"
+        );
+        assert!(!data_spec.mounts[1].writable && data_spec.mounts[2].writable);
+        ato_adapter_oci::validate_oci_spec(&data_spec).unwrap();
+        let context = context.with_output_dir(Some(output));
+        assert!(container_oci_spec(&spec, oci, &context, BTreeMap::new()).is_err());
+        let context = context.with_read_only_inputs(vec![]).with_output_dir(None);
+
         let mut native = oci.clone();
         native.native_surface = Some(serde_json::json!({}));
         assert!(
@@ -953,6 +1012,173 @@ mod tests {
         let adapter_spec =
             container_oci_spec(&spec, &legacy, &context, BTreeMap::new()).expect("spec");
         assert_eq!(adapter_spec.working_dir, "/app");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires native Linux Docker and ATO_OCI_DATA_TEST_IMAGE pinned Python"]
+    fn delivered_files_are_read_only_and_outputs_survive_owned_container_stop() {
+        use crate::launch::resolved::ResolvedReadOnlyInput;
+        use ato_ipc::runtime_launch::LaunchRealizationV1;
+        use std::os::unix::fs::MetadataExt;
+        let boundary = if std::env::var("ATO_OCI_DATA_TEST_HOST_BOUNDARY").as_deref() == Ok("1") {
+            let boundary = super::super::host_boundary::HostBoundary {
+                uid: std::env::var("ATO_OCI_DATA_WORKLOAD_UID")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                gid: std::env::var("ATO_OCI_DATA_WORKLOAD_GID")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            };
+            super::super::host_boundary::enable(boundary).unwrap();
+            Some(boundary)
+        } else {
+            None
+        };
+        let image = std::env::var("ATO_OCI_DATA_TEST_IMAGE").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let assets = root.path().join("assets");
+        let output = root.path().join("outputs");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&assets).unwrap();
+        std::fs::write(assets.join("seed.txt"), b"owned input\n").unwrap();
+        let mut spec = RuntimeLaunchSpecV1::parse(include_str!(
+            "../../../ipc/tests/fixtures/runtime-launch-spec-v1/portable-oci-working-dir.json"
+        ))
+        .unwrap();
+        spec.context.run_id = format!("data-{}", std::process::id());
+        let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            panic!("OCI")
+        };
+        oci.image_digest_ref = image.rsplit_once('@').unwrap().1.to_owned();
+        oci.image_reference = Some(image);
+        oci.entrypoint = Some("/usr/local/bin/python3".into());
+        oci.working_dir = Some("/app".into());
+        oci.workspace_mount_path = Some("/app".into());
+        let owner = std::fs::metadata(&workspace).unwrap();
+        oci.user = Some(ato_ipc::runtime_launch::OciUserV1 {
+            uid: boundary.map_or(owner.uid(), |b| b.uid),
+            gid: boundary.map_or(owner.gid(), |b| b.gid),
+        });
+        oci.argv = Some(vec![
+            "-c".into(),
+            r#"
+import os, pathlib, time
+source = pathlib.Path(os.environ['ATO_INPUT_ASSETS_DIR']) / 'seed.txt'
+value = source.read_bytes()
+try:
+    source.write_bytes(b'unexpected write')
+except OSError:
+    pass
+else:
+    raise RuntimeError('input was writable')
+(pathlib.Path(os.environ['ATO_OUTPUT_DIR']) / 'result.txt').write_bytes(value)
+time.sleep(30)
+"#
+            .into(),
+        ]);
+        let LaunchRealizationV1::Oci(oci) = &spec.realization else {
+            unreachable!()
+        };
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.clone(),
+            "",
+            BTreeMap::new(),
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_read_only_inputs(vec![ResolvedReadOnlyInput {
+            env_name: "ATO_INPUT_ASSETS_DIR".into(),
+            path: assets.clone(),
+        }])
+        .with_output_dir(Some(output.clone()));
+        let owner = OciOwner {
+            runner_id: "data-fixture".into(),
+            slot_id: spec.context.run_id.clone(),
+            lease_id: "data-lease".into(),
+            run_id: spec.context.run_id.clone(),
+            incarnation: "data-test".into(),
+        };
+        let adapter =
+            container_adapter(&spec, oci, &context, owner.labels(Some("main")).unwrap()).unwrap();
+        let started = Instant::now();
+        let container = adapter
+            .spawn(&workspace, &root.path().join("runtime"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !output.join("result.txt").exists() && Instant::now() < deadline {
+            assert!(
+                container.exit_code().unwrap().is_none(),
+                "workload exited before output"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            std::fs::read(output.join("result.txt")).unwrap(),
+            b"owned input\n"
+        );
+        assert_eq!(
+            std::fs::read(assets.join("seed.txt")).unwrap(),
+            b"owned input\n"
+        );
+        assert!(
+            container
+                .stop_gracefully(StopBudget {
+                    graceful: Duration::from_secs(1),
+                    force: Duration::from_secs(1)
+                })
+                .is_confirmed()
+        );
+        assert_eq!(
+            std::fs::read(output.join("result.txt")).unwrap(),
+            b"owned input\n"
+        );
+        let resources =
+            ato_adapter_oci::OwnedResourceScanner::new(&owner.runner_id, &owner.slot_id)
+                .unwrap()
+                .scan()
+                .unwrap();
+        assert!(resources.containers.is_empty() && resources.networks.is_empty());
+        let mut wrong = oci.clone();
+        let user = oci.user.unwrap();
+        wrong.user = Some(ato_ipc::runtime_launch::OciUserV1 {
+            uid: if user.uid == 65534 { 65533 } else { 65534 },
+            gid: user.gid,
+        });
+        let refused = container_adapter(
+            &spec,
+            &wrong,
+            &context,
+            owner.labels(Some("wrong-user")).unwrap(),
+        )
+        .and_then(|adapter| adapter.spawn(&workspace, &root.path().join("wrong-runtime")));
+        let error = match refused {
+            Ok(container) => {
+                let _ = container.stop();
+                panic!("mismatching workload user was accepted")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("oci_user_state_owner_mismatch"),
+            "{error:#}"
+        );
+        let resources =
+            ato_adapter_oci::OwnedResourceScanner::new(&owner.runner_id, &owner.slot_id)
+                .unwrap()
+                .scan()
+                .unwrap();
+        assert!(resources.containers.is_empty() && resources.networks.is_empty());
+        eprintln!(
+            "OCI file delivery complete: elapsed_ms={} host_boundary={}",
+            started.elapsed().as_millis(),
+            boundary.is_some()
+        );
     }
 
     /// Uses real Docker, with one test-process-only wrapper refusing the

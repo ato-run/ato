@@ -169,6 +169,9 @@ fn advertised_capabilities(
         capabilities.retain(|capability| *capability != "isolation:runtime_launch=untrusted-v1");
         capabilities.push("isolation:runtime_launch=host-boundary-v1");
         capabilities.push(runtime_launch::host_boundary::ISOLATION_CAPABILITY);
+        if capabilities.contains(&"execution_abi=oci") {
+            capabilities.push(ato_runtime_attempt::launch::oci::OCI_DATA_PLANE_RUNTIME_FEATURE);
+        }
     }
     if has_accelerator {
         capabilities.push(GPU_CAPABILITY);
@@ -7061,6 +7064,23 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         let base = runner_capabilities(false, false, false, false, false);
         assert!(advertised_capabilities(base.clone(), false, true).contains(&"gpu"));
         assert!(!advertised_capabilities(base, false, false).contains(&"gpu"));
+    }
+
+    #[test]
+    fn oci_data_plane_requires_both_container_and_host_boundary_support() {
+        for host in [false, true] {
+            for oci in [false, true] {
+                let capabilities = advertised_capabilities(
+                    runner_capabilities(false, oci, false, false, false),
+                    host,
+                    false,
+                );
+                assert_eq!(
+                    capabilities.contains(&"runtime_feature=oci_data_plane_v1"),
+                    host && oci
+                );
+            }
+        }
     }
 
     #[test]
