@@ -493,6 +493,9 @@ fn run_actual_native_dispatch_with_browser(
             } else if files && path.ends_with("/data/outputs/native-output/complete") {
                 assert_eq!(body["parts"], json!([{"part_number":1}]));
                 worker_output_saved.store(true, Ordering::Release);
+                if let Some(fixture) = &server_browser {
+                    fixture.observe(browser_fixture::Fact::Output, true);
+                }
                 (200, b"{\"asset_id\":\"ast_native_saved\"}".to_vec())
             } else if path.ends_with("/control") {
                 (
@@ -639,6 +642,9 @@ fn run_actual_native_dispatch_with_browser(
                     },
                 )
                 .receipt;
+                if let Some(fixture) = &server_browser {
+                    fixture.observe(browser_fixture::Fact::Contract, receipt.fully_satisfied);
+                }
                 assert_eq!(receipt.fully_satisfied, !mismatch);
                 assert_eq!(
                     receipt.execution.as_ref().unwrap().services.len(),
@@ -754,14 +760,40 @@ fn run_actual_native_dispatch_with_browser(
                     let result = std::panic::catch_unwind(|| {
                         if let Some(fixture) = &browser {
                             fixture.publish(public, &gateway_scope, &scope);
-                            let expiry = fixture.wait_done().unwrap();
+                            let expiry = fixture.wait_done(|expiry| {
+                                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                                    tokio::time::timeout(fixture.remaining(),async {
+                                        use runtime_launch::native::pixel::tests::controls_acceptance as observed;
+                                        let actual=observed::browser_clipboard(&root).await;
+                                        anyhow::ensure!(fixture.observe_clipboard(&actual,false),"checkpoint requires actual Some(expected), not wire-only delivery");
+                                        let closed=observed::browser_denied_input(public,&gateway_scope,key,&origin,&scope,expiry,false).await;
+                                        let unchanged=observed::browser_clipboard(&root).await==actual;
+                                        fixture.observe(browser_fixture::Fact::PasteDenial,closed && unchanged);
+                                        anyhow::ensure!(closed && unchanged,"denied paste changed clipboard or did not close");
+                                        Ok::<(),anyhow::Error>(())
+                                    }).await?
+                                })
+                            }).unwrap();
                             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                                tokio::time::timeout(
-                                    fixture.remaining(),
-                                    runtime_launch::native::pixel::tests::controls_acceptance::verify_browser_result(
-                                        public, &root, &gateway_scope, key, &origin, &scope, expiry,
-                                    ),
-                                ).await.unwrap();
+                                tokio::time::timeout(fixture.remaining(),async {
+                                    use runtime_launch::native::pixel::tests::controls_acceptance as observed;
+                                    let post_disconnect=observed::browser_clipboard(&root).await;
+                                    assert!(fixture.observe_clipboard(&post_disconnect,true),"unexpected clipboard value after disconnect");
+                                    let denied=observed::browser_denied_input(public,&gateway_scope,key,&origin,&scope,expiry,true).await;
+                                    let unchanged=observed::browser_clipboard(&root).await==post_disconnect;
+                                    fixture.observe(browser_fixture::Fact::ResizeDenial,denied && unchanged);
+                                    assert!(denied && unchanged);
+                                    let ((width,height),quiet)=observed::browser_reconnect(public,&gateway_scope,key,&origin,&scope,expiry).await;
+                                    fixture.observe_size(width,height);
+                                    let reconnected=(width,height)==(1024,768) && quiet;
+                                    fixture.observe(browser_fixture::Fact::Reconnect,reconnected);
+                                    assert!(reconnected);
+                                    let frame=observed::browser_full_frame(public,&gateway_scope,key,&origin,&scope,expiry).await;
+                                    fixture.observe_size(frame.width,frame.height);
+                                    let full=(frame.width,frame.height,frame.bytes)==(1024,768,1024*768*4);
+                                    fixture.observe(browser_fixture::Fact::FullFrame,full);
+                                    assert!(full);
+                                }).await.unwrap();
                             });
                         } else {
                             tokio::runtime::Runtime::new().unwrap().block_on(
@@ -777,21 +809,10 @@ fn run_actual_native_dispatch_with_browser(
                             &scope.runner_id,
                             "app.probe",
                         );
-                        assert_eq!(
-                            reqwest::blocking::Client::builder()
-                                .no_proxy()
-                                .timeout(Duration::from_secs(3))
-                                .build()
-                                .unwrap()
-                                .get(format!("http://{public}/result"))
-                                .header(RUN_ASSERTION_HEADER, proof)
-                                .send()
-                                .unwrap()
-                                .bytes()
-                                .unwrap()
-                                .as_ref(),
-                            expected.as_slice()
-                        );
+                        let frozen=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap().get(format!("http://{public}/result")).header(RUN_ASSERTION_HEADER,proof).send().unwrap().bytes().unwrap();
+                        let unchanged=frozen.as_ref()==expected.as_slice();
+                        if let Some(fixture)=&browser {fixture.observe(browser_fixture::Fact::Frozen,unchanged);}
+                        assert!(unchanged);
                     });
                     controls_done.store(true, Ordering::Release);
                     result.unwrap();
