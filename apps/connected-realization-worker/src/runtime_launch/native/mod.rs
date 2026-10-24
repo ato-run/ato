@@ -2,6 +2,7 @@
 //! transport readiness never authorizes publication or satisfies Contract K.
 mod dispatch;
 pub mod pixel;
+mod pixel_controls;
 mod producer;
 pub use dispatch::NativeLeaseRun;
 pub(crate) mod pixel_capacity;
@@ -54,11 +55,13 @@ pub struct NativeLeaseSurfaceConfig {
     pub startup_timeout: Duration,
     pub idle_timeout: Duration,
     pub maximum_lifetime: Duration,
+    pub controls: netd::pixel_gateway::PixelGatewayControls,
 }
 
 pub struct OwnedNativeTerminalRun {
     surface_addr: SocketAddr,
     observation_addr: SocketAddr,
+    controls: netd::pixel_gateway::PixelGatewayControls,
     execution: super::lease::RuntimeExecutionEvidence,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<NativeCompletion>>,
@@ -69,6 +72,9 @@ pub struct NativeCompletion {
     pub cause: &'static str,
 }
 impl OwnedNativeTerminalRun {
+    pub fn controls(&self) -> netd::pixel_gateway::PixelGatewayControls {
+        self.controls
+    }
     pub fn surface_addr(&self) -> SocketAddr {
         self.surface_addr
     }
@@ -120,6 +126,7 @@ struct Parts {
     pixel_directories: Option<pixel::DisplayDirectories>,
     probe: Option<NativeProbeHandle>,
     surface: Option<NativeSurfaceHandle>,
+    controls: netd::pixel_gateway::PixelGatewayControls,
     budget: StopBudget,
     // Keep the Linux directory alias alive through every UDS connection.
     _socket_directory: Option<std::fs::File>,
@@ -199,6 +206,12 @@ pub async fn start_terminal(
     config: NativeLeaseSurfaceConfig,
     mut owner_alive: watch::Receiver<bool>,
 ) -> std::result::Result<OwnedNativeTerminalRun, super::lease::StartFailure> {
+    if config.controls.text_paste || config.controls.framebuffer_resize {
+        return Err(anyhow::anyhow!(
+            "native_surface_controls_unsupported: GUI controls cannot enable Terminal features"
+        )
+        .into());
+    }
     let started_at = Instant::now();
     let (
         declaration,
@@ -347,6 +360,7 @@ pub async fn start_terminal(
         pixel_directories: None,
         probe: None,
         surface: None,
+        controls: netd::pixel_gateway::PixelGatewayControls::default(),
         budget: super::recovery::stop_budget(&spec.lifecycle),
         _socket_directory: Some(socket_directory),
     };
@@ -434,6 +448,7 @@ fn finish_owned_run(
     lifetime_deadline: Instant,
 ) -> OwnedNativeTerminalRun {
     let surface_addr = parts.surface.as_ref().unwrap().local_addr();
+    let controls = parts.controls;
     let observation_addr = parts.probe.as_ref().unwrap().local_addr();
     let containers = parts.container.as_ref().unwrap().containers();
     let app = containers
@@ -477,6 +492,7 @@ fn finish_owned_run(
         }
     });
     OwnedNativeTerminalRun {
+        controls,
         surface_addr,
         observation_addr,
         execution,

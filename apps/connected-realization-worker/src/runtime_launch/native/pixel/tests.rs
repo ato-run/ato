@@ -1,3 +1,5 @@
+#[path = "controls_acceptance.rs"]
+pub(crate) mod controls_acceptance;
 use super::super::tests as terminal;
 use super::*;
 use ato_formation::{
@@ -63,6 +65,7 @@ pub(crate) fn expected() -> Vec<u8> {
 }
 fn stub_helper() -> PixelHelper {
     PixelHelper {
+        controls: PixelGatewayControls::default(),
         image: format!("missing.invalid/helper@sha256:{}", "11".repeat(32)),
         platform: "linux/amd64".into(),
         archive: Arc::new(vec![]),
@@ -175,6 +178,7 @@ async fn gui_refuses_invalid_scope_config_declared_env_mounts_and_tcp_facts_befo
         "selection",
         "platform",
         "root_user",
+        "controls_mismatch",
     ] {
         let (mut spec, descriptor, _, d) =
             fixture(&format!("missing.invalid/app@sha256:{}", "33".repeat(32)));
@@ -188,6 +192,7 @@ async fn gui_refuses_invalid_scope_config_declared_env_mounts_and_tcp_facts_befo
             unreachable!()
         };
         match invalid {
+            "controls_mismatch" => config.controls.text_paste = true,
             "key" => config.verification_key = "weak".into(),
             "origin" => config.origin = "http://untrusted.example".into(),
             "scope" => config.scope.surface_id = "other".into(),
@@ -283,7 +288,22 @@ async fn actual_gui_helper_app_probe_original_k_and_owned_cleanup() {
     let origin = config.origin.clone();
     let (_alive, rx) = watch::channel(true);
     let setup = Instant::now();
-    let helper = helper();
+    let controls = std::env::var("ATO_NATIVE_PIXEL_TEST_CONTROLS").as_deref() == Ok("1");
+    config.controls = PixelGatewayControls {
+        text_paste: controls,
+        framebuffer_resize: controls,
+    };
+    let helper = if controls {
+        let path = std::env::var_os("ATO_NATIVE_PIXEL_HELPER_ARCHIVE").unwrap();
+        PixelHelper::from_archive_with_controls(
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+            limits(),
+            config.controls,
+        )
+        .unwrap()
+    } else {
+        helper()
+    };
     let archive = app_archive();
     let materialization_input_ms = setup.elapsed().as_millis();
     let start = Instant::now();
@@ -301,6 +321,8 @@ async fn actual_gui_helper_app_probe_original_k_and_owned_cleanup() {
     .await
     .unwrap();
     let elapsed = start.elapsed().as_millis();
+    assert_eq!(run.controls().text_paste, controls);
+    assert_eq!(run.controls().framebuffer_resize, controls);
     let surface = run.surface_addr();
     let probe = run.observation_addr();
     let actual = get(probe).await;
@@ -310,6 +332,45 @@ async fn actual_gui_helper_app_probe_original_k_and_owned_cleanup() {
     assert_eq!(evidence.principal.as_ref().unwrap().uids, [65532; 4]);
     assert_eq!(evidence.services.len(), 1);
     assert_eq!(evidence.services[0].name, "native-display");
+    let helper_cmd = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            &evidence.services[0].container_id,
+            "--format",
+            "{{json .Config.Cmd}}",
+        ])
+        .output()
+        .unwrap();
+    assert!(helper_cmd.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&helper_cmd.stdout).unwrap(),
+        if controls {
+            vec!["640", "480", "--controls-v1", "1", "1"]
+        } else {
+            vec!["640", "480"]
+        }
+    );
+    let app_mounts = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            run.container_id(),
+            "--format",
+            "{{json .Mounts}}",
+        ])
+        .output()
+        .unwrap();
+    assert!(app_mounts.status.success());
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&app_mounts.stdout)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| !m["Destination"]
+                .as_str()
+                .unwrap()
+                .starts_with("/run/ato-native-rfb"))
+    );
     assert!(evidence.services[0].principal.as_ref().unwrap().uids[0] > 0);
     let helper_mounts = std::process::Command::new("docker")
         .args([
@@ -424,8 +485,11 @@ async fn actual_gui_helper_app_probe_original_k_and_owned_cleanup() {
     assert_eq!(k.contract_ref().unwrap(), k_ref);
     // Authenticated reconnect runs real subsequent input against this display;
     // frozen GET remains the first operation. Wrong-Origin cannot connect.
-    let keys = SurfaceAssertionKeyring::new(BTreeMap::from([("ato.runner-surface@1".into(), key)]))
-        .unwrap();
+    let keys = SurfaceAssertionKeyring::new(BTreeMap::from([(
+        "ato.runner-surface@1".into(),
+        key.clone(),
+    )]))
+    .unwrap();
     let execution = SurfaceExecutionScope {
         run_id: owner.run_id.clone(),
         lease_id: owner.lease_id.clone(),
@@ -454,6 +518,28 @@ async fn actual_gui_helper_app_probe_original_k_and_owned_cleanup() {
         .await
         .is_err()
     );
+    if controls {
+        controls_acceptance::exercise(
+            surface,
+            root.path(),
+            &scope,
+            &key,
+            &origin,
+            &SurfaceExecutionScope {
+                run_id: owner.run_id.clone(),
+                lease_id: owner.lease_id.clone(),
+                runner_id: owner.runner_id.clone(),
+            },
+        )
+        .await;
+        assert_eq!(
+            get(probe).await,
+            actual,
+            "controls never recapture K or frozen probe bytes"
+        );
+        assert_eq!(k.contract_ref().unwrap(), k_ref);
+        assert_eq!(d.derivation_ref().unwrap(), d_ref);
+    }
     let completion = run.stop().await;
     assert!(completion.stop.is_confirmed(), "{:?}", completion.stop);
     closed(surface).await;
@@ -467,7 +553,7 @@ async fn actual_gui_helper_app_probe_original_k_and_owned_cleanup() {
     );
     eprintln!(
         "GUI_EVIDENCE {}",
-        json!({"contract_ref":k_ref,"derivation_ref":d_ref,"app_image":image(),"helper_image":evidence.services[0].image,"width":640,"height":480,"settle_ms":50,"body":String::from_utf8(actual).unwrap(),"warm_readiness_ms":elapsed,"verified_input_ms":materialization_input_ms,"fully_satisfied":true,"cleanup_confirmed":true})
+        json!({"contract_ref":k_ref,"derivation_ref":d_ref,"app_image":image(),"helper_image":evidence.services[0].image,"width":640,"height":480,"settle_ms":50,"body":String::from_utf8(actual).unwrap(),"warm_readiness_ms":elapsed,"verified_input_ms":materialization_input_ms,"fully_satisfied":true,"surface_controls":controls,"cleanup_confirmed":true})
     );
     eprintln!(
         "GUI warm readiness_ms={elapsed}, verified image input_ms={materialization_input_ms}, original K satisfied, two owned containers cleaned"
@@ -813,5 +899,27 @@ fn actual_runner_sigkill_recovers_both_gui_containers_and_does_not_preserve_cook
         !preserved
             .join("oci-runtime/display/auth/Xauthority")
             .exists()
+    );
+}
+
+#[test]
+fn helper_argv_preserves_legacy_and_only_encodes_fixed_physical_controls() {
+    let mut helper = stub_helper();
+    assert_eq!(helper.launch_argv(640, 480), vec!["640", "480"]);
+    helper.controls = PixelGatewayControls {
+        text_paste: true,
+        framebuffer_resize: false,
+    };
+    assert_eq!(
+        helper.launch_argv(640, 480),
+        vec!["640", "480", "--controls-v1", "1", "0"]
+    );
+    helper.controls = PixelGatewayControls {
+        text_paste: false,
+        framebuffer_resize: true,
+    };
+    assert_eq!(
+        helper.launch_argv(640, 480),
+        vec!["640", "480", "--controls-v1", "0", "1"]
     );
 }

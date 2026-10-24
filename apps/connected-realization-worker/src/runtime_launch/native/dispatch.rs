@@ -73,6 +73,9 @@ impl NativeLeaseRun {
     fn run(&self) -> &OwnedNativeTerminalRun {
         self.run.as_ref().expect("owned Native Run")
     }
+    pub fn controls(&self) -> netd::pixel_gateway::PixelGatewayControls {
+        self.run().controls()
+    }
     pub fn surface_addr(&self) -> SocketAddr {
         self.run().surface_addr()
     }
