@@ -1011,6 +1011,7 @@ pub(crate) mod tests {
                 return Err(crate::pixel_gateway::SurfaceAuthorizationError);
             }
             Ok(crate::pixel_gateway::AuthorizedSurfaceAccess {
+                clipboard_paste_until: None,
                 principal: "user-1".to_string(),
                 grant_id: "probe-grant-1".to_string(),
             })
