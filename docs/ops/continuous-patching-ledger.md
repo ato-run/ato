@@ -292,3 +292,30 @@ Not verified here (requires host/Cloudflare/D1 access):
 - Never report "no known vulnerabilities" on the basis of a scan that does not
   exist. Report the last check date, the known advisories, the patch status and
   the verification result (or the absence of one).
+
+## 9. Progress since this ledger (2026-10-24, second batch)
+
+The first batch (this document's PRs 1–4) and the second batch below are
+deliberately separate. Nothing here changes the §7 rule: a mechanism existing is
+not the same as a host, staging, or production having exercised it.
+
+| PR | Repository | What it adds | State |
+|---|---|---|---|
+| [#1550](https://github.com/ato-run/ato/pull/1550) | `ato` | Fix the pre-existing base-main Linux build break (`OciSpec.user` in the source OCI runtime) so CI evaluates real diffs | **merged** |
+| [#1551](https://github.com/ato-run/ato/pull/1551) | `ato` | Execution-time runtime policy: refuse a sealed Derivation pinned to an affected Node (`runtime_version_not_patched` / `_unverifiable`) at attempt admission, bundle validation and retained replay; one authoritative table shared with the authoring catalog. Stacked on #1548. | open |
+| [#880](https://github.com/ato-run/ato-api/pull/880) | `ato-api` | Hosted-start mirror gate for stored runtimes / `runtime_requirements` / `public_env.PATH`; persists `launch_blocked_reason`. | open |
+| [#881](https://github.com/ato-run/ato-api/pull/881) | `ato-api` | `runtime_image_index`: verified receipt → image digest → D/K → latest receipt, written from Formation acceptance (no rows today) and the hosted-run ack (real rows). Not a K evaluator, not a scanner. | open |
+| [#882](https://github.com/ato-run/ato-api/pull/882) | `ato-api` | Derivation re-formation orchestration: same source archive re-formed, old/new `contract_ref` compared, `k_equal` recorded; `accepted` only when `k_equal && fully_satisfied`. Archive lane only; no expiry/approval bypass. | open |
+
+What is still **not** proven, and must not be reported as done:
+
+- A real host/systemd drain → swap → verify → undrain E2E (PR7 in §6).
+- A real host re-Formation of an existing app with a patched worker, with old D
+  ≠ new D, old K = new K and a `fully_satisfied` receipt.
+- Real image rows in `runtime_image_index` from an actual `.capsule` ack, and the
+  D1 migration application in staging/production.
+- Any "patched" claim derived from a receipt: the node runtime version is still
+  not projected into `ContractVerificationReceipt.execution`, so the refusal
+  code plus the declared Derivation remain the only evidence. Do not render
+  "Patched" from a successful run.
+- Auto-build from advisories and Auto-rollout (PR8 in §6) are not started.
