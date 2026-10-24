@@ -1,7 +1,7 @@
 //! Shared exact-origin, assertion, replay, and subprotocol WebSocket boundary.
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use http::{
     HeaderValue, StatusCode,
@@ -12,7 +12,9 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 use url::Url;
 
-use crate::surface_authorization::{SurfaceAccessAuthorizer, SurfaceGatewayScope};
+use crate::surface_authorization::{
+    AuthorizedSurfaceAccess, SurfaceAccessAuthorizer, SurfaceGatewayScope,
+};
 
 pub const SURFACE_ASSERTION_HEADER: &str = "x-ato-surface-assertion";
 const MAX_CONSUMED_GRANTS: usize = 4096;
@@ -52,6 +54,7 @@ pub struct SurfaceHandshakeAuthorizer {
     consumed_grants: ConsumedSurfaceGrants,
     subprotocol: &'static str,
     require_subprotocol: bool,
+    access_capture: Option<Arc<OnceLock<AuthorizedSurfaceAccess>>>,
 }
 
 impl SurfaceHandshakeAuthorizer {
@@ -70,7 +73,18 @@ impl SurfaceHandshakeAuthorizer {
             consumed_grants,
             subprotocol,
             require_subprotocol,
+            access_capture: None,
         }
+    }
+}
+
+impl SurfaceHandshakeAuthorizer {
+    pub(crate) fn with_access_capture(
+        mut self,
+        capture: Arc<OnceLock<AuthorizedSurfaceAccess>>,
+    ) -> Self {
+        self.access_capture = Some(capture);
+        self
     }
 }
 
@@ -80,7 +94,7 @@ impl Callback for SurfaceHandshakeAuthorizer {
         request: &Request,
         mut response: Response,
     ) -> Result<Response, ErrorResponse> {
-        authorize_upgrade(
+        let access = authorize_upgrade(
             request,
             &self.allowed_origins,
             &self.scope,
@@ -96,6 +110,11 @@ impl Callback for SurfaceHandshakeAuthorizer {
             );
         } else if self.require_subprotocol {
             return Err(rejection(StatusCode::BAD_REQUEST));
+        }
+        if let Some(capture) = self.access_capture {
+            capture
+                .set(access)
+                .map_err(|_| rejection(StatusCode::INTERNAL_SERVER_ERROR))?;
         }
         Ok(response)
     }
@@ -124,7 +143,7 @@ fn authorize_upgrade(
     scope: &SurfaceGatewayScope,
     authorizer: &dyn SurfaceAccessAuthorizer,
     consumed_grants: &Mutex<HashSet<String>>,
-) -> Result<(), UpgradeRejection> {
+) -> Result<AuthorizedSurfaceAccess, UpgradeRejection> {
     let origin = request
         .headers()
         .get(ORIGIN)
@@ -153,8 +172,8 @@ fn authorize_upgrade(
     if consumed.len() >= MAX_CONSUMED_GRANTS {
         return Err(UpgradeRejection::Internal);
     }
-    consumed.insert(access.grant_id);
-    Ok(())
+    consumed.insert(access.grant_id.clone());
+    Ok(access)
 }
 
 fn offered_subprotocol(request: &Request, expected: &str) -> bool {
