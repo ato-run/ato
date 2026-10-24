@@ -89,3 +89,40 @@ provider archive rewrites: an existing conflicting revision/format digest must
 remain a conflict, not overwrite or upgrade immutable evidence. This slice does
 not change that storage invariant, add a daemon/table, enqueue an application,
 change a feature flag, or deploy a worker.
+
+## Explicit existing Requester client handoff
+
+The existing `proposal_search` example accepts optional
+`formation_source_pointer` and `expected_source_origin` members in its existing
+configuration. They are an operational extension, not another configuration
+schema, CLI, semantic profile or authority. Both members require the existing
+`source_job` / `source_archive` / owner-authored `frozen_request` lane. The local
+archive verifier envelope is not a new server Job and does not replace the
+accepted source-only Job named by the pointer. In pointer mode the original
+`frozen_request` JSON value must equal its typed serialization; normalization
+such as null becoming omission is rejected before credentials or network use.
+
+`FormationSourceOrigin::validate_local_source` reuses `SourceArchiveOutput`, its
+canonical physical Binding and the original source verifier. It checks the
+pointer, fixed request/source tuple, actual raw archive digest, tree, format,
+resolver, closure and counters without changing K, D, policy or budget. A saved
+origin is consistency evidence; it is not ownership, approval, current attempt
+or execution authorization. Those remain the existing API authority.
+
+After that preflight, `Client::submit_from_formation_source` calls only:
+
+1. `POST /v1/runtime-network/sources/from-formation` with the exact pointer.
+2. After the full transferred source/origin matches the saved snapshot,
+   `POST /v1/runtime-network/satisfy` with the unchanged typed request and the
+   separate `source_archive_job_id` / `binding_digest` query parameters.
+
+There is no `/sources` requester upload, archive re-encoding, fallback or
+automatic POST retry in this path. Metadata responses are capped at 64 KiB,
+redirects and ambient proxies are disabled, and the existing bearer/deadline
+mechanism applies. The example's finite observation allowance also bounds this
+handoff; an explicit repeat reuses the same Search/body and asks the server to
+replay its existing result. It does not reset durable Search/provider budgets.
+The existing requester claim, provider, receipt acceptance and observation loop
+are reused unchanged. An accepted request or stopped observation is not K
+satisfaction. Missing pointer/origin members keep the existing legacy upload
+and plain `/satisfy` behavior.

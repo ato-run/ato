@@ -15,6 +15,7 @@ use ato_formation_worker::{
             deepseek::{DeepSeekCandidateProducer, DeepSeekConfig},
             prepare_proposal_submission, serve_general_proposal, serve_proposal,
         },
+        source_handoff::{FormationSourceOrigin, FormationSourcePointer},
     },
 };
 use serde::Deserialize;
@@ -52,6 +53,12 @@ struct Config {
     source_archive: Option<PathBuf>,
     #[serde(default)]
     frozen_request: Option<SatisfyRequest>,
+    /// Optional saved API provenance. Both fields require the existing explicit
+    /// archive lane; neither turns a local byte proof into owner authorization.
+    #[serde(default)]
+    formation_source_pointer: Option<FormationSourcePointer>,
+    #[serde(default)]
+    expected_source_origin: Option<FormationSourceOrigin>,
     #[serde(default)]
     routes: Vec<PathBuf>,
     authorization: Option<ProposalAuthorization>,
@@ -159,14 +166,36 @@ impl DecisionProvider for FixedDecision<'_> {
         }
     }
 }
+fn read_config(bytes: &[u8]) -> Result<Config> {
+    let config: Config = serde_json::from_slice(bytes)?;
+    if config.formation_source_pointer.is_some() {
+        let raw: serde_json::Value = serde_json::from_slice(bytes)?;
+        let request = config
+            .frozen_request
+            .as_ref()
+            .context("explicit owner-frozen SatisfyRequest required")?;
+        // Reject normalization (for example explicit null becoming omission).
+        // This compares JSON values; K and its canonicalization stay Rust-owned.
+        anyhow::ensure!(
+            raw.get("frozen_request") == Some(&serde_json::to_value(request)?),
+            "source-bound frozen request must survive typed decoding unchanged"
+        );
+    }
+    Ok(config)
+}
 fn main() -> Result<()> {
     let path = std::env::args()
         .nth(1)
         .context("usage: proposal_search CONFIG_JSON")?;
-    let config: Config = serde_json::from_slice(&std::fs::read(path)?)?;
+    let config = read_config(&std::fs::read(path)?)?;
     let explicit_archive = config.source_job.is_some()
         || config.source_archive.is_some()
         || config.frozen_request.is_some();
+    anyhow::ensure!(
+        config.formation_source_pointer.is_some() == config.expected_source_origin.is_some()
+            && (config.formation_source_pointer.is_none() || explicit_archive),
+        "source provenance needs both pointer/origin and the explicit archive lane"
+    );
     let mut submission = if explicit_archive {
         let job = config
             .source_job
@@ -230,6 +259,12 @@ fn main() -> Result<()> {
         }
         s
     };
+    if let (Some(pointer), Some(origin)) = (
+        &config.formation_source_pointer,
+        &config.expected_source_origin,
+    ) {
+        origin.validate_local_source(pointer, &submission)?;
+    }
     if config.preregister_only {
         anyhow::ensure!(
             config.mock_llm.is_none() && config.live_llm.is_none() && config.resume.is_none(),
@@ -241,7 +276,33 @@ fn main() -> Result<()> {
         )?;
         return Ok(());
     }
+    let source_wait = if config.formation_source_pointer.is_some() {
+        let seconds = config
+            .settle_seconds
+            .min(submission.request.budget.deadline_seconds);
+        anyhow::ensure!(
+            seconds > 0,
+            "source requester observation allowance is empty"
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+        Some((
+            Instant::now() + Duration::from_secs(seconds),
+            now.checked_add(
+                seconds
+                    .checked_mul(1000)
+                    .context("source requester deadline overflow")?,
+            )
+            .context("source requester deadline overflow")?,
+        ))
+    } else {
+        None
+    };
     let client = Client::new(&config.api, &std::fs::read_to_string(&config.token_file)?)?;
+    let client = source_wait.map_or(client.clone(), |(_, deadline)| {
+        client.with_deadline(deadline)
+    });
     anyhow::ensure!(
         config.mock_llm.is_none() || config.live_llm.is_none(),
         "ambiguous producer mode"
@@ -276,9 +337,28 @@ fn main() -> Result<()> {
             Ok(producer)
         })
         .transpose()?;
-    let created = match &config.resume {
-        Some(id) => json!({"satisfy_id":id}),
-        None => client.submit(&submission)?,
+    let created = match (
+        &config.formation_source_pointer,
+        &config.expected_source_origin,
+    ) {
+        (Some(pointer), Some(origin)) => {
+            // An explicit repeat asks the existing server to replay exactly
+            // this source-bound request, never a legacy upload or new Search.
+            let created = client.submit_from_formation_source(&submission, pointer, origin)?;
+            anyhow::ensure!(
+                config
+                    .resume
+                    .as_ref()
+                    .is_none_or(|id| created["satisfy_id"] == id.as_str()),
+                "source-bound replay returned another satisfy identity"
+            );
+            created
+        }
+        (None, None) => match &config.resume {
+            Some(id) => json!({"satisfy_id":id}),
+            None => client.submit(&submission)?,
+        },
+        _ => unreachable!("source provenance configuration validated before credentials"),
     };
     std::fs::write(
         &config.created,
@@ -290,7 +370,10 @@ fn main() -> Result<()> {
         batch: config.batch_json,
         calls: config.calls,
     });
-    let deadline = Instant::now() + Duration::from_secs(config.settle_seconds);
+    let deadline = source_wait.map_or_else(
+        || Instant::now() + Duration::from_secs(config.settle_seconds),
+        |(deadline, _)| deadline,
+    );
     let mut answered = BTreeSet::new();
     let decisions = std::cell::RefCell::new(Vec::new());
     while Instant::now() < deadline {
@@ -376,4 +459,57 @@ fn main() -> Result<()> {
         std::thread::sleep(Duration::from_millis(150));
     }
     anyhow::bail!("acceptance observation deadline (not a K verdict)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(pointer: bool) -> serde_json::Value {
+        let request: SatisfyRequest = serde_json::from_str(include_str!(
+            "../tests/fixtures/runtime-network-v0/satisfy-request.json"
+        ))
+        .unwrap();
+        let mut config = json!({
+            "api": "http://127.0.0.1:1", "token_file": ".tmp/absent",
+            "source": ".tmp/source", "work": ".tmp/work",
+            "search_id": request.search_id, "claimant_id": "fixture",
+            "contract": request.base_contract, "policy": request.policy,
+            "budget": request.budget, "frozen_request": request,
+            "batch_json": "{}", "producer_mode": "success",
+            "calls": ".tmp/calls", "created": ".tmp/created", "result": ".tmp/result"
+        });
+        if pointer {
+            config["formation_source_pointer"] = json!({
+                "source_archive_job_id": "fjob_fixture",
+                "binding_digest": format!("sha256:{}", "a".repeat(64))
+            });
+        }
+        config
+    }
+
+    #[test]
+    fn source_bound_request_preserves_the_owner_json_value() {
+        let config = config(true);
+        let parsed = read_config(&serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed.frozen_request.unwrap()).unwrap(),
+            config["frozen_request"]
+        );
+    }
+
+    #[test]
+    fn source_bound_request_refuses_null_normalization_but_legacy_is_unchanged() {
+        let mut config = config(true);
+        config["frozen_request"]["source"]["content_ref"] = serde_json::Value::Null;
+        let err = read_config(&serde_json::to_vec(&config).unwrap())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("unchanged"));
+        config
+            .as_object_mut()
+            .unwrap()
+            .remove("formation_source_pointer");
+        assert!(read_config(&serde_json::to_vec(&config).unwrap()).is_ok());
+    }
 }
