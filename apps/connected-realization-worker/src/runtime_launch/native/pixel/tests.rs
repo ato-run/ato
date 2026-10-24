@@ -69,6 +69,7 @@ fn stub_helper() -> PixelHelper {
         config_reference: format!("sha256:{}", "22".repeat(32)),
         limits: limits(),
         owner: None,
+        prepared_user: None,
     }
 }
 fn limits() -> OciResourceLimits {
