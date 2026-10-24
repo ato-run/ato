@@ -48,9 +48,13 @@ touched either.
 ### Runtimes: exact, declared
 
 - Node: the exact version the Derivation declares, from
-  `SUPPORTED_NODE_RUNTIME` (`20.20.2`, `22.14.0`), provisioned into
+  `SUPPORTED_NODE_RUNTIME` (`22.23.4`, `24.22.1`), provisioned into
   `/opt/ato/toolchains/node/<version>` from nodejs.org. Anything else is
   `intent_unsupported_runtime`.
+  These are the only releases patched for CVE-2026-111497 (the Brotli decoder
+  out-of-bounds write inside Node's `zlib`); the previously listed `20.20.2` /
+  `22.14.0` are retired because 20.x is end-of-life and 22.14.0 pre-dates the
+  fix. See `docs/ops/cve-2026-111497-node-brotli-20261024.md`.
 - Python: exact, from the existing catalog.
 - A route may declare several (Python + Node: Node builds, Python serves).
   Each is an independent provision; they are provisioned in a fixed order

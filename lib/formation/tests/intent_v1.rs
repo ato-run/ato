@@ -596,12 +596,31 @@ fn corepack_package_manager_outranks_the_lockfiles() {
 #[test]
 fn node_version_comes_from_the_source_and_never_from_the_host() {
     for (file, contents, expected) in [
-        (".nvmrc", "v22.14.0", "22.14.0"),
-        (".node-version", "18.20.4", "18.20.4"),
+        (".nvmrc", "v22.23.4", "22.23.4"),
+        (".node-version", "24.22.1", "24.22.1"),
     ] {
         let dir = vite_fixture(&[(file, contents)]);
         let intent = static_intent(dir.path(), &[]).expect("compiles");
         assert_eq!(intent.static_build.expect("built").node_version, expected);
+    }
+
+    // A source's own exact pin is still bound by the provisioned catalog: the
+    // EOL 18.x / 20.x lines and the pre-fix 22.x / 24.x releases are refused
+    // (CVE-2026-111497), never silently substituted with a supported version.
+    for (file, contents) in [
+        (".nvmrc", "v22.14.0"),
+        (".node-version", "18.20.4"),
+        (".node-version", "20.20.2"),
+        (".nvmrc", "24.18.0"),
+    ] {
+        let dir = vite_fixture(&[(file, contents)]);
+        assert_eq!(
+            static_intent(dir.path(), &[])
+                .expect_err("an EOL or CVE-affected pin is refused")
+                .code(),
+            "intent_unsupported_node",
+            "{file} = {contents}"
+        );
     }
 
     // A RANGE resolves through the ladder, and never survives as a range.
@@ -611,7 +630,7 @@ fn node_version_comes_from_the_source_and_never_from_the_host() {
             "scripts":{"build":"vite build","preview":"vite preview"}}"#,
     )]);
     let intent = static_intent(dir.path(), &[]).expect("compiles");
-    assert_eq!(intent.static_build.expect("built").node_version, "22.14.0");
+    assert_eq!(intent.static_build.expect("built").node_version, "22.23.4");
 
     // A range no provisioned version satisfies is a refusal, not a default.
     let dir = vite_fixture(&[(
@@ -625,6 +644,26 @@ fn node_version_comes_from_the_source_and_never_from_the_host() {
             .code(),
         "intent_unsupported_node"
     );
+}
+
+/// The catalog is the security boundary: no EOL or CVE-2026-111497-affected
+/// release may be provisioned, and the exact runtime catalog is the same
+/// patched set.
+#[test]
+fn the_node_catalog_names_only_patched_releases() {
+    for removed in ["18.20.4", "20.20.2", "22.14.0", "24.18.0"] {
+        assert!(
+            !NODE_VERSION_LADDER.contains(&removed),
+            "{removed} must not be provisionable"
+        );
+        assert!(
+            !SUPPORTED_NODE_RUNTIME.contains(&removed),
+            "{removed} must not be declarable as a [[runtime]]"
+        );
+    }
+    assert_eq!(NODE_VERSION_LADDER, ["22.23.4", "24.22.1"]);
+    assert_eq!(SUPPORTED_NODE_RUNTIME, NODE_VERSION_LADDER);
+    assert_eq!(DEFAULT_NODE, NODE_VERSION_LADDER[0]);
 }
 
 #[test]
