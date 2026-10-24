@@ -758,6 +758,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-runtime-image-ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ato-runtime-object-graph"
 version = "0.1.0"
 dependencies = [
