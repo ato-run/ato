@@ -324,6 +324,14 @@ fn component_assignment_preserves_legacy_bytes_and_distinguishes_explicit_empty(
     services(&mut assigned)[1].input_ids = Some(vec![]);
     assigned.validate().unwrap();
     let bytes = assigned.canonical_bytes().unwrap();
+    assert_eq!(
+        bytes,
+        include_bytes!("../../tests/fixtures/runtime-launch-spec-v2/service-group-inputs.json")
+    );
+    assert_eq!(
+        assigned.canonical_digest().unwrap(),
+        "sha256:c38b591b70fb2e101908948bec01daa5d9677f02dfb1d8474e01c10fe89ffdcd"
+    );
     let parsed = RuntimeLaunchSpecV2::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
     assert_eq!(parsed.service_group().services[1].input_ids, Some(vec![]));
     assert_ne!(
