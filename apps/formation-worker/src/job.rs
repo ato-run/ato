@@ -628,12 +628,43 @@ fn compose_result(
     let plan = &planned.plan;
     let serve = plan.serving(&planned.derivation);
     let public_env = plan.process_environment(&planned.derivation);
-    let readiness = planned
+    let readiness_path = planned
         .contract
         .requirements
         .iter()
         .find(|r| r.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER)
         .and_then(|r| r.path.as_ref());
+    // What the result actually exports is decided here, once, and the readiness
+    // contract is derived from it. A Static Web candidate runs in the browser
+    // and exports nothing, so naming the Contract's HTTP port there is a claim
+    // about a port that does not exist — the control plane refuses it with
+    // `readiness names port "http", which is not exported`. The HTTP Contract
+    // observation itself is unaffected: it is still verified for every lane.
+    let exported_ports = planned
+        .derivation
+        .ports
+        .iter()
+        .filter(|port| plan.lane.is_process() && port.from == serve.id)
+        .map(|port| {
+            serde_json::json!({
+                "name": "http", "protocol": "http", "guest_port": port.guest_port,
+            })
+        })
+        .collect::<Vec<_>>();
+    let readiness_contracts = if exported_ports
+        .iter()
+        .any(|port| port.get("name").and_then(serde_json::Value::as_str) == Some("http"))
+    {
+        readiness_path
+            .map(|path| {
+                vec![serde_json::json!({
+                    "kind": "http", "port_name": "http", "path": path,
+                })]
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let (kind, candidate) = match plan.lane {
         Lane::PythonProcess | Lane::Process => (
             "process_workspace",
@@ -695,12 +726,8 @@ fn compose_result(
             "name": name, "version": version, "resolution": "authored",
         })).collect::<Vec<_>>(),
         "realization_candidates": [candidate],
-        "exported_ports": planned.derivation.ports.iter().filter(|p| plan.lane.is_process() && p.from == serve.id).map(|p| serde_json::json!({
-            "name": "http", "protocol": "http", "guest_port": p.guest_port,
-        })).collect::<Vec<_>>(),
-        "readiness_contracts": readiness.map(|path| vec![serde_json::json!({
-            "kind": "http", "port_name": "http", "path": path,
-        })]).unwrap_or_default(),
+        "exported_ports": exported_ports,
+        "readiness_contracts": readiness_contracts,
         "state_slot_declarations": planned.derivation.state.iter().filter(|_| plan.lane.is_process()).map(|slot| serde_json::json!({
             "state_key": slot.id, "mount_target": slot.mount,
             "access": "read_write", "protocol": "ato.state.filesystem@1",
@@ -772,4 +799,195 @@ pub fn preflight(job: &serde_json::Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod result_v2_readiness_tests {
+    //! A readiness contract names a port the result exports.
+    //!
+    //! The control plane refuses a result whose readiness names a port missing
+    //! from `exported_ports`, and a Static Web result exports none. These tests
+    //! hold the builder to that: readiness is derived from the exported ports
+    //! rather than from the Contract's HTTP requirement alone, while the HTTP
+    //! observation itself stays verified for every lane.
+    use std::collections::BTreeMap;
+
+    use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
+    use ato_formation::capsule_toml::parse_capsule_toml;
+    use ato_formation::detect::detect;
+    use ato_formation::intent::Lane;
+    use ato_formation::preset::{AppPreset, synthesize_authoring};
+    use ato_formation::request::AttemptOutcomes;
+    use ato_formation::source::{RESOLVER_CONTRACT_V1, SourceClosureRef};
+    use ato_formation::verify::{
+        ContractVerification, ContractVerificationReceipt, ObservationOutcome, ObservationVerdict,
+        VerificationTargetKind,
+    };
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    const PROCESS_ROUTE: &str = r#"
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = ["/app/server.py"]
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8000
+
+[[contract.require]]
+id = "health"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+
+[contract.require.expect]
+status = 200
+"#;
+
+    fn closure() -> SourceClosureRef {
+        SourceClosureRef::derive(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "",
+            RESOLVER_CONTRACT_V1,
+        )
+        .expect("closure")
+    }
+
+    fn static_plan() -> PlannedCandidate {
+        let source = tempfile::tempdir().expect("tempdir");
+        std::fs::write(source.path().join("index.html"), "<h1>static</h1>").expect("write");
+        let evidence = detect(source.path()).expect("detects");
+        plan_candidate(
+            &synthesize_authoring(AppPreset::StaticFiles),
+            &closure(),
+            &evidence,
+            BTreeMap::new(),
+            "/app",
+            "wasm32-browser",
+        )
+        .expect("static plan")
+    }
+
+    fn process_plan() -> PlannedCandidate {
+        let source = tempfile::tempdir().expect("tempdir");
+        std::fs::write(source.path().join("server.py"), "print('serve')").expect("write");
+        let draft = parse_capsule_toml(PROCESS_ROUTE).expect("process route parses");
+        let evidence = detect(source.path()).expect("detects");
+        plan_candidate(
+            &draft,
+            &closure(),
+            &evidence,
+            BTreeMap::new(),
+            "/app",
+            "x86_64-linux-gnu",
+        )
+        .expect("process plan")
+    }
+
+    fn compose(planned: &PlannedCandidate) -> Value {
+        let attempt = BuildAttempt {
+            job_id: "job".to_owned(),
+            attempt_id: "attempt".to_owned(),
+            attempt_fence: 1,
+        };
+        let verification = ContractVerification {
+            verdicts: vec![ObservationVerdict {
+                id: "root".to_owned(),
+                outcome: ObservationOutcome::Satisfied,
+            }],
+        };
+        let receipt = ContractVerificationReceipt::new(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            &planned.contract_ref,
+            &planned.derivation_ref,
+            VerificationTargetKind::FormationRuntime,
+            verification.clone(),
+        );
+        compose_result(
+            &attempt,
+            &closure(),
+            planned,
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            1024,
+            "x86_64-linux-gnu",
+            "/app",
+            NetworkPolicy::Denied,
+            &planned.contract_ref,
+            &planned.derivation_ref,
+            &verification,
+            &receipt,
+            &AttemptOutcomes::not_run("test"),
+        )
+        .expect("composes")
+    }
+
+    #[test]
+    fn a_static_result_exports_no_port_and_claims_no_readiness() {
+        let planned = static_plan();
+        assert_eq!(planned.plan.lane, Lane::StaticWeb);
+        // The Contract still requires an HTTP observation; the point is that
+        // the RESULT no longer claims a port that it does not export.
+        assert!(
+            planned
+                .contract
+                .requirements
+                .iter()
+                .any(|r| r.verifier == HTTP_CONTRACT_VERIFIER),
+            "the static preset must keep its HTTP Contract observation"
+        );
+
+        let result = compose(&planned);
+        assert_eq!(result["exported_ports"], json!([]));
+        assert_eq!(result["readiness_contracts"], json!([]));
+        assert_eq!(result["materializations"][0]["kind"], json!("static_web"));
+        // Verification evidence is carried unchanged: this fix does not touch
+        // what the Contract observes, only what the result says it exports.
+        assert_eq!(
+            result["contract_verification"]["observations"][0]["result"],
+            json!("satisfied")
+        );
+    }
+
+    #[test]
+    fn a_process_result_readiness_names_an_exported_port() {
+        let planned = process_plan();
+        assert!(planned.plan.lane.is_process());
+
+        let result = compose(&planned);
+        let exported = result["exported_ports"]
+            .as_array()
+            .expect("exported_ports is a list");
+        assert!(!exported.is_empty(), "a serving process exports its port");
+
+        let readiness = result["readiness_contracts"]
+            .as_array()
+            .expect("readiness_contracts is a list");
+        assert_eq!(readiness.len(), 1);
+        assert_eq!(readiness[0]["kind"], json!("http"));
+        let port_name = readiness[0]["port_name"]
+            .as_str()
+            .expect("readiness names a port");
+        assert!(
+            exported
+                .iter()
+                .any(|port| port["name"].as_str() == Some(port_name)),
+            "readiness names {port_name:?}, which is not exported: {exported:?}"
+        );
+        // The readiness path is the serving HTTP path from the Contract.
+        assert_eq!(readiness[0]["path"], json!("/health"));
+    }
 }
