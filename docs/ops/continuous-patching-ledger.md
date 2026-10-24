@@ -240,11 +240,13 @@ exploit was possible.
 | 7 | TBD | — | Staging auto-update E2E (needs host access; cannot be verified from a source checkout). | planned |
 | 8 | TBD | — | Advisory → update candidate generation (Auto-build first; Auto-rollout only after the safety conditions are measured). | planned |
 
-This is the ledger's execution order, which is slightly finer than the original
-six-PR outline: the worker update is split per repository (2a/2b), the CVE fix is
-its own PR (3), and the runtime work is split into inventory (4), D1 index (5)
-and rebuild/re-verify (6). The dependency order is 1 → 2a → 2b → 3 → 4 → 5 → 6;
-7 and 8 come after the preceding ones have evidence.
+This is the recommended review/merge order, and it is slightly finer than the
+original six-PR outline: the worker update is split per repository (2a/2b), the
+CVE fix is its own PR (3), and the runtime work is split into inventory (4), the
+D1 index (5) and rebuild/re-verify (6). The only hard dependency inside the
+split is 2a → 2b (they share a wire contract); 3 and 4 are independent of the
+worker update and of each other; 5 depends on 4; 6 depends on 5; 7 and 8 need
+the evidence from the preceding PRs.
 
 PRs are deliberately independent. 2a and 2b share a wire contract but land
 separately: 2a is safe with no worker change (a drained worker simply stops
