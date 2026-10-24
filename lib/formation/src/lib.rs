@@ -54,6 +54,10 @@ pub mod receipt;
 pub mod request;
 pub mod requirements;
 pub mod retained;
+/// Which sealed runtimes execution may run. Not feature-gated: the portable
+/// validator and the wasm receipt authority build without `planning`, and
+/// they must reach the same policy as the attempt admission does.
+pub mod runtime_policy;
 #[cfg(feature = "planning")]
 pub mod source;
 pub mod variables;

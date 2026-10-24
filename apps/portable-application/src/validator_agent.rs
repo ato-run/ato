@@ -1335,7 +1335,14 @@ fn decode_bytes(response: Response, operation: &str) -> Result<Vec<u8>> {
 
 fn classify_rejection(error: &anyhow::Error) -> &'static str {
     let message = format!("{error:#}");
-    if message.contains("digest") || message.contains("identity") {
+    // The runtime policy codes are stable and must survive classification
+    // verbatim; folding them into `unsupported_version` would lose the
+    // "not patched" statement the uploader and the API need.
+    if message.contains("runtime_version_not_patched") {
+        "runtime_version_not_patched"
+    } else if message.contains("runtime_version_unverifiable") {
+        "runtime_version_unverifiable"
+    } else if message.contains("digest") || message.contains("identity") {
         "hash_mismatch"
     } else if message.contains("closure") || message.contains("unreachable") {
         "unreachable_objects"
