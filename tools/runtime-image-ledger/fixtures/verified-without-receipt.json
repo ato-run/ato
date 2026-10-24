@@ -1,0 +1,21 @@
+{
+  "schema": "ato.runtime-image-inventory/1",
+  "images": [
+    {
+      "image_digest": "sha256:259e8f0a0c3ec4e94df6b990e36f76a33224b8623f3dcde609c972729b3ba0d5",
+      "base_digests": [
+        "sha256:95a4bd0114d131c2f87bfa63574562aff4693c005fa328fa06bfd4be448704f0",
+        "sha256:6f401ac044ec79bc93fbc11185042af5ab830336925f9e70ddebdbaebc679461"
+      ],
+      "runtime_versions": {
+        "node": "20.20.2",
+        "python": "3.12.7"
+      },
+      "created_from": "formation",
+      "derivation_ref": "sha256:fb6a55b77a65c27fc9594d80d3104083f4c76ced5ae3f8546db585011900573c",
+      "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+      "status": "verified"
+    }
+  ],
+  "patch_candidates": []
+}
