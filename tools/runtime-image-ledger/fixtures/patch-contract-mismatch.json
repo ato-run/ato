@@ -1,0 +1,51 @@
+{
+  "schema": "ato.runtime-image-inventory/1",
+  "images": [
+    {
+      "image_digest": "sha256:259e8f0a0c3ec4e94df6b990e36f76a33224b8623f3dcde609c972729b3ba0d5",
+      "base_digests": [
+        "sha256:95a4bd0114d131c2f87bfa63574562aff4693c005fa328fa06bfd4be448704f0",
+        "sha256:6f401ac044ec79bc93fbc11185042af5ab830336925f9e70ddebdbaebc679461"
+      ],
+      "runtime_versions": {
+        "node": "20.20.2",
+        "python": "3.12.7"
+      },
+      "created_from": "formation",
+      "derivation_ref": "sha256:fb6a55b77a65c27fc9594d80d3104083f4c76ced5ae3f8546db585011900573c",
+      "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+      "status": "candidate"
+    },
+    {
+      "image_digest": "sha256:97e67a5645969953f1a4cfe2ea75649864ff99789189cdd3f6db03e59f8a8ebf",
+      "base_digests": [
+        "sha256:95a4bd0114d131c2f87bfa63574562aff4693c005fa328fa06bfd4be448704f0",
+        "sha256:6f401ac044ec79bc93fbc11185042af5ab830336925f9e70ddebdbaebc679461"
+      ],
+      "runtime_versions": {
+        "node": "20.20.2",
+        "python": "3.12.7"
+      },
+      "created_from": "formation",
+      "derivation_ref": "sha256:18ca526876d6f37e0a8ffe25d5e39fcc9471962d1e63df71f14c81f330be97e1",
+      "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+      "status": "candidate"
+    }
+  ],
+  "patch_candidates": [
+    {
+      "from_digest": "sha256:259e8f0a0c3ec4e94df6b990e36f76a33224b8623f3dcde609c972729b3ba0d5",
+      "to_digest": "sha256:97e67a5645969953f1a4cfe2ea75649864ff99789189cdd3f6db03e59f8a8ebf",
+      "advisories": [
+        "GHSA-aaaa-bbbb-cccc"
+      ],
+      "rebuild": {
+        "derivation_ref": "sha256:18ca526876d6f37e0a8ffe25d5e39fcc9471962d1e63df71f14c81f330be97e1",
+        "contract_ref": "sha256:2426f33f6e4aa00367f25efff29d5e2ec6fb9a3a7c4bc0dd3e92792886fca9fc",
+        "receipt_ref": "sha256:1a10c8cca2fbb84143fed50fcce503d5e42d68880aa782a49465b071dc29e0b4",
+        "fully_satisfied": true
+      },
+      "decision": "manual"
+    }
+  ]
+}
