@@ -272,7 +272,7 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
             let ato_ipc::runtime_launch_v2::LaunchRealizationV2::OciServiceGroup(group) =
                 &mut wrong.realization;
             group.services[0].user = user;
-            let service = &group.services[0];
+            let service = &wrong.service_group().services[0];
             let error = crate::launch::oci::service_oci_spec(
                 &wrong,
                 service,
