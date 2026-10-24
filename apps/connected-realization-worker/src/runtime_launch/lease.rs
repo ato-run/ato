@@ -78,6 +78,10 @@ pub fn RUNTIME_LAUNCH_SUPPORTED() -> bool {
 /// What the control plane puts in `runner_leases.command_json`.
 #[derive(Debug, serde::Deserialize)]
 pub struct RuntimeLaunchLeaseCommand {
+    /// Coordinator evidence of owner-authored explicit placement, delivered
+    /// only by the existing authorized lease claim. Not part of the spec/K/D.
+    #[serde(default)]
+    pub explicit_runner_id: Option<String>,
     /// Selected validator route, checked against the declaration inside the spec.
     #[serde(default)]
     pub portable_derivation_ref: Option<String>,
@@ -115,6 +119,23 @@ pub struct RuntimeLaunchLeaseCommand {
     /// digest or Capsule identity.
     #[serde(default)]
     pub network_authorization: Option<NetworkAuthorization>,
+}
+
+impl RuntimeLaunchLeaseCommand {
+    /// This routing restriction never replaces lease/execution authorization.
+    pub fn validate_runner_assignment(&self, runner_id: &str, required: bool) -> Result<()> {
+        match self.explicit_runner_id.as_deref() {
+            Some(assigned) => ensure!(
+                !assigned.trim().is_empty() && assigned == runner_id,
+                "explicit_runner_assignment_mismatch: command must explicitly name this Runner"
+            ),
+            None => ensure!(
+                !required,
+                "explicit_runner_assignment_required: this Runner accepts explicit placement only"
+            ),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1347,6 +1368,7 @@ mod tests {
 
     fn command_for(spec: &RuntimeLaunchSpecV1, digest: &str) -> RuntimeLaunchLeaseCommand {
         RuntimeLaunchLeaseCommand {
+            explicit_runner_id: None,
             portable_derivation_ref: None,
             session_surface: None,
             session_id: None,
@@ -1545,6 +1567,7 @@ mod tests {
         let spec =
             ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2::parse(GROUP_FIXTURE).expect("fixture");
         RuntimeLaunchLeaseCommand {
+            explicit_runner_id: None,
             portable_derivation_ref: None,
             session_surface: None,
             session_id: None,
