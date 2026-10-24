@@ -827,8 +827,15 @@ fn validate_selected_derivation(
         validate_static_http_paths(&contract, &application, &tree)?;
     }
     let model_sets = validated_model_sets(bundle, &derivation)?;
-    if !model_sets.is_empty() && realization != PortableRealizationKind::LocalProcess {
-        return Err(profile("v0 delivers a Model Set only to a process route"));
+    if !model_sets.is_empty()
+        && !matches!(
+            realization,
+            PortableRealizationKind::LocalProcess | PortableRealizationKind::OciContainer
+        )
+    {
+        return Err(profile(
+            "v0 delivers a Model Set only to a process or single OCI route",
+        ));
     }
 
     Ok(ValidatedPortableApplication {
@@ -3066,6 +3073,158 @@ default = "pure"
             bundle.index.root_contract_ref
         );
         assert_ne!(without.index.derivations, bundle.index.derivations);
+    }
+
+    fn attach_model_input(bundle: &mut PortableApplicationBundle, reference: &str) -> String {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");
+        let (_, model_bundle) = build_authored_bundle_v2(&root).unwrap();
+        let model_route = validate_all_derivations(&model_bundle).unwrap().remove(0);
+        let input = model_route
+            .derivation
+            .inputs
+            .iter()
+            .find(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+            .unwrap()
+            .clone();
+        bundle.index.objects.push(
+            model_bundle
+                .index
+                .objects
+                .iter()
+                .find(|object| object.reference == input.content_ref)
+                .unwrap()
+                .clone(),
+        );
+        bundle.payloads.push(
+            model_bundle
+                .payloads
+                .iter()
+                .find(|payload| payload.reference == input.content_ref)
+                .unwrap()
+                .clone(),
+        );
+        bundle
+            .index
+            .objects
+            .sort_by(|a, b| a.reference.cmp(&b.reference));
+        bundle
+            .payloads
+            .sort_by(|a, b| a.reference.cmp(&b.reference));
+        replace_derivation(bundle, reference, |derivation| {
+            derivation.inputs.push(input);
+            derivation.inputs.sort_by(|a, b| a.id.cmp(&b.id));
+        })
+    }
+
+    #[test]
+    fn single_oci_and_native_model_inputs_validate_and_project_without_rewriting_k() {
+        for native in [None, Some(false), Some(true)] {
+            let mut bundle = match native {
+                Some(pixel) => crate::native_surface_tests::fixture(pixel),
+                None => {
+                    build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec())
+                        .unwrap()
+                        .1
+                }
+            };
+            let old_k = bundle.index.root_contract_ref.clone();
+            let selected = route_ref(&bundle, PortableRealizationKind::OciContainer);
+            let selected = attach_model_input(&mut bundle, &selected);
+            let bytes = encode_portable_application_bundle(&bundle).unwrap();
+            let (_, routes) = validate_bytes_all(&bytes).unwrap();
+            let route = routes
+                .iter()
+                .find(|route| route.derivation_ref.as_str() == selected)
+                .unwrap();
+            assert_eq!(route.model_sets.len(), 1);
+            assert_eq!(route.model_sets[0].input_id, "models");
+            assert_eq!(
+                route.model_sets[0].reference,
+                route.model_sets[0].manifest.reference().unwrap()
+            );
+            assert_eq!(bundle.index.root_contract_ref, old_k);
+            assert_eq!(route.contract.contract_ref().unwrap(), old_k);
+            let reports = validator_agent::tests_support::route_reports(&routes).unwrap();
+            let report = reports
+                .iter()
+                .find(|r| r.derivation_ref == selected)
+                .unwrap();
+            let report = serde_json::to_value(report).unwrap();
+            assert_eq!(
+                report["realization"],
+                if native.is_some() {
+                    "native_oci_container"
+                } else {
+                    "oci"
+                }
+            );
+            assert_eq!(report["model_sets"][0]["input_id"], "models");
+            assert_eq!(report["model_sets"][0]["object_count"], 2);
+            assert_eq!(report["model_sets"][0]["total_bytes"], 1_048_596);
+            assert_eq!(
+                report["model_sets"][0]["content_ref"],
+                route.model_sets[0].reference
+            );
+            // The container profile admits the data shape, not local execution.
+            let refused = ato_runtime_attempt::admission::admit(
+                &route.attempt_spec(None),
+                ato_runtime_attempt::admission::EffectAuthorization::UserInvoked {
+                    derivation_ref: route.derivation_ref.as_str(),
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                refused.code,
+                if native.is_some() {
+                    "native_surface_unavailable"
+                } else {
+                    "model_set_unavailable"
+                }
+            );
+            for model in &route.model_sets[0].manifest.objects {
+                assert!(
+                    bundle
+                        .descriptor(&ContentRef::parse(model.digest.clone()).unwrap())
+                        .is_none()
+                );
+            }
+            // The legacy process route in the same bundle stays untouched.
+            if native.is_none() {
+                assert!(
+                    routes
+                        .iter()
+                        .find(|r| r.realization == PortableRealizationKind::LocalProcess)
+                        .unwrap()
+                        .model_sets
+                        .is_empty()
+                );
+            }
+            // Manifest payload tampering remains a closure/digest failure.
+            let manifest_ref = route.model_sets[0].reference.clone();
+            let payload = bundle
+                .payloads
+                .iter_mut()
+                .find(|p| p.reference == manifest_ref)
+                .unwrap();
+            payload.bytes = base64::engine::general_purpose::STANDARD.encode(b"{}");
+            assert!(encode_portable_application_bundle(&bundle).is_err());
+        }
+    }
+
+    #[test]
+    fn model_inputs_remain_unsupported_for_static_and_service_groups() {
+        let (_, static_bundle) =
+            build_static_bundle(&fixture_root(), "Static model refusal").unwrap();
+        let root = authored_root(SERVICE_GROUP_TOML);
+        let (_, group_bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        for mut bundle in [static_bundle, group_bundle] {
+            let selected = bundle.index.derivations[0].clone();
+            attach_model_input(&mut bundle, &selected);
+            let error = validate_all_derivations(&bundle).unwrap_err().to_string();
+            assert!(error.contains("Model Set"), "{error}");
+        }
     }
 
     #[test]
