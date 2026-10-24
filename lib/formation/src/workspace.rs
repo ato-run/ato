@@ -502,7 +502,7 @@ mod tests {
         };
         for (cwd, out) in [("apps/web", "apps/web/dist"), ("site", "site/build")] {
             let draft = static_build_draft(
-                "20.20.2".into(),
+                "22.23.4".into(),
                 ResolvedPackageManager {
                     name: "yarn".into(),
                     version: "1.22.22".into(),
@@ -514,7 +514,7 @@ mod tests {
             let (k, expected) = bind(&draft, &ctx).unwrap();
             let auth = NodeStaticWorkspaceAuthorization {
                 install: WorkspaceInstallScope {
-                    node_version: "20.20.2".into(),
+                    node_version: "22.23.4".into(),
                     package_manager: "yarn".into(),
                     package_manager_version: "1.22.22".into(),
                     install_mode: "--frozen-lockfile".into(),
