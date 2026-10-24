@@ -8,6 +8,7 @@
 
 pub mod host_boundary;
 pub mod oci;
+mod oci_component_inputs;
 mod oci_data;
 pub mod process_abi;
 pub mod process_executor;

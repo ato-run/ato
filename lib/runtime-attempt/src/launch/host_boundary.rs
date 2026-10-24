@@ -412,6 +412,7 @@ mod tests {
         let policy = landlock_policy(
             &context(workspace.path(), &state, StateAccessV1::ReadWrite).with_read_only_inputs(
                 vec![crate::launch::resolved::ResolvedReadOnlyInput {
+                    input_id: None,
                     env_name: "ATO_INPUT_PATH_MODELS".to_owned(),
                     path: inputs.path().to_path_buf(),
                 }],
