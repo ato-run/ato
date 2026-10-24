@@ -433,3 +433,35 @@ cleanup/preservation. Optional application archive transport must match D's exac
 image/platform and pass the same existing archive verification before creation.
 Cold materialization retains the existing command bound and is a separate rollout
 gate; only an exactly verified loaded config/platform can be reused.
+
+## Local Pixel lease admission (opt-in child)
+
+`ATO_RUNNER_NATIVE_PIXEL` defaults false. A local Linux, single-slot Runner may
+explicitly configure a fully verified helper archive, its exact immutable image,
+bounded helper limits, and an existing cgroup v2 parent. These are physical
+Runner inputs, never lease/app-supplied helper credentials or Capsule identity.
+The frozen helper shares archive bytes across attempts. Only exact already-loaded
+config/platform permits advertisement; rollout requires prematerialization and
+never hides a cold load behind a longer command deadline.
+
+The first backend requires the default local Unix Docker endpoint and confirms
+that existing ambient label recovery resolves to that same endpoint. It refuses
+remote/ambiguous endpoints, rootless/unknown management principals, container
+boundaries, unsupported cgroup drivers/parent spellings, and unobserved capacity.
+The selected cgroup parent is passed explicitly to both container create calls.
+Admission measures its actual ancestors, effective cpuset/CPU quota, and available
+memory against app plus helper limits before resource creation. Dockerd's own
+service cgroup may be a sibling and is never used as the workload budget. Each
+created process must then be observed under that exact parent before probe or
+gateway publication. The actual cgroup-v2 root omits control interfaces by kernel
+design; omission anywhere else remains an unknown-capacity refusal.
+The physical admission also reserves 64MiB for the bounded Runner frame/coverage
+and transport buffers, outside either application's semantic requirements.
+
+Measurements describe current headroom, not guaranteed future resource supply.
+Both containers retain hard CPU/RAM/PID limits and the existing failure/stop/
+recovery ownership. The existing feature `native_surface_probe_v1` is advertised
+with the explicit `ato.pixel-stream.v1` / `rfb_websocket` typed intersection only
+after these physical checks. Terminal and legacy Web opt-ins remain independent.
+The existing same-attempt Rust K/receipt and API viewer-access authority continue
+to gate acceptance; transport readiness never grants browser access on its own.

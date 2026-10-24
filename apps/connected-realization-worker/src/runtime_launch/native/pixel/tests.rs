@@ -12,7 +12,7 @@ use ato_runtime_attempt::{
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn fixture(
+pub(crate) fn fixture(
     image: &str,
 ) -> (
     RuntimeLaunchSpecV1,
@@ -58,18 +58,17 @@ fn fixture(
         Some(RuntimeHttpObservation::from_response("", "", "", 0, &expected()).body_digest);
     (spec, descriptor, k, d)
 }
-fn expected() -> Vec<u8> {
+pub(crate) fn expected() -> Vec<u8> {
     pixel_probe_result(&[0x99, 0x66, 0x33, 0].repeat(640 * 480)).unwrap()
 }
 fn stub_helper() -> PixelHelper {
     PixelHelper {
         image: format!("missing.invalid/helper@sha256:{}", "11".repeat(32)),
         platform: "linux/amd64".into(),
-        verified: ValidatedOciArchive {
-            bytes: vec![],
-            config_reference: format!("sha256:{}", "22".repeat(32)),
-        },
+        archive: Arc::new(vec![]),
+        config_reference: format!("sha256:{}", "22".repeat(32)),
         limits: limits(),
+        owner: None,
     }
 }
 fn limits() -> OciResourceLimits {
