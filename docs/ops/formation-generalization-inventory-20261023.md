@@ -204,3 +204,45 @@ source_evidence経路を使うreceiver-firstの修正と実archive保存を後�
 
 本番配備、課金GPU作成、運営キーの本番投入は実施していない。全体完了・全種のHosted
 実行・運営キーの実workload安全性・既存アプリの保存/再接続回帰完了とは報告しない。
+
+
+## 2026-10-24 phase16 更新
+
+前節の「未実装」「未配備」は各節の記録時点を表す。現在の差分は下表で更新する。
+Draftコードの存在、隔離Runtime実測、staging配信、Hostedの機能有効化を区別する。
+
+| 範囲 | 追加Draft / 再利用した境界 | 現時点の残り |
+|---|---|---|
+| Native実Run所有・Files | ato #1519以降の既存HostBoundary/Run Output連携、#1536。APIの既存owner/data grant admission | 実Hostedの保存・復旧・他利用者分離を同じattemptで確認 |
+| Model / 複合入力 | ato #1535/#1537、API #873/#874。既存DeliveredInput、readonly ModelSet/Asset、component input_idsとOutput scope | 実GPUモデル・Hosted複合Run。異種runtimeを跨ぐ単一複合Dは未対応 |
+| Source全体連携 | APIのarchive/measurement/owner source transfer、ato #1538、PWA #515。既存Formation jobと固定source pointerから既存Satisfyへ接続 | 認証済みownerから実GitHub job→選択D→Hosted receipt永続化 |
+| GUI貼り付け | ato #1539。既存assertionの既定false権限、全packet検証後のLatin-1転送、fragment/expiry/共有頻度制限 | 実Chrome共同試験進行中。Hostedは未有効 |
+| GUIリサイズ | ato #1540。既存gateway/署名、bounded SetDesktopSize、元K固定、実TigerVNCのACK/fullframe/reconnect | 実Chrome共同試験進行中。Hostedは未有効 |
+| noVNC互換 | ato #1541。既存bounded SetEncodingsからExtendedClipboardだけを除去、negative CutText拒否維持 | 統合Linuxの同一source検証とChrome共同試験 |
+| trusted helper | ato #1542。検証済みOCI ABI label→既存helperの固定argv、物理controls→既存Ready/heartbeat、default off | shared Runnerへ未インストール・未広告 |
+| Native操作認可 | API #875/#876/#877。既存HMAC、Ready extension、owner/live lease/accepted receipt/現行能力の積、app-origin preflight | stagingコード配備済み。認証済みowner/browserと対応Runnerの受入 |
+| 共通アプリフレーム | PWA #517。既存renderer/noVNC公開API、明示Paste、サイズ変更、古い非同期結果の破棄 | staging資産配信確認済み。実Chrome fixture作成中、Hostedは未検証 |
+| Managed Secrets | 既存固定Embedding brokerのSDK/network/relay/用途別Admin拡張 | staging broker無効・policy0。実上流/運営key試験なし。任意認証request/自由prompt/URLへ運営keyを渡せない |
+| GPU共通予算 | RunPod/Vast共通予約・Run排他・削除/在庫/孤児照合はDraft実装済み | 実Provider未検証。既存31未予約intentの保守的予算計上によりclosed、Vast設定なし。課金作成直前の別承認が必要 |
+
+phase16の共有stagingはAPI source64d50b0b / active100%77f0b0b9、PWA sourceb065887a /
+active100%23a4c432、Admin271d6291変更なし。両チャットの切替可能回答後にlock下で
+API→PWAを直列配備し、独立監査で119 bindings/36 Secret参照・設定保持、6 readonly D1
+結果前後一致/書込0を確認した。未適用migrationなし、適用なし。実HTML200と到達可能な
+主要5資産がlocal build bytes一致、staging API origin/Native controls/Files/Runtime markerを
+確認。stage16 ops/proofは各所有repoに保存し、lockを解放して両チャットへ通知済み。
+
+API #877は175 distinct tests/7 suites、全体typecheck、PWA #517は53 tests/6 suitesと
+型検査/full buildが成功。統合PWAは追加78 tests/7 suites成功。API #876の204 tests、
+#875の48 testsは重複を含むので合算しない。PWA広範囲の303成功/SessionTrayコピー期待値
+1失敗は同一baseでも再現し、スキップを追加していない。
+
+隔離Linuxでは#1540の実TigerVNC1024×768/fullframeと#1542の通常/root UID65534における
+paste/resize/reconnect/元K/stop-save/回収を確認した。#1542はMac440/Linux441 testsと
+Clippy成功。これはlocal Coordinator/canary認証のfixtureで、staging Hosted/本物の運営key/
+実Providerの受入ではない。GUI起動deadlineの一度の未解明失敗と、その後の同一deadline
+fresh-root成功は各PRのopsへ両方保持している。
+
+手動staging専用Chromeログインは既存質問の回答待ちで、認証の迂回はしない。
+本番配備・課金GPU作成・運営key本番投入は行っていない。依頼全体の完了、全種のHosted
+実行、既存アプリの保存/再接続回帰完了とは報告しない。
