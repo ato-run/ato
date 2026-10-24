@@ -300,3 +300,49 @@ fn explicit_user_golden_fixture_has_stable_canonical_bytes_and_digest() {
         "sha256:600851a1424991898e9c46786d7fbeedce86e47379eb8ffa0eab09a6c3c2a733"
     );
 }
+
+#[test]
+fn component_assignment_preserves_legacy_bytes_and_distinguishes_explicit_empty() {
+    assert!(
+        RuntimeLaunchSpecV2::parse(&GROUP_FIXTURE.replacen(
+            "\"state_keys\":[\"data\"]",
+            "\"input_ids\":null,\"state_keys\":[\"data\"]",
+            1
+        ))
+        .is_err()
+    );
+    let legacy = group();
+    assert!(
+        legacy
+            .service_group()
+            .services
+            .iter()
+            .all(|service| service.input_ids.is_none())
+    );
+    let mut assigned = legacy.clone();
+    services(&mut assigned)[0].input_ids = Some(vec!["models".into()]);
+    services(&mut assigned)[1].input_ids = Some(vec![]);
+    assigned.validate().unwrap();
+    let bytes = assigned.canonical_bytes().unwrap();
+    let parsed = RuntimeLaunchSpecV2::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    assert_eq!(parsed.service_group().services[1].input_ids, Some(vec![]));
+    assert_ne!(
+        assigned.canonical_digest().unwrap(),
+        legacy.canonical_digest().unwrap()
+    );
+    for ids in [
+        vec!["workspace"],
+        vec!["models", "models"],
+        vec!["models", "assets"],
+        vec!["a-b", "a.b"],
+    ] {
+        services(&mut assigned)[0].input_ids = Some(ids.into_iter().map(str::to_owned).collect());
+        assert!(assigned.validate().is_err());
+    }
+    services(&mut assigned)[0].input_ids = Some(vec!["models".into()]);
+    services(&mut assigned)[0].public_env.push(PublicEnvV1 {
+        name: "ATO_INPUT_PATH_MODELS".into(),
+        value: "shadow".into(),
+    });
+    assert!(assigned.validate().is_err());
+}
