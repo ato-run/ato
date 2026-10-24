@@ -18,7 +18,8 @@ Red: canonical single OCI/Native model-input test failed on the original
 process-only gate. Green: portable application lib 116/116, runtime-attempt lib
 175/175 and hosted validator integration 11/11. This includes both Terminal and
 Pixel canonical bundles, unchanged ContractRef, verified manifest-only bundle
-closure and report metadata, payload tampering rejection, legacy Process, and
+closure and report metadata, payload tampering rejection, explicit unchanged local runtime model/Native
+refusal without a capable executor, legacy Process, and
 explicit Static/group refusal. Common OCI projection tests now include a Model
 Set and Asset together, verifying both RO mounts and separate writable output.
 All-target Clippy with -D warnings for both crates and cargo fmt/check passed.
