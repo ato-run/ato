@@ -4,7 +4,10 @@ use super::*;
 use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -59,11 +62,44 @@ struct CleanupContext {
     lease_root: PathBuf,
     runner_id: String,
 }
+pub(super) fn validate_heartbeat(
+    method: &str,
+    path: &str,
+    body: &serde_json::Value,
+    runner: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        method == "POST" && path == format!("/v1/runners/{runner}/heartbeat"),
+        "fixture heartbeat must belong to this Runner and use POST"
+    );
+    anyhow::ensure!(
+        body["active_slots"] == 1 && body["max_slots"] == 1 && body["slot_recovered"] == true,
+        "fixture heartbeat must describe one active recovered slot"
+    );
+    anyhow::ensure!(
+        body["os"] == std::env::consts::OS
+            && body["arch"] == std::env::consts::ARCH
+            && body["agent_version"] == env!("CARGO_PKG_VERSION")
+            && body["public_base_url"] == "https://native-runner.example",
+        "fixture heartbeat host facts differ"
+    );
+    anyhow::ensure!(
+        body["capabilities"]
+            .as_array()
+            .is_some_and(|values| values.iter().all(|v| v.is_string()))
+            && body["supported_lease_kinds"].is_array()
+            && body["supported_session_surfaces"].is_array()
+            && body["host_resources"].is_object(),
+        "fixture heartbeat collections are malformed"
+    );
+    Ok(())
+}
 pub(super) struct BrowserFixture {
     root: PathBuf,
     pub origin: String,
     clock: OnceLock<(Instant, u64)>,
     cleanup: OnceLock<CleanupContext>,
+    heartbeats_acked: AtomicUsize,
     identity: OnceLock<(
         String,
         String,
@@ -91,6 +127,7 @@ impl BrowserFixture {
             origin,
             clock: OnceLock::new(),
             cleanup: OnceLock::new(),
+            heartbeats_acked: AtomicUsize::new(0),
             identity: OnceLock::new(),
         }
     }
@@ -113,6 +150,9 @@ impl BrowserFixture {
                 })
                 .is_ok()
         );
+    }
+    pub fn ack_heartbeat(&self) {
+        self.heartbeats_acked.fetch_add(1, AtomicOrdering::AcqRel);
     }
     pub fn arm(&self) {
         let exp = SystemTime::now()
@@ -232,7 +272,7 @@ impl BrowserFixture {
         });
         let identity = self.identity.get();
         let success = success && cleanup && identity.is_some();
-        self.atomic_json("result.json", &json!({"version":1,"status":if success {"passed"} else {"failed"},
+        self.atomic_json("result.json", &json!({"version":1,"status":if success {"passed"} else {"failed"},"heartbeats_acked":self.heartbeats_acked.load(AtomicOrdering::Acquire),
             "session_id":identity.map(|(session,_,_)|session),"surface_id":identity.map(|(_,surface,_)|surface),
             "run_id":identity.map(|(_,_,scope)|&scope.run_id),"lease_id":identity.map(|(_,_,scope)|&scope.lease_id),"runner_id":identity.map(|(_,_,scope)|&scope.runner_id),
             "actual_clipboard_latin1_hex":success.then_some(CLIPBOARD_HEX),"actual_width":success.then_some(WIDTH),"actual_height":success.then_some(HEIGHT),
@@ -293,6 +333,7 @@ fn publication_and_done_files_are_owned_private_atomic_and_refuse_links() {
         origin: "https://127.0.0.1:4179".into(),
         clock: OnceLock::new(),
         cleanup: OnceLock::new(),
+        heartbeats_acked: AtomicUsize::new(0),
         identity: OnceLock::new(),
     };
     fixture.arm();
@@ -336,6 +377,7 @@ fn absent_done_cannot_extend_the_absolute_fixture_deadline() {
         origin: "https://127.0.0.1:4179".into(),
         clock: OnceLock::new(),
         cleanup: OnceLock::new(),
+        heartbeats_acked: AtomicUsize::new(0),
         identity: OnceLock::new(),
     };
     fixture
@@ -344,4 +386,25 @@ fn absent_done_cannot_extend_the_absolute_fixture_deadline() {
         .unwrap();
     assert!(fixture.wait_done().is_err());
     assert!(fixture.expired());
+}
+
+#[test]
+fn heartbeat_ack_requires_actual_runner_post_and_one_recovered_active_slot() {
+    let body = json!({"active_slots":1,"max_slots":1,"slot_recovered":true,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"agent_version":env!("CARGO_PKG_VERSION"),"public_base_url":"https://native-runner.example","capabilities":["execution_abi=oci"],"supported_lease_kinds":["runtime_launch"],"supported_session_surfaces":[],"host_resources":{}});
+    assert!(validate_heartbeat("POST", "/v1/runners/owned/heartbeat", &body, "owned").is_ok());
+    assert!(validate_heartbeat("GET", "/v1/runners/owned/heartbeat", &body, "owned").is_err());
+    assert!(validate_heartbeat("POST", "/v1/runners/foreign/heartbeat", &body, "owned").is_err());
+    for (field, value) in [
+        ("active_slots", json!(0)),
+        ("max_slots", json!(2)),
+        ("slot_recovered", json!(false)),
+        ("capabilities", json!({})),
+        ("host_resources", json!(null)),
+    ] {
+        let mut invalid = body.clone();
+        invalid[field] = value;
+        assert!(
+            validate_heartbeat("POST", "/v1/runners/owned/heartbeat", &invalid, "owned").is_err()
+        );
+    }
 }
