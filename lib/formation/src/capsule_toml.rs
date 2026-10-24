@@ -41,6 +41,10 @@ use crate::authoring::{
     PortDraft, RequirementDraft, RuntimeDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StateDraft,
     StepDraft, StepNetwork, WORKSPACE_PROTOCOL, malformed,
 };
+use crate::native_surface::{
+    NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, TERMINAL_PORT_PROTOCOL,
+    terminal_size_in_bounds,
+};
 
 /// The file an author writes, at the root of the source they upload.
 pub const CAPSULE_FILE_NAME: &str = "capsule.toml";
@@ -170,14 +174,24 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
 
     let mut derivation = DerivationDraft::default();
     let mut contract = ContractDraft::default();
+    // Read before the key loop: an `ato.pty@1` Port is only meaningful beside
+    // a declared native Surface, and TOML does not promise key order.
+    let native_declared = table
+        .get("derive")
+        .and_then(Value::as_table)
+        .is_some_and(|derive| derive.contains_key("native_surface"));
 
     for (key, value) in table {
         match key.as_str() {
             "schema" => {}
             "input" => derivation.inputs = read_inputs(value)?,
             "runtime" => derivation.runtimes = read_runtimes(value)?,
-            "derive" => derivation.steps = read_derive(value)?,
-            "port" => derivation.ports = read_ports(value)?,
+            "derive" => {
+                let (steps, native_surface) = read_derive(value)?;
+                derivation.steps = steps;
+                derivation.native_surface = native_surface;
+            }
+            "port" => derivation.ports = read_ports(value, native_declared)?,
             "state" => derivation.state = read_state(value)?,
             "contract" => contract.requirements = read_contract(value)?,
             "effects" => derivation.effects = read_effects(value)?,
@@ -256,7 +270,7 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
         "runtime":d.runtimes.iter().map(|r|json!({"name":r.name,"version":r.version})).collect::<Vec<_>>(),
         "derive":{"step":d.steps.iter().map(|t|{
             let mut value=json!({"id":t.id,"use":t.protocol,"op":t.op,"cwd":t.cwd,"env":t.env,"source":t.source,"root":t.root,"entry":t.entry,"spa_fallback":t.spa_fallback});
-            if t.protocol == PROCESS_PROTOCOL {value["argv"]=json!(t.argv);}
+            if t.protocol == PROCESS_PROTOCOL || !t.argv.is_empty() {value["argv"]=json!(t.argv);}
             if !t.network.is_denied() {value["network"]=json!(t.network);}
             value
         }).collect::<Vec<_>>()},
@@ -269,6 +283,9 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
     }
     if !d.variable_bindings.is_empty() {
         doc["variable_bindings"] = json!(d.variable_bindings);
+    }
+    if let Some(native) = &d.native_surface {
+        doc["derive"]["native_surface"] = render_native_surface(native)?;
     }
     fn omit_nulls(value: &mut Json) {
         match value {
@@ -298,6 +315,57 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
         return Err(malformed("derivation", "authoring render was not lossless").into());
     }
     Ok(text)
+}
+
+/// Reverse of [`read_native_surface`] for the shape this grammar authored.
+/// Anything richer is refused rather than silently dropped.
+fn render_native_surface(
+    native: &NativeSurfaceAdapter,
+) -> Result<serde_json::Value, CapsuleTomlError> {
+    let NativePresentation::Terminal { port, cols, rows } = &native.surface else {
+        return Err(malformed(
+            "derive.native_surface",
+            "only a Terminal Surface is representable by this authoring grammar",
+        )
+        .into());
+    };
+    let [
+        NativeProbeOperation::TerminalExchange {
+            path,
+            input,
+            output_delimiter,
+            max_output_bytes,
+            timeout_ms,
+        },
+    ] = native.operations.as_slice()
+    else {
+        return Err(malformed(
+            "derive.native_surface",
+            "this grammar represents exactly one terminal_exchange operation",
+        )
+        .into());
+    };
+    let text = |field: &str, bytes: &[u8]| -> Result<String, CapsuleTomlError> {
+        std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| {
+            CapsuleTomlError::from(malformed(
+                format!("derive.native_surface.{field}"),
+                "is not UTF-8",
+            ))
+        })
+    };
+    Ok(serde_json::json!({
+        "kind": native.surface.kind(),
+        "profile": native.surface.profile(),
+        "cols": cols,
+        "rows": rows,
+        "port": port,
+        "probe_port": native.probe_port,
+        "probe_path": path,
+        "probe_input": text("probe_input", input)?,
+        "probe_output_delimiter": text("probe_output_delimiter", output_delimiter)?,
+        "probe_max_output_bytes": max_output_bytes,
+        "probe_timeout_ms": timeout_ms,
+    }))
 }
 
 // ─────────────────────────────────────────────────────────────────── the tables
@@ -438,16 +506,128 @@ fn read_platforms(value: &Value) -> Result<Vec<PlatformDraft>, AuthoringError> {
         .collect()
 }
 
-fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
+/// `[derive.native_surface]`: the one Terminal Adapter this grammar authors.
+///
+/// The wire type is deliberately richer (Pixel, several probe operations), but
+/// a key that promised what this frontend cannot render would be a decision the
+/// author only believed they made.
+fn read_native_surface(
+    table: &toml::map::Map<String, Value>,
+) -> Result<NativeSurfaceAdapter, AuthoringError> {
+    const WHAT: &str = "derive.native_surface";
+    only(
+        table,
+        WHAT,
+        &[
+            "kind",
+            "profile",
+            "cols",
+            "rows",
+            "port",
+            "probe_port",
+            "probe_path",
+            "probe_input",
+            "probe_output_delimiter",
+            "probe_max_output_bytes",
+            "probe_timeout_ms",
+        ],
+    )?;
+    let integer = |field: &str| -> Result<i64, AuthoringError> {
+        table
+            .get(field)
+            .and_then(Value::as_integer)
+            .ok_or_else(|| malformed(format!("{WHAT}.{field}"), "expected an integer"))
+    };
+    let geometry = || {
+        malformed(
+            WHAT,
+            "terminal geometry must be 2..=500 columns and 2..=200 rows",
+        )
+    };
+    let (Ok(cols), Ok(rows)) = (
+        u16::try_from(integer("cols")?),
+        u16::try_from(integer("rows")?),
+    ) else {
+        return Err(geometry());
+    };
+    if !terminal_size_in_bounds(cols, rows) {
+        return Err(geometry());
+    }
+
+    let surface = NativePresentation::Terminal {
+        port: required_str(table, "port", WHAT)?,
+        cols,
+        rows,
+    };
+    let kind = required_str(table, "kind", WHAT)?;
+    if kind != surface.kind() {
+        return Err(malformed(
+            format!("{WHAT}.kind"),
+            format!(
+                "this build authors the {:?} Surface only; {kind:?} has no table here",
+                surface.kind()
+            ),
+        ));
+    }
+    let profile = required_str(table, "profile", WHAT)?;
+    if profile != surface.profile() {
+        return Err(malformed(
+            format!("{WHAT}.profile"),
+            format!("a {:?} Surface is {:?}", surface.kind(), surface.profile()),
+        ));
+    }
+    let max_output_bytes = u32::try_from(integer("probe_max_output_bytes")?).map_err(|_| {
+        malformed(
+            format!("{WHAT}.probe_max_output_bytes"),
+            "expected a positive byte bound",
+        )
+    })?;
+    let timeout_ms = u64::try_from(integer("probe_timeout_ms")?).map_err(|_| {
+        malformed(
+            format!("{WHAT}.probe_timeout_ms"),
+            "expected a millisecond bound",
+        )
+    })?;
+    let adapter = NativeSurfaceAdapter {
+        surface,
+        probe_port: required_str(table, "probe_port", WHAT)?,
+        operations: vec![NativeProbeOperation::TerminalExchange {
+            path: required_str(table, "probe_path", WHAT)?,
+            input: required_str(table, "probe_input", WHAT)?.into_bytes(),
+            output_delimiter: required_str(table, "probe_output_delimiter", WHAT)?.into_bytes(),
+            max_output_bytes,
+            timeout_ms,
+        }],
+    };
+    adapter
+        .validate_catalog()
+        .map_err(|error| malformed(WHAT, error))?;
+    Ok(adapter)
+}
+
+fn read_derive(
+    value: &Value,
+) -> Result<(Vec<StepDraft>, Option<NativeSurfaceAdapter>), AuthoringError> {
     let table = value
         .as_table()
         .ok_or_else(|| malformed("derive", "expected [[derive.step]] entries"))?;
-    only(table, "derive", &["step"])?;
+    only(table, "derive", &["step", "native_surface"])?;
+    let native_surface = match table.get("native_surface") {
+        None => None,
+        Some(Value::Table(native)) => Some(read_native_surface(native)?),
+        Some(_) => {
+            return Err(malformed(
+                "derive.native_surface",
+                "expected a [derive.native_surface] table",
+            ));
+        }
+    };
+    let native = native_surface.is_some();
     let steps = table
         .get("step")
         .ok_or_else(|| malformed("derive", "declares no [[derive.step]]"))?;
 
-    array_of_tables(steps, "derive.step")?
+    let steps = array_of_tables(steps, "derive.step")?
         .into_iter()
         .map(|step| {
             only(
@@ -550,7 +730,29 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                     }
                 }
                 crate::source_oci_plan::OCI_PROTOCOL => {
-                    if op != "serve" || !argv.is_empty() || step.get("source").is_none() {
+                    if op != "serve" {
+                        return Err(malformed(
+                            &what,
+                            "source OCI requires ImageDefault command and a workspace input",
+                        ));
+                    }
+                    if native {
+                        // A native Surface runs one immutable image with a
+                        // declared launch argv; there is no build input to
+                        // resolve at this layer.
+                        if argv.is_empty() {
+                            return Err(malformed(
+                                format!("{what}.argv"),
+                                "a native OCI route declares the launch argv it runs",
+                            ));
+                        }
+                        if step.get("source").is_some() {
+                            return Err(malformed(
+                                format!("{what}.source"),
+                                "a native OCI route runs its digested image, not a source input",
+                            ));
+                        }
+                    } else if !argv.is_empty() || step.get("source").is_none() {
                         return Err(malformed(
                             &what,
                             "source OCI requires ImageDefault command and a workspace input",
@@ -596,20 +798,28 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                 network,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((steps, native_surface))
 }
 
-fn read_ports(value: &Value) -> Result<Vec<PortDraft>, AuthoringError> {
+fn read_ports(value: &Value, native_declared: bool) -> Result<Vec<PortDraft>, AuthoringError> {
     array_of_tables(value, "port")?
         .into_iter()
         .map(|table| {
             only(table, "port", &["id", "use", "from", "guest_port", "bind"])?;
             let id = required_str(table, "id", "port")?;
             let protocol = required_str(table, "use", "port")?;
-            if protocol != HTTP_PROTOCOL {
+            // `ato.pty@1` is the Surface Port of a declared native Adapter.
+            // Every other Port this grammar exports is logical HTTP.
+            if protocol != HTTP_PROTOCOL
+                && !(native_declared && protocol == TERMINAL_PORT_PROTOCOL)
+            {
                 return Err(malformed(
                     format!("port.{id}.use"),
-                    format!("{protocol:?} is not a port protocol this build exports; use {HTTP_PROTOCOL}"),
+                    format!(
+                        "{protocol:?} is not a port protocol this build exports; use \
+                         {HTTP_PROTOCOL}, or {TERMINAL_PORT_PROTOCOL} beside a declared native Surface"
+                    ),
                 ));
             }
             // Checked rather than ignored: a workload bound to loopback cannot
