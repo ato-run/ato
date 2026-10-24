@@ -10,6 +10,7 @@ pub(crate) const MAX_PASTE_BYTES: usize = 64 * 1024;
 pub(crate) const ASSEMBLY_TIMEOUT: Duration = Duration::from_secs(5);
 const PASTE_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_MESSAGE_BYTES: usize = MAX_PASTE_BYTES + 8;
+const EXTENDED_CLIPBOARD_ENCODING: [u8; 4] = [0xc0, 0xa1, 0xe5, 0xce];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Rejected;
@@ -81,7 +82,25 @@ impl ClientFilter {
             let length = self.length(unix_seconds)?;
             if self.pending.len() == length {
                 self.validate(now, unix_seconds)?;
-                forwarded.extend_from_slice(&self.pending);
+                if self.handshake == 3 && self.pending[0] == 2 {
+                    // noVNC advertises ExtendedClipboard even with clipboard UI
+                    // disabled. Suppress that unsupported negotiation, never
+                    // relax negative CutText admission. Validate the original
+                    // complete message before shrinking it.
+                    let header = forwarded.len();
+                    forwarded.extend_from_slice(&self.pending[..4]);
+                    let mut count = 0u16;
+                    for encoding in self.pending[4..].chunks_exact(4) {
+                        if encoding == EXTENDED_CLIPBOARD_ENCODING {
+                            continue;
+                        }
+                        forwarded.extend_from_slice(encoding);
+                        count += 1;
+                    }
+                    forwarded[header + 2..header + 4].copy_from_slice(&count.to_be_bytes());
+                } else {
+                    forwarded.extend_from_slice(&self.pending);
+                }
                 self.pending.clear();
                 self.started = None;
             }
@@ -403,5 +422,125 @@ mod tests {
             let mut f = resizable(Some(200), Arc::default());
             assert!(f.feed(&packet, Instant::now(), 100).is_err());
         }
+    }
+    #[test]
+    fn pinned_novnc_15_advertisement_removes_only_extended_clipboard() {
+        use sha2::{Digest, Sha256};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/novnc-1.5-encodings.json"))
+                .unwrap();
+        let packet: Vec<u8> = fixture["packet"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| u8::try_from(v.as_u64().unwrap()).unwrap())
+            .collect();
+        assert_eq!(packet.len(), 92);
+        assert_eq!(
+            hex::encode(Sha256::digest(&packet)),
+            fixture["sha256"].as_str().unwrap()
+        );
+        assert_eq!(&packet[80..84], &[0xc0, 0xa1, 0xe5, 0xce]);
+        let mut expected = packet.clone();
+        expected.drain(80..84);
+        expected[2..4].copy_from_slice(&21u16.to_be_bytes());
+        assert_eq!(
+            hex::encode(Sha256::digest(&expected)),
+            "5737b9187b2562f591dcc563058cf3a16b8501479e19b73d34f9f43fb6f72744"
+        );
+        let mut f = filter(None);
+        assert_eq!(f.feed(&packet, Instant::now(), 100).unwrap(), expected);
+    }
+    fn encodings(values: &[i32]) -> Vec<u8> {
+        let mut bytes = vec![2, 0];
+        bytes.extend(u16::try_from(values.len()).unwrap().to_be_bytes());
+        for value in values {
+            bytes.extend(value.to_be_bytes());
+        }
+        bytes
+    }
+    #[test]
+    fn encodings_keep_every_other_byte_and_order_and_remove_all_duplicates() {
+        let ext = i32::from_be_bytes(EXTENDED_CLIPBOARD_ENCODING);
+        for (original, expected) in [
+            (vec![], vec![]),
+            (vec![ext], vec![]),
+            (vec![ext, ext], vec![]),
+            (
+                vec![0, -308, ext, -223, ext, 7, ext, ext + 1],
+                vec![0, -308, -223, 7, ext + 1],
+            ),
+            (vec![0, -308, -223, 7], vec![0, -308, -223, 7]),
+        ] {
+            assert_eq!(
+                filter(None)
+                    .feed(&encodings(&original), Instant::now(), 100)
+                    .unwrap(),
+                encodings(&expected)
+            );
+        }
+    }
+    #[test]
+    fn encodings_wait_for_every_original_fragment_and_filter_every_later_message() {
+        let ext = i32::from_be_bytes(EXTENDED_CLIPBOARD_ENCODING);
+        let original = encodings(&[ext, 0, ext, -308]);
+        let expected = encodings(&[0, -308]);
+        for split in 1..original.len() {
+            let mut f = filter(None);
+            let now = Instant::now();
+            assert!(f.feed(&original[..split], now, 100).unwrap().is_empty());
+            assert_eq!(f.feed(&original[split..], now, 100).unwrap(), expected);
+            assert_eq!(f.feed(&original, now, 100).unwrap(), expected);
+        }
+    }
+    #[test]
+    fn encodings_rewrite_cannot_escape_original_size_or_absolute_deadline() {
+        let ext = i32::from_be_bytes(EXTENDED_CLIPBOARD_ENCODING);
+        let limit = (MAX_MESSAGE_BYTES - 4) / 4;
+        assert_eq!(
+            filter(None)
+                .feed(&encodings(&vec![ext; limit]), Instant::now(), 100)
+                .unwrap(),
+            encodings(&[])
+        );
+        let bytes = encodings(&vec![ext; limit + 1]);
+        let mut f = filter(None);
+        assert!(f.feed(&bytes, Instant::now(), 100).is_err());
+        assert!(f.pending.len() <= 4);
+        let now = Instant::now();
+        let original = encodings(&[ext, 0]);
+        let mut f = filter(None);
+        assert!(f.feed(&original[..4], now, 100).unwrap().is_empty());
+        let deadline = f.deadline();
+        assert!(
+            f.feed(&original[4..8], now + Duration::from_secs(4), 100)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(f.deadline(), deadline);
+        assert!(f.feed(&original[8..], now + ASSEMBLY_TIMEOUT, 100).is_err());
+    }
+    #[test]
+    fn encodings_rewrite_preserves_adjacent_messages_and_negative_cuttext_denial() {
+        let ext = i32::from_be_bytes(EXTENDED_CLIPBOARD_ENCODING);
+        let mut bytes = vec![0; 20];
+        bytes.extend(encodings(&[0, ext, -308]));
+        bytes.extend([4, 1, 0, 0, 0, 0, 0, 97]);
+        let mut expected = vec![0; 20];
+        expected.extend(encodings(&[0, -308]));
+        expected.extend([4, 1, 0, 0, 0, 0, 0, 97]);
+        assert_eq!(
+            filter(None).feed(&bytes, Instant::now(), 100).unwrap(),
+            expected
+        );
+        let mut f = filter(Some(200));
+        assert_eq!(
+            f.feed(&encodings(&[ext]), Instant::now(), 100).unwrap(),
+            encodings(&[])
+        );
+        assert!(
+            f.feed(&[6, 0, 0, 0, 255, 255, 255, 255], Instant::now(), 100)
+                .is_err()
+        );
     }
 }
