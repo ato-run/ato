@@ -41,6 +41,7 @@ members = [
     "tools/legacy-vm-inspector",
     "tools/arch-check",
     "tools/receipt-authority",
+    "tools/runtime-image-ledger",
     "lib/ipc",
     "lib/host-control",
     "services/netd",
