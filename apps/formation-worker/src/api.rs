@@ -6,9 +6,9 @@
 //! validates. Anything it could reach on its own would be something an
 //! untrusted build could reach through it.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ato_runtime_attempt::journal::AttemptRecordState;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use ato_runtime_attempt::text::{FAILURE_REASON_LIMIT, bounded_reason};
 
@@ -66,6 +66,79 @@ pub struct ClaimedFormationJob {
     pub job: serde_json::Value,
 }
 
+/// The identity fields a worker reports with its lifecycle state.
+///
+/// `binary_sha256` is of the running file's bytes; the rest are the compile
+/// time build stamps. The control plane stores them so an operator can ask
+/// "what is on that host?" without shelling into it.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerIdentityReport {
+    pub commit: String,
+    pub dirty: String,
+    pub build_id: String,
+    pub rustc: String,
+    pub binary_sha256: String,
+}
+
+/// `POST /v1/internal/formation/workers/self`.
+///
+/// Reporting is not a request: the control plane stores the state and answers
+/// with a directive. A worker cannot clear its own drain or update request by
+/// reporting — those stay operator-owned.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerStateReport {
+    pub worker_id: String,
+    pub agent_version: String,
+    pub lifecycle_state: String,
+    pub identity: WorkerIdentityReport,
+    /// The attempt this process is executing right now, if any.
+    pub current_attempt_id: Option<String>,
+}
+
+/// What the control plane answers a state report with.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkerDirective {
+    #[serde(default)]
+    pub ok: bool,
+    /// Stop claiming. Set when the runner is drained or an update is required.
+    #[serde(default)]
+    pub drain: bool,
+    #[serde(default)]
+    pub target_version: Option<String>,
+    #[serde(default)]
+    pub target_digest: Option<String>,
+    #[serde(default)]
+    pub min_version: Option<String>,
+    #[serde(default)]
+    pub next_heartbeat_seconds: Option<u64>,
+}
+
+/// Why a claim was refused by the control plane.
+///
+/// These are stop signals, not transport failures: a drained worker and a
+/// worker being updated must stop claiming instead of retrying, and neither
+/// may consume an attempt fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimRefusal {
+    Drained,
+    UpdateRequired {
+        target_version: Option<String>,
+        target_digest: Option<String>,
+    },
+}
+
+/// The outcome of asking for the next job.
+#[derive(Debug)]
+pub enum ClaimOutcome {
+    Work(Box<ClaimedFormationWork>),
+    /// The queue is empty. Normal for a service.
+    Idle,
+    /// The control plane says stop. Authoritative even if a state report
+    /// failed.
+    Stopped(ClaimRefusal),
+}
+
+#[derive(Clone)]
 pub struct FormationApi {
     client: reqwest::blocking::Client,
     base: String,
@@ -119,6 +192,53 @@ impl FormationApi {
             return Ok(None);
         }
         Ok(Some(serde_json::from_value(response)?))
+    }
+
+    /// Ask for the next job, keeping the control plane's stop signals distinct
+    /// from transport failures.
+    ///
+    /// A `409` here means the worker must stop claiming — it is drained, or an
+    /// update is required — and is authoritative even when the last state
+    /// report failed. Reading it as a generic error would make the worker keep
+    /// polling for work the control plane will never hand it.
+    pub fn claim_next_controlled(&self, worker_id: &str) -> Result<ClaimOutcome> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/v1/internal/formation/claim?worker_id={worker_id}",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({}))
+            .send()?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().unwrap_or_default();
+        interpret_claim_response(status, body)
+    }
+
+    /// Tell the control plane what this worker is and what phase it is in.
+    ///
+    /// The response is the only directive channel the control plane has to
+    /// this worker; callers keep it and stop claiming when `drain` is set.
+    pub fn report_worker_state(&self, report: &WorkerStateReport) -> Result<WorkerDirective> {
+        let response = self
+            .client
+            .post(format!("{}/v1/internal/formation/workers/self", self.base))
+            .bearer_auth(&self.token)
+            .json(report)
+            .send()?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().unwrap_or_default();
+        if !status.is_success() {
+            let code = body
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            return Err(anyhow!(
+                "the control plane refused this worker state report: HTTP {status} ({code})"
+            ));
+        }
+        Ok(serde_json::from_value(body)?)
     }
 
     /// Publish only the bounded operation source from a verified closure.
@@ -407,6 +527,46 @@ fn digest_of(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+/// Read a claim response without collapsing "stop" into "error".
+///
+/// Only the two documented `409` codes are stop signals. Anything else that
+/// is not a success keeps the old behaviour — an error the caller may retry —
+/// because a worker that treats every refusal as an update instruction would
+/// idle forever on a misconfiguration.
+fn interpret_claim_response(
+    status: reqwest::StatusCode,
+    body: serde_json::Value,
+) -> Result<ClaimOutcome> {
+    if status == reqwest::StatusCode::CONFLICT {
+        return match body.get("error").and_then(serde_json::Value::as_str) {
+            Some("runner_drained") => Ok(ClaimOutcome::Stopped(ClaimRefusal::Drained)),
+            Some("runner_update_required") => {
+                Ok(ClaimOutcome::Stopped(ClaimRefusal::UpdateRequired {
+                    target_version: string_field(&body, "target_version"),
+                    target_digest: string_field(&body, "target_digest"),
+                }))
+            }
+            Some(other) => Err(anyhow!("the control plane refused the claim: {other}")),
+            None => Err(anyhow!(
+                "the control plane refused the claim (HTTP {status}) without a reason"
+            )),
+        };
+    }
+    if !status.is_success() {
+        return Err(anyhow!("failed to ask for Formation work: HTTP {status}"));
+    }
+    if body.get("job_id").is_none_or(serde_json::Value::is_null) {
+        return Ok(ClaimOutcome::Idle);
+    }
+    Ok(ClaimOutcome::Work(Box::new(serde_json::from_value(body)?)))
+}
+
+fn string_field(body: &serde_json::Value, name: &str) -> Option<String> {
+    body.get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PublishOutcome {
     Accepted {
@@ -468,5 +628,166 @@ pub fn classify_failure(error: &anyhow::Error) -> FailureReport {
         attempt_record: None,
         receipt: None,
         outcomes: None,
+    }
+}
+
+/// The worker control wire format is shared with the API (PR2a). These tests
+// leave the contract in the same place as the code that depends on it: a field
+// rename here would otherwise only fail against a live control plane.
+#[cfg(test)]
+mod worker_lifecycle_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn report() -> WorkerStateReport {
+        WorkerStateReport {
+            worker_id: "formation-sugamo".to_owned(),
+            agent_version: "0.1.1".to_owned(),
+            lifecycle_state: "active".to_owned(),
+            identity: WorkerIdentityReport {
+                commit: "17305afe0".to_owned(),
+                dirty: "clean".to_owned(),
+                build_id: "ci-123".to_owned(),
+                rustc: "rustc 1.96.0".to_owned(),
+                binary_sha256: "a".repeat(64),
+            },
+            current_attempt_id: None,
+        }
+    }
+
+    #[test]
+    fn the_state_report_uses_the_contract_field_names() {
+        let encoded = serde_json::to_value(report()).unwrap();
+        assert_eq!(
+            encoded,
+            json!({
+                "worker_id": "formation-sugamo",
+                "agent_version": "0.1.1",
+                "lifecycle_state": "active",
+                "identity": {
+                    "commit": "17305afe0",
+                    "dirty": "clean",
+                    "build_id": "ci-123",
+                    "rustc": "rustc 1.96.0",
+                    "binary_sha256": "a".repeat(64),
+                },
+                "current_attempt_id": null,
+            })
+        );
+        let mut with_attempt = report();
+        with_attempt.current_attempt_id = Some("attempt-1".to_owned());
+        assert_eq!(
+            serde_json::to_value(with_attempt).unwrap()["current_attempt_id"],
+            json!("attempt-1")
+        );
+    }
+
+    #[test]
+    fn a_directive_deserializes_from_the_contract_response() {
+        let target_digest = "b".repeat(64);
+        let directive: WorkerDirective = serde_json::from_value(json!({
+            "ok": true,
+            "drain": true,
+            "target_version": "0.1.1",
+            "target_digest": target_digest,
+            "min_version": "0.1.0",
+            "next_heartbeat_seconds": 15,
+        }))
+        .unwrap();
+        assert!(directive.ok);
+        assert!(directive.drain);
+        assert_eq!(directive.target_version.as_deref(), Some("0.1.1"));
+        assert_eq!(
+            directive.target_digest.as_deref(),
+            Some(target_digest.as_str())
+        );
+        assert_eq!(directive.min_version.as_deref(), Some("0.1.0"));
+        assert_eq!(directive.next_heartbeat_seconds, Some(15));
+
+        // A minimal response must not fail a worker that only needs `drain`.
+        let minimal: WorkerDirective =
+            serde_json::from_value(json!({"ok": true, "drain": false})).unwrap();
+        assert!(!minimal.drain);
+        assert_eq!(minimal.target_version, None);
+        assert_eq!(minimal.next_heartbeat_seconds, None);
+    }
+
+    #[test]
+    fn a_conflict_is_a_stop_signal_not_a_transport_error() {
+        let drained = interpret_claim_response(
+            reqwest::StatusCode::CONFLICT,
+            json!({"error": "runner_drained"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            drained,
+            ClaimOutcome::Stopped(ClaimRefusal::Drained)
+        ));
+
+        let update = interpret_claim_response(
+            reqwest::StatusCode::CONFLICT,
+            json!({
+                "error": "runner_update_required",
+                "target_version": "0.1.1",
+                "target_digest": null,
+            }),
+        )
+        .unwrap();
+        match update {
+            ClaimOutcome::Stopped(ClaimRefusal::UpdateRequired {
+                target_version,
+                target_digest,
+            }) => {
+                assert_eq!(target_version.as_deref(), Some("0.1.1"));
+                assert_eq!(target_digest, None);
+            }
+            other => panic!("expected an update stop signal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_failures_stay_retryable_errors() {
+        let unknown_conflict = interpret_claim_response(
+            reqwest::StatusCode::CONFLICT,
+            json!({"error": "some_other_conflict"}),
+        );
+        assert!(unknown_conflict.is_err());
+        let anonymous_conflict = interpret_claim_response(reqwest::StatusCode::CONFLICT, json!({}));
+        assert!(anonymous_conflict.is_err());
+        let server_error = interpret_claim_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "boom"}),
+        );
+        assert!(server_error.is_err());
+    }
+
+    #[test]
+    fn an_empty_queue_is_idle_and_a_job_is_work() {
+        for body in [json!({"job_id": null}), json!({})] {
+            assert!(matches!(
+                interpret_claim_response(reqwest::StatusCode::OK, body).unwrap(),
+                ClaimOutcome::Idle
+            ));
+        }
+        let work = interpret_claim_response(
+            reqwest::StatusCode::OK,
+            json!({
+                "job_id": "job-1",
+                "attempt_id": "attempt-1",
+                "attempt_fence": 7,
+                "compute_id": null,
+                "capsule_revision_id": null,
+                "job": {"schema": "ato.formation-job/1"},
+            }),
+        )
+        .unwrap();
+        match work {
+            ClaimOutcome::Work(work) => {
+                assert_eq!(work.job_id, "job-1");
+                assert_eq!(work.attempt_fence, 7);
+                assert!(!work.operation_catalog_required);
+            }
+            other => panic!("expected work, got {other:?}"),
+        }
     }
 }
