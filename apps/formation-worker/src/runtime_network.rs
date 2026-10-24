@@ -58,6 +58,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod delivery;
 pub mod proposal;
 mod publication;
+pub mod source_handoff;
 mod source_oci_exploration;
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
