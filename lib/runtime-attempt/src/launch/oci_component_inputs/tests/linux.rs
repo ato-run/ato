@@ -260,6 +260,34 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
     );
     cache.verify_cached(&entry).unwrap();
     save_component_outputs(&client, &outputs, &expected_backend, &expected_app);
+    if let Some(boundary) = boundary {
+        for user in [
+            None,
+            Some(OciUserV1 {
+                uid: boundary.uid + 1,
+                gid: boundary.gid,
+            }),
+        ] {
+            let mut wrong = spec.clone();
+            let ato_ipc::runtime_launch_v2::LaunchRealizationV2::OciServiceGroup(group) =
+                &mut wrong.realization;
+            group.services[0].user = user;
+            let service = &group.services[0];
+            let error = crate::launch::oci::service_oci_spec(
+                &wrong,
+                service,
+                &context,
+                &owner,
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("oci_user_state_owner_mismatch"),
+                "{error:#}"
+            );
+        }
+    }
+
     spec.context.run_id.push_str("-failed");
     let ato_ipc::runtime_launch_v2::LaunchRealizationV2::OciServiceGroup(group) =
         &mut spec.realization;
