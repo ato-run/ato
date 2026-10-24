@@ -71,3 +71,22 @@ Worker library test executable SHA-256:
 Full logs, before/after hashes and cleanup evidence are retained in `logs/` and
 in the independent Linux mirror parent. No Cargo/test process remains active;
 shared target ownership is released after this report.
+
+## Source Requester integration
+
+Draft #1538 at `2d3aeebb7876d43a47d198bb76c124962dbf32cb` was merged later,
+producing clean integration `343d3c6cfded4109d8c918d3ca7d6d13521840cd`.
+It changes no Native/ModelSet/component production code. Independent read-only
+review found no new P1/P2. The local archive/Binding/origin checks establish
+consistency; the server retains ownership, current-fence and admission authority.
+The owner request is unchanged, provenance stays in the query, and the two POSTs
+are bounded without redirects, proxy use, retry or legacy-upload fallback.
+Root-only and the existing zero-known-D example restriction remain explicit.
+
+The merged source passed focused macOS checks: all-target compilation with four
+handoff tests, two owner-JSON example cases, one legacy-submit case, and fmt.
+Fresh task-specific ATO_HOME/TMPDIR and an isolated target were used without
+changing HOME/CODEX_HOME. Git remained clean. Logs are retained under
+`.tmp/requester-integration/`. Seven intersections were checked; the author's
+399-test regression was not repeated. The earlier Linux evidence remains tied
+to 876cb714 and is not relabelled as Linux or staging execution of this client.
