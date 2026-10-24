@@ -230,11 +230,11 @@ exploit was possible.
 
 | PR | Repository | Branch | Scope | Status |
 |---|---|---|---|---|
-| 1 | `ato` | `docs/continuous-patching-ledger` | This ledger | open |
-| 2a | `ato-api` | `feat/formation-worker-update-control` | Formation claim honors drain; managed worker state report; operator update request; additive migration | implementation |
-| 2b | `ato` | `feat/formation-worker-update-lifecycle` | Worker-side lifecycle journal, drain/stop, version+digest verification, operator runbook | implementation |
-| 3 | `ato` | `fix/cve-2026-111497-node-brotli` | Node catalog moved off affected/EOL versions; CVE receipt | implementation |
-| 4 | `ato` | `feat/runtime-image-ledger` | Versioned runtime-image ledger (`ato.runtime-image-inventory/1`: digest, base digests, runtime versions, declared SBOM/scan/provenance, Derivation, Contract K + receipt refs) and a fail-closed patch-candidate validator. It records declared evidence; it does not scan, sign, or produce receipts. | implementation |
+| 1 | `ato` | `docs/continuous-patching-ledger` | This ledger | [#1546](https://github.com/ato-run/ato/pull/1546) |
+| 2a | `ato-api` | `feat/formation-worker-update-control` | Formation claim honors drain; managed worker state report; operator update request; additive migration | [#879](https://github.com/ato-run/ato-api/pull/879) |
+| 2b | `ato` | `feat/formation-worker-update-lifecycle` | Worker-side lifecycle journal, drain/stop, version+digest verification, operator runbook | [#1547](https://github.com/ato-run/ato/pull/1547) |
+| 3 | `ato` | `fix/cve-2026-111497-node-brotli` | Node catalog moved off affected/EOL versions; CVE receipt | [#1548](https://github.com/ato-run/ato/pull/1548) |
+| 4 | `ato` | `feat/runtime-image-ledger` | Versioned runtime-image ledger (`ato.runtime-image-inventory/1`: digest, base digests, runtime versions, declared SBOM/scan/provenance, Derivation, Contract K + receipt refs) and a fail-closed patch-candidate validator. It records declared evidence; it does not scan, sign, or produce receipts. | [#1549](https://github.com/ato-run/ato/pull/1549) |
 | 5 | TBD | — | D1 index: one `runtime_images` row per digest (base digests, runtime versions, SBOM/scan artifact refs, Derivation, latest receipt), written at Formation acceptance, read-only list route. Reuses the existing receipt schema and authority; no new K evaluator in TypeScript. | planned |
 | 6 | TBD | — | Patch candidate rebuild + Contract K re-verification harness on the existing `source-patch → submitFormationJob → acceptResult` path, emitting a receipt and a ledger record. | planned |
 | 7 | TBD | — | Staging auto-update E2E (needs host access; cannot be verified from a source checkout). | planned |
