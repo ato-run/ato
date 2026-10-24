@@ -366,7 +366,8 @@ Therefore:
 | Platform browser verifier Node | **n/a** | not the app's runtime |
 | Node bundled inside a user OCI image | **no** | digest pin only; the platform cannot know without an image SBOM/scan. `runtime_image_index` records `not_run`, never green |
 | Undeclared runtime: `argv` = `node`, `sh -c "node …"`, `npx`, shell scripts | **no** | gates read runtime declarations, not argv |
-| Authored `env.PATH` pointing at an affected toolchain while D declares patched | **partial** | Rust gate does not inspect env; #880 checks `public_env.PATH` only on the compute path |
+| **Declared patched, but `argv[0]` is an absolute `/opt/ato/toolchains/node/<affected>/bin/…`** | **no (real bypass)** | `execution.rs:256-271` allows absolute argv; the gate reads only `runtimes` |
+| Authored `env.PATH` pointing at an affected toolchain while D declares patched | **partial (real bypass outside compute)** | Rust gate does not inspect env (`execution.rs:72-86`); #880 checks `public_env.PATH` only on the compute path |
 | App changes `PATH` at runtime (dotenv, export, child process) | **no** | static pre-launch gates |
 | Already-issued leases, running Runs, old binaries/old API | **no** | no retroactive stop; a gate is not a kill switch |
 
@@ -377,6 +378,12 @@ Therefore:
    declared a patched release).
 2. Undeclared execution (`argv`, shell, `npx`, script) is out of scope by
    design; static detection of arbitrary command construction is not attempted.
+   **Exception, tracked as a real bypass rather than a non-goal:** an absolute
+   `/opt/ato/toolchains/node/<version>/bin/...` path in `argv` or in an authored
+   `env.PATH` is a deterministic reference the gate *could* classify, and it
+   currently does not. Until a follow-up closes it, a Derivation can declare a
+   patched runtime and still execute an affected toolchain on a host that kept
+   it. Do not read "admitted" as "patched" until this is fixed and tested.
 3. Image contents, including a Node binary inside a user OCI image, are out of
    scope. That needs image-level SBOM/scan and advisory matching, which does not
    exist yet.
