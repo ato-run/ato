@@ -3234,6 +3234,22 @@ default = "pure"
                 route.model_sets[0].reference
             );
             // The container profile admits the data shape, not local execution.
+            let refused = ato_runtime_attempt::admission::admit(
+                &route.attempt_spec(None),
+                ato_runtime_attempt::admission::EffectAuthorization::UserInvoked {
+                    derivation_ref: route.derivation_ref.as_str(),
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                refused.code,
+                if native.is_some() {
+                    "native_surface_unavailable"
+                } else {
+                    "model_set_unavailable"
+                }
+            );
             for model in &route.model_sets[0].manifest.objects {
                 assert!(
                     bundle
