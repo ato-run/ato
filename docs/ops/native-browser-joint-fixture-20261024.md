@@ -136,7 +136,33 @@ journal and lease directory, including after test panic. Unknown is never passed
   unobserved facts null, one heartbeat ACK, full cleanup=true. All identity
   fields matched ready/ACK/result. No positive browser Run was started for this
   negative check.
-- Positive Chrome joint acceptance with the checkpoint remains pending.
+- Third Chrome joint attempt passed on the frozen checkpoint candidate. Root
+  orchestrated one checkpoint and one done transfer for fresh
+  `/opt/ato/.tmp/native-browser.fVj3N0`, Runner946707 and
+  lease `native-dispatch-946707-77b6f5242caebcc4`. Actual checkpoint Xselection
+  was `636166e9090a` (Some expected), paste-denial close/unchanged was true,
+  and the correlated12-field ACK passed before resize. After browser Stop,
+  post-disconnect selection was independently observed as None. This supports
+  the timing hypothesis in this test, not a clipboard-persistence guarantee.
+- Final Runtime facts all passed: actual1024x768, false-permission resize,
+  independent Runtime reconnect and canonical full frame, original K,
+  byte-identical frozen GET, output saved, OCI resources/public+hidden
+  listeners/journal/lease cleanup. A separate Docker query for this exact
+  Runner found zero containers and zero networks. All658 source input hashes
+  and the test-binary hash still matched after the run.
+- Browser authority is separate: actual installed Chrome/shared
+  SessionSurfaceRenderer/noVNC performed initial640x480 frame, user-gesture
+  Latin-1 paste, checkpoint ACK, resize1024x768, second authenticated WebSocket
+  and canvas frame on the same Surface, then Stop. Playwright passed8.6s;
+  Runtime preparation6902ms, lease execution11363ms, ignored test19.03s.
+  Root's21.6s orchestration includes SSH/preparation/browser/file synchronization
+  and is not a product latency metric. No Hosted authentication or staging
+  browser session was used. Control-plane/grants remain fixtures.
+- Local evidence is under `.tmp/linux-evidence/joint3/` (ready/checkpoint/done,
+  ACK/result, Runtime/browser logs, orchestration, independent cleanup and
+  all-input hash check). Parent and frontend retain their independent logs at
+  `.tmp/nbj-th4h7f3q` and the PWA fixture's matching artifact directory.
+  Initial failed attempts and negative checks remain retained.
 
 Own Linux source:
 `/home/ekohsuke/ato-run/.tmp/native-browser-joint-20261024/source`.
