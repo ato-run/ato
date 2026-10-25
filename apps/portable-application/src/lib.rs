@@ -20,7 +20,9 @@ use ato_formation::authoring::{
     TCP_PROTOCOL, WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
-use ato_formation::capsule_toml_v2::{PortableDerivationKindV2, parse_capsule_toml_v2};
+use ato_formation::capsule_toml_v2::{
+    PortableDerivationKindV2, parse_capsule_toml_v2, parse_capsule_toml_v2_derivation_candidate,
+};
 use ato_materializer_static_web::{media_type_for, validate_relative_path};
 use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION, PORTABLE_APPLICATION_PROFILE, PortableApplicationBundle,
@@ -1026,7 +1028,13 @@ pub fn build_static_bundle(
     let derivation_ref = add_structured(&mut objects, &derivation, BOUND_DERIVATION_SCHEMA)?;
     let application_ref = add_structured(&mut objects, &application, APPLICATION_SCHEMA)?;
 
-    let bundle = finish_bundle(objects, contract_ref, application_ref, vec![derivation_ref]);
+    let bundle = finish_bundle(
+        objects,
+        contract_ref,
+        application_ref,
+        vec![derivation_ref],
+        BundleShape::v3(),
+    );
     validate_bundle(&bundle)?;
     let bytes = encode_portable_application_bundle(&bundle)?;
     Ok((bytes, bundle))
@@ -1137,6 +1145,7 @@ pub fn build_multi_derivation_bundle(
         contract_ref,
         application_ref,
         vec![static_ref, process_ref],
+        BundleShape::v3(),
     );
     let validated = validate_all_derivations(&bundle)?;
     if validated
@@ -1201,14 +1210,73 @@ pub fn build_dynamic_process_oci_bundle(
 /// Contract/Application/Derivation objects used by fixture builders. The TOML
 /// bytes and author-facing route labels are deliberately not bundled or
 /// digested.
+///
+/// `ato pack` and every normal authoring path require the manifest to declare
+/// its `[contract]`; the Contract is derived here and is the bundle root.
 pub fn build_authored_bundle_v2(
     source_root: &Path,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    let spec = authored_bundle_spec_v2(source_root, true)?;
+    build_dynamic_routes_bundle(source_root, &spec)
+}
+
+/// Parse a new source as a derivation candidate for Contract-preserving
+/// transformation: `[contract]` is optional here and is never used to mint K.
+///
+/// This is the only caller of the optional-contract parse mode. The resulting
+/// spec is handed to `build_derivation_candidate_bundle`, which writes the
+/// FROZEN Contract as the bundle root.
+pub(crate) fn authored_derivation_candidate_spec(
+    source_root: &Path,
+) -> Result<PortableAuthoredBundleSpec, PortableApplicationError> {
+    authored_bundle_spec_v2(source_root, false)
+}
+
+/// The Contract a route set would derive on its own, used only to compare a
+/// candidate manifest's DECLARED contract to the frozen one. It never becomes
+/// the bundle root.
+pub(crate) fn http_contract_from_requirements(
+    requirements: &[PortableHttpRequirementSpec],
+) -> Result<BoundContract, PortableApplicationError> {
+    let mut bound = requirements
+        .iter()
+        .map(|requirement| BoundRequirement {
+            id: requirement.id.clone(),
+            verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
+            port: Some("app.http".to_owned()),
+            method: Some("GET".to_owned()),
+            path: Some(requirement.path.clone()),
+            status: Some(requirement.status),
+            body_digest: requirement.body_digest.clone(),
+            input: None,
+            digest: None,
+        })
+        .collect::<Vec<_>>();
+    bound.sort_by(|left, right| left.id.cmp(&right.id));
+    if bound.windows(2).any(|pair| pair[0].id == pair[1].id) {
+        return Err(profile(
+            "dynamic Contract contains duplicate observation ids",
+        ));
+    }
+    Ok(BoundContract {
+        schema: BOUND_CONTRACT_SCHEMA.to_owned(),
+        requirements: bound,
+    })
+}
+
+fn authored_bundle_spec_v2(
+    source_root: &Path,
+    contract_required: bool,
+) -> Result<PortableAuthoredBundleSpec, PortableApplicationError> {
     let text = read(source_root.join(CAPSULE_FILE_NAME))?;
     let text = std::str::from_utf8(&text)
         .map_err(|error| profile(format!("capsule.toml is not UTF-8: {error}")))?;
-    let draft = parse_capsule_toml_v2(text)
-        .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
+    let draft = if contract_required {
+        parse_capsule_toml_v2(text)
+    } else {
+        parse_capsule_toml_v2_derivation_candidate(text)
+    }
+    .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
     let routes = draft
         .derivations
         .into_iter()
@@ -1255,69 +1323,90 @@ pub fn build_authored_bundle_v2(
             startup: derivation.startup,
         })
         .collect();
-    build_dynamic_routes_bundle(
-        source_root,
-        &PortableAuthoredBundleSpec {
-            title: draft.title,
-            surface_path: draft.surface_path,
-            routes,
-            filesystem_state: draft.state.into_iter().next().map(|state| {
-                PortableFilesystemStateSpec {
-                    id: state.id,
-                    mount: state.mount,
-                }
+    Ok(PortableAuthoredBundleSpec {
+        title: draft.title,
+        surface_path: draft.surface_path,
+        routes,
+        filesystem_state: draft
+            .state
+            .into_iter()
+            .next()
+            .map(|state| PortableFilesystemStateSpec {
+                id: state.id,
+                mount: state.mount,
             }),
-            bindings: draft
-                .bindings
-                .into_iter()
-                .map(|binding| ApplicationBindingV1 {
-                    id: binding.id,
-                    protocol: binding.protocol,
-                    required: binding.required,
-                })
-                .collect(),
-            requirements: draft
-                .observations
-                .into_iter()
-                .map(|observation| PortableHttpRequirementSpec {
-                    id: observation.id,
-                    path: observation.path,
-                    status: observation.status,
-                    body_digest: observation.body_digest,
-                })
-                .collect(),
-            effects: draft.effects,
-            model_sets: draft
-                .model_sets
-                .iter()
-                .map(|input| {
-                    let bytes = read(source_root.join(&input.manifest_path))?;
-                    let (manifest, digest) =
-                        ato_formation::model_set::ModelSetManifest::from_canonical_bytes(&bytes)
-                            .map_err(|e| {
-                                profile(format!(
-                                    "Model Set manifest {} is invalid: {e}",
-                                    input.manifest_path
-                                ))
-                            })?;
-                    if digest != input.content_ref {
-                        return Err(profile(format!(
-                            "Model Set manifest {} is {digest}, not the pinned {}",
-                            input.manifest_path, input.content_ref
-                        )));
-                    }
-                    Ok((input.id.clone(), input.manifest_path.clone(), manifest))
-                })
-                .collect::<Result<_, PortableApplicationError>>()?,
-        },
-    )
+        bindings: draft
+            .bindings
+            .into_iter()
+            .map(|binding| ApplicationBindingV1 {
+                id: binding.id,
+                protocol: binding.protocol,
+                required: binding.required,
+            })
+            .collect(),
+        requirements: draft
+            .observations
+            .into_iter()
+            .map(|observation| PortableHttpRequirementSpec {
+                id: observation.id,
+                path: observation.path,
+                status: observation.status,
+                body_digest: observation.body_digest,
+            })
+            .collect(),
+        effects: draft.effects,
+        model_sets: draft
+            .model_sets
+            .iter()
+            .map(|input| {
+                let bytes = read(source_root.join(&input.manifest_path))?;
+                let (manifest, digest) =
+                    ato_formation::model_set::ModelSetManifest::from_canonical_bytes(&bytes)
+                        .map_err(|e| {
+                            profile(format!(
+                                "Model Set manifest {} is invalid: {e}",
+                                input.manifest_path
+                            ))
+                        })?;
+                if digest != input.content_ref {
+                    return Err(profile(format!(
+                        "Model Set manifest {} is {digest}, not the pinned {}",
+                        input.manifest_path, input.content_ref
+                    )));
+                }
+                Ok((input.id.clone(), input.manifest_path.clone(), manifest))
+            })
+            .collect::<Result<_, PortableApplicationError>>()?,
+    })
 }
 
 pub fn build_dynamic_routes_bundle(
     source_root: &Path,
     spec: &PortableAuthoredBundleSpec,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
-    if spec.title.trim().is_empty() || spec.requirements.is_empty() {
+    build_routes_bundle(source_root, spec, None)
+}
+
+/// Build a candidate bundle whose Contract IS the frozen one.
+///
+/// The Contract object written into the bundle is the frozen canonical body,
+/// never one derived from the new source. The new source contributes only
+/// application/input/derivation objects, and each Derivation must declare the
+/// Ports/inputs the frozen Contract names.
+pub(crate) fn build_derivation_candidate_bundle(
+    source_root: &Path,
+    spec: &PortableAuthoredBundleSpec,
+    frozen_contract: &BoundContract,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_routes_bundle(source_root, spec, Some(frozen_contract))
+}
+
+fn build_routes_bundle(
+    source_root: &Path,
+    spec: &PortableAuthoredBundleSpec,
+    frozen_contract: Option<&BoundContract>,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    if spec.title.trim().is_empty() || (frozen_contract.is_none() && spec.requirements.is_empty()) {
         return Err(profile(
             "dynamic application requires a title and at least one HTTP observation",
         ));
@@ -1458,30 +1547,11 @@ pub fn build_dynamic_routes_bundle(
         source_oci: None,
         effects: spec.effects,
     };
-    let mut requirements = spec
-        .requirements
-        .iter()
-        .map(|requirement| BoundRequirement {
-            id: requirement.id.clone(),
-            verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
-            port: Some("app.http".to_owned()),
-            method: Some("GET".to_owned()),
-            path: Some(requirement.path.clone()),
-            status: Some(requirement.status),
-            body_digest: requirement.body_digest.clone(),
-            input: None,
-            digest: None,
-        })
-        .collect::<Vec<_>>();
-    requirements.sort_by(|left, right| left.id.cmp(&right.id));
-    if requirements.windows(2).any(|pair| pair[0].id == pair[1].id) {
-        return Err(profile(
-            "dynamic Contract contains duplicate observation ids",
-        ));
-    }
-    let contract = BoundContract {
-        schema: BOUND_CONTRACT_SCHEMA.to_owned(),
-        requirements,
+    let contract = match frozen_contract {
+        // The frozen K is carried as data: this builder neither re-derives nor
+        // edits it. Its canonical bytes are checked against its own ref below.
+        Some(contract) => contract.clone(),
+        None => http_contract_from_requirements(&spec.requirements)?,
     };
     validate_application_bindings(&spec.bindings)?;
     let application = ApplicationV2 {
@@ -1495,12 +1565,46 @@ pub fn build_dynamic_routes_bundle(
         bindings: spec.bindings.clone(),
     };
 
+    // A different source cannot satisfy a source-bound K. The transformation
+    // layer refuses this before building; the builder refuses it too so no
+    // caller can assemble such a bundle by accident.
+    if let Some(frozen) = frozen_contract
+        && crate::transformation::frozen_contract_is_source_bound(frozen)
+    {
+        return Err(PortableApplicationError::Transformation {
+            code: crate::transformation::FROZEN_CONTRACT_IS_SOURCE_BOUND,
+            detail: "a source-bound frozen Contract cannot admit a different source".to_owned(),
+        });
+    }
     let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
+    if let Some(frozen) = frozen_contract {
+        let expected = frozen
+            .contract_ref()
+            .map_err(|error| PortableApplicationError::Binding(error.to_string()))?;
+        if contract_ref != expected {
+            return Err(PortableApplicationError::Transformation {
+                code: crate::transformation::CANDIDATE_CONTRACT_MISMATCH,
+                detail: format!(
+                    "the frozen Contract body digests to {contract_ref}, not its declared {expected}"
+                ),
+            });
+        }
+    }
     let mut derivation_refs = Vec::with_capacity(spec.routes.len());
     for route in &spec.routes {
+        let bound = derivation(route);
+        if let Some(frozen) = frozen_contract {
+            ato_formation::authoring::validate_derivation_against_contract(&bound, frozen)
+                .map_err(|error| PortableApplicationError::Transformation {
+                    code: crate::transformation::CANDIDATE_DERIVATION_NOT_COMPATIBLE,
+                    detail: format!(
+                        "candidate Derivation does not bind the frozen Contract: {error}"
+                    ),
+                })?;
+        }
         derivation_refs.push(add_structured(
             &mut objects,
-            &derivation(route),
+            &bound,
             BOUND_DERIVATION_SCHEMA,
         )?);
     }
@@ -1510,8 +1614,25 @@ pub fn build_dynamic_routes_bundle(
         ));
     }
     let application_ref = add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?;
-    let bundle = finish_bundle(objects, contract_ref, application_ref, derivation_refs);
-    let validated = validate_all_derivations(&bundle)?;
+    let bundle = finish_bundle(
+        objects,
+        contract_ref,
+        application_ref,
+        derivation_refs,
+        BundleShape::v3(),
+    );
+    let validated = match validate_all_derivations(&bundle) {
+        Ok(validated) => validated,
+        Err(error) if frozen_contract.is_some() => {
+            return Err(PortableApplicationError::Transformation {
+                code: crate::transformation::CANDIDATE_DERIVATION_NOT_COMPATIBLE,
+                detail: format!(
+                    "the candidate bundle does not validate under the frozen Contract: {error}"
+                ),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     if validated.len() != spec.routes.len() {
         return Err(profile(
             "validated route count does not equal the authored route count",
@@ -2611,11 +2732,37 @@ fn build_portable_tree_with_schema(
     Ok((objects, tree_ref))
 }
 
+/// The wire shape a finished bundle is emitted in.
+///
+/// A normal authored bundle is v3. A Contract-preserving transformation emits
+/// the same frozen shape the input declared, so a v4 input (with its portability
+/// manifest and, where present, its Instance snapshot) is not silently
+/// downgraded by the builder itself.
+#[derive(Debug, Clone)]
+struct BundleShape {
+    version: u32,
+    profile: String,
+    instance_snapshot_ref: Option<String>,
+    portability: Option<ato_objects::PortableDependencyTransport>,
+}
+
+impl BundleShape {
+    fn v3() -> Self {
+        Self {
+            version: PORTABLE_APPLICATION_BUNDLE_VERSION,
+            profile: PORTABLE_APPLICATION_PROFILE.to_owned(),
+            instance_snapshot_ref: None,
+            portability: None,
+        }
+    }
+}
+
 fn finish_bundle(
     objects: BTreeMap<String, ObjectToEncode>,
     root_contract_ref: String,
     application_ref: String,
     mut derivations: Vec<String>,
+    shape: BundleShape,
 ) -> PortableApplicationBundle {
     let mut descriptors = Vec::with_capacity(objects.len());
     let mut payloads = Vec::with_capacity(objects.len());
@@ -2640,16 +2787,16 @@ fn finish_bundle(
     derivations.sort();
     PortableApplicationBundle {
         index: PortableBundleIndex {
-            version: PORTABLE_APPLICATION_BUNDLE_VERSION,
-            profile: PORTABLE_APPLICATION_PROFILE.to_owned(),
+            version: shape.version,
+            profile: shape.profile,
             root_contract_ref,
             application_ref,
-            instance_snapshot_ref: None,
+            instance_snapshot_ref: shape.instance_snapshot_ref,
             derivations,
             objects: descriptors,
         },
         payloads,
-        portability: None,
+        portability: shape.portability,
         signatures: Vec::new(),
     }
 }

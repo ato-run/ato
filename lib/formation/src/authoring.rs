@@ -640,7 +640,68 @@ pub fn bind(
     Ok((contract, derivation))
 }
 
-fn bind_derivation(
+/// Bind a route draft against an ALREADY frozen Contract.
+///
+/// This is the transformation path: K is not derived here and is never
+/// returned or rewritten. The function only proves the Derivation can satisfy
+/// the frozen Contract's references — an HTTP observation must name a Port the
+/// Derivation declares, an input identity must name one of its inputs — so the
+/// caller can carry the frozen canonical Contract bytes into the new bundle.
+pub fn bind_derivation_against_contract(
+    draft: &DerivationDraft,
+    context: &BindingContext<'_>,
+    contract: &BoundContract,
+) -> Result<BoundDerivation, AuthoringError> {
+    let derivation = bind_derivation(draft, context)?;
+    validate_derivation_against_contract(&derivation, contract)?;
+    Ok(derivation)
+}
+
+/// Does this Derivation declare every Port and input the frozen Contract
+/// names?
+///
+/// Contract identity is not re-derived: this only checks the references that
+/// bind K to a specific route. A Contract requirement with no `port` and no
+/// `input` (for example an Instance snapshot observation) binds the index, not
+/// the Derivation, so it is not checked here.
+pub fn validate_derivation_against_contract(
+    derivation: &BoundDerivation,
+    contract: &BoundContract,
+) -> Result<(), AuthoringError> {
+    let known_inputs: BTreeSet<&str> = derivation.inputs.iter().map(|i| i.id.as_str()).collect();
+    let known_ports: BTreeSet<&str> = derivation.ports.iter().map(|p| p.id.as_str()).collect();
+    for requirement in &contract.requirements {
+        if let Some(port) = &requirement.port
+            && !known_ports.contains(port.as_str())
+        {
+            return Err(AuthoringError::Unresolved {
+                referrer: format!("contract.require.{}", requirement.id),
+                what: "port",
+                id: port.clone(),
+            });
+        }
+        if let Some(input) = &requirement.input
+            && !known_inputs.contains(input.as_str())
+        {
+            return Err(AuthoringError::Unresolved {
+                referrer: format!("contract.require.{}", requirement.id),
+                what: "input",
+                id: input.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a route draft into one addressable Derivation, without a Contract.
+///
+/// [bind] is the normal path: it binds the Derivation and then the Contract the
+/// author declared. Contract-preserving transformation is the case where the
+/// Contract is already frozen elsewhere (an existing bundle), so only the
+/// Derivation is derived from the new source. The caller then binds that
+/// Derivation to the frozen Contract with
+/// [`bind_derivation_against_contract`].
+pub fn bind_derivation(
     draft: &DerivationDraft,
     context: &BindingContext<'_>,
 ) -> Result<BoundDerivation, AuthoringError> {
