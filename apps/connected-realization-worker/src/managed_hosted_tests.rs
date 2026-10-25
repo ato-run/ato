@@ -256,6 +256,9 @@ fn actual_managed_embedding_lease_materializes_redeems_verifies_and_stops() {
                     shape: CandidateShape::Process,
                     input_refs: BTreeMap::new(),
                     instance_snapshot_ref: None,
+                    // This fixture declares HTTP requirements only; scenario
+                    // requirements would fail closed as unobserved.
+                    scenarios: Vec::new(),
                 };
                 // Runtime principal facts belong to the ready report. The shared
                 // receipt schema carries its explicit, smaller evidence projection.
@@ -272,6 +275,7 @@ fn actual_managed_embedding_lease_materializes_redeems_verifies_and_stops() {
                 let receipt = verify_observed_candidate(
                     &attempt,
                     observations,
+                    Vec::new(),
                     evidence,
                     &ReceiptContext {
                         target: VerificationTargetKind::AtoRunHosted,
