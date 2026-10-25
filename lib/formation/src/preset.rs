@@ -463,6 +463,7 @@ pub fn synthesize_authoring_with_identity(
             requirements,
         },
         derivation: DerivationDraft {
+            native_surface: None,
             runtime_port_operations: vec![],
             variable_bindings: vec![],
             requirements: Default::default(),
