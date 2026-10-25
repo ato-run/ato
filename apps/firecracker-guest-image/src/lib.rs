@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_workspace::{WorkspaceSnapshot, restore_workspace};
 use ato_computation::{ComputationRef, ContentRef, SemanticsId};
 use ato_objects::{ObjectResolver, read_exact_object, resolve_computation};
+use guest_agent::pixel::PixelProducerConfig;
 use guest_agent::supervisor::{StdioMode, SupervisorConfig};
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,8 @@ const MAX_WORKSPACE_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct GuestPhysicalBuildProfile {
     pub base_image: String,
+    pub stdio_mode: StdioMode,
+    pub pixel_surface: Option<PixelProducerConfig>,
     pub guest_agent: PathBuf,
     pub kernel: PathBuf,
     pub image_size_mib: u64,
@@ -48,6 +51,10 @@ pub struct GuestNetwork {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuestBuildPlan {
     pub target_computation_ref: String,
+    #[serde(skip_serializing_if = "is_log_stdio")]
+    pub stdio_mode: StdioMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_surface: Option<PixelProducerConfig>,
     pub workspace: GuestWorkspacePlan,
     pub processes: Vec<GuestProcess>,
     pub http_relays: Vec<HttpRelay>,
@@ -161,6 +168,10 @@ struct PortConfig {
     environment: Option<String>,
     #[serde(default)]
     internal: bool,
+}
+
+fn is_log_stdio(mode: &StdioMode) -> bool {
+    *mode == StdioMode::Log
 }
 
 fn default_cwd() -> PathBuf {
@@ -293,11 +304,22 @@ pub fn derive_guest_build_plan(
         });
     }
     ensure!(
-        !http_relays.is_empty(),
-        "Computation has no ato.http@1 Adapter"
+        !http_relays.is_empty()
+            || profile.pixel_surface.is_some()
+            || profile.stdio_mode == StdioMode::Pty,
+        "Computation has no ato.http@1 Adapter and no explicit native surface profile"
     );
 
+    if let Some(pixel) = &profile.pixel_surface {
+        ensure!(
+            !relay_ports.contains(&pixel.rfb_port),
+            "pixel RFB port conflicts with an HTTP relay"
+        );
+    }
+
     Ok(GuestBuildPlan {
+        stdio_mode: profile.stdio_mode,
+        pixel_surface: profile.pixel_surface.clone(),
         target_computation_ref: target.to_string(),
         workspace: GuestWorkspacePlan {
             snapshot_ref: snapshot_ref.to_string(),
@@ -342,7 +364,7 @@ pub fn build_guest_image(
     write_file(&context.join("ato/init"), init_script(&plan).as_bytes())?;
     write_file(
         &context.join("Dockerfile"),
-        dockerfile(&plan.base_image).as_bytes(),
+        dockerfile(&plan.base_image, plan.pixel_surface.is_some()).as_bytes(),
     )?;
 
     let tag = format!("ato-firecracker-guest:{}", safe_tag(target));
@@ -404,6 +426,13 @@ pub fn build_guest_image(
 }
 
 fn validate_profile(profile: &GuestPhysicalBuildProfile) -> Result<()> {
+    if let Some(pixel) = &profile.pixel_surface {
+        pixel.validate().map_err(anyhow::Error::msg)?;
+        ensure!(
+            profile.stdio_mode == StdioMode::Log,
+            "pixel and terminal surfaces are mutually exclusive"
+        );
+    }
     ensure!(
         profile.base_image.contains("@sha256:"),
         "base image must be pinned by immutable sha256 digest"
@@ -490,7 +519,8 @@ fn supervisor_config(plan: &GuestBuildPlan) -> Result<SupervisorConfig> {
     );
     let process = &plan.processes[0];
     Ok(SupervisorConfig {
-        stdio_mode: StdioMode::Log,
+        stdio_mode: plan.stdio_mode,
+        pixel_surface: plan.pixel_surface.clone(),
         cmd: process.command.clone(),
         cwd: process.cwd.clone(),
         base_env: BTreeMap::new(),
@@ -501,16 +531,21 @@ fn supervisor_config(plan: &GuestBuildPlan) -> Result<SupervisorConfig> {
     })
 }
 
-fn dockerfile(base_image: &str) -> String {
+fn dockerfile(base_image: &str, pixel: bool) -> String {
     // Alpine links /sbin/init to busybox. Replacing through that symlink
     // destroys the shell needed by the remaining image construction steps.
+    let dependencies = if pixel {
+        "RUN command -v bash && command -v Xtigervnc && command -v xauth && command -v xdpyinfo\n"
+    } else {
+        ""
+    };
     format!(
-        "FROM {base_image}\nCOPY workspace/ /workspace/\nCOPY ato/ato-guest-agent /usr/local/bin/ato-guest-agent\nCOPY ato/supervisor.json /etc/ato/supervisor.json\nRUN rm -f /sbin/init\nCOPY ato/init /sbin/init\nRUN chmod 0755 /usr/local/bin/ato-guest-agent /sbin/init\n"
+        "FROM {base_image}\n{dependencies}COPY workspace/ /workspace/\nCOPY ato/ato-guest-agent /usr/local/bin/ato-guest-agent\nCOPY ato/supervisor.json /etc/ato/supervisor.json\nRUN rm -f /sbin/init\nCOPY ato/init /sbin/init\nRUN chmod 0755 /usr/local/bin/ato-guest-agent /sbin/init\n"
     )
 }
 
 fn init_script(plan: &GuestBuildPlan) -> String {
-    let relays = plan
+    let mut relays = plan
         .http_relays
         .iter()
         .map(|relay| {
@@ -521,6 +556,9 @@ fn init_script(plan: &GuestBuildPlan) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    if let Some(pixel) = &plan.pixel_surface {
+        relays.push_str(&format!("\n/usr/local/bin/ato-guest-agent tcp-relay --listen-guest-port {} --target 127.0.0.1:{} >/dev/console 2>&1 &", pixel.rfb_port, pixel.rfb_port));
+    }
     format!(
         "#!/bin/sh\nexport PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nexport PYTHONDONTWRITEBYTECODE=1 HOME=/tmp\nmount -t proc proc /proc 2>/dev/null || true\nmount -t sysfs sysfs /sys 2>/dev/null || true\nmount -t devtmpfs devtmpfs /dev 2>/dev/null || true\nmount -t tmpfs tmpfs /tmp 2>/dev/null || true\nmount -t tmpfs tmpfs /run 2>/dev/null || true\nmkdir -p /run/ato/bindings\n{relays}\nexport ATO_GUEST_AGENT_MODE=vsock ATO_GUEST_AGENT_VSOCK_PORT=1025 ATO_BINDINGS_ROOT=/run/ato/bindings\nexec /usr/local/bin/ato-guest-agent >/dev/console 2>&1\n"
     )

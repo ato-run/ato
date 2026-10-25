@@ -97,6 +97,13 @@ pub struct OciServiceV2 {
     pub secret_grants: Vec<SecretGrantV1>,
     /// Keys of `state_attachments` mounted into THIS service only.
     pub state_keys: Vec<String>,
+    /// Explicit data-plane selectors. None keeps the legacy component unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::oci_component_inputs::deserialize_input_ids"
+    )]
+    pub input_ids: Option<Vec<String>>,
     pub endpoints: Vec<ServiceEndpointV2>,
     pub readiness: ServiceReadinessV2,
 }
@@ -236,6 +243,11 @@ impl RuntimeLaunchSpecV2 {
         let mut surfaces = 0usize;
         let mut endpoint_count = 0usize;
         for service in &group.services {
+            if let Some(ids) = &service.input_ids {
+                crate::oci_component_inputs::validate_input_ids(ids).map_err(|_| {
+                    group_error(format!("realization.services[{}].input_ids", service.name))
+                })?;
+            }
             if service.user.is_some_and(|user| !user.valid()) {
                 return Err(group_error(format!(
                     "realization.services[{}].user",
@@ -314,6 +326,35 @@ impl RuntimeLaunchSpecV2 {
                 if grant.grant_ref.is_empty() {
                     return Err(RuntimeLaunchSpecError::ForbiddenField {
                         field: field(&format!("secret_grants[{}].grant_ref", grant.name)),
+                    });
+                }
+            }
+
+            if let Some(ids) = &service.input_ids {
+                for name in ids
+                    .iter()
+                    .map(|id| crate::oci_component_inputs::input_env_name(id))
+                    .chain(std::iter::once("ATO_OUTPUT_DIR".to_owned()))
+                {
+                    if env_names.contains(name.as_str()) {
+                        return Err(RuntimeLaunchSpecError::EnvConflict { name });
+                    }
+                }
+                if std::iter::once(service.workspace_mount_path.as_str())
+                    .chain(
+                        service
+                            .state_keys
+                            .iter()
+                            .filter_map(|key| state_by_key.get(key.as_str()))
+                            .map(|attachment| attachment.mount_target.as_str()),
+                    )
+                    .any(|target| {
+                        std::path::Path::new(target).starts_with("/.ato-data")
+                            || std::path::Path::new("/.ato-data").starts_with(target)
+                    })
+                {
+                    return Err(RuntimeLaunchSpecError::MountConflict {
+                        target: "/.ato-data".to_owned(),
                     });
                 }
             }

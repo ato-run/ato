@@ -355,12 +355,15 @@ dependencies = [
  "ato-compose",
  "ato-computation",
  "ato-contracts",
+ "ato-formation",
  "ato-ipc",
  "ato-kernel",
  "ato-materializer-api",
  "ato-materializer-replay",
  "ato-materializer-vm-snapshot",
+ "ato-native-surface-gateway",
  "ato-objects",
+ "ato-portable-application",
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-attempt",
@@ -372,6 +375,7 @@ dependencies = [
  "hex",
  "hmac",
  "libc",
+ "netd",
  "rand 0.8.6",
  "reqwest",
  "rustix",
@@ -382,6 +386,7 @@ dependencies = [
  "tar",
  "tempfile",
  "time",
+ "tokio",
  "tracing",
  "tungstenite",
  "url",
@@ -447,6 +452,7 @@ name = "ato-formation-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-api",
  "ato-adapter-oci",
  "ato-adapter-process",
  "ato-formation",
@@ -633,6 +639,26 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "time",
+]
+
+[[package]]
+name = "ato-native-surface-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-formation",
+ "ato-ipc",
+ "bytes",
+ "http 1.4.2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "netd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

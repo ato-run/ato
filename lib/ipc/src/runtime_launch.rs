@@ -195,9 +195,16 @@ impl OciUserV1 {
     }
 }
 
+/// Maximum serialized opaque native launch declaration; no domain semantics.
+pub const MAX_NATIVE_LAUNCH_DECLARATION_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OciRealizationV1 {
+    /// Opaque Adapter declaration bound to this physical launch. Domain validation
+    /// belongs to the runtime layer; IPC remains independent of Formation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_surface: Option<serde_json::Value>,
     /// A content-addressed DIGEST, `sha256:<64 hex>`.
     ///
     /// A mutable tag (`python:latest`) cannot establish identity: the same
@@ -440,6 +447,16 @@ impl RuntimeLaunchSpecV1 {
                 }
             }
             LaunchRealizationV1::Oci(oci) => {
+                if let Some(native) = &oci.native_surface
+                    && (!native.is_object()
+                        || serde_json::to_vec(native).map_or(true, |bytes| {
+                            bytes.len() > MAX_NATIVE_LAUNCH_DECLARATION_BYTES
+                        }))
+                {
+                    return Err(RuntimeLaunchSpecError::ForbiddenField {
+                        field: "realization.native_surface".to_owned(),
+                    });
+                }
                 if oci.user.is_some_and(|user| !user.valid()) {
                     return Err(RuntimeLaunchSpecError::ForbiddenField {
                         field: "realization.user".to_owned(),

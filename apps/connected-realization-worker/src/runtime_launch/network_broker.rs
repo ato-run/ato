@@ -23,7 +23,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONNECTIONS_PER_LISTENER: usize = 128;
 const EGRESS_BRIDGE_PATTERN: &str = "atoe+";
-const EGRESS_BROKER_PORT: u16 = 1080;
+pub(super) const EGRESS_BROKER_PORT: u16 = 1080;
 
 /// Install the host-wide admission boundary for Runner-created egress
 /// bridges. Docker's `--internal` route blocks forwarding; these INPUT rules
@@ -123,13 +123,17 @@ fn bounded_stderr(output: &Output) -> String {
         .to_owned()
 }
 
-struct ConnectionPermit(Arc<AtomicUsize>);
+pub(super) struct ConnectionPermit(Arc<AtomicUsize>);
 
 impl ConnectionPermit {
     fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
+        Self::acquire_bounded(active, MAX_CONNECTIONS_PER_LISTENER)
+    }
+
+    pub(super) fn acquire_bounded(active: &Arc<AtomicUsize>, maximum: usize) -> Option<Self> {
         active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current < MAX_CONNECTIONS_PER_LISTENER).then_some(current + 1)
+                (current < maximum).then_some(current + 1)
             })
             .ok()
             .map(|_| Self(Arc::clone(active)))
@@ -147,7 +151,7 @@ impl Drop for ConnectionPermit {
 /// directions of a blocking copy. Worker joins are bounded so revocation can
 /// never hang the Runner indefinitely.
 #[derive(Default)]
-struct ConnectionGroup {
+pub(super) struct ConnectionGroup {
     stopping: AtomicBool,
     next_id: AtomicUsize,
     sockets: Mutex<BTreeMap<usize, Vec<TcpStream>>>,
@@ -155,7 +159,7 @@ struct ConnectionGroup {
 }
 
 impl ConnectionGroup {
-    fn spawn(
+    pub(super) fn spawn(
         self: &Arc<Self>,
         client: TcpStream,
         permit: ConnectionPermit,
@@ -236,7 +240,7 @@ impl ConnectionGroup {
             .unwrap_or(0)
     }
 
-    fn cancel_and_join(&self) {
+    pub(super) fn cancel_and_join(&self) {
         self.stopping.store(true, Ordering::Release);
         if let Ok(sockets) = self.sockets.lock() {
             for owned in sockets.values() {

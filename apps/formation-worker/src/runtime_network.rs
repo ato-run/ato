@@ -58,6 +58,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod delivery;
 pub mod proposal;
 mod publication;
+pub mod source_handoff;
 mod source_oci_exploration;
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
@@ -85,7 +86,7 @@ pub const MAX_ATTEMPT_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_ATTEMPT_STORED_BYTES: u64 = 512 * 1024 * 1024;
 /// How long a Runtime may take to fetch a ticket's source: MAX_SOURCE_BYTES
 /// at about 40 KB/s.
-const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 // ─────────────────────────────────────────────────────────────── wire types
 
@@ -1122,6 +1123,35 @@ fn prepare_submission_inner(
         &std::path::absolute(work_root)?,
         SourceLimits::default(),
     )?;
+    prepare_frozen_submission(
+        archive,
+        frozen,
+        routes,
+        browser_contract,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        explicit_contract,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_frozen_submission(
+    archive: File,
+    frozen: local::FrozenSource,
+    routes: &[PathBuf],
+    browser_contract: Option<BrowserContractV0>,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    explicit_contract: Option<ato_formation::authoring::BoundContract>,
+    infer_known_routes: bool,
+) -> Result<Submission> {
+    let archive_bytes = archive.metadata()?.len();
+    let archive_digest = file_digest(&mut archive.try_clone()?)?;
     let evidence = detect(&frozen.root).context("detection failed")?;
 
     let route_files: Vec<PathBuf> = if explicit_contract.is_some() && routes.is_empty() {
@@ -1137,7 +1167,7 @@ fn prepare_submission_inner(
         .transpose()?;
     let mut authorized = Vec::new();
     let mut contracts = BTreeMap::new();
-    let auto_known = policy.exploration.is_some() && routes.is_empty();
+    let auto_known = infer_known_routes && policy.exploration.is_some() && routes.is_empty();
     let mut recipes: Vec<(String, String)> = route_files
         .iter()
         .map(|file| {

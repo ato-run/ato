@@ -1,0 +1,26 @@
+{
+  "schema": "ato.native-pixel-producer-acceptance/1",
+  "real_tigervnc": true,
+  "transport": "authenticated_gateway",
+  "expired_assertion_rejected": true,
+  "wrong_session_rejected": true,
+  "execution_scope_verified": true,
+  "initial_frame_bytes": 1920000,
+  "ready_ms": 684,
+  "keyboard_changed_pixels": true,
+  "resized_viewport": [
+    1024,
+    768
+  ],
+  "resized_frame_bytes": 3145728,
+  "reconnect": true,
+  "clipboard_messages": 0,
+  "contract_verified": false,
+  "frame_sha256": [
+    "b5817fcfc71ae999708482a0845b3588a0b280a92cab6a79fa094d50286360f8",
+    "541545eff81e7d1597ec2a0547635b6b7628b4bf8972a2633e9f85596b1fd697",
+    "5e8d40d1ea531f3f58f00e9b505ebaba441b02bdd37ab10215773c683a5b94b2",
+    "5e8d40d1ea531f3f58f00e9b505ebaba441b02bdd37ab10215773c683a5b94b2"
+  ],
+  "shutdown_listener_closed": true
+}
