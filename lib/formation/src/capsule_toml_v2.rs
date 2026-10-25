@@ -134,7 +134,10 @@ pub struct PortableServicePortDraftV2 {
 struct Document {
     schema: String,
     application: Application,
-    contract: Contract,
+    /// Optional only for the transformation-only candidate parse. The normal
+    /// `ato pack` parse still requires it (see `parse_capsule_toml_v2`).
+    #[serde(default)]
+    contract: Option<Contract>,
     #[serde(default)]
     input: Vec<Input>,
     #[serde(default)]
@@ -328,7 +331,33 @@ fn validate_relative(path: &str, field: &str) -> Result<(), CapsuleTomlV2Error> 
 }
 
 /// Parse the deliberately bounded portable v0 authoring grammar.
+///
+/// `ato pack` and every normal authoring path require a `[contract]` section:
+/// a portable Application is sealed by the Contract it declares.
 pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, CapsuleTomlV2Error> {
+    parse_capsule_toml_v2_impl(text, true)
+}
+
+/// Parse a derivation-candidate manifest: the same grammar, except that
+/// `[contract]` is OPTIONAL.
+///
+/// Used only by Contract-preserving transformation, where the Contract is the
+/// frozen one carried in the existing bundle and the new source contributes
+/// only its application/input/derivation sections. When `[contract]` IS
+/// present it is parsed exactly as in the normal mode and must still be
+/// syntactically valid; the transformation layer decides whether it matches
+/// the frozen K. A manifest without `[contract]` yields empty observations and
+/// is never used to mint a Contract.
+pub fn parse_capsule_toml_v2_derivation_candidate(
+    text: &str,
+) -> Result<PortableAuthoringDraftV2, CapsuleTomlV2Error> {
+    parse_capsule_toml_v2_impl(text, false)
+}
+
+fn parse_capsule_toml_v2_impl(
+    text: &str,
+    require_contract: bool,
+) -> Result<PortableAuthoringDraftV2, CapsuleTomlV2Error> {
     let document: Document =
         toml::from_str(text).map_err(|error| CapsuleTomlV2Error::Syntax(error.to_string()))?;
     if document.schema != CAPSULE_SCHEMA_V2 {
@@ -511,76 +540,95 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
         .map(|state| state.id.clone())
         .collect::<BTreeSet<_>>();
 
-    if document.contract.mode != ContractMode::All || document.contract.observation.is_empty() {
-        return Err(invalid(
-            "contract",
-            "portable v0 requires non-empty mode=all observations",
-        ));
-    }
-    // `behavioral` is legal and changes nothing in K (this grammar only binds
-    // HTTP observations). `source-bound` cannot be honoured: the portable v0
-    // authored grammar has no way to name a source identity, so accepting it
-    // would claim an identity this frontend cannot build.
-    match document.contract.identity.as_deref() {
-        None | Some("behavioral") => {}
-        Some("source-bound") => {
+    // A declared Contract must still be exactly what the normal grammar
+    // allows; only its absence is tolerated in candidate mode.
+    let observations = match document.contract {
+        Some(contract) => {
+            if contract.mode != ContractMode::All || contract.observation.is_empty() {
+                return Err(invalid(
+                    "contract",
+                    "portable v0 requires non-empty mode=all observations",
+                ));
+            }
+            // `behavioral` is legal and changes nothing in K (this grammar only
+            // binds HTTP observations). `source-bound` cannot be honoured: the
+            // portable v0 authored grammar has no way to name a source
+            // identity, so accepting it would claim an identity this frontend
+            // cannot build.
+            match contract.identity.as_deref() {
+                None | Some("behavioral") => {}
+                Some("source-bound") => {
+                    return Err(invalid(
+                        "contract.identity",
+                        "ato.capsule/2 cannot bind a source identity; use behavioral, or omit the \
+                         key and author a workspace observation in ato.capsule/1",
+                    ));
+                }
+                Some(other) => {
+                    return Err(invalid(
+                        "contract.identity",
+                        format!(
+                            "{other:?} is not a Contract identity; use behavioral, or omit the key"
+                        ),
+                    ));
+                }
+            }
+            let mut observation_ids = BTreeSet::new();
+            contract
+                .observation
+                .into_iter()
+                .map(|observation| {
+                    validate_id("contract.observation.id", &observation.id)?;
+                    if !observation_ids.insert(observation.id.clone()) {
+                        return Err(invalid(
+                            "contract.observation.id",
+                            format!("duplicate id {:?}", observation.id),
+                        ));
+                    }
+                    if observation.verifier != "ato.contract.http@1"
+                        || observation.port != "app.http"
+                        || observation.method != "GET"
+                    {
+                        return Err(invalid(
+                            "contract.observation",
+                            "portable v0 supports GET ato.contract.http@1 on app.http",
+                        ));
+                    }
+                    if !observation.path.starts_with('/')
+                        || !(100..=599).contains(&observation.status)
+                    {
+                        return Err(invalid(
+                            "contract.observation",
+                            "path or HTTP status is invalid",
+                        ));
+                    }
+                    if let Some(digest) = &observation.body_digest
+                        && !is_sha256_ref(digest)
+                    {
+                        return Err(invalid(
+                            "contract.observation.body_digest",
+                            "must be sha256:<64 lowercase hex>",
+                        ));
+                    }
+                    Ok(PortableHttpObservationDraftV2 {
+                        id: observation.id,
+                        path: observation.path,
+                        status: observation.status,
+                        body_digest: observation.body_digest,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        None if require_contract => {
             return Err(invalid(
-                "contract.identity",
-                "ato.capsule/2 cannot bind a source identity; use behavioral, or omit the key \
-                 and author a workspace observation in ato.capsule/1",
+                "contract",
+                "portable v0 requires non-empty mode=all observations",
             ));
         }
-        Some(other) => {
-            return Err(invalid(
-                "contract.identity",
-                format!("{other:?} is not a Contract identity; use behavioral, or omit the key"),
-            ));
-        }
-    }
-    let mut observation_ids = BTreeSet::new();
-    let observations = document
-        .contract
-        .observation
-        .into_iter()
-        .map(|observation| {
-            validate_id("contract.observation.id", &observation.id)?;
-            if !observation_ids.insert(observation.id.clone()) {
-                return Err(invalid(
-                    "contract.observation.id",
-                    format!("duplicate id {:?}", observation.id),
-                ));
-            }
-            if observation.verifier != "ato.contract.http@1"
-                || observation.port != "app.http"
-                || observation.method != "GET"
-            {
-                return Err(invalid(
-                    "contract.observation",
-                    "portable v0 supports GET ato.contract.http@1 on app.http",
-                ));
-            }
-            if !observation.path.starts_with('/') || !(100..=599).contains(&observation.status) {
-                return Err(invalid(
-                    "contract.observation",
-                    "path or HTTP status is invalid",
-                ));
-            }
-            if let Some(digest) = &observation.body_digest
-                && !is_sha256_ref(digest)
-            {
-                return Err(invalid(
-                    "contract.observation.body_digest",
-                    "must be sha256:<64 lowercase hex>",
-                ));
-            }
-            Ok(PortableHttpObservationDraftV2 {
-                id: observation.id,
-                path: observation.path,
-                status: observation.status,
-                body_digest: observation.body_digest,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        // A derivation-candidate manifest binds to the frozen Contract; it
+        // declares no K of its own.
+        None => Vec::new(),
+    };
 
     if document.derivation.is_empty() || document.derivation.len() > 16 {
         return Err(invalid(

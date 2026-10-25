@@ -11,6 +11,7 @@
 | 不変条件 | 期待 | どこで示すか |
 |---|---|---|
 | `K_old == K_new` | 同一 `ContractRef`（canonical JCS bytes も同一） | `report.frozen_contract_ref`、`receipt_b.contract_ref` |
+| K の出所 | **candidate manifest ではない**。bundle の root Contract object は frozen bundle の canonical Contract bytes そのもの | `build_transformation_candidate` / `build_derivation_candidate_bundle`、unit test |
 | `D_old != D_new` | 異なる `DerivationRef` | `receipt_b.derivation_ref != receipt_a.derivation_ref` |
 | `Source_old != Source_new` | 異なる workspace source closure | `report.old_source_closure_refs[0] != report.new_source_closure_ref` |
 | 検証 | 新しい receipt が `fully_satisfied: true` | `out/receipt.json` |
@@ -19,7 +20,8 @@
 
 補足:
 
-- K は **再生成も再 capture もされない**。候補 source が別の K を導出した場合は、ビルド・実行の前に `candidate_contract_mismatch` で拒否する。
+- K は **再生成も再 capture もされない**。候補 Derivation は frozen Contract body に直接 bind し、candidate manifest は K の出所にならない（`build_derivation_candidate_bundle`）。
+- 候補 source の `capsule.toml` は `[contract]` を **省略できる**（derivation-candidate manifest）。宣言した場合だけ frozen K と canonical bytes / `contract_ref` を比較し、不一致はビルド・実行の前に `candidate_contract_mismatch` で拒否する。`ato pack` は従来どおり `[contract]` 必須。
 - 判定者は既存の Rust verifier（`ato_formation::verify::verify_runtime` / `run_attempt`）だけで、v0 はそれに何も足していない。
 - 同じ K を満たすことは「同じ機能」を意味しない。K は観測（HTTP status / body digest など）であり、この文書は K の外の性質を主張しない。
 
@@ -34,7 +36,7 @@
 | `source-b-broken/` | `source-b` と同じ manifest（同じ `body_digest`）だが、`{"service":"transformation-v0","status":"degraded"}\n` を返す |
 | `source-c-contract-change/` | `source-a` 実装だが observation が `status = 201`（K が変わる） |
 
-- すべて `schema = "ato.capsule/2"`、workspace input 1 つ、`[[contract.observation]]` 1 つ（`ato.contract.http@1`, `GET /`, status 200, `body_digest`）、`[[derivation]] use = "ato.process@1"`（`python3 app.py`, `guest_port = 8000`, `runtimes = { python = "3.12" }`）、`[effects] default = "pure"`。
+- すべて `schema = "ato.capsule/2"`、workspace input 1 つ、`[[contract.observation]]` 1 つ（`ato.contract.http@1`, `GET /`, status 200, `body_digest`）、`[[derivation]] use = "ato.process@1"`（`python3 app.py`, `guest_port = 8000`, `runtimes = { python = "3.12" }`）、`[effects] default = "pure"`。candidate source は `[contract]` を省略してもよい（省略時は frozen K に直接 bind する）。
 - `body_digest` は `sha256:f345de2490fa7c64f7398b35c26b4591dfa662d3e7815c3a73e591f48559452d`（改行込みの完全一致）。
 - K は **source identity を capture しない**（`ato.contract.workspace@1` を持たない）。これが「別 source を同じ K で受けられる」条件であり、source-bound K の拒否は §3 の negative 3 で示す。
 - listen port は既存の process fixture と同じく `ATO_ENDPOINT_APP_HTTP_PORT` を使う。binding は `127.0.0.1`。
@@ -46,6 +48,7 @@
 | behavior break | `ato reform bundle-a source-b-broken --out out-broken` | 非 0 終了。`report.status = "rejected"`、`k_preserved = true`、`fully_satisfied = false`。失敗した observation が `failed` で残る | `out-broken/report.json`, `out-broken/receipt.json`（`fully_satisfied:false`） |
 | contract change | `ato reform bundle-a source-c-contract-change --out out-contract` | 非 0 終了。`candidate_contract_mismatch`。`k_preserved = false`。**`candidate.capsule` も `receipt.json` も書かれない**（ビルド前に拒否） | `out-contract/report.json` |
 | source-bound K | `ato reform samples/interop-static.capsule source-b --out out-source-bound` | 非 0 終了。`frozen_contract_is_source_bound`。`k_preserved = false`。何もビルド・実行しない | `out-source-bound/report.json` |
+| candidate manifest without `[contract]` | `ato reform bundle-a source-b-no-contract --out out-no-contract` | ビルドされ、bundle root の Contract bytes は frozen K と byte-identical。実行/検証は通常どおり | `out-no-contract/candidate.capsule`, `report.json` |
 
 どのケースでも旧 bundle は byte-identical のまま。`ato reform` は publish / activate / switch を行わない。
 
@@ -120,4 +123,6 @@ Linux 以外では統合テストは `#![cfg(target_os = "linux")]` により 0 
 - **scenario verifier / functional acceptance は無い**（K の観測だけ）。
 - 「同じ K」は「同じ機能」「脆弱性が直った」を意味しない。
 - source-bound K（`ato.contract.workspace@1` を capture する K）は **別 source を受けない**。これは `source_changed_same_k` の別機能であり、v0 では意図的に拒否する（弱めない）。
+- Instance snapshot を持つ frozen v4 bundle は v0 では **明示的に拒否**する（`frozen_instance_snapshot_unsupported`）。snapshot closure・portability manifest を候補へ再構成するのは Scenario PR の範囲。
+- v0 の candidate transport は v3。v4 frozen bundle のうち snapshot を持たないものは受け付けるが、出力は v3 になる。
 - 実行は Linux の local Runtime のみ。macOS / Windows の実行は未検証。
