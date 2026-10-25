@@ -159,10 +159,7 @@ fn failure_of(observation: &Value) -> &str {
 
 /// The runtime scratch survives a failed Run (kept under `ATO_HOME/cache`);
 /// its receipt is the attempt's own evidence, never a published receipt.
-fn latest_runtime_receipt_for_derivation(
-    home: &Path,
-    derivation_ref: &str,
-) -> (Value, PathBuf) {
+fn latest_runtime_receipt_for_derivation(home: &Path, derivation_ref: &str) -> (Value, PathBuf) {
     let cache = home.join("cache");
     // Two negative Runs in this test can share a Contract and differ only by
     // Derivation; choosing by mtime would race them. The receipt names the D

@@ -104,6 +104,18 @@ jobs:
           name: scenario-verifier-v1-evidence
           path: target/scenario-verifier-v1-evidence/
           if-no-files-found: warn
+      - name: Stateful transformation E2E (Linux)
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        run: >-
+          cargo test -p ato-cli --test stateful_transformation --locked --
+          --nocapture
+      - name: Upload stateful transformation evidence (Linux)
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stateful-transformation-evidence
+          path: target/stateful-transformation-evidence/
+          if-no-files-found: warn
       - name: Portable worker regressions (Windows)
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash
