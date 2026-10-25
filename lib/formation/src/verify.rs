@@ -755,7 +755,8 @@ pub fn verify_runtime(
                             let reason = observation
                                 .code
                                 .as_deref()
-                                .map(|code| format!("{code}: "))
+                                .filter(|observation_code| *observation_code != code)
+                                .map(|observation_code| format!("{observation_code}: "))
                                 .unwrap_or_default();
                             ObservationOutcome::Failed {
                                 code,
