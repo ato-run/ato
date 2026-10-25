@@ -37,6 +37,7 @@ pub mod network_bridge;
 pub mod plan;
 pub mod realize;
 pub mod retained;
+pub mod scenario;
 pub mod spec;
 pub mod startup;
 pub mod state_bindings;

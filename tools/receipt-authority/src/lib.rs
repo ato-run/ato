@@ -1016,6 +1016,7 @@ mod exploration_submission_tests {
                 "app.http", "GET", "/", 200, b"ok",
             )],
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         let mut receipt = ContractVerificationReceipt::from_attempt(
             &state.frozen.contract_ref,
