@@ -51,10 +51,10 @@ pub struct NativeLeaseSurfaceConfig {
     pub scope: SurfaceGatewayScope,
     pub verification_key: String,
     pub origin: String,
-    /// The Runner's own public ingress origin. The app proxy rebases a
-    /// same-origin WebSocket handshake from the app host onto the upstream
-    /// (this Runner's `public_base_url`), so the in-guest gateway must accept
-    /// that origin in addition to the lease's authored `surface_origin`.
+    /// The Runner's own public ingress address, if it publishes one. The app
+    /// proxy rebases a same-origin WebSocket handshake from the app host onto
+    /// the upstream (this Runner's `public_base_url`), so the in-guest gateway
+    /// must also accept that exact origin.
     pub public_base_origin: Option<String>,
     pub surface_listen: SocketAddr,
     pub startup_timeout: Duration,
@@ -202,6 +202,29 @@ impl Parts {
 /// The caller still uses the existing private HTTP observer/Rust K verifier.
 /// Production dispatch stays guarded until receipt-gated publication is wired.
 #[allow(clippy::too_many_arguments)]
+/// The exact origins a Native Surface handshake may carry: the Lease's authored
+/// `surface_origin`, plus this Runner's own published ingress origin when it is
+/// a valid `https://` origin.
+///
+/// Nothing here is derived from a request header or from control-plane input,
+/// so a caller cannot widen the allowlist. The ingress value is normalized the
+/// way a browser serializes `Origin` (lowercase host, default port dropped, no
+/// trailing slash) before it is allowed to match.
+pub(crate) fn surface_allowed_origins(
+    lease_origin: String,
+    public_base_origin: Option<&str>,
+) -> BTreeSet<String> {
+    let mut origins = BTreeSet::from([lease_origin]);
+    if let Some(origin) = public_base_origin
+        .and_then(|value| url::Url::parse(value).ok())
+        .map(|url| url.origin().ascii_serialization())
+        .filter(|origin| origin.starts_with("https://"))
+    {
+        origins.insert(origin);
+    }
+    origins
+}
+
 pub async fn start_terminal(
     spec: &RuntimeLaunchSpecV1,
     selected_derivation_ref: &str,
@@ -290,17 +313,10 @@ pub async fn start_terminal(
             firecracker_vsock_uds: socket.clone(),
             guest_connect_timeout: config.startup_timeout,
             scope: config.scope.clone(),
-            allowed_origins: {
-                let mut origins = BTreeSet::from([config.origin.clone()]);
-                if let Some(origin) = config
-                    .public_base_origin
-                    .as_ref()
-                    .filter(|origin| origin.starts_with("https://"))
-                {
-                    origins.insert(origin.clone());
-                }
-                origins
-            },
+            allowed_origins: surface_allowed_origins(
+                config.origin.clone(),
+                config.public_base_origin.as_deref(),
+            ),
         };
         gateway_config.validate()?;
         let keys = Arc::new(SurfaceAssertionKeyring::new(BTreeMap::from([(
