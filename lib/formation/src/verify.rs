@@ -40,7 +40,10 @@ use sha2::{Digest, Sha256};
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
+};
+use crate::scenario::{
+    SCENARIO_VERIFIER_VERSION, ScenarioObservation, ScenarioResult, is_scenario_ref,
 };
 
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA: &str = "ato.contract-verification-receipt/1";
@@ -184,6 +187,10 @@ pub struct RuntimeObservation {
     pub input_refs: BTreeMap<String, String>,
     pub http: Vec<RuntimeHttpObservation>,
     pub instance_snapshot_ref: Option<String>,
+    /// What the runtime's scenario executor established, by requirement id.
+    /// Empty on paths that do not execute scenarios (Formation, hosted), where
+    /// a scenario requirement then fails closed as unobserved.
+    pub scenarios: Vec<ScenarioObservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +406,18 @@ impl ContractVerificationReceipt {
                                 input: None,
                                 digest: Some(digest.clone()),
                             }),
+                        SCENARIO_CONTRACT_VERIFIER => runtime
+                            .scenarios
+                            .iter()
+                            .find(|observation| observation.requirement_id == requirement.id)
+                            .map(|observation| VerificationEvidence {
+                                method: None,
+                                path: Some(format!("scenario:{}", requirement.id)),
+                                status: None,
+                                body_sha256: Some(observation.transcript_digest.clone()),
+                                input: None,
+                                digest: Some(observation.scenario_ref.clone()),
+                            }),
                         _ => None,
                     });
                 receipt_observation(verdict, evidence)
@@ -575,6 +594,15 @@ pub fn verify(contract: &BoundContract, candidate: &CandidateObservation) -> Con
                         },
                     }
                 }
+                SCENARIO_CONTRACT_VERIFIER => {
+                    // A scenario executes HTTP operations against a running
+                    // candidate. Formation has no running candidate, so it can
+                    // only name the gate that will decide it; a Deferred
+                    // outcome never makes a receipt fully satisfied.
+                    ObservationOutcome::Deferred {
+                        by: format!("runtime scenario verifier {}", requirement.id),
+                    }
+                }
                 other => ObservationOutcome::Failed {
                     code: "verifier_unknown",
                     detail: format!("no verifier named {other} is available to decide this"),
@@ -675,6 +703,82 @@ pub fn verify_runtime(
                             code: "instance_snapshot_missing",
                             detail: "the runtime restored no portable Instance snapshot".to_owned(),
                         },
+                    }
+                }
+                SCENARIO_CONTRACT_VERIFIER => {
+                    let expected = requirement.digest.as_deref().unwrap_or_default();
+                    match candidate
+                        .scenarios
+                        .iter()
+                        .find(|observation| observation.requirement_id == requirement.id)
+                    {
+                        None => ObservationOutcome::Failed {
+                            code: "scenario_observation_missing",
+                            detail: format!(
+                                "the runtime executed no scenario for {}",
+                                requirement.id
+                            ),
+                        },
+                        Some(observation) if observation.scenario_ref != expected => {
+                            ObservationOutcome::Failed {
+                                code: "scenario_object_mismatch",
+                                detail: format!(
+                                    "executed scenario {}; K pins {expected}",
+                                    observation.scenario_ref
+                                ),
+                            }
+                        }
+                        Some(observation)
+                            if observation.verifier_version != SCENARIO_VERIFIER_VERSION =>
+                        {
+                            ObservationOutcome::Failed {
+                                code: "scenario_verifier_version_unsupported",
+                                detail: format!(
+                                    "the runtime executed verifier version {}; this build \
+                                     decides {SCENARIO_VERIFIER_VERSION}",
+                                    observation.verifier_version
+                                ),
+                            }
+                        }
+                        Some(observation) if observation.result == ScenarioResult::Failed => {
+                            let code = match observation.code.as_deref() {
+                                Some("scenario_isolation_unavailable") => {
+                                    "scenario_isolation_unavailable"
+                                }
+                                _ => "scenario_step_failed",
+                            };
+                            let step = observation
+                                .failed_step
+                                .as_deref()
+                                .map(|step| format!("{step}: "))
+                                .unwrap_or_default();
+                            let reason = observation
+                                .code
+                                .as_deref()
+                                .map(|code| format!("{code}: "))
+                                .unwrap_or_default();
+                            ObservationOutcome::Failed {
+                                code,
+                                detail: format!(
+                                    "{step}{reason}{}",
+                                    observation.detail.as_deref().unwrap_or(
+                                        "a step did not \
+                                     meet its expectation"
+                                    )
+                                ),
+                            }
+                        }
+                        Some(observation) if !is_scenario_ref(&observation.transcript_digest) => {
+                            ObservationOutcome::Failed {
+                                code: "scenario_transcript_mismatch",
+                                detail: format!(
+                                    "the scenario transcript digest {} is not a sha256 \
+                                     reference",
+                                    observation.transcript_digest
+                                ),
+                            }
+                        }
+                        Some(_) => ObservationOutcome::Satisfied,
                     }
                 }
                 other => ObservationOutcome::Failed {
@@ -929,6 +1033,168 @@ mod tests {
             verification.failure().unwrap().1,
             "instance_snapshot_missing"
         );
+    }
+
+    fn scenario_requirement(id: &str, port: &str, digest: &str) -> BoundRequirement {
+        BoundRequirement {
+            id: id.to_owned(),
+            verifier: SCENARIO_CONTRACT_VERIFIER.to_owned(),
+            port: Some(port.to_owned()),
+            method: None,
+            path: None,
+            status: None,
+            body_digest: None,
+            input: None,
+            digest: Some(digest.to_owned()),
+        }
+    }
+
+    const SCENARIO_REF: &str =
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const TRANSCRIPT: &str =
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
+    #[test]
+    fn seal_defers_a_scenario_to_the_runtime_verifier() {
+        let k = contract(vec![scenario_requirement("crud", "app.http", SCENARIO_REF)]);
+        let candidate = CandidateObservation {
+            exported_ports: ["app.http".to_owned()].into(),
+            ..Default::default()
+        };
+        let verification = verify(&k, &candidate);
+        // A Deferred verdict is seal-admissible but never fully satisfied.
+        assert!(verification.seal_admissible());
+        assert!(!verification.fully_satisfied());
+        match &verification.verdicts[0].outcome {
+            ObservationOutcome::Deferred { by } => {
+                assert!(by.contains("runtime scenario verifier crud"), "{by}")
+            }
+            other => panic!("expected a deferred scenario, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_scenario_verdicts_cover_every_refusal() {
+        let k = contract(vec![scenario_requirement("crud", "app.http", SCENARIO_REF)]);
+        let satisfied = ScenarioObservation::satisfied("crud", SCENARIO_REF, TRANSCRIPT);
+        let accepted = verify_runtime(
+            &k,
+            &RuntimeObservation {
+                scenarios: vec![satisfied],
+                ..Default::default()
+            },
+        );
+        assert!(accepted.fully_satisfied(), "{accepted:?}");
+
+        let missing = verify_runtime(&k, &RuntimeObservation::default());
+        assert_eq!(missing.failure().unwrap().1, "scenario_observation_missing");
+
+        let other_ref = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+        let mismatch = verify_runtime(
+            &k,
+            &RuntimeObservation {
+                scenarios: vec![ScenarioObservation::satisfied(
+                    "crud", other_ref, TRANSCRIPT,
+                )],
+                ..Default::default()
+            },
+        );
+        assert_eq!(mismatch.failure().unwrap().1, "scenario_object_mismatch");
+
+        let mut unsupported = ScenarioObservation::satisfied("crud", SCENARIO_REF, TRANSCRIPT);
+        unsupported.verifier_version = SCENARIO_VERIFIER_VERSION + 1;
+        let unsupported = verify_runtime(
+            &k,
+            &RuntimeObservation {
+                scenarios: vec![unsupported],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            unsupported.failure().unwrap().1,
+            "scenario_verifier_version_unsupported"
+        );
+
+        let malformed = verify_runtime(
+            &k,
+            &RuntimeObservation {
+                scenarios: vec![ScenarioObservation::satisfied(
+                    "crud",
+                    SCENARIO_REF,
+                    "not-a-digest",
+                )],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            malformed.failure().unwrap().1,
+            "scenario_transcript_mismatch"
+        );
+
+        let failed = verify_runtime(
+            &k,
+            &RuntimeObservation {
+                scenarios: vec![ScenarioObservation::failed(
+                    "crud",
+                    SCENARIO_REF,
+                    TRANSCRIPT,
+                    Some("create".to_owned()),
+                    "status_mismatch",
+                    "status 500; expected 201",
+                )],
+                ..Default::default()
+            },
+        );
+        let (_, code, detail) = failed.failure().unwrap();
+        assert_eq!(code, "scenario_step_failed");
+        assert!(detail.contains("create"), "{detail}");
+        assert!(detail.contains("status_mismatch"), "{detail}");
+
+        let isolated = verify_runtime(
+            &k,
+            &RuntimeObservation {
+                scenarios: vec![ScenarioObservation::isolation_unavailable(
+                    "crud",
+                    SCENARIO_REF,
+                )],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            isolated.failure().unwrap().1,
+            "scenario_isolation_unavailable"
+        );
+    }
+
+    #[test]
+    fn a_scenario_receipt_uses_the_existing_evidence_fields() {
+        let k = contract(vec![scenario_requirement("crud", "app.http", SCENARIO_REF)]);
+        let runtime = RuntimeObservation {
+            scenarios: vec![ScenarioObservation::satisfied(
+                "crud",
+                SCENARIO_REF,
+                TRANSCRIPT,
+            )],
+            ..Default::default()
+        };
+        let verification = verify_runtime(&k, &runtime);
+        let receipt = ContractVerificationReceipt::from_attempt(
+            "sha256:k",
+            "sha256:d",
+            &k,
+            &runtime,
+            verification,
+        );
+        assert!(receipt.fully_satisfied);
+        let observation = &receipt.observations[0];
+        assert_eq!(observation.id, "crud");
+        let evidence = observation.evidence.as_ref().expect("scenario evidence");
+        assert_eq!(evidence.path.as_deref(), Some("scenario:crud"));
+        assert_eq!(evidence.body_sha256.as_deref(), Some(TRANSCRIPT));
+        assert_eq!(evidence.digest.as_deref(), Some(SCENARIO_REF));
+        assert!(evidence.method.is_none());
+        assert!(evidence.status.is_none());
+        assert!(evidence.input.is_none());
     }
 
     #[test]

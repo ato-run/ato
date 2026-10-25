@@ -16,8 +16,9 @@ use std::collections::BTreeSet;
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
 };
+use crate::scenario::is_scenario_ref;
 use crate::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
     ContractVerificationReceipt, ReceiptObservation, ReceiptOutcome,
@@ -226,6 +227,29 @@ fn check_observation(
         INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => {
             if evidence.digest != requirement.digest {
                 return inconsistent("the restored snapshot is not the one K requires");
+            }
+        }
+        SCENARIO_CONTRACT_VERIFIER => {
+            // The receipt carries a reference, a transcript digest and the
+            // requirement id; the steps themselves stay in the raw sidecar.
+            if evidence.method.is_some() || evidence.status.is_some() || evidence.input.is_some() {
+                return inconsistent(
+                    "scenario evidence carries only a path, a transcript digest and a scenario \
+                     reference",
+                );
+            }
+            let expected_path = format!("scenario:{}", requirement.id);
+            if evidence.path.as_deref() != Some(expected_path.as_str()) {
+                return inconsistent("the evidence is not for this scenario requirement");
+            }
+            if evidence.digest != requirement.digest {
+                return inconsistent("the scenario reference is not the one K requires");
+            }
+            let Some(transcript) = evidence.body_sha256.as_deref() else {
+                return inconsistent("no scenario transcript digest was recorded");
+            };
+            if !is_scenario_ref(transcript) {
+                return inconsistent("the scenario transcript digest is not a sha256 reference");
             }
         }
         other => {
@@ -467,6 +491,7 @@ mod tests {
                 "app.http", "GET", "/", status, b"hi",
             )],
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         let mut receipt = ContractVerificationReceipt::from_attempt(
             "sha256:k",
@@ -627,6 +652,137 @@ mod tests {
                 &unknown,
             )
             .is_err()
+        );
+    }
+
+    fn scenario_contract() -> BoundContract {
+        BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: vec![BoundRequirement {
+                id: "crud".to_owned(),
+                verifier: SCENARIO_CONTRACT_VERIFIER.to_owned(),
+                port: Some("app.http".to_owned()),
+                method: None,
+                path: None,
+                status: None,
+                body_digest: None,
+                input: None,
+                digest: Some(
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_owned(),
+                ),
+            }],
+        }
+    }
+
+    fn scenario_receipt() -> ContractVerificationReceipt {
+        let contract = scenario_contract();
+        let runtime = RuntimeObservation {
+            scenarios: vec![crate::scenario::ScenarioObservation::satisfied(
+                "crud",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            )],
+            ..Default::default()
+        };
+        let mut receipt = ContractVerificationReceipt::from_attempt(
+            "sha256:k",
+            "sha256:d",
+            &contract,
+            &runtime,
+            verify_runtime(&contract, &runtime),
+        );
+        receipt.execution = Some(crate::verify::VerificationExecutionEvidence {
+            realization: "process".to_owned(),
+            runtime_executable: None,
+            runtime_version: None,
+            pid: None,
+            container_id: None,
+            image: None,
+            platform: None,
+            endpoint: None,
+            run_id: None,
+            lease_id: None,
+            attempt_id: Some("att".to_owned()),
+            request_id: Some("req".to_owned()),
+            dependency_fetches: Vec::new(),
+            portability_profile: None,
+            embedded_oci_image_loaded: None,
+            services: Vec::new(),
+        });
+        receipt
+    }
+
+    fn check_scenario(receipt: &ContractVerificationReceipt) -> Result<(), ReceiptRejection> {
+        let contract = scenario_contract();
+        accept_receipt(
+            &ReceiptAssignment {
+                contract: &contract,
+                contract_ref: "sha256:k",
+                derivation_ref: "sha256:d",
+                attempt_id: "att",
+                request_id: Some("req"),
+            },
+            receipt,
+        )
+    }
+
+    #[test]
+    fn a_scenario_receipt_is_accepted_only_with_its_exact_evidence() {
+        let receipt = scenario_receipt();
+        assert!(receipt.fully_satisfied);
+        assert_eq!(check_scenario(&receipt), Ok(()));
+
+        let mut wrong_path = scenario_receipt();
+        wrong_path.observations[0].evidence.as_mut().unwrap().path = Some("scenario:other".into());
+        assert_eq!(
+            check_scenario(&wrong_path).unwrap_err().code,
+            "receipt_evidence_inconsistent"
+        );
+
+        let mut wrong_digest = scenario_receipt();
+        wrong_digest.observations[0]
+            .evidence
+            .as_mut()
+            .unwrap()
+            .digest =
+            Some("sha256:3333333333333333333333333333333333333333333333333333333333333333".into());
+        assert_eq!(
+            check_scenario(&wrong_digest).unwrap_err().code,
+            "receipt_evidence_inconsistent"
+        );
+
+        let mut malformed_transcript = scenario_receipt();
+        malformed_transcript.observations[0]
+            .evidence
+            .as_mut()
+            .unwrap()
+            .body_sha256 = Some("not-a-digest".into());
+        assert_eq!(
+            check_scenario(&malformed_transcript).unwrap_err().code,
+            "receipt_evidence_inconsistent"
+        );
+
+        let mut smuggled_http = scenario_receipt();
+        smuggled_http.observations[0]
+            .evidence
+            .as_mut()
+            .unwrap()
+            .status = Some(200);
+        assert_eq!(
+            check_scenario(&smuggled_http).unwrap_err().code,
+            "receipt_evidence_inconsistent"
+        );
+
+        let mut missing_transcript = scenario_receipt();
+        missing_transcript.observations[0]
+            .evidence
+            .as_mut()
+            .unwrap()
+            .body_sha256 = None;
+        assert_eq!(
+            check_scenario(&missing_transcript).unwrap_err().code,
+            "receipt_evidence_inconsistent"
         );
     }
 }

@@ -1,0 +1,28 @@
+{
+  "schema": "ato.scenario/1",
+  "verifier_version": 1,
+  "isolation": { "fresh_instance": true, "network": "candidate-only" },
+  "limits": { "step_timeout_ms": 5000, "total_timeout_ms": 60000, "max_body_bytes": 1048576 },
+  "steps": [
+    { "id": "login",
+      "request": { "method": "POST", "path": "/login", "body_b64": "e30=" },
+      "expect": { "status": 200 } },
+    { "id": "create",
+      "request": { "method": "POST", "path": "/items", "body_b64": "eyJuYW1lIjoiZmlyc3QifQ==" },
+      "expect": { "status": 201, "json": [ { "pointer": "/id", "exists": true } ] },
+      "capture": [ { "name": "item", "json_pointer": "/id" } ] },
+    { "id": "update",
+      "request": { "method": "PUT", "path": "/items/${item}", "body_b64": "eyJuYW1lIjoidXBkYXRlZCJ9" },
+      "expect": { "status": 200,
+                  "body_digest": "sha256:6a4347f3497067b2ad77a3d043fbda1360bf6b762e0f5db0efb713162e871f58" } },
+    { "id": "unauthorized-read",
+      "request": { "method": "GET", "path": "/items/${item}", "cookies": "cleared" },
+      "expect": { "status": 401 } },
+    { "id": "delete",
+      "request": { "method": "DELETE", "path": "/items/${item}" },
+      "expect": { "status": 204 } },
+    { "id": "read-after-delete",
+      "request": { "method": "GET", "path": "/items/${item}" },
+      "expect": { "status": 404 } }
+  ]
+}

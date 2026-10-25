@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use ato_formation::authoring::{BoundContract, BoundDerivation};
+use ato_formation::scenario::ScenarioV1;
 
 /// The shape of the running candidate, for the checks that depend on it
 /// (a browser Contract needs a process candidate today).
@@ -18,6 +19,21 @@ pub enum CandidateShape {
     Process,
     /// Files served to a browser.
     StaticWeb,
+}
+
+/// One Scenario a Runtime must execute, paired with the Contract requirement
+/// that names it.
+///
+/// The requirement id names the transcript sidecar and the verdict; the object
+/// is content-addressed by the Contract, and `scenario_ref` is the reference K
+/// pins. The port selects which of the candidate's realized endpoints the
+/// execution talks to — the verifier never constructs an address of its own.
+#[derive(Debug, Clone)]
+pub struct AttemptScenarioV1 {
+    pub requirement_id: String,
+    pub port: String,
+    pub scenario_ref: String,
+    pub scenario: ScenarioV1,
 }
 
 /// The attempt a Runtime is asked to make: which K, which D.
@@ -35,4 +51,8 @@ pub struct AttemptSpec<'a> {
     /// A portable Instance snapshot restored before the candidate started,
     /// for snapshot observations.
     pub instance_snapshot_ref: Option<String>,
+    /// The Contract's scenario requirements this attempt can execute. Empty
+    /// where the caller cannot resolve scenario objects (Formation, hosted):
+    /// a scenario requirement then fails closed as unobserved.
+    pub scenarios: Vec<AttemptScenarioV1>,
 }

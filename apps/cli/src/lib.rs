@@ -2286,6 +2286,54 @@ fn run_computation_bundle(args: RunArgs, bundle: CapsuleBundle) -> Result<()> {
     accepted.run().map_err(Into::into)
 }
 
+/// Where a Run's scenario transcript sidecars live beside its receipt.
+fn scenario_sidecar_directory(receipt: &Path) -> PathBuf {
+    let mut name = receipt
+        .file_name()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "receipt.json".into());
+    name.push(".scenarios");
+    receipt.with_file_name(name)
+}
+
+/// Copy the transcript sidecars a Run wrote into the caller's evidence
+/// directory. The runtime scratch is disposable, so a receipt kept without its
+/// transcripts would name evidence nobody can read.
+fn copy_scenario_sidecars(runtime_root: &Path, destination: &Path) -> Result<()> {
+    let source = runtime_root.join("scenario-transcripts");
+    if !source.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(destination).with_context(|| {
+        format!(
+            "create scenario transcript directory {}",
+            destination.display()
+        )
+    })?;
+    for entry in fs::read_dir(&source)
+        .with_context(|| format!("read scenario transcript directory {}", source.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        fs::copy(&path, destination.join(name)).with_context(|| {
+            format!(
+                "copy scenario transcript {} to {}",
+                path.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn run_portable_application(
     args: RunArgs,
     bundle_bytes: &[u8],
@@ -2315,6 +2363,10 @@ fn run_portable_application(
         .prefix("ato-portable-run-")
         .tempdir_in(cache)?;
     let runtime_root = runtime.keep();
+    // A Run that fails verification publishes nothing: `--verification-receipt`
+    // names the receipt of a Run that was accepted. The attempt record (and,
+    // for a scenario, the transcript under the runtime scratch) is the failure
+    // evidence; writing a receipt here would make a refused Run look published.
     let started = start_and_verify_portable_application(
         bundle_bytes,
         bundle,
@@ -2332,6 +2384,7 @@ fn run_portable_application(
         if let Some(path) = &args.verification_receipt {
             fs::write(path, receipt.canonical_bytes()?)
                 .with_context(|| format!("write verification receipt {}", path.display()))?;
+            copy_scenario_sidecars(&runtime_root, &scenario_sidecar_directory(path))?;
         }
         println!("Capsule: {}", receipt.contract_ref);
         println!("Route: {}", receipt.derivation_ref);
@@ -2596,6 +2649,13 @@ fn run_reform(args: ReformArgs) -> Result<()> {
         },
     );
 
+    // The candidate directory survives the reform runtime; keep the transcript
+    // sidecars there before the tempdir is dropped.
+    if let Err(error) =
+        copy_scenario_sidecars(&runtime_root, &args.out.join("scenario-transcripts"))
+    {
+        eprintln!("[reform] could not keep scenario transcripts: {error:#}");
+    }
     let mut receipt_bytes: Option<Vec<u8>> = None;
     let mut receipt: Option<ContractVerificationReceipt> = None;
     let mut run_error: Option<String> = None;
