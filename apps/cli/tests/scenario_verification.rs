@@ -157,6 +157,45 @@ fn failure_of(observation: &Value) -> &str {
         .unwrap_or_else(|| panic!("expected a failure, got {observation}"))
 }
 
+/// The runtime scratch survives a failed Run (kept under `ATO_HOME/cache`);
+/// its receipt is the attempt's own evidence, never a published receipt.
+fn latest_runtime_receipt(home: &Path) -> (Value, PathBuf) {
+    let cache = home.join("cache");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    if let Ok(entries) = fs::read_dir(&cache) {
+        for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("ato-portable-run-")
+            {
+                continue;
+            }
+            let receipt = entry.path().join("verification-receipt.json");
+            if !receipt.is_file() {
+                continue;
+            }
+            let Ok(modified) = receipt.metadata().and_then(|metadata| metadata.modified()) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
+                newest = Some((modified, receipt));
+            }
+        }
+    }
+    let (_, path) =
+        newest.expect("a failed Run leaves its attempt receipt under the runtime scratch");
+    let value = read_json(&path);
+    (value, path)
+}
+
+fn transcript_beside(receipt: &Path) -> PathBuf {
+    receipt
+        .parent()
+        .expect("receipt has a directory")
+        .join("scenario-transcripts/crud.json")
+}
+
 #[test]
 fn a_scenario_contract_is_executed_verified_and_reformable() {
     let evidence_dir = evidence_root();
@@ -280,11 +319,22 @@ fn a_scenario_contract_is_executed_verified_and_reformable() {
         !bad_run.status.success(),
         "a candidate that misses a step expectation must not exit 0"
     );
-    let bad_receipt = read_json(&bad_receipt_path);
+    let bad_stderr = String::from_utf8_lossy(&bad_run.stderr).to_string();
+    assert!(
+        bad_stderr.contains("did not fully satisfy observation crud"),
+        "{bad_stderr}"
+    );
+    // A failed Run publishes no receipt: the attempt record and the runtime
+    // scratch are its evidence.
+    assert!(
+        !bad_receipt_path.exists(),
+        "a failed ato run must not publish a verification receipt"
+    );
+    let (bad_receipt, bad_attempt_receipt) = latest_runtime_receipt(&home);
     assert_eq!(bad_receipt["fully_satisfied"], false);
     let bad_observation = scenario_observation(&bad_receipt);
     assert_eq!(bad_observation["outcome"], "failed");
-    let bad_failure = failure_of(bad_observation);
+    let bad_failure = failure_of(bad_observation).to_owned();
     assert!(
         bad_failure.starts_with("scenario_step_failed:"),
         "{bad_failure}"
@@ -294,7 +344,17 @@ fn a_scenario_contract_is_executed_verified_and_reformable() {
         "fully_satisfied": false,
         "exit_ok": bad_run.status.success(),
         "failure": bad_failure,
-        "receipt_path": copy_artifact(&bad_receipt_path, &evidence_dir, "bad--receipt.json"),
+        "published_receipt": false,
+        "attempt_receipt_path": copy_artifact(
+            &bad_attempt_receipt,
+            &evidence_dir,
+            "bad--attempt-receipt.json",
+        ),
+        "transcript_path": copy_artifact(
+            &transcript_beside(&bad_attempt_receipt),
+            &evidence_dir,
+            "bad--crud-transcript.json",
+        ),
     });
     flush_evidence(&evidence_dir, &evidence);
 
@@ -307,9 +367,13 @@ fn a_scenario_contract_is_executed_verified_and_reformable() {
         !isolation_run.status.success(),
         "a stateful candidate must not run a scenario in v1"
     );
-    let isolation_receipt = read_json(&isolation_receipt_path);
+    assert!(
+        !isolation_receipt_path.exists(),
+        "a failed ato run must not publish a verification receipt"
+    );
+    let (isolation_receipt, isolation_attempt_receipt) = latest_runtime_receipt(&home);
     assert_eq!(isolation_receipt["fully_satisfied"], false);
-    let isolation_failure = failure_of(scenario_observation(&isolation_receipt));
+    let isolation_failure = failure_of(scenario_observation(&isolation_receipt)).to_owned();
     assert!(
         isolation_failure.starts_with("scenario_isolation_unavailable:"),
         "{isolation_failure}"
@@ -318,10 +382,11 @@ fn a_scenario_contract_is_executed_verified_and_reformable() {
         "fully_satisfied": false,
         "exit_ok": isolation_run.status.success(),
         "failure": isolation_failure,
-        "receipt_path": copy_artifact(
-            &isolation_receipt_path,
+        "published_receipt": false,
+        "attempt_receipt_path": copy_artifact(
+            &isolation_attempt_receipt,
             &evidence_dir,
-            "isolation--receipt.json",
+            "isolation--attempt-receipt.json",
         ),
     });
     flush_evidence(&evidence_dir, &evidence);
