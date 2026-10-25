@@ -829,8 +829,10 @@ fn run_actual_native_dispatch_with_browser(
             )
             .unwrap();
             stream.write_all(&response).unwrap();
-            // Browser input happens after ready ACK. The real Runner's bounded
-            // 500ms live-ready report must never wait on interactive actions.
+            // Browser input happens after ready ACK. The real Runner's native
+            // ready report must never wait on interactive actions: it returns
+            // as soon as the control plane answers, and this fake answers at
+            // once, so no retry may be scheduled.
             if (controls || server_terminal.is_some()) && path.ends_with("/ready") {
                 let controls_done = Arc::clone(&controls_done);
                 let root = observed_lease_root.clone();
