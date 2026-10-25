@@ -20,6 +20,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 
 pub mod command_control;
+mod terminal;
+pub use terminal::OciTerminal;
 mod ownership;
 mod principal;
 mod stop;
@@ -339,14 +341,53 @@ pub struct DockerOciAdapter {
     docker: DockerClient,
     spec: OciSpec,
     offline_image: Option<OfflineImage>,
+    attached_terminal: bool,
+    cgroup_parent: Option<String>,
 }
 
 struct OfflineImage {
-    archive: Vec<u8>,
+    archive: std::sync::Arc<Vec<u8>>,
     config_reference: String,
 }
 
 impl DockerOciAdapter {
+    /// Trusted physical placement, independent of the application's identity.
+    /// The caller measures this exact existing parent before creating either
+    /// member of an auxiliary group. Never inferred from dockerd's cgroup.
+    pub fn with_cgroup_parent(mut self, parent: String) -> Result<Self> {
+        ensure!(
+            !parent.is_empty()
+                && parent.len() <= 256
+                && parent
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b))
+                && !parent.split('/').any(|part| part == ".." || part == ".")
+                && !parent.contains("//")
+                && !parent.ends_with('/'),
+            "invalid explicit OCI cgroup parent"
+        );
+        self.cgroup_parent = Some(parent);
+        Ok(self)
+    }
+    /// Host-owned PTY for the declared entrypoint; no helper enters the image.
+    /// This deliberately supports no network endpoint or root execution.
+    pub fn with_attached_terminal(mut self) -> Result<Self> {
+        ensure!(
+            cfg!(target_os = "linux"),
+            "native OCI terminal requires a Linux Runner"
+        );
+        ensure!(
+            self.spec.user.is_some(),
+            "native terminal requires explicit nonroot numeric user"
+        );
+        ensure!(
+            self.spec.endpoints.is_empty(),
+            "native terminal cannot silently publish OCI endpoints"
+        );
+        self.attached_terminal = true;
+        Ok(self)
+    }
+
     pub fn with_control(mut self, control: command_control::CommandControl) -> Self {
         self.docker.control = Some(control);
         self
@@ -376,6 +417,8 @@ impl DockerOciAdapter {
             docker,
             spec,
             offline_image: None,
+            attached_terminal: false,
+            cgroup_parent: None,
         })
     }
 
@@ -383,6 +426,16 @@ impl DockerOciAdapter {
     /// config, layers, platform, and pinned image digest. Docker may load it,
     /// but must not resolve an absent image through the network.
     pub fn new_offline(spec: OciSpec, archive: Vec<u8>, config_reference: String) -> Result<Self> {
+        Self::new_offline_shared(spec, std::sync::Arc::new(archive), config_reference)
+    }
+
+    /// Reuse a fully verified frozen materialization without copying a large
+    /// helper archive into every attempt's admission footprint.
+    pub fn new_offline_shared(
+        spec: OciSpec,
+        archive: std::sync::Arc<Vec<u8>>,
+        config_reference: String,
+    ) -> Result<Self> {
         ensure!(
             config_reference
                 .strip_prefix("sha256:")
@@ -417,7 +470,7 @@ impl DockerOciAdapter {
         );
         let mut adapter = Self::new_at(spec, executable)?;
         adapter.offline_image = Some(OfflineImage {
-            archive,
+            archive: std::sync::Arc::new(archive),
             config_reference,
         });
         Ok(adapter)
@@ -495,7 +548,7 @@ impl DockerOciAdapter {
             &self.spec.id,
             &self.spec.labels,
             "ator",
-            self.docker.owner.is_some() || !direct_egress_enabled(),
+            self.attached_terminal || self.docker.owner.is_some() || !direct_egress_enabled(),
         )?;
         match self.spawn_in_network(workspace, runtime_root, &network, None) {
             Ok(mut handle) => {
@@ -512,6 +565,40 @@ impl DockerOciAdapter {
                 Err(error) => Err(error),
             },
         }
+    }
+
+    fn load_offline_if_missing(&self, runtime_root: &Path) -> Result<()> {
+        // The caller verified the complete archive graph before construction.
+        // Reuse only an exact already-loaded config/platform, never a tag or
+        // unverified registry fallback. Large trusted helpers need not be
+        // reloaded on every lease inside its bounded startup budget.
+        if let Some(offline) = &self.offline_image
+            && self
+                .inspect_loaded_image(&offline.config_reference)
+                .is_err()
+        {
+            let path = runtime_root.join("verified-oci-image.tar");
+            fs::write(&path, offline.archive.as_slice()).context("write verified OCI archive")?;
+            run_checked(
+                &self.docker,
+                [
+                    "image",
+                    "load",
+                    "--platform",
+                    self.spec.platform.as_str(),
+                    "--input",
+                    path.to_str().context("OCI archive path is not UTF-8")?,
+                ],
+                "load verified offline OCI image",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A trusted auxiliary producer must not inherit the legacy direct-egress
+    /// escape hatch. Use this adapter's owner client and command deadline.
+    pub fn create_internal_network(&self, label: &str) -> Result<OciNetwork> {
+        OciNetwork::create_with(&self.docker, label, &self.spec.labels, "ator", true)
     }
 
     /// Launch into a network the caller owns, optionally under a network
@@ -535,22 +622,7 @@ impl DockerOciAdapter {
             );
         }
         fs::create_dir_all(runtime_root).context("create OCI runtime directory")?;
-        if let Some(offline) = &self.offline_image {
-            let path = runtime_root.join("verified-oci-image.tar");
-            fs::write(&path, &offline.archive).context("write verified OCI archive")?;
-            run_checked(
-                &self.docker,
-                [
-                    "image",
-                    "load",
-                    "--platform",
-                    self.spec.platform.as_str(),
-                    "--input",
-                    path.to_str().context("OCI archive path is not UTF-8")?,
-                ],
-                "load verified offline OCI image",
-            )?;
-        }
+        self.load_offline_if_missing(runtime_root)?;
         let (_, image_for_run) = self.admit_image()?;
         // Docker silently creates an anonymous, writable volume for every
         // image VOLUME no mount covers. That would be state outside the
@@ -588,7 +660,7 @@ impl DockerOciAdapter {
             .collect::<String>();
         fs::write(&env_file, environment).context("write OCI environment file")?;
 
-        let argv = docker_run_arguments(
+        let mut argv = docker_run_arguments(
             &self.spec,
             workspace,
             &env_file,
@@ -597,6 +669,16 @@ impl DockerOciAdapter {
             alias,
             &image_for_run,
         )?;
+        if self.attached_terminal {
+            // Attach before starting so even the first output is captured.
+            // Every sandbox/resource/ownership argument remains unchanged.
+            argv[0] = "create".to_owned();
+            argv.remove(1); // --detach applies only to run.
+            argv.splice(1..1, ["--interactive".to_owned(), "--tty".to_owned()]);
+        }
+        if let Some(parent) = &self.cgroup_parent {
+            argv.splice(1..1, ["--cgroup-parent".to_owned(), parent.clone()]);
+        }
         // Persist the chosen name before Docker can create it. A worker crash
         // must not erase the identity needed to inspect an external workload.
         fs::write(
@@ -654,11 +736,40 @@ impl DockerOciAdapter {
                 anyhow::anyhow!("Docker returned no container id"),
             ));
         };
-        let (container_address, execution_principal) =
-            match inspect_container_address(&self.docker, &container_id) {
-                Ok(observation) => observation,
+        let terminal = if self.attached_terminal {
+            match OciTerminal::start(self.docker.clone(), &container_id) {
+                Ok(terminal) => Some(terminal),
                 Err(error) => return Err(failed_launch(&self.docker, &container_id, error)),
-            };
+            }
+        } else {
+            None
+        };
+        let inspect = || inspect_container_address(&self.docker, &container_id);
+        let observation = if terminal.is_some() {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match inspect() {
+                    Ok(value) => break Ok(value),
+                    Err(error)
+                        if std::time::Instant::now() >= deadline
+                            || self
+                                .docker
+                                .control
+                                .as_ref()
+                                .is_some_and(|control| control.remaining().is_err()) =>
+                    {
+                        break Err(error);
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(25)),
+                }
+            }
+        } else {
+            inspect()
+        };
+        let (container_address, execution_principal) = match observation {
+            Ok(observation) => observation,
+            Err(error) => return Err(failed_launch(&self.docker, &container_id, error)),
+        };
         let mut forwarders = Vec::with_capacity(self.spec.endpoints.len());
         for endpoint in &self.spec.endpoints {
             match PortForwarder::start(endpoint.host_port, container_address, endpoint.guest_port) {
@@ -685,6 +796,7 @@ impl DockerOciAdapter {
             endpoints: self.spec.endpoints.clone(),
             forwarders,
             outcome: None,
+            terminal: terminal.map(Box::new),
         })
     }
 
@@ -1173,9 +1285,68 @@ pub struct OciHandle {
     forwarders: Vec<PortForwarder>,
     /// Set once a stop has been attempted, so drop never stops twice.
     outcome: Option<StopOutcome>,
+    terminal: Option<Box<OciTerminal>>,
 }
 
 impl OciHandle {
+    /// Confirm the physical parent selected during host capacity admission.
+    /// A mismatching or unobservable parent is never accepted as placement.
+    pub fn verify_cgroup_parent(&self, docker_parent: &str, parent: &Path) -> Result<()> {
+        ensure!(
+            cfg!(target_os = "linux"),
+            "effective cgroup observation requires Linux"
+        );
+        let mut client = self.docker.clone();
+        client.control = Some(command_control::CommandControl::cleanup(
+            Duration::from_millis(500),
+        ));
+        let output = run_checked(
+            &client,
+            [
+                "inspect",
+                self.container_id.as_str(),
+                "--format",
+                "{{.State.Pid}}|{{.HostConfig.CgroupParent}}",
+            ],
+            "observe effective OCI cgroup parent",
+        )?;
+        let (pid, actual) = output
+            .trim()
+            .split_once('|')
+            .context("missing OCI cgroup parent evidence")?;
+        let pid: u32 = pid.parse()?;
+        ensure!(
+            pid > 0 && actual == docker_parent,
+            "OCI cgroup parent differs from admitted placement"
+        );
+        use std::io::Read as _;
+        let mut cgroup = String::new();
+        fs::File::open(format!("/proc/{pid}/cgroup"))?
+            .take(4097)
+            .read_to_string(&mut cgroup)?;
+        ensure!(cgroup.len() <= 4096, "oversized OCI cgroup evidence");
+        let actual = cgroup
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .context("unknown effective OCI cgroup")?;
+        let expected = Path::new("/").join(parent);
+        ensure!(
+            Path::new(actual)
+                .strip_prefix(expected)?
+                .components()
+                .next()
+                .is_some()
+                && actual.contains(&self.container_id),
+            "OCI process did not enter the admitted cgroup parent"
+        );
+        Ok(())
+    }
+
+    /// Transfer the trusted attach client to the Runner-owned producer.
+    pub fn take_terminal(&mut self) -> Option<OciTerminal> {
+        self.terminal.take().map(|terminal| *terminal)
+    }
+
     pub fn execution_principal(&self) -> Option<&OciExecutionPrincipal> {
         self.execution_principal.as_deref()
     }
@@ -1213,8 +1384,18 @@ impl OciHandle {
     }
 
     pub fn exit_code(&self) -> Result<Option<i32>> {
-        let output = self
-            .docker
+        self.exit_code_with_client(&self.docker)
+    }
+
+    /// A native lifecycle must observe exit without blocking owner cancellation.
+    pub fn exit_code_bounded(&self, budget: Duration) -> Result<Option<i32>> {
+        let mut docker = self.docker.clone();
+        docker.control = Some(command_control::CommandControl::cleanup(budget));
+        self.exit_code_with_client(&docker)
+    }
+
+    fn exit_code_with_client(&self, docker: &DockerClient) -> Result<Option<i32>> {
+        let output = docker
             .command()
             .args([
                 "inspect",
@@ -1274,6 +1455,7 @@ impl OciHandle {
         } else if let Some(network) = self.network.take() {
             network.forget();
         }
+        self.terminal.take();
         self.outcome = Some(outcome.clone());
         outcome
     }
@@ -2391,6 +2573,58 @@ mod tests {
         std::fs::write(&fake, script).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         (dir, DockerClient::ambient(fake))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_cache_requires_exact_verified_config_and_platform_and_loads_only_on_miss() {
+        for mode in ["hit", "missing", "wrong-config", "wrong-platform"] {
+            let config = format!("sha256:{}", "ab".repeat(32));
+            let script = format!(
+                r##"#!/bin/sh
+base=$(dirname "$0")
+echo "$*" >> "$base/calls"
+case "$1 $2" in
+  'version --format') echo '29.0.0';;
+  'image inspect')
+    if [ -f "$base/loaded" ] || [ '{mode}' = hit ]; then
+      echo '{config}|linux/amd64'
+    elif [ '{mode}' = wrong-config ]; then echo 'sha256:wrong|linux/amd64'
+    elif [ '{mode}' = wrong-platform ]; then echo '{config}|linux/arm64'
+    else exit 1; fi;;
+  'image load') touch "$base/loaded";;
+  *) exit 91;;
+esac
+"##
+            );
+            let (dir, client) = fake_docker(&script);
+            let mut value = spec();
+            value.endpoints.clear();
+            let adapter = DockerOciAdapter::new_offline_at(
+                value,
+                b"already-verified-archive".to_vec(),
+                config.clone(),
+                client.executable.as_ref().clone(),
+            )
+            .unwrap();
+            adapter.load_offline_if_missing(dir.path()).unwrap();
+            let (_, selected) = adapter.admit_image().unwrap();
+            assert_eq!(selected, config);
+            let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
+            assert_eq!(
+                calls
+                    .lines()
+                    .filter(|line| line.starts_with("image load "))
+                    .count(),
+                usize::from(mode != "hit"),
+                "{mode}: {calls}"
+            );
+            assert!(!calls.contains("pull"));
+            assert_eq!(
+                dir.path().join("verified-oci-image.tar").exists(),
+                mode != "hit"
+            );
+        }
     }
 
     #[cfg(unix)]

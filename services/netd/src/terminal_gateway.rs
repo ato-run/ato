@@ -30,9 +30,9 @@ use crate::surface_websocket_auth::{
 };
 
 pub const GUEST_TERMINAL_VSOCK_PORT: u32 = 1026;
-const FRAME_INPUT: u8 = 1;
-const FRAME_OUTPUT: u8 = 2;
-const FRAME_CONTROL: u8 = 3;
+pub const FRAME_INPUT: u8 = 1;
+pub const FRAME_OUTPUT: u8 = 2;
+pub const FRAME_CONTROL: u8 = 3;
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ pub struct TerminalGatewayConfig {
 }
 
 impl TerminalGatewayConfig {
-    fn validate(&self) -> Result<(), TerminalGatewayError> {
+    pub fn validate(&self) -> Result<(), TerminalGatewayError> {
         if self.scope.session_id.trim().is_empty() || self.scope.surface_id.trim().is_empty() {
             return Err(TerminalGatewayError::InvalidConfig(
                 "session_id and surface_id must not be empty",
@@ -233,7 +233,7 @@ async fn serve_terminal_connection(
     relay_terminal(websocket, guest, last_input_activity_unix_millis).await
 }
 
-async fn connect_guest_terminal(
+pub async fn connect_guest_terminal(
     path: &std::path::Path,
     budget: Duration,
 ) -> std::io::Result<UnixStream> {
@@ -392,8 +392,8 @@ where
     writer_result.map_err(TerminalGatewayError::WebSocket)
 }
 
-async fn write_guest_frame(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+pub async fn write_guest_frame<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
     kind: u8,
     payload: &[u8],
 ) -> std::io::Result<()> {
@@ -403,8 +403,8 @@ async fn write_guest_frame(
     writer.flush().await
 }
 
-async fn read_guest_frame(
-    reader: &mut tokio::net::unix::OwnedReadHalf,
+pub async fn read_guest_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
 ) -> Result<(u8, Vec<u8>), TerminalGatewayError> {
     let kind = reader.read_u8().await?;
     let length = reader.read_u32().await? as usize;
@@ -478,6 +478,8 @@ mod tests {
             }
             self.seen.lock().unwrap().push(assertion.to_string());
             Ok(AuthorizedSurfaceAccess {
+                clipboard_paste_until: None,
+                framebuffer_resize_until: None,
                 principal: "user-1".into(),
                 grant_id: assertion.to_string(),
             })

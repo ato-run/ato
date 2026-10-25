@@ -58,6 +58,7 @@ fn main() -> Result<()> {
         }],
         requirements: vec![PortableHttpRequirementSpec {
             id: "binding-health".to_owned(),
+            port: None,
             path: "/health".to_owned(),
             status: 200,
             body_digest: Some(HEALTH_SHA256.to_owned()),

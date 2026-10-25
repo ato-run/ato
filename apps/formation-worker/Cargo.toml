@@ -17,6 +17,7 @@ name = "ato-formation-worker"
 path = "src/bin/ato-formation-worker.rs"
 
 [dependencies]
+ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
 ato-portable-application = { path = "../portable-application", version = "0.1.0" }
 ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "0.1.0" }
 anyhow = "1"
