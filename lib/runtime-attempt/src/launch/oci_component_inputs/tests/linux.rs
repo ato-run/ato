@@ -223,6 +223,9 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
     let mut observation = RuntimeObservation {
         input_refs: BTreeMap::new(),
         instance_snapshot_ref: None,
+        // This route declares HTTP requirements only; a scenario requirement
+        // would fail closed as unobserved (see RuntimeObservation::scenarios).
+        scenarios: Vec::new(),
         http: vec![RuntimeHttpObservation::from_response(
             "app.http", "GET", "/", 200, &app_body,
         )],
