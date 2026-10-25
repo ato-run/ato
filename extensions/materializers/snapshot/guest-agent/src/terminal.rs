@@ -255,10 +255,11 @@ impl Workload for PtyChildWorkload {
     }
 
     fn stop(&mut self) -> io::Result<bool> {
-        let Some(generation) = self.generation.take() else {
+        let Some(generation) = self.generation else {
             return Ok(false);
         };
         let Some(pgid) = self.broker.running_pgid(generation) else {
+            self.generation = None;
             return Ok(false);
         };
         unsafe {
@@ -273,9 +274,17 @@ impl Workload for PtyChildWorkload {
                 libc::killpg(pgid, libc::SIGKILL);
             }
         }
+        let kill_deadline = Instant::now() + STOP_GRACE;
         while self.broker.running_pgid(generation).is_some() {
+            if Instant::now() >= kill_deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "PTY workload stop is unconfirmed",
+                ));
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
+        self.generation = None;
         Ok(true)
     }
 
@@ -291,9 +300,16 @@ impl Workload for PtyChildWorkload {
     }
 }
 
+impl Drop for PtyChildWorkload {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
 pub enum GuestWorkload {
     Log(ChildWorkload),
     Pty(PtyChildWorkload),
+    Pixel(crate::pixel::PixelChildWorkload),
 }
 
 impl Workload for GuestWorkload {
@@ -301,24 +317,28 @@ impl Workload for GuestWorkload {
         match self {
             Self::Log(workload) => workload.start(plan),
             Self::Pty(workload) => workload.start(plan),
+            Self::Pixel(workload) => workload.start(plan),
         }
     }
     fn stop(&mut self) -> io::Result<bool> {
         match self {
             Self::Log(workload) => workload.stop(),
             Self::Pty(workload) => workload.stop(),
+            Self::Pixel(workload) => workload.stop(),
         }
     }
     fn is_running(&self) -> bool {
         match self {
             Self::Log(workload) => workload.is_running(),
             Self::Pty(workload) => workload.is_running(),
+            Self::Pixel(workload) => workload.is_running(),
         }
     }
     fn run_once(&mut self, plan: &SpawnPlan) -> io::Result<i32> {
         match self {
             Self::Log(workload) => workload.run_once(plan),
             Self::Pty(workload) => workload.run_once(plan),
+            Self::Pixel(workload) => workload.run_once(plan),
         }
     }
 }

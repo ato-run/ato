@@ -36,6 +36,10 @@ ato-materializer-api = { path = "../../extensions/materializers/api", version = 
 ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
 ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-portable-application = { path = "../portable-application" }
+ato-native-surface-gateway = { path = "../native-surface-gateway" }
+netd = { path = "../../services/netd" }
+tokio = { version = "1", features = ["full"] }
 ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
 ato-planner = { package = "ato-realization-planner", path = "../../extensions/planner", version = "0.1.0" }
 ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
@@ -47,7 +51,7 @@ libc = "0.2"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rand = "0.8"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.1"
 serde_json = "1"
@@ -58,3 +62,6 @@ tracing = "0.1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 url = "2"
 tungstenite = "0.28"
+
+[dev-dependencies]
+ato-formation = { path = "../../lib/formation", default-features = false }

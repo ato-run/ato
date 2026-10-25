@@ -41,6 +41,12 @@ use sha2::{Digest, Sha256};
 /// Zstandard's magic number, little-endian.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
+/// Truthful transports of an already verified source archive. These labels
+/// deliberately do not claim the removed canonical snapshot encoder's v1.
+pub const RAW_TAR_FORMAT: &str = "ato.source-archive.raw-tar/1";
+pub const RAW_TAR_GZIP_FORMAT: &str = "ato.source-archive.raw-tar-gzip/1";
+pub const RAW_TAR_ZSTD_FORMAT: &str = "ato.source-archive.raw-tar-zstd/1";
+
 /// Decompress by what the BYTES say, not by what the URL ended in.
 ///
 /// GitHub serves gzip; an uploaded archive arrives zstd-compressed. Sniffing
@@ -201,6 +207,7 @@ pub struct TreeVerifiedArchive {
     resolver_contract: &'static str,
     /// The content bytes of the tree's regular files, as measured.
     file_bytes: u64,
+    file_count: usize,
 }
 
 impl DownloadedArchive {
@@ -254,6 +261,7 @@ impl DigestVerifiedArchive {
             tree_digest: measured.digest,
             resolver_contract: measured.contract,
             file_bytes: measured.file_bytes,
+            file_count: measured.file_count,
         })
     }
 }
@@ -281,6 +289,12 @@ impl TreeVerifiedArchive {
         self.file_bytes
     }
 
+    /// Regular files plus contained symlinks, excluding directories and tar
+    /// metadata. This is the same counter that enforces `max_files`.
+    pub fn expanded_file_count(&self) -> usize {
+        self.file_count
+    }
+
     /// The closure identity: the tree, plus the rules that measured it.
     pub fn closure_ref(&self, subdirectory: &str) -> Result<SourceClosureRef, SourceError> {
         SourceClosureRef::derive(&self.tree_digest, subdirectory, self.resolver_contract)
@@ -304,6 +318,9 @@ impl TreeVerifiedArchive {
 pub struct FileVerifiedArchive {
     file: std::fs::File,
     measured: Measured,
+    archive_digest: String,
+    archive_bytes: u64,
+    archive_format: &'static str,
 }
 
 impl FileVerifiedArchive {
@@ -330,6 +347,8 @@ impl FileVerifiedArchive {
         let mut hasher = Sha256::new();
         let mut size = 0u64;
         let mut buffer = [0u8; 64 * 1024];
+        let mut magic = [0u8; 4];
+        let mut magic_length = 0;
         loop {
             if !can_continue() {
                 return Err(SourceError::DeadlineExceeded);
@@ -337,6 +356,11 @@ impl FileVerifiedArchive {
             let count = file.read(&mut buffer).map_err(source_io)?;
             if count == 0 {
                 break;
+            }
+            if magic_length < 4 {
+                let take = count.min(4 - magic_length);
+                magic[magic_length..magic_length + take].copy_from_slice(&buffer[..take]);
+                magic_length += take;
             }
             size = size.saturating_add(count as u64);
             if size > expected_size {
@@ -365,10 +389,44 @@ impl FileVerifiedArchive {
             },
             limits,
         )?;
-        Ok(Self { file, measured })
+        Ok(Self {
+            file,
+            measured,
+            archive_digest: actual,
+            archive_bytes: size,
+            archive_format: if magic_length >= 2 && magic[..2] == [0x1f, 0x8b] {
+                RAW_TAR_GZIP_FORMAT
+            } else if magic_length == 4 && magic == ZSTD_MAGIC {
+                RAW_TAR_ZSTD_FORMAT
+            } else {
+                RAW_TAR_FORMAT
+            },
+        })
+    }
+    pub fn archive_digest(&self) -> &str {
+        &self.archive_digest
+    }
+    pub fn archive_bytes(&self) -> u64 {
+        self.archive_bytes
+    }
+    pub fn archive_format(&self) -> &'static str {
+        self.archive_format
+    }
+    /// Read-only, finite raw transport for upload. The underlying private
+    /// anonymous archive is never exposed as a writable file or host path.
+    pub fn archive_reader(&self) -> Result<impl Read + Send + 'static, SourceError> {
+        use std::io::Seek;
+        let mut file = self.file.try_clone().map_err(source_io)?;
+        file.rewind().map_err(source_io)?;
+        Ok(file.take(self.archive_bytes))
     }
     pub fn expanded_bytes(&self) -> u64 {
         self.measured.file_bytes
+    }
+    /// The verifier's existing `max_files` counter; never inferred from tar
+    /// headers or re-counted from a subsequently mutable materialized tree.
+    pub fn expanded_file_count(&self) -> usize {
+        self.measured.file_count
     }
     pub fn tree_digest(&self) -> &str {
         &self.measured.digest
@@ -879,6 +937,7 @@ struct Measured {
     digest: String,
     contract: &'static str,
     file_bytes: u64,
+    file_count: usize,
 }
 
 fn measure(archive: &[u8], limits: SourceLimits) -> Result<Measured, SourceError> {
@@ -983,6 +1042,7 @@ fn measure_readers<R: Read>(
         digest: format!("sha256:{:x}", hasher.finalize()),
         contract,
         file_bytes: total,
+        file_count: count,
     })
 }
 
@@ -1953,6 +2013,80 @@ mod tests {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(bytes).unwrap();
         FileVerifiedArchive::verify(file, digest, size, limits)
+    }
+
+    #[test]
+    fn verified_metrics_count_safe_entries_once_and_regular_contents_across_encodings() {
+        use std::io::Write;
+        let bytes = tree(&[
+            E::Dir("repository/site"),
+            E::File("repository/README", b"readme"),
+            E::File("repository/site/index.html", b"hello"),
+            E::File("repository/site/empty", b""),
+            E::Link("repository/site/link", "index.html"),
+        ]);
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&bytes).unwrap();
+        for (encoded, format) in [
+            (bytes.clone(), RAW_TAR_FORMAT),
+            (gzip.finish().unwrap(), RAW_TAR_GZIP_FORMAT),
+            (
+                zstd::stream::encode_all(bytes.as_slice(), 1).unwrap(),
+                RAW_TAR_ZSTD_FORMAT,
+            ),
+        ] {
+            let digest = content_ref(&encoded);
+            let memory = DownloadedArchive::new(encoded.clone())
+                .verify_archive_digest(&digest)
+                .unwrap()
+                .verify_tree_digest(None, LIMITS)
+                .unwrap();
+            let mut file = file_archive(&encoded, encoded.len() as u64, &digest, LIMITS).unwrap();
+            assert_eq!(file.archive_digest(), digest);
+            assert_eq!(file.archive_bytes(), encoded.len() as u64);
+            assert_eq!(file.archive_format(), format);
+            let mut transported = Vec::new();
+            file.archive_reader()
+                .unwrap()
+                .read_to_end(&mut transported)
+                .unwrap();
+            assert_eq!(transported, encoded);
+            assert_eq!(memory.expanded_file_count(), 4);
+            assert_eq!(file.expanded_file_count(), 4);
+            assert_eq!(file.expanded_bytes(), 11);
+            assert_eq!(memory.expanded_bytes(), 11);
+            assert_eq!(file.tree_digest(), memory.tree_digest());
+            assert_eq!(file.resolver_contract(), RESOLVER_CONTRACT_V2);
+            assert_eq!(
+                file.closure_ref("site").unwrap(),
+                memory.closure_ref("site").unwrap()
+            );
+            let selected = tempfile::tempdir().unwrap();
+            file.materialize(selected.path(), "site", LIMITS).unwrap();
+            // Full archive evidence is unchanged by selecting a smaller app.
+            assert_eq!((file.expanded_file_count(), file.expanded_bytes()), (4, 11));
+        }
+        assert!(matches!(
+            file_archive(
+                &bytes,
+                bytes.len() as u64,
+                &content_ref(b"different"),
+                LIMITS
+            ),
+            Err(SourceError::ArchiveDigestMismatch { .. })
+        ));
+        assert!(matches!(
+            file_archive(
+                &bytes,
+                bytes.len() as u64,
+                &content_ref(&bytes),
+                SourceLimits {
+                    max_files: 3,
+                    ..LIMITS
+                }
+            ),
+            Err(SourceError::LimitExceeded { limit: "max_files" })
+        ));
     }
 
     #[test]

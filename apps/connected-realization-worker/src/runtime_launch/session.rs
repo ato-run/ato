@@ -995,6 +995,7 @@ while True:
         let port = free_port();
         let mut spec = spec_for("run_2ec_container", Some(1), "unused", port);
         spec.realization = LaunchRealizationV1::Oci(ato_ipc::runtime_launch::OciRealizationV1 {
+            native_surface: None,
             image_digest_ref: WHOAMI.rsplit_once('@').unwrap().1.to_owned(),
             image_reference: Some(WHOAMI.to_owned()),
             platform: Some("linux/amd64".to_owned()),
@@ -1118,6 +1119,7 @@ while True:
                 generation: 1,
             }],
             fixed_tcp: Vec::new(),
+            managed_embeddings: Vec::new(),
         };
         let document = group_run("group_egress", Some(&authorization));
         assert_eq!(document["served_status"], 200);

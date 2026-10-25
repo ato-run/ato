@@ -1,0 +1,101 @@
+{
+  "scope": "phase18-21 integration status; isolated real browser results and shared staging HTTP results remain separate",
+  "prs": {
+    "rust_policy": 1544,
+    "api_policy": 878,
+    "rust_terminal_fixture": 1545,
+    "pwa_terminal_fixture": 519,
+    "drafts": true
+  },
+  "integration_before_this_ops_commit": {
+    "rust": "e2638b040bfccf8016ad78edf4fc62ad26718474",
+    "api": "85198199c786af1909833f9f6c0942b66423ae89",
+    "pwa": "3d1abe3896c2a3230ba2e96d16d92fdda53537d6"
+  },
+  "pwa_pr_head": "2759af2c526dd326ffef3fc55eba0ad22fe6d5d3",
+  "stage20": {
+    "source": "11d75a2c89253701ae6806ccf8659e75c4106c37",
+    "api_version": "3f7e0c43-2c86-4d2c-abfd-14ff5a9e62cb",
+    "admin_version": "271d6291-57e4-4d81-8cc4-600201e16e3f",
+    "pwa_version": "23a4c432-4ab5-45c5-b703-f68bb8d080ff",
+    "bindings": 119,
+    "secret_refs": 36,
+    "readonly_sets": 7,
+    "safety_results_equal": true,
+    "rows_written": 0,
+    "migrations_applied": false,
+    "lock_released": true,
+    "authenticated_acceptance": false
+  },
+  "cross_wire": {
+    "expected_results": 5,
+    "all_expectations_met": true,
+    "workload_launched": false,
+    "api_remote_write": false
+  },
+  "terminal": {
+    "pwa_executed_source": "a6ea247853de275057564319ce4d387b2c9ceb17",
+    "rust_executed_source": "b69b7cc6b6f142e75f8ec5bf46a290a972b6f8b7",
+    "fixture_code_manifest_sha256": "a350ddd1124286cb7dab21d27ab8c409aa112da7838444632febc93e473e6a51",
+    "root_joint_seconds": 11.482,
+    "browser_case_seconds": 6.6,
+    "rust_test_seconds": 8.77,
+    "lease_execution_ms": 8437,
+    "requested_stop_outcome": {
+      "kind": "forced",
+      "exit_code": 137
+    },
+    "normal_worker_sha256": "0586494e6cb3bac11a00624a6948fdeaf62122e4953746067d5c0c7cc4c7081c",
+    "normal_worker_bytes": 50490512,
+    "source_input_manifest_sha256": "8a79c72f79b4314a75d1e730996b270ef44a81cbf29b929c5376b25a9d93e82d",
+    "runner_installed": false,
+    "hosted_authentication_verified": false,
+    "real_oss_application": false,
+    "operator_secret_used": false,
+    "post_execution_discovery_fix": {
+      "reason": "Both Node contracts.test.mjs suites were collected by default Vitest and failed No test suite found; original red logs retained.",
+      "guard_renames_content_unchanged": true,
+      "ci_explicit_node22_guard_step": true,
+      "code_paths": 10,
+      "manifest_sha256": "9caad0a1a9274ac0a8b4d940f383bd59477c84a76fb8450afbfc0a88b7dcb97a",
+      "runtime_files_unchanged_from_executed_source": 6,
+      "browser_reexecuted": false,
+      "node_guard_tests": 11,
+      "node_skipped": 0,
+      "vitest_cases": 39,
+      "vitest_suites": 4,
+      "vitest_default_directory_discovery": "passed",
+      "independent_review": "no new P1/P2",
+      "evidence_logs": [
+        "vitest-node-discovery.log",
+        "vitest-pixel-node-discovery.log",
+        "node-discovery-green.log",
+        "vitest-discovery-green.log"
+      ]
+    }
+  },
+  "validation": {
+    "rust_mac_pass": 192,
+    "rust_linux_pass": 193,
+    "api_focused_pass": 226,
+    "pwa_node_pass": 11,
+    "pwa_vitest_pass": 39,
+    "pwa_suites": 4,
+    "product_build_pages": 71,
+    "ci": "observed earlier API6/PWA2 jobs were blocked before execution by billing; latest heads not confirmed green"
+  },
+  "remaining": [
+    "manual staging-only Chrome owner login",
+    "dedicated actual one-owner/one-run machine",
+    "authenticated Source job -> selected D -> persisted same-attempt Rust receipt",
+    "Hosted save/restore and user separation",
+    "real GPU/provider acceptance; budget closed and Vast configuration missing",
+    "real operator-key workload acceptance; broker disabled and policies zero",
+    "heterogeneous-runtime component group"
+  ],
+  "production_changed": false,
+  "paid_gpu_created": false,
+  "production_operator_key_introduced": false,
+  "new_runner_installed": false,
+  "pending_approval": false
+}

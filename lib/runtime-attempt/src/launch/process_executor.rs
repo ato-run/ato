@@ -1345,6 +1345,7 @@ HTTPServer(('127.0.0.1', 34567), H).serve_forever()
         let fixture = context_with_state(StateAccessV1::ReadWrite);
         let mut spec = spec(PROCESS_FIXTURE);
         spec.realization = LaunchRealizationV1::Oci(OciRealizationV1 {
+            native_surface: None,
             image_digest_ref: format!("sha256:{}", "ab".repeat(32)),
             image_reference: None,
             platform: None,

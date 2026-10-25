@@ -1435,6 +1435,7 @@ mod tests {
             bindings: Vec::new(),
             requirements: vec![PortableHttpRequirementSpec {
                 id: "notes-health".to_owned(),
+                port: None,
                 path: "/health".to_owned(),
                 status: 200,
                 body_digest: Some(
