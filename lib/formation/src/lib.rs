@@ -58,6 +58,7 @@ pub mod retained;
 /// validator and the wasm receipt authority build without `planning`, and
 /// they must reach the same policy as the attempt admission does.
 pub mod runtime_policy;
+pub mod scenario;
 #[cfg(feature = "planning")]
 pub mod source;
 pub mod variables;
