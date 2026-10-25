@@ -80,6 +80,18 @@ jobs:
       - name: Test workspace
         if: runner.os != 'Windows'
         run: cargo test --workspace --no-fail-fast
+      - name: Derivation transformation v0 E2E (Linux)
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        run: >-
+          cargo test -p ato-cli --test derivation_transformation --locked --
+          --nocapture
+      - name: Upload transformation v0 evidence (Linux)
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: transformation-v0-evidence
+          path: target/transformation-v0-evidence/
+          if-no-files-found: warn
       - name: Portable worker regressions (Windows)
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash
