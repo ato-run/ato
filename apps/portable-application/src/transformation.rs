@@ -38,7 +38,7 @@ use ato_objects::{
 };
 
 use crate::{
-    PortableApplicationError, build_authored_bundle_v2, bundle_sha256, validate_all_derivations,
+    PortableApplicationError, bundle_sha256, validate_all_derivations,
     validate_bundle_for_derivation, workspace_input,
 };
 
@@ -62,6 +62,15 @@ pub const TRANSFORMATION_DERIVATION_SELECTION_REQUIRED: &str =
 pub const TRANSFORMATION_DERIVATION_NOT_DECLARED: &str = "transformation_derivation_not_declared";
 /// The candidate derivation omitted its `ato.workspace@1` input.
 pub const CANDIDATE_SOURCE_CLOSURE_MISSING: &str = "candidate_source_closure_missing";
+/// The candidate source's Derivation does not declare the Ports/inputs the
+/// frozen Contract names, or the assembled candidate bundle does not validate
+/// under it.
+pub const CANDIDATE_DERIVATION_NOT_COMPATIBLE: &str = "candidate_derivation_not_compatible";
+/// A frozen bundle that carries an Instance snapshot is outside the v0
+/// transformation scope: the candidate would have to reproduce the v4 index,
+/// its portability manifest and the snapshot closure. Refused explicitly rather
+/// than silently dropping the snapshot.
+pub const FROZEN_INSTANCE_SNAPSHOT_UNSUPPORTED: &str = "frozen_instance_snapshot_unsupported";
 
 fn refusal(code: &'static str, detail: impl Into<String>) -> PortableApplicationError {
     PortableApplicationError::Transformation {
@@ -86,6 +95,9 @@ pub struct FrozenTransformTarget {
     /// Every distinct `ato.workspace@1` content_ref among those old
     /// derivations, sorted. These are the old source closures.
     pub source_closure_refs: Vec<String>,
+    /// The frozen index's Instance snapshot, when it has one. Carried as a
+    /// fact here; transforming a snapshot-bearing bundle is refused in v0.
+    pub instance_snapshot_ref: Option<String>,
 }
 
 /// A candidate bundle built from a new source under the frozen K, before any
@@ -208,14 +220,25 @@ pub fn inspect_frozen_transform_target(
         contract_ref,
         derivation_refs,
         source_closure_refs: source_closure_refs.into_iter().collect(),
+        instance_snapshot_ref: bundle.index.instance_snapshot_ref.clone(),
     })
 }
 
 /// Build a candidate Derivation bundle from `source_root` under the frozen K.
 ///
-/// The frozen Contract is read from `frozen_bundle_bytes`; the candidate is
-/// built with the existing `ato.capsule/2` authoring builder. Nothing is
-/// executed here, and nothing on disk is written.
+/// The new source is a DERIVATION candidate, not a Contract source:
+///
+/// - the bundle root Contract object is the frozen canonical body, carried
+///   byte-for-byte; the new source can never become the origin of K;
+/// - the candidate's `ato.capsule/2` application/input/derivation sections are
+///   projected exactly as `ato pack` projects them, and each Derivation is
+///   checked against the frozen Contract's Port/input references;
+/// - a candidate manifest MAY omit `[contract]`; when it declares one, that
+///   declaration is compared byte-for-byte to the frozen K and a mismatch is
+///   `candidate_contract_mismatch` before anything is built;
+/// - a source-bound frozen Contract is refused up front.
+///
+/// Nothing is executed here, and nothing on disk is written.
 pub fn build_transformation_candidate(
     frozen_bundle_bytes: &[u8],
     source_root: &Path,
@@ -233,32 +256,49 @@ pub fn build_transformation_candidate(
             ),
         ));
     }
+    if frozen.instance_snapshot_ref.is_some() {
+        return Err(refusal(
+            FROZEN_INSTANCE_SNAPSHOT_UNSUPPORTED,
+            format!(
+                "the frozen bundle {} indexes an Instance snapshot; a v4 snapshot-bearing \
+                 candidate would have to reproduce the snapshot closure and portability manifest, \
+                 which transformation v0 does not implement (refused rather than dropped)",
+                frozen.bundle_sha256
+            ),
+        ));
+    }
 
-    let (candidate_bytes, candidate_bundle) = build_authored_bundle_v2(source_root)?;
-    let candidate_routes = validate_all_derivations(&candidate_bundle)?;
-    let candidate_contract = candidate_routes
-        .first()
-        .map(|route| route.contract.clone())
-        .ok_or_else(|| {
-            refusal(
-                TRANSFORMATION_DERIVATION_SELECTION_REQUIRED,
-                "the candidate bundle declares no Derivation",
-            )
-        })?;
-    let candidate_contract_ref = contract_ref(&candidate_contract)?;
+    // The new source contributes application/input/derivation sections only.
+    // Its `[contract]`, when present, is a DECLARATION to compare — never the
+    // origin of the bundle's K.
+    let spec = crate::authored_derivation_candidate_spec(source_root)?;
+    if !spec.requirements.is_empty() {
+        let declared = crate::http_contract_from_requirements(&spec.requirements)?;
+        let declared_ref = contract_ref(&declared)?;
+        if declared_ref != frozen.contract_ref
+            || canonical_contract(&declared)? != canonical_contract(&frozen.contract)?
+        {
+            return Err(refusal(
+                CANDIDATE_CONTRACT_MISMATCH,
+                format!(
+                    "the candidate manifest declares Contract {declared_ref}, but the frozen \
+                     Contract is {}; a candidate manifest cannot redefine K",
+                    frozen.contract_ref
+                ),
+            ));
+        }
+    }
 
-    // K is compared as canonical bytes AND as the ref that names those bytes.
-    // Both, because either alone would let a different body claim the old K.
-    if candidate_contract_ref != frozen.contract_ref
-        || canonical_contract(&candidate_contract)? != canonical_contract(&frozen.contract)?
-        || candidate_bundle.index.root_contract_ref != frozen.contract_ref
-    {
+    // The bundle root IS the frozen Contract object; the builder binds the new
+    // source's Derivation against it and refuses an incompatible route.
+    let (candidate_bytes, candidate_bundle) =
+        crate::build_derivation_candidate_bundle(source_root, &spec, &frozen.contract)?;
+    if candidate_bundle.index.root_contract_ref != frozen.contract_ref {
         return Err(refusal(
             CANDIDATE_CONTRACT_MISMATCH,
             format!(
-                "the new source derives Contract {candidate_contract_ref}, but the frozen Contract \
-                 is {}; a transformation must preserve K, so the old K is not rewritten",
-                frozen.contract_ref
+                "the candidate bundle roots at {}, not the frozen Contract {}",
+                candidate_bundle.index.root_contract_ref, frozen.contract_ref
             ),
         ));
     }
@@ -382,6 +422,44 @@ default = "pure"
         fs::write(dir.path().join("capsule.toml"), manifest).expect("capsule.toml");
         fs::write(dir.path().join("app.py"), app).expect("app.py");
         dir
+    }
+
+    /// A derivation-candidate manifest: the same route, but NO `[contract]`.
+    /// The frozen K comes from the existing bundle; this file must never mint
+    /// one.
+    fn derivation_candidate_without_contract(app: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Transformation candidate"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derivation]]
+id = "python-a"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
+"#;
+        fs::write(dir.path().join("capsule.toml"), manifest).expect("capsule.toml");
+        fs::write(dir.path().join("app.py"), app).expect("app.py");
+        dir
+    }
+
+    fn contract_object_bytes(bundle: &PortableApplicationBundle) -> Vec<u8> {
+        let reference = ContentRef::parse(bundle.index.root_contract_ref.clone()).expect("ref");
+        bundle.payload_bytes(&reference).expect("contract payload")
     }
 
     fn two_route_source() -> tempfile::TempDir {
@@ -571,6 +649,15 @@ env = { ROUTE_VARIANT = "b" }
             candidate.contract_ref, candidate.bundle.index.root_contract_ref,
             "the candidate bundle roots at the frozen K"
         );
+        // The root Contract OBJECT is the frozen bytes, not merely a body that
+        // happens to digest alike.
+        assert_eq!(
+            contract_object_bytes(&candidate.bundle),
+            serde_jcs::to_vec(&frozen_target.contract).expect("canonical frozen K"),
+            "the candidate bundle carries the frozen Contract bytes"
+        );
+        validate_all_derivations(&candidate.bundle)
+            .expect("the candidate validates against the frozen K object");
         assert_ne!(
             candidate.source_closure_ref, candidate.old_source_closure_refs[0],
             "a different source is a different closure"
@@ -586,6 +673,51 @@ env = { ROUTE_VARIANT = "b" }
         assert!(
             !candidate.old_source_closure_refs.is_empty(),
             "the old closure is reported"
+        );
+    }
+
+    #[test]
+    fn a_candidate_manifest_may_omit_the_contract_and_binds_the_frozen_k() {
+        let frozen_source = written_source(200, "print('old')\n", "python-a");
+        let frozen = frozen_bytes(frozen_source.path());
+        let frozen_target = inspect_frozen_transform_target(&frozen).expect("frozen target");
+        let new_source = derivation_candidate_without_contract("print('new')\n");
+
+        let candidate =
+            build_transformation_candidate(&frozen, new_source.path(), None).expect("candidate");
+        assert!(candidate.k_preserved);
+        assert_eq!(candidate.contract_ref, frozen_target.contract_ref);
+        assert_eq!(
+            candidate.bundle.index.root_contract_ref,
+            frozen_target.contract_ref
+        );
+        // The bundle's root Contract object is the frozen canonical body.
+        assert_eq!(
+            contract_object_bytes(&candidate.bundle),
+            serde_jcs::to_vec(&frozen_target.contract).expect("canonical frozen K")
+        );
+        validate_all_derivations(&candidate.bundle)
+            .expect("the candidate validates against the frozen K object");
+        // The D and its closure come from the NEW source.
+        assert_ne!(candidate.derivation_ref, frozen_target.derivation_refs[0]);
+        assert_ne!(
+            candidate.source_closure_ref, frozen_target.source_closure_refs[0],
+            "a different source is a different closure"
+        );
+        assert_eq!(
+            candidate.old_source_closure_refs,
+            frozen_target.source_closure_refs
+        );
+    }
+
+    #[test]
+    fn ato_pack_still_requires_a_contract_section() {
+        let candidate_source = derivation_candidate_without_contract("print('x')\n");
+        let error = crate::build_authored_bundle_v2(candidate_source.path())
+            .expect_err("ato pack still requires the author to declare a Contract");
+        assert!(
+            error.to_string().contains("contract"),
+            "unexpected error: {error}"
         );
     }
 
