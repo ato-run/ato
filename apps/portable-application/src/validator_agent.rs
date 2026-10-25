@@ -220,6 +220,10 @@ impl ValidatorAgent {
         let point = verify_observed_candidate(
             &spec,
             http,
+            // Hosted validation observes through a GET-only relay; it cannot
+            // execute a Scenario in v1, so a scenario requirement fails
+            // closed as unobserved instead of being claimed.
+            Vec::new(),
             execution,
             &ReceiptContext {
                 target: VerificationTargetKind::AtoRunHosted,

@@ -277,6 +277,7 @@ mod tests {
             shape: CandidateShape::Process,
             input_refs: Default::default(),
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         admit(&spec, authorization, None).map(|failure| failure.code)
     }
@@ -295,6 +296,7 @@ mod tests {
             shape: CandidateShape::Process,
             input_refs: Default::default(),
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         admit(&spec, EffectAuthorization::Unattended, None).map(|failure| failure.code)
     }
@@ -362,6 +364,7 @@ mod tests {
             shape: CandidateShape::Process,
             input_refs: Default::default(),
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         assert_eq!(
             admit(
@@ -457,6 +460,7 @@ mod tests {
             shape: CandidateShape::Process,
             input_refs: Default::default(),
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         for authorization in [
             EffectAuthorization::Unattended,
@@ -494,6 +498,7 @@ mod tests {
             shape: CandidateShape::Process,
             input_refs: Default::default(),
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         // A grant that would cover the route's authority does not admit it:
         // the host condition is not authority and no grant satisfies it.

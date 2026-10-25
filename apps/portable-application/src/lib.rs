@@ -329,6 +329,16 @@ impl ValidatedPortableApplication {
                 .map(|input| (input.id.clone(), self.tree_ref.to_string()))
                 .collect(),
             instance_snapshot_ref: restored_snapshot_ref.map(str::to_owned),
+            scenarios: self
+                .scenarios
+                .iter()
+                .map(|scenario| ato_runtime_attempt::spec::AttemptScenarioV1 {
+                    requirement_id: scenario.requirement_id.clone(),
+                    port: scenario.port.clone(),
+                    scenario_ref: scenario.scenario_ref.to_string(),
+                    scenario: scenario.scenario.clone(),
+                })
+                .collect(),
         }
     }
 }

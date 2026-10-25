@@ -1,0 +1,39 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Scenario verifier v1 fixture"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+identity = "behavioral"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+
+[[contract.observation]]
+id = "crud"
+use = "ato.contract.scenario@1"
+port = "app.http"
+scenario = "scenarios/crud.json"
+
+[[derivation]]
+id = "app"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
