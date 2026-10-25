@@ -615,6 +615,55 @@ env = { ROUTE_VARIANT = "b" }
         );
     }
 
+    /// A preset synthesizes a Contract that captures the workspace closure
+    /// (`ato.contract.workspace@1` with `digest = "capture"`). Two different
+    /// source closures therefore cannot share that K: the refs differ, which
+    /// is exactly why `build_transformation_candidate` refuses a source-bound
+    /// frozen Contract instead of pretending the source is not in K.
+    #[test]
+    fn a_preset_style_source_bound_contract_differs_between_source_closures() {
+        use ato_formation::authoring::{BindingContext, bind};
+        use ato_formation::preset::{AppPreset, synthesize_authoring};
+
+        let draft = synthesize_authoring(AppPreset::StaticFiles);
+        let closure_a = format!("sha256:{}", "a".repeat(64));
+        let closure_b = format!("sha256:{}", "b".repeat(64));
+        let first = bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: &closure_a,
+            },
+        )
+        .expect("source A binds");
+        let second = bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: &closure_b,
+            },
+        )
+        .expect("source B binds");
+
+        assert!(frozen_contract_is_source_bound(&first.0));
+        assert!(frozen_contract_is_source_bound(&second.0));
+        // The closure is inside K's canonical bytes, so the K refs move...
+        assert!(
+            serde_json::to_string(&first.0)
+                .expect("canonical K")
+                .contains(&closure_a),
+            "the preset K captures its source closure"
+        );
+        assert_ne!(
+            first.0.contract_ref().unwrap(),
+            second.0.contract_ref().unwrap(),
+            "a source-bound K cannot be preserved for a different source"
+        );
+        // ...and the derivations differ too, for the same reason.
+        assert_ne!(
+            first.1.derivation_ref().unwrap(),
+            second.1.derivation_ref().unwrap()
+        );
+    }
+
     #[test]
     fn a_computation_bundle_is_not_a_transformation_input() {
         let error = build_transformation_candidate(b"{}", Path::new("."), None)
