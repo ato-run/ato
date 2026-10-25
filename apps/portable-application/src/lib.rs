@@ -16,13 +16,14 @@ use ato_formation::authoring::{
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
     BoundRequirement, BoundStep, ClientAddressTransport, DerivationDraft, EffectClass,
     HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL,
-    PortDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, TCP_EGRESS_PROTOCOL,
-    TCP_PROTOCOL, WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
+    PortDraft, SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft,
+    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_formation::capsule_toml_v2::{
     PortableDerivationKindV2, parse_capsule_toml_v2, parse_capsule_toml_v2_derivation_candidate,
 };
+use ato_formation::scenario::{SCENARIO_SCHEMA, ScenarioV1};
 use ato_materializer_static_web::{media_type_for, validate_relative_path};
 use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION, PORTABLE_APPLICATION_PROFILE, PortableApplicationBundle,
@@ -217,6 +218,20 @@ pub struct ValidatedPortableApplication {
     /// The route's `ato.model-set@1` inputs, each verified against the
     /// manifest object the bundle carries. Their objects are not in the bundle.
     pub model_sets: Vec<ValidatedModelSet>,
+    /// The route's scenario requirements, each verified against its canonical
+    /// `ato.scenario/1` object in the bundle closure.
+    pub scenarios: Vec<ValidatedScenario>,
+}
+
+/// One `ato.contract.scenario@1` requirement resolved against the bundle's
+/// `ato.scenario/1` object. The steps are immutable and content-addressed; the
+/// runtime that executes them is a separate concern.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedScenario {
+    pub requirement_id: String,
+    pub port: String,
+    pub scenario_ref: ContentRef,
+    pub scenario: ScenarioV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,6 +424,22 @@ pub struct PortableAuthoredBundleSpec {
     /// `(input id, manifest path in the source, canonical manifest)` consumed
     /// by every route. The manifest file is an input, not workspace content.
     pub model_sets: Vec<(String, String, ato_formation::model_set::ModelSetManifest)>,
+    /// `ato.contract.scenario@1` inputs: the validated plan and its content
+    /// address. The scenario file is an input, not workspace content.
+    pub scenarios: Vec<PortableScenarioSpec>,
+}
+
+/// One scenario observation an authored source declares: the validated plan,
+/// its content address and the Port it runs against.
+#[derive(Debug, Clone)]
+pub struct PortableScenarioSpec {
+    pub id: String,
+    pub port: String,
+    /// Source-relative path of the scenario file, excluded from the workspace
+    /// tree because the Contract pins it as an input.
+    pub path: String,
+    pub scenario: ScenarioV1,
+    pub reference: String,
 }
 
 /// Every `(image, platform)` an OCI route runs: one for a single-container
@@ -835,6 +866,7 @@ fn validate_selected_derivation(
     if !model_sets.is_empty() && realization != PortableRealizationKind::LocalProcess {
         return Err(profile("v0 delivers a Model Set only to a process route"));
     }
+    let scenarios = validated_scenarios(bundle, &contract, &derivation)?;
 
     Ok(ValidatedPortableApplication {
         contract_ref,
@@ -849,7 +881,63 @@ fn validate_selected_derivation(
         tree_schema,
         realization,
         model_sets,
+        scenarios,
     })
+}
+
+/// Each `ato.contract.scenario@1` requirement must name a canonical
+/// `ato.scenario/1` object in the bundle and an HTTP Port the route declares.
+fn validated_scenarios(
+    bundle: &PortableApplicationBundle,
+    contract: &BoundContract,
+    derivation: &BoundDerivation,
+) -> Result<Vec<ValidatedScenario>, PortableApplicationError> {
+    let mut scenarios = Vec::new();
+    for requirement in contract
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == SCENARIO_CONTRACT_VERIFIER)
+    {
+        let digest = requirement
+            .digest
+            .as_deref()
+            .ok_or_else(|| profile("scenario requirement omitted its digest"))?;
+        let reference = parse_ref(digest, "scenario reference")?;
+        let schema = bundle
+            .descriptor(&reference)
+            .and_then(|descriptor| descriptor.schema.clone());
+        if schema.as_deref() != Some(SCENARIO_SCHEMA) {
+            return Err(profile(
+                "a scenario requirement must name a structured ato.scenario/1 object",
+            ));
+        }
+        let bytes = bundle.payload_bytes(&reference)?;
+        let (scenario, computed) = ScenarioV1::from_canonical_bytes(&bytes)
+            .map_err(|error| profile(format!("scenario object is invalid: {error}")))?;
+        if computed != reference.as_str() {
+            return Err(profile("scenario object does not match its reference"));
+        }
+        let port = requirement
+            .port
+            .as_deref()
+            .ok_or_else(|| profile("scenario requirement omitted its port"))?;
+        if !derivation
+            .ports
+            .iter()
+            .any(|candidate| candidate.id == port && candidate.protocol == HTTP_PROTOCOL)
+        {
+            return Err(profile(
+                "scenario requirement names a port this Derivation does not declare",
+            ));
+        }
+        scenarios.push(ValidatedScenario {
+            requirement_id: requirement.id.clone(),
+            port: port.to_owned(),
+            scenario_ref: reference,
+            scenario,
+        });
+    }
+    Ok(scenarios)
 }
 
 /// Each `ato.model-set@1` input must name a structured object of the Model
@@ -1202,6 +1290,7 @@ pub fn build_dynamic_process_oci_bundle(
             requirements: spec.requirements.clone(),
             effects: EffectClass::Pure,
             model_sets: Vec::new(),
+            scenarios: Vec::new(),
         },
     )
 }
@@ -1232,13 +1321,14 @@ pub(crate) fn authored_derivation_candidate_spec(
     authored_bundle_spec_v2(source_root, false)
 }
 
-/// The Contract a route set would derive on its own, used only to compare a
-/// candidate manifest's DECLARED contract to the frozen one. It never becomes
-/// the bundle root.
-pub(crate) fn http_contract_from_requirements(
-    requirements: &[PortableHttpRequirementSpec],
+/// The Contract a source would derive on its own, used to build a normal pack
+/// and to compare a candidate manifest's DECLARED contract to the frozen one.
+/// In the transformation path it never becomes the bundle root.
+pub(crate) fn contract_from_spec(
+    spec: &PortableAuthoredBundleSpec,
 ) -> Result<BoundContract, PortableApplicationError> {
-    let mut bound = requirements
+    let mut bound = spec
+        .requirements
         .iter()
         .map(|requirement| BoundRequirement {
             id: requirement.id.clone(),
@@ -1252,6 +1342,17 @@ pub(crate) fn http_contract_from_requirements(
             digest: None,
         })
         .collect::<Vec<_>>();
+    bound.extend(spec.scenarios.iter().map(|input| BoundRequirement {
+        id: input.id.clone(),
+        verifier: SCENARIO_CONTRACT_VERIFIER.to_owned(),
+        port: Some(input.port.clone()),
+        method: None,
+        path: None,
+        status: None,
+        body_digest: None,
+        input: None,
+        digest: Some(input.reference.clone()),
+    }));
     bound.sort_by(|left, right| left.id.cmp(&right.id));
     if bound.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(profile(
@@ -1277,6 +1378,32 @@ fn authored_bundle_spec_v2(
         parse_capsule_toml_v2_derivation_candidate(text)
     }
     .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
+    let scenarios = draft
+        .scenarios
+        .iter()
+        .map(|input| {
+            let bytes = read(source_root.join(&input.scenario_path))?;
+            let scenario = ScenarioV1::parse_json(&bytes).map_err(|error| {
+                profile(format!(
+                    "scenario {} is invalid: {error}",
+                    input.scenario_path
+                ))
+            })?;
+            let reference = scenario.scenario_ref().map_err(|error| {
+                profile(format!(
+                    "scenario {} is invalid: {error}",
+                    input.scenario_path
+                ))
+            })?;
+            Ok(PortableScenarioSpec {
+                id: input.id.clone(),
+                port: input.port.clone(),
+                path: input.scenario_path.clone(),
+                scenario,
+                reference,
+            })
+        })
+        .collect::<Result<Vec<_>, PortableApplicationError>>()?;
     let routes = draft
         .derivations
         .into_iter()
@@ -1377,6 +1504,7 @@ fn authored_bundle_spec_v2(
                 Ok((input.id.clone(), input.manifest_path.clone(), manifest))
             })
             .collect::<Result<_, PortableApplicationError>>()?,
+        scenarios,
     })
 }
 
@@ -1397,18 +1525,22 @@ pub(crate) fn build_derivation_candidate_bundle(
     source_root: &Path,
     spec: &PortableAuthoredBundleSpec,
     frozen_contract: &BoundContract,
+    frozen_bundle: &PortableApplicationBundle,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
-    build_routes_bundle(source_root, spec, Some(frozen_contract))
+    build_routes_bundle(source_root, spec, Some((frozen_contract, frozen_bundle)))
 }
 
 fn build_routes_bundle(
     source_root: &Path,
     spec: &PortableAuthoredBundleSpec,
-    frozen_contract: Option<&BoundContract>,
+    frozen: Option<(&BoundContract, &PortableApplicationBundle)>,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
-    if spec.title.trim().is_empty() || (frozen_contract.is_none() && spec.requirements.is_empty()) {
+    let frozen_contract = frozen.map(|(contract, _)| contract);
+    if spec.title.trim().is_empty()
+        || (frozen_contract.is_none() && spec.requirements.is_empty() && spec.scenarios.is_empty())
+    {
         return Err(profile(
-            "dynamic application requires a title and at least one HTTP observation",
+            "dynamic application requires a title and at least one observation",
         ));
     }
     if spec.routes.is_empty() || spec.routes.len() > 16 {
@@ -1416,15 +1548,17 @@ fn build_routes_bundle(
             "dynamic application requires between one and sixteen routes",
         ));
     }
-    let (mut objects, tree_ref) = build_portable_tree_with_schema(
-        source_root,
-        PORTABLE_TREE_V2_SCHEMA,
-        &spec
-            .model_sets
-            .iter()
-            .map(|(_, path, _)| path.clone())
-            .collect::<Vec<_>>(),
-    )?;
+    let mut excluded: Vec<String> = spec
+        .model_sets
+        .iter()
+        .map(|(_, path, _)| path.clone())
+        .collect();
+    // The scenario files are inputs the Contract pins, not workspace content.
+    // A candidate manifest that omits `[contract]` names no scenario file; any
+    // scenario file it carries is ordinary source content.
+    excluded.extend(spec.scenarios.iter().map(|input| input.path.clone()));
+    let (mut objects, tree_ref) =
+        build_portable_tree_with_schema(source_root, PORTABLE_TREE_V2_SCHEMA, &excluded)?;
     let input = BoundInput {
         id: "workspace".to_owned(),
         protocol: WORKSPACE_PROTOCOL.to_owned(),
@@ -1445,6 +1579,67 @@ fn build_routes_bundle(
             protocol: ato_formation::model_set::MODEL_SET_PROTOCOL.to_owned(),
             content_ref: reference,
         });
+    }
+    // Scenario objects are part of the Contract closure. A normal pack carries
+    // the plans the source declared. A transformation candidate carries the
+    // frozen K's plans read from the frozen bundle: the new source cannot
+    // replace what the Contract pins.
+    match frozen {
+        Some((frozen_contract, frozen_bundle)) => {
+            let frozen_digests = frozen_contract
+                .requirements
+                .iter()
+                .filter(|requirement| requirement.verifier == SCENARIO_CONTRACT_VERIFIER)
+                .filter_map(|requirement| requirement.digest.as_deref())
+                .collect::<BTreeSet<_>>();
+            for input in &spec.scenarios {
+                if !frozen_digests.contains(input.reference.as_str()) {
+                    return Err(PortableApplicationError::Transformation {
+                        code: crate::transformation::CANDIDATE_CONTRACT_MISMATCH,
+                        detail: format!(
+                            "the candidate manifest declares scenario {}, which the frozen \
+                             Contract does not pin",
+                            input.reference
+                        ),
+                    });
+                }
+            }
+            let mut added = BTreeSet::new();
+            for requirement in frozen_contract
+                .requirements
+                .iter()
+                .filter(|requirement| requirement.verifier == SCENARIO_CONTRACT_VERIFIER)
+            {
+                let digest = requirement
+                    .digest
+                    .as_deref()
+                    .ok_or_else(|| profile("frozen scenario requirement omitted its digest"))?;
+                if !added.insert(digest.to_owned()) {
+                    continue;
+                }
+                let reference = parse_ref(digest, "frozen scenario reference")?;
+                let bytes = frozen_bundle.payload_bytes(&reference)?;
+                let (scenario, computed) = ScenarioV1::from_canonical_bytes(&bytes)
+                    .map_err(|error| profile(format!("frozen scenario is invalid: {error}")))?;
+                if computed != digest {
+                    return Err(profile(
+                        "frozen scenario object does not match its reference",
+                    ));
+                }
+                let stored = add_structured(&mut objects, &scenario, SCENARIO_SCHEMA)?;
+                if stored != digest {
+                    return Err(profile("frozen scenario object is not canonical"));
+                }
+            }
+        }
+        None => {
+            for input in &spec.scenarios {
+                let stored = add_structured(&mut objects, &input.scenario, SCENARIO_SCHEMA)?;
+                if stored != input.reference {
+                    return Err(profile("scenario object is not canonical"));
+                }
+            }
+        }
     }
     route_inputs.sort_by(|a, b| a.id.cmp(&b.id));
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
@@ -1551,7 +1746,7 @@ fn build_routes_bundle(
         // The frozen K is carried as data: this builder neither re-derives nor
         // edits it. Its canonical bytes are checked against its own ref below.
         Some(contract) => contract.clone(),
-        None => http_contract_from_requirements(&spec.requirements)?,
+        None => contract_from_spec(spec)?,
     };
     validate_application_bindings(&spec.bindings)?;
     let application = ApplicationV2 {
@@ -1999,6 +2194,28 @@ fn validate_route_requirements(
                 {
                     return Err(profile(
                         "Instance snapshot requirement contains unrelated observation fields",
+                    ));
+                }
+            }
+            SCENARIO_CONTRACT_VERIFIER => {
+                if requirement.port.as_deref() != Some(surface_port) {
+                    return Err(profile(
+                        "scenario requirement does not target the declared application surface",
+                    ));
+                }
+                let digest = requirement
+                    .digest
+                    .as_deref()
+                    .ok_or_else(|| profile("scenario requirement omitted its digest"))?;
+                parse_ref(digest, "scenario digest")?;
+                if requirement.method.is_some()
+                    || requirement.path.is_some()
+                    || requirement.status.is_some()
+                    || requirement.body_digest.is_some()
+                    || requirement.input.is_some()
+                {
+                    return Err(profile(
+                        "scenario requirement contains unrelated observation fields",
                     ));
                 }
             }
@@ -2515,6 +2732,7 @@ fn portable_reference_registry() -> Result<PortableReferenceRegistry, PortableAp
     registry.register(Arc::new(TreeV2References))?;
     registry.register(Arc::new(InstanceSnapshotReferences))?;
     registry.register(Arc::new(ModelSetReferences))?;
+    registry.register(Arc::new(ScenarioReferences))?;
     Ok(registry)
 }
 
@@ -2530,14 +2748,17 @@ impl PortableReferenceExtractor for ContractReferences {
         contract
             .requirements
             .into_iter()
-            .filter(|requirement| requirement.verifier == INSTANCE_SNAPSHOT_CONTRACT_VERIFIER)
+            .filter(|requirement| {
+                requirement.verifier == INSTANCE_SNAPSHOT_CONTRACT_VERIFIER
+                    || requirement.verifier == SCENARIO_CONTRACT_VERIFIER
+            })
             .map(|requirement| {
                 let digest =
                     requirement
                         .digest
                         .ok_or_else(|| PortableBundleError::ReferenceExtraction {
                             schema: BOUND_CONTRACT_SCHEMA.to_owned(),
-                            reason: "Instance snapshot requirement omitted digest".to_owned(),
+                            reason: format!("{} requirement omitted digest", requirement.verifier),
                         })?;
                 parse_for_extraction_ref(BOUND_CONTRACT_SCHEMA, &digest)
             })
@@ -2627,6 +2848,27 @@ impl PortableReferenceExtractor for ModelSetReferences {
                 reason: error.to_string(),
             },
         )?;
+        Ok(Vec::new())
+    }
+}
+
+/// A Scenario is a leaf: its steps name no bundle object. Parsing it here is
+/// what makes a malformed scenario object fail closure validation rather than
+/// pass through as opaque bytes.
+struct ScenarioReferences;
+
+impl PortableReferenceExtractor for ScenarioReferences {
+    fn schema(&self) -> &str {
+        SCENARIO_SCHEMA
+    }
+
+    fn outgoing(&self, bytes: &[u8]) -> Result<Vec<ContentRef>, PortableBundleError> {
+        ScenarioV1::from_canonical_bytes(bytes).map_err(|error| {
+            PortableBundleError::ReferenceExtraction {
+                schema: SCENARIO_SCHEMA.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
         Ok(Vec::new())
     }
 }
@@ -3051,6 +3293,183 @@ default = "pure"
         let mut derivation = route.derivation.clone();
         mutate(&mut derivation);
         validate_initial_route(&route.contract, &route.application, &derivation)
+    }
+
+    const SCENARIO_TOML: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Scenario pack"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+identity = "behavioral"
+
+[[contract.observation]]
+id = "crud"
+use = "ato.contract.scenario@1"
+port = "app.http"
+scenario = "scenarios/crud.json"
+
+[[derivation]]
+id = "app"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
+"#;
+
+    const SCENARIO_CRUD: &str = r#"{
+  "schema": "ato.scenario/1",
+  "verifier_version": 1,
+  "isolation": { "fresh_instance": true, "network": "candidate-only" },
+  "limits": { "step_timeout_ms": 5000, "total_timeout_ms": 60000, "max_body_bytes": 1048576 },
+  "steps": [
+    { "id": "login", "request": { "method": "POST", "path": "/login", "body_b64": "e30=" },
+      "expect": { "status": 200 } },
+    { "id": "create", "request": { "method": "POST", "path": "/items" },
+      "expect": { "status": 201 }, "capture": [ { "name": "item", "json_pointer": "/id" } ] },
+    { "id": "read", "request": { "method": "GET", "path": "/items/${item}" },
+      "expect": { "status": 200 } }
+  ]
+}"#;
+
+    fn scenario_root(toml: &str, scenario: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(CAPSULE_FILE_NAME), toml).unwrap();
+        fs::write(root.path().join("app.py"), "print('scenario fixture')\n").unwrap();
+        fs::create_dir_all(root.path().join("scenarios")).unwrap();
+        fs::write(root.path().join("scenarios/crud.json"), scenario).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_scenario_is_a_content_addressed_object_in_the_bundle_closure() {
+        let root = scenario_root(SCENARIO_TOML, SCENARIO_CRUD);
+        let (bytes, bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(routes.len(), 1);
+        let route = &routes[0];
+        assert_eq!(route.contract.requirements.len(), 1);
+        let requirement = &route.contract.requirements[0];
+        assert_eq!(requirement.id, "crud");
+        assert_eq!(requirement.verifier, SCENARIO_CONTRACT_VERIFIER);
+        assert_eq!(requirement.port.as_deref(), Some("app.http"));
+        assert!(requirement.method.is_none());
+        assert!(requirement.path.is_none());
+        assert!(requirement.status.is_none());
+
+        let scenario = ScenarioV1::parse_json(SCENARIO_CRUD.as_bytes()).unwrap();
+        let expected_ref = scenario.scenario_ref().unwrap();
+        assert_eq!(requirement.digest.as_deref(), Some(expected_ref.as_str()));
+        assert_eq!(route.scenarios.len(), 1);
+        assert_eq!(route.scenarios[0].requirement_id, "crud");
+        assert_eq!(route.scenarios[0].port, "app.http");
+        assert_eq!(route.scenarios[0].scenario_ref.as_str(), expected_ref);
+        assert_eq!(route.scenarios[0].scenario, scenario);
+
+        // The scenario file is an input object, not workspace content.
+        assert!(
+            route
+                .tree
+                .entries
+                .iter()
+                .all(|entry| entry.path != "scenarios/crud.json"),
+            "the scenario file leaked into the workspace tree"
+        );
+        assert!(
+            route
+                .tree
+                .entries
+                .iter()
+                .any(|entry| entry.path == "app.py")
+        );
+
+        // The object is structured, canonical and part of the closure.
+        let reference = parse_ref(&expected_ref, "scenario reference").unwrap();
+        let descriptor = bundle.descriptor(&reference).unwrap();
+        assert_eq!(descriptor.schema.as_deref(), Some(SCENARIO_SCHEMA));
+        assert_eq!(
+            ScenarioV1::from_canonical_bytes(&bundle.payload_bytes(&reference).unwrap()).unwrap(),
+            (scenario.clone(), expected_ref.clone())
+        );
+        let registry = portable_reference_registry().unwrap();
+        validate_portable_application_closure(&bundle, &registry).unwrap();
+
+        // Packing the same source twice is byte-identical.
+        let (again, _) = build_authored_bundle_v2(root.path()).unwrap();
+        assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn a_scenario_requirement_changes_k_and_keeps_the_rest_of_the_bundle_stable() {
+        let root = scenario_root(SCENARIO_TOML, SCENARIO_CRUD);
+        let (_, first) = build_authored_bundle_v2(root.path()).unwrap();
+        let first_route = validate_all_derivations(&first).unwrap().remove(0);
+        let first_contract = first_route.contract_ref.to_string();
+        let first_derivations = first.index.derivations.clone();
+
+        // A different scenario is a different Contract, not a different route.
+        let changed = SCENARIO_CRUD.replace(r#""status": 201"#, r#""status": 202"#);
+        fs::write(root.path().join("scenarios/crud.json"), changed).unwrap();
+        let (_, second) = build_authored_bundle_v2(root.path()).unwrap();
+        let second_route = validate_all_derivations(&second).unwrap().remove(0);
+        assert_ne!(first_contract, second_route.contract_ref.to_string());
+        assert_eq!(second.index.derivations, first_derivations);
+    }
+
+    #[test]
+    fn a_missing_or_invalid_scenario_object_is_refused() {
+        let root = scenario_root(SCENARIO_TOML, "{ not json");
+        assert!(build_authored_bundle_v2(root.path()).is_err());
+
+        let root = scenario_root(SCENARIO_TOML, SCENARIO_CRUD);
+        let (_, bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        let mut without_object = bundle.clone();
+        let contract: BoundContract = structured(
+            &without_object,
+            &parse_ref(&without_object.index.root_contract_ref.clone(), "contract").unwrap(),
+            BOUND_CONTRACT_SCHEMA,
+        )
+        .unwrap();
+        let scenario_ref = contract.requirements[0].digest.clone().unwrap();
+        without_object
+            .payloads
+            .retain(|payload| payload.reference != scenario_ref);
+        assert!(validate_all_derivations(&without_object).is_err());
+    }
+
+    #[test]
+    fn a_scenario_requirement_must_target_the_surface_port_and_declared_route() {
+        // The parser refuses a non-app.http port for a v2 observation.
+        let wrong_port = SCENARIO_TOML.replace(
+            "port = \"app.http\"\nscenario",
+            "port = \"other.http\"\nscenario",
+        );
+        assert_ne!(wrong_port, SCENARIO_TOML);
+        assert!(parse_capsule_toml_v2(&wrong_port).is_err());
+
+        // A bundle whose scenario Port the Derivation does not declare is
+        // refused by bundle validation, not silently ignored.
+        let root = scenario_root(SCENARIO_TOML, SCENARIO_CRUD);
+        let (_, bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        let mut derivation = routes[0].derivation.clone();
+        derivation.ports.clear();
+        assert!(
+            validate_initial_route(&routes[0].contract, &routes[0].application, &derivation)
+                .is_err()
+        );
     }
 
     #[test]

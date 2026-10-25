@@ -70,6 +70,12 @@ pub const HTTP_CONTRACT_VERIFIER: &str = "ato.contract.http@1";
 pub const WORKSPACE_CONTRACT_VERIFIER: &str = "ato.contract.workspace@1";
 /// The exact portable saved-data/Asset snapshot restored for an Instance.
 pub const INSTANCE_SNAPSHOT_CONTRACT_VERIFIER: &str = "ato.contract.instance-snapshot@1";
+/// The ordered, stateful HTTP scenario a running candidate must perform.
+///
+/// The requirement names the scenario by its content address in `digest`; the
+/// steps themselves are an [`crate::scenario::ScenarioV1`] object in the bundle
+/// closure. Execution and receipt evidence belong to the runtime, not here.
+pub const SCENARIO_CONTRACT_VERIFIER: &str = "ato.contract.scenario@1";
 
 pub const BOUND_CONTRACT_SCHEMA: &str = "ato.contract/1";
 pub const BOUND_DERIVATION_SCHEMA: &str = "ato.derivation/1";
@@ -156,10 +162,22 @@ pub struct HttpRequirement {
     pub body_digest: Option<Observed<String>>,
 }
 
+/// A content-addressed scenario requirement.
+///
+/// `scenario` is the `sha256:` reference of an `ato.scenario/1` object. It is
+/// always stated: a capture would have to read bytes this build does not have,
+/// so it is refused rather than bound to something nobody looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioRequirement {
+    pub port: String,
+    pub scenario: Observed<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequirementDraft {
     Http(HttpRequirement),
     InputIdentity(InputIdentityRequirement),
+    Scenario(ScenarioRequirement),
 }
 
 /// One condition that must hold for a continuation to be this Capsule.
@@ -989,6 +1007,45 @@ fn bind_contract(
                     body_digest: None,
                     input: Some(identity.input.clone()),
                     digest: Some(digest),
+                }
+            }
+            RequirementDraft::Scenario(scenario) => {
+                if !known_ports.contains(scenario.port.as_str()) {
+                    return Err(AuthoringError::Unresolved {
+                        referrer: format!("contract.require.{}", observation.id),
+                        what: "port",
+                        id: scenario.port.clone(),
+                    });
+                }
+                let reference = match &scenario.scenario {
+                    Observed::Stated(value) if crate::scenario::is_scenario_ref(value) => {
+                        value.clone()
+                    }
+                    Observed::Stated(_) => {
+                        return Err(malformed(
+                            format!("contract.require.{}.scenario", observation.id),
+                            "expected a scenario reference as sha256:<64 lowercase hex>",
+                        ));
+                    }
+                    Observed::Capture => {
+                        return Err(AuthoringError::CaptureUnresolvable {
+                            field: format!("contract.require.{}.scenario", observation.id),
+                            detail: "a scenario is content-addressed; state its digest rather \
+                                     than asking this build to capture one"
+                                .to_owned(),
+                        });
+                    }
+                };
+                BoundRequirement {
+                    id: observation.id.clone(),
+                    verifier: SCENARIO_CONTRACT_VERIFIER.to_owned(),
+                    port: Some(scenario.port.clone()),
+                    method: None,
+                    path: None,
+                    status: None,
+                    body_digest: None,
+                    input: None,
+                    digest: Some(reference),
                 }
             }
         };

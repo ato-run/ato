@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::authoring::{
-    ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL,
-    TCP_EGRESS_PROTOCOL, WORKSPACE_PROTOCOL,
+    ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, SCENARIO_CONTRACT_VERIFIER,
+    STATE_FILESYSTEM_PROTOCOL, TCP_EGRESS_PROTOCOL, WORKSPACE_PROTOCOL,
 };
 use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::requirements::HostRequirement;
@@ -48,6 +48,19 @@ pub struct PortableAuthoringDraftV2 {
     pub effects: EffectClass,
     /// `ato.model-set@1` inputs every route consumes (at most two in v0).
     pub model_sets: Vec<PortableModelSetInputDraftV2>,
+    /// `ato.contract.scenario@1` observations. Each names a source-relative
+    /// scenario file the bundle builder canonicalises and carries.
+    pub scenarios: Vec<PortableScenarioDraftV2>,
+}
+
+/// A Scenario observation as authored: the file carried with the source and the
+/// port the scenario runs against. The builder reads the file, validates it as
+/// [`crate::scenario::ScenarioV1`], canonicalises it and pins its digest in K.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableScenarioDraftV2 {
+    pub id: String,
+    pub port: String,
+    pub scenario_path: String,
 }
 
 /// A Model Set input as authored: the manifest file carried with the source
@@ -165,7 +178,7 @@ struct Contract {
     /// enters the bound Contract bytes, so `K` is unchanged either way.
     #[serde(default)]
     identity: Option<String>,
-    observation: Vec<HttpObservation>,
+    observation: Vec<Observation>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -175,18 +188,27 @@ enum ContractMode {
     All,
 }
 
+/// One `[[contract.observation]]`. Fields are optional because the grammar
+/// carries two verifiers; each is validated against its own shape below, so an
+/// HTTP observation still requires `path`/`status` and a scenario observation
+/// still refuses them.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HttpObservation {
+struct Observation {
     id: String,
     #[serde(rename = "use")]
     verifier: String,
     port: String,
-    #[serde(default = "default_method")]
-    method: String,
-    path: String,
-    status: u16,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    status: Option<u16>,
+    #[serde(default)]
     body_digest: Option<String>,
+    #[serde(default)]
+    scenario: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,10 +299,6 @@ struct Effects {
 
 fn default_surface_path() -> String {
     "/".to_owned()
-}
-
-fn default_method() -> String {
-    "GET".to_owned()
 }
 
 fn default_workspace_path() -> String {
@@ -542,7 +560,7 @@ fn parse_capsule_toml_v2_impl(
 
     // A declared Contract must still be exactly what the normal grammar
     // allows; only its absence is tolerated in candidate mode.
-    let observations = match document.contract {
+    let (observations, scenarios) = match document.contract {
         Some(contract) => {
             if contract.mode != ContractMode::All || contract.observation.is_empty() {
                 return Err(invalid(
@@ -550,11 +568,11 @@ fn parse_capsule_toml_v2_impl(
                     "portable v0 requires non-empty mode=all observations",
                 ));
             }
-            // `behavioral` is legal and changes nothing in K (this grammar only
-            // binds HTTP observations). `source-bound` cannot be honoured: the
-            // portable v0 authored grammar has no way to name a source
-            // identity, so accepting it would claim an identity this frontend
-            // cannot build.
+            // `behavioral` is legal and changes nothing in K (this grammar
+            // binds HTTP and scenario observations, neither of which names a
+            // source). `source-bound` cannot be honoured: the portable v0
+            // authored grammar has no way to name a source identity, so
+            // accepting it would claim an identity this frontend cannot build.
             match contract.identity.as_deref() {
                 None | Some("behavioral") => {}
                 Some("source-bound") => {
@@ -574,50 +592,105 @@ fn parse_capsule_toml_v2_impl(
                 }
             }
             let mut observation_ids = BTreeSet::new();
-            contract
-                .observation
-                .into_iter()
-                .map(|observation| {
-                    validate_id("contract.observation.id", &observation.id)?;
-                    if !observation_ids.insert(observation.id.clone()) {
-                        return Err(invalid(
-                            "contract.observation.id",
-                            format!("duplicate id {:?}", observation.id),
-                        ));
+            let mut observations = Vec::new();
+            let mut scenarios = Vec::new();
+            for observation in contract.observation {
+                validate_id("contract.observation.id", &observation.id)?;
+                if !observation_ids.insert(observation.id.clone()) {
+                    return Err(invalid(
+                        "contract.observation.id",
+                        format!("duplicate id {:?}", observation.id),
+                    ));
+                }
+                if observation.port != "app.http" {
+                    return Err(invalid(
+                        "contract.observation.port",
+                        "portable v0 observes the app.http surface only",
+                    ));
+                }
+                match observation.verifier.as_str() {
+                    "ato.contract.http@1" => {
+                        if observation.scenario.is_some() {
+                            return Err(invalid(
+                                "contract.observation",
+                                "an HTTP observation does not take `scenario`",
+                            ));
+                        }
+                        let method = observation.method.unwrap_or_else(|| "GET".to_owned());
+                        if method != "GET" {
+                            return Err(invalid(
+                                "contract.observation",
+                                "portable v0 supports GET ato.contract.http@1 on app.http",
+                            ));
+                        }
+                        let (Some(path), Some(status)) = (observation.path, observation.status)
+                        else {
+                            return Err(invalid(
+                                "contract.observation",
+                                "path or HTTP status is invalid",
+                            ));
+                        };
+                        if !path.starts_with('/') || !(100..=599).contains(&status) {
+                            return Err(invalid(
+                                "contract.observation",
+                                "path or HTTP status is invalid",
+                            ));
+                        }
+                        if let Some(digest) = &observation.body_digest
+                            && !is_sha256_ref(digest)
+                        {
+                            return Err(invalid(
+                                "contract.observation.body_digest",
+                                "must be sha256:<64 lowercase hex>",
+                            ));
+                        }
+                        observations.push(PortableHttpObservationDraftV2 {
+                            id: observation.id,
+                            path,
+                            status,
+                            body_digest: observation.body_digest,
+                        });
                     }
-                    if observation.verifier != "ato.contract.http@1"
-                        || observation.port != "app.http"
-                        || observation.method != "GET"
-                    {
+                    SCENARIO_CONTRACT_VERIFIER => {
+                        if observation.method.is_some()
+                            || observation.path.is_some()
+                            || observation.status.is_some()
+                            || observation.body_digest.is_some()
+                        {
+                            return Err(invalid(
+                                "contract.observation",
+                                "a scenario observation states only `port` and `scenario`",
+                            ));
+                        }
+                        let Some(scenario_path) = observation.scenario else {
+                            return Err(invalid(
+                                "contract.observation",
+                                "a scenario observation names its source-relative scenario file",
+                            ));
+                        };
+                        validate_relative(&scenario_path, "contract.observation.scenario")?;
+                        if scenario_path == "." {
+                            return Err(invalid(
+                                "contract.observation.scenario",
+                                "must name a scenario file, not the source root",
+                            ));
+                        }
+                        scenarios.push(PortableScenarioDraftV2 {
+                            id: observation.id,
+                            port: observation.port,
+                            scenario_path,
+                        });
+                    }
+                    _ => {
                         return Err(invalid(
                             "contract.observation",
-                            "portable v0 supports GET ato.contract.http@1 on app.http",
+                            "portable v0 supports ato.contract.http@1 and \
+                             ato.contract.scenario@1",
                         ));
                     }
-                    if !observation.path.starts_with('/')
-                        || !(100..=599).contains(&observation.status)
-                    {
-                        return Err(invalid(
-                            "contract.observation",
-                            "path or HTTP status is invalid",
-                        ));
-                    }
-                    if let Some(digest) = &observation.body_digest
-                        && !is_sha256_ref(digest)
-                    {
-                        return Err(invalid(
-                            "contract.observation.body_digest",
-                            "must be sha256:<64 lowercase hex>",
-                        ));
-                    }
-                    Ok(PortableHttpObservationDraftV2 {
-                        id: observation.id,
-                        path: observation.path,
-                        status: observation.status,
-                        body_digest: observation.body_digest,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?
+                }
+            }
+            (observations, scenarios)
         }
         None if require_contract => {
             return Err(invalid(
@@ -627,7 +700,7 @@ fn parse_capsule_toml_v2_impl(
         }
         // A derivation-candidate manifest binds to the frozen Contract; it
         // declares no K of its own.
-        None => Vec::new(),
+        None => (Vec::new(), Vec::new()),
     };
 
     if document.derivation.is_empty() || document.derivation.len() > 16 {
@@ -693,6 +766,7 @@ fn parse_capsule_toml_v2_impl(
         derivations,
         effects,
         model_sets,
+        scenarios,
     })
 }
 
@@ -1246,5 +1320,123 @@ default = "pure"
         for (name, toml) in refused {
             assert!(parse_capsule_toml_v2(&toml).is_err(), "{name} was accepted");
         }
+    }
+    const SCENARIO_OBSERVATION: &str = r#"
+[[contract.observation]]
+id = "crud"
+use = "ato.contract.scenario@1"
+port = "app.http"
+scenario = "scenarios/crud.json"
+"#;
+
+    fn with_scenario(base: &str) -> String {
+        format!("{base}{SCENARIO_OBSERVATION}")
+    }
+
+    #[test]
+    fn a_scenario_observation_names_a_source_relative_file_and_the_surface_port() {
+        let draft = parse_capsule_toml_v2(&with_scenario(TWO_PROCESS_ROUTES)).unwrap();
+        assert_eq!(draft.observations.len(), 1);
+        assert_eq!(draft.scenarios.len(), 1);
+        assert_eq!(draft.scenarios[0].id, "crud");
+        assert_eq!(draft.scenarios[0].port, "app.http");
+        assert_eq!(draft.scenarios[0].scenario_path, "scenarios/crud.json");
+    }
+
+    #[test]
+    fn a_scenario_only_contract_is_accepted_by_pack_and_optional_for_a_candidate() {
+        let base = TWO_PROCESS_ROUTES.replace(
+            r#"[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+"#,
+            "",
+        );
+        let draft = parse_capsule_toml_v2(&with_scenario(&base)).unwrap();
+        assert!(draft.observations.is_empty());
+        assert_eq!(draft.scenarios.len(), 1);
+
+        // The derivation-candidate mode tolerates a manifest without
+        // `[contract]`, and a declared scenario still parses.
+        assert!(
+            parse_capsule_toml_v2_derivation_candidate(TWO_PROCESS_ROUTES).is_ok(),
+            "candidate mode still accepts a declared contract"
+        );
+        let without_contract = TWO_PROCESS_ROUTES.replace(
+            r#"[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+"#,
+            "",
+        );
+        let candidate = parse_capsule_toml_v2_derivation_candidate(&without_contract).unwrap();
+        assert!(candidate.observations.is_empty());
+        assert!(candidate.scenarios.is_empty());
+        assert!(parse_capsule_toml_v2(&without_contract).is_err());
+    }
+
+    #[test]
+    fn a_scenario_observation_refuses_http_fields_and_unsafe_files() {
+        for (what, text) in [
+            (
+                "method",
+                with_scenario(TWO_PROCESS_ROUTES).replace(
+                    r#"scenario = "scenarios/crud.json""#,
+                    "scenario = \"scenarios/crud.json\"\nmethod = \"GET\"",
+                ),
+            ),
+            (
+                "status",
+                with_scenario(TWO_PROCESS_ROUTES).replace(
+                    r#"scenario = "scenarios/crud.json""#,
+                    "scenario = \"scenarios/crud.json\"\nstatus = 200",
+                ),
+            ),
+            (
+                "absolute path",
+                with_scenario(TWO_PROCESS_ROUTES).replace("scenarios/crud.json", "/etc/passwd"),
+            ),
+            (
+                "source root",
+                with_scenario(TWO_PROCESS_ROUTES).replace("scenarios/crud.json", "."),
+            ),
+            (
+                "missing scenario",
+                with_scenario(TWO_PROCESS_ROUTES)
+                    .replace(r#"scenario = "scenarios/crud.json""#, ""),
+            ),
+            (
+                "wrong port",
+                with_scenario(TWO_PROCESS_ROUTES).replace(
+                    "port = \"app.http\"\nscenario",
+                    "port = \"other.http\"\nscenario",
+                ),
+            ),
+            (
+                "unknown verifier",
+                with_scenario(TWO_PROCESS_ROUTES)
+                    .replace("ato.contract.scenario@1", "ato.contract.scenario@2"),
+            ),
+        ] {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what} was accepted");
+        }
+    }
+
+    #[test]
+    fn an_http_observation_cannot_smuggle_a_scenario_file() {
+        let text = TWO_PROCESS_ROUTES.replace(
+            "status = 200",
+            "status = 200\nscenario = \"scenarios/crud.json\"",
+        );
+        assert!(parse_capsule_toml_v2(&text).is_err());
     }
 }
