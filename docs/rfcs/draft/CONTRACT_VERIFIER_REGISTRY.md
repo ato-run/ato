@@ -61,6 +61,32 @@ Contract descriptors and results are acceptance metadata. Neither is used to
 derive `ComputationRef`. Materialization descriptors may include Contracts
 without changing the target logical identity.
 
+## Source-bound vs behavioral Contract identity
+
+`ato.capsule/1` authors may state what their Contract's identity depends on:
+
+```toml
+[contract]
+identity = "behavioral"   # or "source-bound"; omit to bind as authored
+```
+
+| identity | requirement set | `K` |
+|---|---|---|
+| omitted | anything authored | bound exactly as authored (behaviour unchanged) |
+| `behavioral` | must not observe `ato.contract.workspace@1` | the same `ContractRef` for any source that behaves the same way |
+| `source-bound` | must observe exactly one workspace input, with a resolved digest | the `ContractRef` names that source closure |
+
+This is authoring intent, not a Contract field: `BoundContract` keeps its
+`{schema, requirements}` shape, so stating an identity adds no bytes to `K`.
+An explicit identity that contradicts the requirements is refused at bind
+(`behavioral_contract_has_source_requirement`,
+`source_bound_contract_has_no_source_requirement`) rather than having the
+binder rewrite `K`. Preset synthesis states `source-bound`; a Formation job may
+request `behavioral`, and an authored manifest that states its own identity
+outranks the request. `ato.capsule/2` accepts `behavioral` and refuses
+`source-bound`, because the portable authored grammar cannot bind a source
+identity.
+
 ## Supersession
 
 For v2 Materializations this RFC supersedes any wording that treats replay
