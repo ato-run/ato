@@ -1,0 +1,39 @@
+# Transformation v0 negative fixture: behavior break.
+#
+# The manifest is the same as source B and still pins the original response
+# body digest, but app.py returns DIFFERENT bytes. The candidate therefore
+# builds under the same K and runs, and the existing verifier must fail the
+# observation (`http_body_digest_mismatch`) so the candidate is never accepted.
+schema = "ato.capsule/2"
+
+[application]
+title = "Transformation v0 fixture B (broken behavior)"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:f345de2490fa7c64f7398b35c26b4591dfa662d3e7815c3a73e591f48559452d"
+
+[[derivation]]
+id = "app"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"

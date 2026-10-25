@@ -1,0 +1,39 @@
+# Transformation v0 negative fixture: contract change.
+#
+# The implementation is source A, but the authored Contract observation is
+# different (status 201 instead of 200). The candidate therefore derives a
+# different ContractRef, and `ato reform` must refuse it BEFORE building or
+# executing anything: the frozen K is not rewritten to fit a new source.
+schema = "ato.capsule/2"
+
+[application]
+title = "Transformation v0 fixture C (contract change)"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 201
+body_digest = "sha256:f345de2490fa7c64f7398b35c26b4591dfa662d3e7815c3a73e591f48559452d"
+
+[[derivation]]
+id = "app"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
