@@ -36,7 +36,7 @@ use toml::Value;
 
 use crate::authoring::{
     AuthoringDraft, AuthoringError, AuthoringProvenance, BROWSER_PROTOCOL, ContractDraft,
-    DerivationDraft, EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft,
+    ContractIdentity, DerivationDraft, EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft,
     InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
     PortDraft, RequirementDraft, RuntimeDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StateDraft,
     StepDraft, StepNetwork, WORKSPACE_PROTOCOL, malformed,
@@ -179,7 +179,11 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
             "derive" => derivation.steps = read_derive(value)?,
             "port" => derivation.ports = read_ports(value)?,
             "state" => derivation.state = read_state(value)?,
-            "contract" => contract.requirements = read_contract(value)?,
+            "contract" => {
+                let (identity, requirements) = read_contract(value)?;
+                contract.identity = identity;
+                contract.requirements = requirements;
+            }
             "effects" => derivation.effects = read_effects(value)?,
             "runtime_port_operations" => {
                 derivation.runtime_port_operations = value
@@ -251,6 +255,12 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
         RequirementDraft::Http(h)=>json!({"id":r.id,"use":USE_HTTP_CONTRACT,"port":h.port,"method":h.method,"path":h.path,"expect":{"status":h.status,"body_digest":h.body_digest.as_ref().map(&observed)}}),
         RequirementDraft::InputIdentity(i)=>json!({"id":r.id,"use":USE_WORKSPACE_CONTRACT,"input":i.input,"expect":{"digest":observed(&i.digest)}})
     }).collect();
+    let mut contract_doc = json!({"require":requirements});
+    // Only an explicit identity is written. A document that never stated one
+    // must render exactly as it did before this key existed.
+    if draft.contract.identity.is_explicit() {
+        contract_doc["identity"] = json!(draft.contract.identity.as_str());
+    }
     let mut doc = json!({"schema":CAPSULE_SCHEMA_V1,
         "input":d.inputs.iter().map(|i|json!({"id":i.id,"use":i.protocol,"path":i.path})).collect::<Vec<_>>(),
         "runtime":d.runtimes.iter().map(|r|json!({"name":r.name,"version":r.version})).collect::<Vec<_>>(),
@@ -263,7 +273,7 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
         "port":d.ports.iter().map(|p|json!({"id":p.id,"use":p.protocol,"from":p.from,"guest_port":p.guest_port})).collect::<Vec<_>>(),
         "state":d.state.iter().map(|s|json!({"id":s.id,"use":s.protocol,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
         "platform":d.platforms,"effects":{"default":d.effects},"requirements":d.requirements,"source_oci":d.source_oci,
-        "contract":{"require":requirements}});
+        "contract":contract_doc});
     if !d.runtime_port_operations.is_empty() {
         doc["runtime_port_operations"] = json!(d.runtime_port_operations);
     }
@@ -683,16 +693,34 @@ fn read_state(value: &Value) -> Result<Vec<StateDraft>, AuthoringError> {
         .collect()
 }
 
-fn read_contract(value: &Value) -> Result<Vec<ObservationDraft>, AuthoringError> {
+fn read_contract(
+    value: &Value,
+) -> Result<(ContractIdentity, Vec<ObservationDraft>), AuthoringError> {
     let table = value
         .as_table()
         .ok_or_else(|| malformed("contract", "expected [[contract.require]] entries"))?;
-    only(table, "contract", &["require"])?;
+    only(table, "contract", &["require", "identity"])?;
+    // Absent is `Unspecified`: bind exactly as authored, which is what every
+    // document written before this key existed means.
+    let identity = match optional_str(table, "identity", "contract")? {
+        None => ContractIdentity::Unspecified,
+        Some("behavioral") => ContractIdentity::Behavioral,
+        Some("source-bound") => ContractIdentity::SourceBound,
+        Some(other) => {
+            return Err(malformed(
+                "contract.identity",
+                format!(
+                    "{other:?} is not a Contract identity; use behavioral or source-bound, \
+                     or omit the key"
+                ),
+            ));
+        }
+    };
     let requires = table
         .get("require")
         .ok_or_else(|| malformed("contract", "declares no [[contract.require]]"))?;
 
-    array_of_tables(requires, "contract.require")?
+    let requirements = array_of_tables(requires, "contract.require")?
         .into_iter()
         .map(|require| {
             only(
@@ -796,7 +824,8 @@ fn read_contract(value: &Value) -> Result<Vec<ObservationDraft>, AuthoringError>
             };
             Ok(ObservationDraft { id, requirement })
         })
-        .collect()
+        .collect::<Result<Vec<_>, AuthoringError>>()?;
+    Ok((identity, requirements))
 }
 
 fn read_effects(value: &Value) -> Result<EffectClass, AuthoringError> {
