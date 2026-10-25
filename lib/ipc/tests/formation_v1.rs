@@ -259,3 +259,70 @@ fn emit_expected_digests() {
         static_web.canonical_digest().unwrap()
     );
 }
+
+/// A Contract identity request is optional request metadata.
+///
+/// Absent is what every job before the field existed means, so its canonical
+/// bytes (and digest) must not move. Present is part of the request, so it is
+/// part of the job's identity — and a value this build cannot name is refused
+/// rather than dropped.
+#[test]
+fn contract_identity_is_optional_and_absent_bytes_are_unchanged() {
+    let job = FormationJobV1::parse(PYTHON_JOB).expect("fixture job");
+    assert_eq!(
+        job.authoring
+            .as_ref()
+            .expect("fixture carries authoring")
+            .contract_identity,
+        None
+    );
+    let absent = String::from_utf8(job.canonical_bytes().expect("canonicalizes")).expect("utf8");
+    assert!(
+        !absent.contains("contract_identity"),
+        "an absent request must add no bytes: {absent}"
+    );
+    assert_eq!(
+        job.canonical_digest().expect("digests"),
+        "sha256:66769f4e661fc751bec3d26dc2782e5ae7778ee785ed7d09a38d4f3675ed939f",
+        "the recorded job digest must not move"
+    );
+
+    let mut requested = job.clone();
+    requested
+        .authoring
+        .as_mut()
+        .expect("authoring")
+        .contract_identity = Some(FormationContractIdentityV1::Behavioral);
+    let present =
+        String::from_utf8(requested.canonical_bytes().expect("canonicalizes")).expect("utf8");
+    assert!(
+        present.contains("\"contract_identity\":\"behavioral\""),
+        "kebab-case is the wire spelling: {present}"
+    );
+    assert_ne!(
+        requested.canonical_digest().expect("digests"),
+        job.canonical_digest().expect("digests"),
+        "a stated identity is part of the request"
+    );
+
+    let raw = PYTHON_JOB.replacen(
+        "\"manifest_toml\"",
+        "\"contract_identity\": \"source-bound\",\n    \"manifest_toml\"",
+        1,
+    );
+    let parsed = FormationJobV1::parse(&raw).expect("source-bound parses");
+    assert_eq!(
+        parsed.authoring.expect("authoring").contract_identity,
+        Some(FormationContractIdentityV1::SourceBound)
+    );
+
+    let unknown = PYTHON_JOB.replacen(
+        "\"manifest_toml\"",
+        "\"contract_identity\": \"bogus\",\n    \"manifest_toml\"",
+        1,
+    );
+    assert!(
+        FormationJobV1::parse(&unknown).is_err(),
+        "an unknown identity must be refused, not ignored"
+    );
+}

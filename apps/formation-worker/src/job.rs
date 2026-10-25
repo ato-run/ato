@@ -17,11 +17,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use ato_formation::authoring::ContractIdentity;
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::detect;
-use ato_formation::failure::FormationFailure;
+use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::Lane;
-use ato_formation::preset::{candidate_authoring, select_preset, synthesize_authoring};
+use ato_formation::preset::{
+    apply_contract_identity, candidate_authoring, select_preset, synthesize_authoring_with_identity,
+};
 use ato_formation::request::{AttemptOutcomes, Outcome};
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
 use ato_formation::verify::{ContractVerification, ContractVerificationReceipt};
@@ -275,6 +278,10 @@ pub fn run_claimed_job_with_ledger(
     // their document did not parse is the one failure mode this whole split
     // exists to prevent.
     let evidence = detect(&source_root).context("detection failed")?;
+    // An explicit identity request is only a statement about how to bind. It is
+    // never a requirement to change K: bind refuses when the statement and the
+    // requirements disagree.
+    let requested_identity = requested_contract_identity(job)?;
     let authored_toml = match job["authoring"]["manifest_toml"].as_str() {
         // The control plane's copy of the author's document wins over the one
         // in the tree: it is the one it accepted and recorded. Both go through
@@ -283,8 +290,14 @@ pub fn run_claimed_job_with_ledger(
         None => read_capsule_toml(&source_root).map_err(FormationFailure::from)?,
     };
     let draft = match authored_toml {
-        Some(text) => parse_capsule_toml(&text).map_err(FormationFailure::from)?,
+        Some(text) => {
+            let mut draft = parse_capsule_toml(&text).map_err(FormationFailure::from)?;
+            draft.contract.identity =
+                resolve_authored_identity(draft.contract.identity, requested_identity)?;
+            draft
+        }
         None => {
+            let identity = requested_identity.unwrap_or(ContractIdentity::SourceBound);
             // Written for the person who uploaded the source. "No lane
             // matched" would name our dispatch instead of their problem — and
             // carrying the mismatch as a TYPE is what gets those words all the
@@ -295,10 +308,11 @@ pub fn run_claimed_job_with_ledger(
                     if *preset == ato_formation::preset::NODE_STATIC_V2)
             {
                 // The common plan admission enforces the declared network requirement.
-                drafts
+                let draft = drafts
                     .into_iter()
                     .next()
-                    .context("known-D frontend returned no draft")?
+                    .context("known-D frontend returned no draft")?;
+                apply_contract_identity(draft, identity)
             } else {
                 let preset = select_preset(&evidence).map_err(FormationFailure::from)?;
                 // A Preset that installs from a registry cannot run under a job
@@ -313,7 +327,7 @@ pub fn run_claimed_job_with_ledger(
                         preset.label()
                     );
                 }
-                synthesize_authoring(preset)
+                synthesize_authoring_with_identity(preset, identity)
             }
         }
     };
@@ -530,6 +544,65 @@ pub fn run_claimed_job_with_ledger(
         materialization_ref,
         outcome: published,
     })
+}
+
+/// The Contract identity a job asks for, if any.
+///
+/// Parsed through the shared DTO so an unknown value is refused by name rather
+/// than ignored: silently falling back to the default identity would bind a
+/// different K than the caller asked for. Absent leaves the bytes of older
+/// jobs exactly as they were.
+fn requested_contract_identity(job: &serde_json::Value) -> Result<Option<ContractIdentity>> {
+    let Some(value) = job
+        .get("authoring")
+        .and_then(|a| a.get("contract_identity"))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let requested: ato_ipc::formation::FormationContractIdentityV1 =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            FormationFailure::new(
+                "contract_identity_invalid",
+                FailureStage::Authoring,
+                format!("authoring.contract_identity {value} is not a Contract identity: {error}"),
+            )
+        })?;
+    Ok(Some(match requested {
+        ato_ipc::formation::FormationContractIdentityV1::Behavioral => ContractIdentity::Behavioral,
+        ato_ipc::formation::FormationContractIdentityV1::SourceBound => {
+            ContractIdentity::SourceBound
+        }
+    }))
+}
+
+/// An authored manifest's stated identity outranks a job-level request.
+///
+/// A request may fill in an identity the manifest never stated, but it may not
+/// contradict one that is written down: both are authorities, and silently
+/// choosing one would bind a `K` that neither asked for.
+fn resolve_authored_identity(
+    stated: ContractIdentity,
+    requested: Option<ContractIdentity>,
+) -> Result<ContractIdentity> {
+    let Some(requested) = requested else {
+        return Ok(stated);
+    };
+    match stated {
+        ContractIdentity::Unspecified => Ok(requested),
+        stated if stated == requested => Ok(stated),
+        stated => Err(FormationFailure::new(
+            "contract_identity_conflict",
+            FailureStage::Authoring,
+            format!(
+                "the authored manifest declares Contract identity {stated}, but the job requests \
+                 {requested}; refusing to let one silently override the other"
+            ),
+        )
+        .into()),
+    }
 }
 
 /// Carries common attempt facts through anyhow without classifying error prose.
@@ -989,5 +1062,99 @@ status = 200
         );
         // The readiness path is the serving HTTP path from the Contract.
         assert_eq!(readiness[0]["path"], json!("/health"));
+    }
+}
+
+#[cfg(test)]
+mod contract_identity_tests {
+    //! The job-level identity request is metadata, and the authored manifest
+    //! keeps its authority. These pin the two rules the worker applies before
+    //! binding: absent stays byte-compatible, and a contradiction is a typed
+    //! failure rather than a silent override.
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_job_without_an_identity_request_is_unchanged() {
+        for job in [
+            json!({}),
+            json!({ "authoring": {} }),
+            json!({ "authoring": { "contract_identity": null } }),
+        ] {
+            assert_eq!(
+                requested_contract_identity(&job).expect("absent is not an error"),
+                None,
+                "{job}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_job_identity_is_read_in_the_wire_spelling() {
+        for (wire, expected) in [
+            ("behavioral", ContractIdentity::Behavioral),
+            ("source-bound", ContractIdentity::SourceBound),
+        ] {
+            let job = json!({ "authoring": { "contract_identity": wire } });
+            assert_eq!(
+                requested_contract_identity(&job).expect("known identity"),
+                Some(expected),
+                "{wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_job_identity_is_refused_typed() {
+        for wire in [json!("bogus"), json!("unspecified"), json!(7)] {
+            let job = json!({ "authoring": { "contract_identity": wire } });
+            let error = requested_contract_identity(&job).expect_err("unknown must fail");
+            let failure = error
+                .downcast_ref::<FormationFailure>()
+                .expect("a typed formation failure");
+            assert_eq!(failure.code, "contract_identity_invalid", "{wire}");
+            assert_eq!(failure.stage, FailureStage::Authoring);
+        }
+    }
+
+    #[test]
+    fn an_authored_identity_may_be_filled_in_but_not_contradicted() {
+        assert_eq!(
+            resolve_authored_identity(ContractIdentity::Unspecified, None).unwrap(),
+            ContractIdentity::Unspecified
+        );
+        assert_eq!(
+            resolve_authored_identity(
+                ContractIdentity::Unspecified,
+                Some(ContractIdentity::Behavioral)
+            )
+            .unwrap(),
+            ContractIdentity::Behavioral
+        );
+        assert_eq!(
+            resolve_authored_identity(ContractIdentity::SourceBound, None).unwrap(),
+            ContractIdentity::SourceBound
+        );
+        assert_eq!(
+            resolve_authored_identity(
+                ContractIdentity::SourceBound,
+                Some(ContractIdentity::SourceBound)
+            )
+            .unwrap(),
+            ContractIdentity::SourceBound
+        );
+
+        let error = resolve_authored_identity(
+            ContractIdentity::SourceBound,
+            Some(ContractIdentity::Behavioral),
+        )
+        .expect_err("contradiction must fail");
+        let failure = error
+            .downcast_ref::<FormationFailure>()
+            .expect("a typed formation failure");
+        assert_eq!(failure.code, "contract_identity_conflict");
+        assert!(failure.message.contains("source-bound"), "{failure:?}");
+        assert!(failure.message.contains("behavioral"), "{failure:?}");
     }
 }
