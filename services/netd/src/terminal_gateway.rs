@@ -30,9 +30,9 @@ use crate::surface_websocket_auth::{
 };
 
 pub const GUEST_TERMINAL_VSOCK_PORT: u32 = 1026;
-const FRAME_INPUT: u8 = 1;
-const FRAME_OUTPUT: u8 = 2;
-const FRAME_CONTROL: u8 = 3;
+pub const FRAME_INPUT: u8 = 1;
+pub const FRAME_OUTPUT: u8 = 2;
+pub const FRAME_CONTROL: u8 = 3;
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ pub struct TerminalGatewayConfig {
 }
 
 impl TerminalGatewayConfig {
-    fn validate(&self) -> Result<(), TerminalGatewayError> {
+    pub fn validate(&self) -> Result<(), TerminalGatewayError> {
         if self.scope.session_id.trim().is_empty() || self.scope.surface_id.trim().is_empty() {
             return Err(TerminalGatewayError::InvalidConfig(
                 "session_id and surface_id must not be empty",
@@ -233,7 +233,7 @@ async fn serve_terminal_connection(
     relay_terminal(websocket, guest, last_input_activity_unix_millis).await
 }
 
-async fn connect_guest_terminal(
+pub async fn connect_guest_terminal(
     path: &std::path::Path,
     budget: Duration,
 ) -> std::io::Result<UnixStream> {
@@ -392,8 +392,8 @@ where
     writer_result.map_err(TerminalGatewayError::WebSocket)
 }
 
-async fn write_guest_frame(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+pub async fn write_guest_frame<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
     kind: u8,
     payload: &[u8],
 ) -> std::io::Result<()> {
@@ -403,8 +403,8 @@ async fn write_guest_frame(
     writer.flush().await
 }
 
-async fn read_guest_frame(
-    reader: &mut tokio::net::unix::OwnedReadHalf,
+pub async fn read_guest_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
 ) -> Result<(u8, Vec<u8>), TerminalGatewayError> {
     let kind = reader.read_u8().await?;
     let length = reader.read_u32().await? as usize;
@@ -426,7 +426,10 @@ fn now_unix_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
 
     use http::{
         HeaderValue,
@@ -440,6 +443,25 @@ mod tests {
     use crate::surface_websocket_auth::SURFACE_ASSERTION_HEADER;
 
     const ORIGIN_VALUE: &str = "https://app.ato.run";
+    static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
+
+    fn short_socket_path(label: &str) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap();
+        // Nested worktrees can exceed BSD's Unix socket path limit. Reuse
+        // their workspace .tmp ancestor while keeping the absolute-path
+        // admission contract exercised by the gateway.
+        let directory = cwd
+            .ancestors()
+            .find(|path| path.file_name().is_some_and(|name| name == ".tmp"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cwd.join(".tmp"));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     struct TestAuthorizer {
         seen: Mutex<Vec<String>>,
@@ -456,6 +478,8 @@ mod tests {
             }
             self.seen.lock().unwrap().push(assertion.to_string());
             Ok(AuthorizedSurfaceAccess {
+                clipboard_paste_until: None,
+                framebuffer_resize_until: None,
                 principal: "user-1".into(),
                 grant_id: assertion.to_string(),
             })
@@ -501,12 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_authenticates_and_relays_only_the_terminal_vsock_protocol() {
-        std::fs::create_dir_all(".tmp").unwrap();
-        let temp = tempfile::Builder::new()
-            .prefix("tg-")
-            .tempdir_in(".tmp")
-            .unwrap();
-        let uds_path = temp.path().join("vsock.sock");
+        let uds_path = short_socket_path("tg");
         let listener = UnixListener::bind(&uds_path).unwrap();
         let guest = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -545,7 +564,10 @@ mod tests {
         let gateway = start_terminal_gateway(
             TerminalGatewayConfig {
                 listen_addr: "127.0.0.1:0".parse().unwrap(),
-                firecracker_vsock_uds: std::fs::canonicalize(&uds_path).unwrap(),
+                // Keep the absolute test socket directly under .tmp: macOS
+                // counts the full path against SUN_LEN, and an extra tempdir
+                // component can otherwise fail before exercising the gateway.
+                firecracker_vsock_uds: uds_path.clone(),
                 guest_connect_timeout: Duration::from_secs(1),
                 scope: SurfaceGatewayScope {
                     session_id: "session-1".into(),
@@ -604,21 +626,17 @@ mod tests {
             .await
             .expect("gateway stop timeout")
             .unwrap();
+        std::fs::remove_file(&uds_path).unwrap();
     }
 
     #[tokio::test]
     async fn gateway_requires_the_terminal_subprotocol_before_guest_connect() {
-        std::fs::create_dir_all(".tmp").unwrap();
-        let temp = tempfile::Builder::new()
-            .prefix("tgs-")
-            .tempdir_in(".tmp")
-            .unwrap();
-        let uds_path = temp.path().join("vsock.sock");
-        let _listener = UnixListener::bind(&uds_path).unwrap();
+        let uds_path = short_socket_path("tgs");
+        let listener = UnixListener::bind(&uds_path).unwrap();
         let gateway = start_terminal_gateway(
             TerminalGatewayConfig {
                 listen_addr: "127.0.0.1:0".parse().unwrap(),
-                firecracker_vsock_uds: std::fs::canonicalize(&uds_path).unwrap(),
+                firecracker_vsock_uds: uds_path.clone(),
                 guest_connect_timeout: Duration::from_millis(100),
                 scope: SurfaceGatewayScope {
                     session_id: "session-1".into(),
@@ -638,5 +656,7 @@ mod tests {
                 .is_err()
         );
         gateway.stop().await.unwrap();
+        drop(listener);
+        std::fs::remove_file(&uds_path).unwrap();
     }
 }

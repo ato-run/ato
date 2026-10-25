@@ -1,0 +1,24 @@
+{
+  "schema": "ato.formation-exploration-budget-summary/1",
+  "previous_arm": "formation-adaptive-100.json",
+  "previous_remaining_usd_micros": 3507128,
+  "preregistered_worst_case_usd_micros": 3443244,
+  "small_stage": {
+    "CP_calls": 10,
+    "DP_calls": 0,
+    "estimated_usd_micros": 26613,
+    "conservative_charged_usd_micros": 98310
+  },
+  "100_app_arm": {
+    "CP_calls": 273,
+    "DP_calls": 1,
+    "estimated_usd_micros": 683545,
+    "conservative_charged_usd_micros": 2686616
+  },
+  "new_task_estimated_usd_micros": 710158,
+  "new_task_conservative_charge_usd_micros": 2784926,
+  "remaining_conservative_reservation_usd_micros": 722202,
+  "unresolved_model_reservations": 0,
+  "billing_receipt": false,
+  "further_model_calls_authorized_by_this_summary": false
+}

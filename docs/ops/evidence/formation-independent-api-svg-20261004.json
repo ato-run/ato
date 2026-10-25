@@ -1,0 +1,127 @@
+{
+  "schema": "ato.formation-independent-api-source-acceptance/1",
+  "measurement_id": "formation-independent-api-svg-20261004",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+  "reservation_prices_usd_micros_per_million": {
+    "input_cache_miss": 300000,
+    "output": 1200000
+  },
+  "Rust_source_pin": "5cc4e1b8f037db7f8f5e69b635b5204861e8fe10",
+  "API_pin": "353c06fef9fd945e0286b686670e253a9f04c243",
+  "known_D_seed": false,
+  "same_Source_K_as_native_SVG": true,
+  "summary": {
+    "exit_code": 1,
+    "elapsed_seconds": 26.409,
+    "new_Search": true,
+    "old_ledger_reset": false,
+    "search_id": "search_27de5a402f91d02b5846123633f427ef",
+    "search_status": "exhausted",
+    "rounds_consumed": 2,
+    "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+    "termination_reason": null,
+    "approval": "not_assessed",
+    "deployed": false,
+    "submission_present": false,
+    "provider_calls": 3
+  },
+  "cells": [
+    {
+      "exchange": "search_27de5a402f91d02b5846123633f427ef_r1_s1_t0",
+      "cell": "search_27de5a402f91d02b5846123633f427ef_r1_s1_t0",
+      "finish_reason": "stop",
+      "input_tokens": 14344,
+      "latency_ms": 1455,
+      "model_matches": true,
+      "output_tokens": 218
+    },
+    {
+      "exchange": "search_27de5a402f91d02b5846123633f427ef_r1_s2_t0",
+      "cell": "search_27de5a402f91d02b5846123633f427ef_r1_s2_t0",
+      "finish_reason": "stop",
+      "input_tokens": 14267,
+      "latency_ms": 2852,
+      "model_matches": true,
+      "output_tokens": 647
+    },
+    {
+      "exchange": "search_27de5a402f91d02b5846123633f427ef_r2_s1_t0",
+      "cell": "search_27de5a402f91d02b5846123633f427ef_r2_s1_t0",
+      "finish_reason": "stop",
+      "input_tokens": 14553,
+      "latency_ms": 3378,
+      "model_matches": true,
+      "output_tokens": 752
+    }
+  ],
+  "accounting_sha256": "dcc81d4b78dde7c823f2c92729a8773771adc80c7eefa94c0f914562e12c420c",
+  "state": {
+    "search_budget": null,
+    "attempts": [
+      {
+        "attempt_id": "01M41F2PT9JNX2ZJ2QF0WYR636",
+        "claimed": true,
+        "derivation_ref": "sha256:cea220a62e6fc19ae69275e10b745487b8390904f522ff138603efec0284843c",
+        "effects": "pure",
+        "environment_id": "native",
+        "failure_code": "authority_denied",
+        "materialization_ref": null,
+        "record": "not_started",
+        "retained_ref": null,
+        "route_accepted": false,
+        "runtime_id": "local",
+        "status": "inconclusive",
+        "unknown_resolved": false
+      },
+      {
+        "attempt_id": "01M41F2W9ECGFZA50J9X7BEQVW",
+        "claimed": true,
+        "derivation_ref": "sha256:9754e5bf2f7fb1b356e1a2a1d7bbb30bc47a1dedeed58c210451c0f0b608740b",
+        "effects": "pure",
+        "environment_id": "native",
+        "failure_code": "npm_lifecycle_plan_required",
+        "materialization_ref": null,
+        "record": "finished",
+        "retained_ref": null,
+        "route_accepted": false,
+        "runtime_id": "local",
+        "status": "fail",
+        "unknown_resolved": false
+      }
+    ],
+    "exploration_stop": null,
+    "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+    "unknown_attempts": null,
+    "verified_routes": null
+  },
+  "estimate_cost_usd_micros": 14893,
+  "actual_provider_charge": "unknown",
+  "budget": {
+    "total_calls_max": 41,
+    "total_calls_used": 21,
+    "small_gate_calls_max": 24,
+    "small_gate_calls_used": 4,
+    "remaining_calls": 20,
+    "unsettled_calls": 0,
+    "cumulative_conservative_charge_usd_micros": 97718,
+    "estimated_remaining_usd_micros": 467188,
+    "old_ledger_hashes_unchanged": true,
+    "four_plans_share_one_account_ceiling": true,
+    "hundred_remeasurement_authorized": false
+  },
+  "first_PASS": 0,
+  "repaired_PASS": 0,
+  "unique_apps_PASS": 0,
+  "normal_Run_authorized": false,
+  "deployed": false,
+  "credential": {
+    "balance_endpoint_status": 200,
+    "is_available": true,
+    "encrypted_transport_owner_RAM_only": true,
+    "persisted_value": false,
+    "model_Runtime_value_exposure": false,
+    "same_account_rotation_basis": "User authorization; balance API does not return account identity"
+  }
+}

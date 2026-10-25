@@ -1,0 +1,1049 @@
+[
+  {
+    "case": "E01",
+    "permutation": 0,
+    "arm": "A",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": null,
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": false,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+    "fixture_hash": "dbce5b85e6809bb26e6737fe7ac6648b106e9ac15e68980f4192102a13936a16",
+    "context": null,
+    "context_hash": null,
+    "provider_calls": 0,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [],
+    "elapsed_seconds": 3.323,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:59b3aa1afde75792ad10cd7b950c7911aa598b59e4fa8bce9a3bb20577a5f207"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "d7f5ae3fc2bf8c178a940d7517c36c647df54badf8723b5d32a224ffb58de77d"
+  },
+  {
+    "case": "E01",
+    "permutation": 0,
+    "arm": "B",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": "invalid",
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": true,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+    "fixture_hash": "dbce5b85e6809bb26e6737fe7ac6648b106e9ac15e68980f4192102a13936a16",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "zero",
+          "custom_http_handler": false,
+          "frameworks": [],
+          "functions": "zero",
+          "id": "m2",
+          "imports": [],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": false,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "q7",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "900312748ad6774c4b8c7b0e43379d13e5b4b6f5508faa1caa78dc708586fe0c",
+    "provider_calls": 1,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [
+      0
+    ],
+    "elapsed_seconds": 4.877,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:59b3aa1afde75792ad10cd7b950c7911aa598b59e4fa8bce9a3bb20577a5f207"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "67207eeb74ed2c13b1a1f1e74e98bee83b0a06b3c0394ff2272e46287ed327bd"
+  },
+  {
+    "case": "E01",
+    "permutation": 0,
+    "arm": "C",
+    "same_k_success": true,
+    "attempts": 2,
+    "attempts_to_pass": 2,
+    "generation_outcome": "admitted",
+    "admitted": true,
+    "declined": false,
+    "invalid_rejected": false,
+    "draft_proposed": true,
+    "selected_entrypoint": "q7",
+    "generated_derivation_ref": "sha256:c3290025b2ad056d14a3841a9a4753aaca75b6880e71068853f2d8d08831cc20",
+    "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+    "fixture_hash": "dbce5b85e6809bb26e6737fe7ac6648b106e9ac15e68980f4192102a13936a16",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "zero",
+          "custom_http_handler": false,
+          "frameworks": [],
+          "functions": "zero",
+          "id": "m2",
+          "imports": [],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": false,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "q7",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "900312748ad6774c4b8c7b0e43379d13e5b4b6f5508faa1caa78dc708586fe0c",
+    "provider_calls": 1,
+    "model_calls": 1,
+    "models": [
+      "jev-1.13.0"
+    ],
+    "prompt_versions": [
+      "ato.formation-generation-prompt/2"
+    ],
+    "usage": [
+      {
+        "input_tokens": 1102,
+        "output_tokens": 75
+      }
+    ],
+    "cost_usd": 4.6284000000000006e-05,
+    "provider_latency_ms": [
+      88
+    ],
+    "elapsed_seconds": 7.335,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:59b3aa1afde75792ad10cd7b950c7911aa598b59e4fa8bce9a3bb20577a5f207"
+      },
+      {
+        "fully_satisfied": true,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:c3290025b2ad056d14a3841a9a4753aaca75b6880e71068853f2d8d08831cc20"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "e4f2ee34bc24b2ee7f4c7b05e1405f4f2eb0b3e84ee130dffac8a2154575237e"
+  },
+  {
+    "case": "E01",
+    "permutation": 1,
+    "arm": "C",
+    "same_k_success": true,
+    "attempts": 2,
+    "attempts_to_pass": 2,
+    "generation_outcome": "admitted",
+    "admitted": true,
+    "declined": false,
+    "invalid_rejected": false,
+    "draft_proposed": true,
+    "selected_entrypoint": "m2",
+    "generated_derivation_ref": "sha256:c3290025b2ad056d14a3841a9a4753aaca75b6880e71068853f2d8d08831cc20",
+    "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+    "fixture_hash": "dbce5b85e6809bb26e6737fe7ac6648b106e9ac15e68980f4192102a13936a16",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "m2",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "zero",
+          "custom_http_handler": false,
+          "frameworks": [],
+          "functions": "zero",
+          "id": "q7",
+          "imports": [],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": false,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "6e49a404787a639d5bc942c4f846d4016d42a927be1186f2539de8afb4c2e762",
+    "provider_calls": 1,
+    "model_calls": 1,
+    "models": [
+      "jev-1.13.0"
+    ],
+    "prompt_versions": [
+      "ato.formation-generation-prompt/2"
+    ],
+    "usage": [
+      {
+        "input_tokens": 1102,
+        "output_tokens": 75
+      }
+    ],
+    "cost_usd": 4.6284000000000006e-05,
+    "provider_latency_ms": [
+      92
+    ],
+    "elapsed_seconds": 7.432,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:59b3aa1afde75792ad10cd7b950c7911aa598b59e4fa8bce9a3bb20577a5f207"
+      },
+      {
+        "fully_satisfied": true,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:c3290025b2ad056d14a3841a9a4753aaca75b6880e71068853f2d8d08831cc20"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "d6bf172460ff14be242602d4f5a4482194c2f199ed435c54a60f9f7f8bef89a3"
+  },
+  {
+    "case": "E01",
+    "permutation": 1,
+    "arm": "B",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": "invalid",
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": true,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+    "fixture_hash": "dbce5b85e6809bb26e6737fe7ac6648b106e9ac15e68980f4192102a13936a16",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "m2",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "zero",
+          "custom_http_handler": false,
+          "frameworks": [],
+          "functions": "zero",
+          "id": "q7",
+          "imports": [],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": false,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "6e49a404787a639d5bc942c4f846d4016d42a927be1186f2539de8afb4c2e762",
+    "provider_calls": 1,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [
+      0
+    ],
+    "elapsed_seconds": 4.877,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:59b3aa1afde75792ad10cd7b950c7911aa598b59e4fa8bce9a3bb20577a5f207"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "4204ebef150a8700541e2398b7104251ec2082b0cce79a455b299b55c9c32333"
+  },
+  {
+    "case": "E01",
+    "permutation": 1,
+    "arm": "A",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": null,
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": false,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+    "fixture_hash": "dbce5b85e6809bb26e6737fe7ac6648b106e9ac15e68980f4192102a13936a16",
+    "context": null,
+    "context_hash": null,
+    "provider_calls": 0,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [],
+    "elapsed_seconds": 3.172,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:272ec76dd14f81af6f9e2d039e0ff412c870c26be70c65cc053a4d11b700c31a",
+        "derivation_ref": "sha256:59b3aa1afde75792ad10cd7b950c7911aa598b59e4fa8bce9a3bb20577a5f207"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "864b5c317e9d10bee992b51f6a537ae68794a90d2c14f673b5e8e429f41df1dc"
+  },
+  {
+    "case": "E02",
+    "permutation": 0,
+    "arm": "A",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": null,
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": false,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+    "fixture_hash": "0f2a5994d3c456964a6c762df28d59f44671c1ec9c506b9756a58e2d57c3d927",
+    "context": null,
+    "context_hash": null,
+    "provider_calls": 0,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [],
+    "elapsed_seconds": 3.073,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+        "derivation_ref": "sha256:244ebc9c2683f6fb99dfca2dcfc2a1cc24cd05cbea909b37264f8e21c39f30c6"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "00cab9c5f4ed17228ca05a8df078675b117f6b9859d385ed24d69a8471cdd0c5"
+  },
+  {
+    "case": "E02",
+    "permutation": 0,
+    "arm": "B",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": "invalid",
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": true,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+    "fixture_hash": "0f2a5994d3c456964a6c762df28d59f44671c1ec9c506b9756a58e2d57c3d927",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "m2",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "q7",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "c0e034bae47c3cbc74170d45450b6af00e5e37c66d05bda897d33dfb115047c5",
+    "provider_calls": 1,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [
+      0
+    ],
+    "elapsed_seconds": 5.178,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+        "derivation_ref": "sha256:244ebc9c2683f6fb99dfca2dcfc2a1cc24cd05cbea909b37264f8e21c39f30c6"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "6f4ada3eae60aa2fe9a446a68533b2db87040d6952d7d18e41e084cb316c8e4e"
+  },
+  {
+    "case": "E02",
+    "permutation": 0,
+    "arm": "C",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": "declined",
+    "admitted": false,
+    "declined": true,
+    "invalid_rejected": false,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+    "fixture_hash": "0f2a5994d3c456964a6c762df28d59f44671c1ec9c506b9756a58e2d57c3d927",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "m2",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "q7",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "c0e034bae47c3cbc74170d45450b6af00e5e37c66d05bda897d33dfb115047c5",
+    "provider_calls": 1,
+    "model_calls": 1,
+    "models": [
+      "jev-1.13.0"
+    ],
+    "prompt_versions": [
+      "ato.formation-generation-prompt/2"
+    ],
+    "usage": [
+      {
+        "input_tokens": 1108,
+        "output_tokens": 74
+      }
+    ],
+    "cost_usd": 4.6536e-05,
+    "provider_latency_ms": [
+      115
+    ],
+    "elapsed_seconds": 5.379,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+        "derivation_ref": "sha256:244ebc9c2683f6fb99dfca2dcfc2a1cc24cd05cbea909b37264f8e21c39f30c6"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "fc6f97f1d0451796583f7b60bb52058f13ee2adbf72243bd24d91190d97ed8e7"
+  },
+  {
+    "case": "E02",
+    "permutation": 1,
+    "arm": "C",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": "declined",
+    "admitted": false,
+    "declined": true,
+    "invalid_rejected": false,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+    "fixture_hash": "0f2a5994d3c456964a6c762df28d59f44671c1ec9c506b9756a58e2d57c3d927",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "m2",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "q7",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "c0e034bae47c3cbc74170d45450b6af00e5e37c66d05bda897d33dfb115047c5",
+    "provider_calls": 1,
+    "model_calls": 1,
+    "models": [
+      "jev-1.13.0"
+    ],
+    "prompt_versions": [
+      "ato.formation-generation-prompt/2"
+    ],
+    "usage": [
+      {
+        "input_tokens": 1108,
+        "output_tokens": 74
+      }
+    ],
+    "cost_usd": 4.6536e-05,
+    "provider_latency_ms": [
+      113
+    ],
+    "elapsed_seconds": 5.177,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+        "derivation_ref": "sha256:244ebc9c2683f6fb99dfca2dcfc2a1cc24cd05cbea909b37264f8e21c39f30c6"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "210ab37a5562741033c5f8fd0b66e722a192334bba2e33c18d553eab7d84b3a3"
+  },
+  {
+    "case": "E02",
+    "permutation": 1,
+    "arm": "B",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": "invalid",
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": true,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+    "fixture_hash": "0f2a5994d3c456964a6c762df28d59f44671c1ec9c506b9756a58e2d57c3d927",
+    "context": {
+      "entrypoints": [
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "m2",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        },
+        {
+          "classes": "one",
+          "custom_http_handler": true,
+          "frameworks": [],
+          "functions": "two_to_four",
+          "id": "q7",
+          "imports": [
+            "http_server"
+          ],
+          "language": "python",
+          "main_guard": false,
+          "server_listen": true,
+          "size_bucket": "up_to1_kib",
+          "source_scan": "complete"
+        }
+      ],
+      "failures": [
+        {
+          "code": "http_status_mismatch",
+          "status": "fail"
+        }
+      ],
+      "inspections": [],
+      "project_summary": {
+        "lockfile": false,
+        "manifest": true,
+        "node": false,
+        "python": true,
+        "python_files": "five_to_sixteen",
+        "readme": false,
+        "regular_files": "five_to_sixteen",
+        "static_html": true
+      },
+      "schema": "ato.formation-generation-context/1"
+    },
+    "context_hash": "c0e034bae47c3cbc74170d45450b6af00e5e37c66d05bda897d33dfb115047c5",
+    "provider_calls": 1,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [
+      0
+    ],
+    "elapsed_seconds": 5.228,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+        "derivation_ref": "sha256:244ebc9c2683f6fb99dfca2dcfc2a1cc24cd05cbea909b37264f8e21c39f30c6"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "6a88f3f9bb69fe01a28dd726e999d3f5f565cefcf28e54aebfdfed54a700bac5"
+  },
+  {
+    "case": "E02",
+    "permutation": 1,
+    "arm": "A",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": null,
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": false,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+    "fixture_hash": "0f2a5994d3c456964a6c762df28d59f44671c1ec9c506b9756a58e2d57c3d927",
+    "context": null,
+    "context_hash": null,
+    "provider_calls": 0,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [],
+    "elapsed_seconds": 3.223,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:0d2aaa0ef6ed9950cef6a096e83955e2b1767e661c0488bc00ddced87397606e",
+        "derivation_ref": "sha256:244ebc9c2683f6fb99dfca2dcfc2a1cc24cd05cbea909b37264f8e21c39f30c6"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "afc8b778072dc4417b00884b5143a63df77a2d061ddfdd736875052d50a68da9"
+  },
+  {
+    "case": "E03",
+    "permutation": 0,
+    "arm": "A",
+    "same_k_success": false,
+    "attempts": 1,
+    "attempts_to_pass": null,
+    "generation_outcome": null,
+    "admitted": false,
+    "declined": false,
+    "invalid_rejected": false,
+    "draft_proposed": false,
+    "selected_entrypoint": null,
+    "generated_derivation_ref": null,
+    "contract_ref": "sha256:95dfeb930e15876dfbafc78618cdb3a81bc4e4e6fe57db08860d30863be219f6",
+    "fixture_hash": "e6cca58c0f71b095c1f4ba0ec55de63fc7ef3c2ecfc54aea9f06502e95cf8a8d",
+    "context": null,
+    "context_hash": null,
+    "provider_calls": 0,
+    "model_calls": 0,
+    "models": [],
+    "prompt_versions": [],
+    "usage": [],
+    "cost_usd": 0,
+    "provider_latency_ms": [],
+    "elapsed_seconds": 3.173,
+    "requester_exit": 0,
+    "error": null,
+    "violations": [],
+    "receipt": [
+      {
+        "fully_satisfied": false,
+        "contract_ref": "sha256:95dfeb930e15876dfbafc78618cdb3a81bc4e4e6fe57db08860d30863be219f6",
+        "derivation_ref": "sha256:e3642bdfd6a111ad28eb29ea9921a903b4db3a0d49074c87f0ea0f5b6a80bff0"
+      }
+    ],
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 2,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240
+    },
+    "report_sha256": "324190fa3470a0a28c2b13e1147be39fa5b37613142d7ba857d83e47f08ad636"
+  }
+]

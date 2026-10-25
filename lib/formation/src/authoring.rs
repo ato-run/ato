@@ -1,0 +1,1422 @@
+//! The canonical authoring compiler: drafts in, addressable Contract and
+//! Derivation out.
+//!
+//! ## What a Capsule is here
+//!
+//! A Capsule's identity is its Contract `K` — the author-chosen observable
+//! conditions that decide whether a future computation counts as the same
+//! resumable point. `ContractRef = H(canonical(bound K))`. A Derivation is an
+//! executable route that attempts to produce a continuation satisfying `K`, and
+//! is separately addressed: `DerivationRef = H(canonical(bound D))`. One
+//! Capsule, many Derivations.
+//!
+//! ## Two frontends, one compiler
+//!
+//! `capsule.toml` and App Presets are two ways of writing the same pair. A
+//! Preset is a synthesizer, not a lane: it produces a `ContractDraft` and a
+//! `DerivationDraft` for a source simple enough to describe without help, and
+//! from here on nothing can tell which door a draft came through. That is the
+//! point — an author who writes out by hand exactly what the Preset would have
+//! synthesized gets the SAME `ContractRef` and the SAME `DerivationRef`.
+//!
+//! ## What must never enter a digest
+//!
+//! Provenance. Whether a draft was synthesized by a Preset, typed by a person
+//! or produced by a model; which file it came from; when; on whose behalf; from
+//! which repository; through which host. None of it is what the author chose to
+//! preserve, and all of it would split one Capsule into many that mean the same
+//! thing. It travels beside the digest, in `AuthoringProvenance`, and is
+//! deliberately not serialized into either bound object.
+//!
+//! ## Binding
+//!
+//! A draft is not addressable. It names a workspace by path and may ask for an
+//! observation to be *captured* rather than stated. Binding resolves both: paths
+//! become content addresses, `capture` becomes the concrete value observed at
+//! seal time. Only then is there something to hash.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+// ─────────────────────────────────────────────────────────── protocol vocabulary
+//
+// Every identifier below already exists in this workspace. None is minted for
+// Step 10: a fictional protocol id is a promise that an adapter honours it, and
+// nothing here can honour a promise it invented.
+
+/// The workspace an input names. `lib/objects`, `ato-adapter-workspace`.
+pub const WORKSPACE_PROTOCOL: &str = "ato.workspace@1";
+/// Process execution. `ato-adapter-process`.
+pub const PROCESS_PROTOCOL: &str = "ato.process@1";
+/// A surface the browser evaluates — what a Static Compute is.
+pub const BROWSER_PROTOCOL: &str = "ato.browser@1";
+/// An exported HTTP port. `ato-adapter-http`.
+pub const HTTP_PROTOCOL: &str = "ato.http@1";
+/// A plain, payload-opaque TCP port that one step of a route serves to its
+/// sibling steps. Honoured by the OCI service group executor, which probes it
+/// for readiness and never forwards it to the host.
+pub const TCP_PROTOCOL: &str = "ato.tcp@1";
+/// A runtime-provided, policy-bound raw TCP egress endpoint. The binding value
+/// is an endpoint selected by the Runner, never an unrestricted network grant.
+pub const TCP_EGRESS_PROTOCOL: &str = "ato.tcp-egress@1";
+/// Writable continuation state, filesystem-shaped. Already the protocol every
+/// Formation `state_slot_declaration` carries.
+pub const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
+/// The HTTP acceptance verifier. `extensions/contracts`.
+pub const HTTP_CONTRACT_VERIFIER: &str = "ato.contract.http@1";
+/// The workspace-content acceptance verifier. `extensions/contracts`.
+pub const WORKSPACE_CONTRACT_VERIFIER: &str = "ato.contract.workspace@1";
+/// The exact portable saved-data/Asset snapshot restored for an Instance.
+pub const INSTANCE_SNAPSHOT_CONTRACT_VERIFIER: &str = "ato.contract.instance-snapshot@1";
+/// The ordered, stateful HTTP scenario a running candidate must perform.
+///
+/// The requirement names the scenario by its content address in `digest`; the
+/// steps themselves are an [`crate::scenario::ScenarioV1`] object in the bundle
+/// closure. Execution and receipt evidence belong to the runtime, not here.
+pub const SCENARIO_CONTRACT_VERIFIER: &str = "ato.contract.scenario@1";
+
+pub const BOUND_CONTRACT_SCHEMA: &str = "ato.contract/1";
+pub const BOUND_DERIVATION_SCHEMA: &str = "ato.derivation/1";
+
+// ────────────────────────────────────────────────────────────────────── errors
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AuthoringError {
+    #[error("{field} is malformed: {detail}")]
+    Malformed { field: String, detail: String },
+    #[error("{what} {id:?} is declared twice")]
+    Duplicate { what: &'static str, id: String },
+    #[error("{referrer} names {what} {id:?}, which is not declared")]
+    Unresolved {
+        referrer: String,
+        what: &'static str,
+        id: String,
+    },
+    #[error("{field} asks for a captured observation this build cannot resolve: {detail}")]
+    CaptureUnresolvable { field: String, detail: String },
+    #[error(
+        "a behavioral Contract must not observe the source identity: requirement {requirement:?} \
+         is {WORKSPACE_CONTRACT_VERIFIER}"
+    )]
+    BehavioralContractHasSourceRequirement { requirement: String },
+    #[error("a source-bound Contract must observe exactly one source identity: {detail}")]
+    SourceBoundContractHasNoSourceRequirement { detail: String },
+    #[error("canonicalization failed: {detail}")]
+    Canonicalization { detail: String },
+}
+
+impl AuthoringError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Malformed { .. } => "authoring_malformed",
+            Self::Duplicate { .. } => "authoring_duplicate_id",
+            Self::Unresolved { .. } => "authoring_unresolved_reference",
+            Self::CaptureUnresolvable { .. } => "authoring_capture_unresolvable",
+            Self::BehavioralContractHasSourceRequirement { .. } => {
+                "behavioral_contract_has_source_requirement"
+            }
+            Self::SourceBoundContractHasNoSourceRequirement { .. } => {
+                "source_bound_contract_has_no_source_requirement"
+            }
+            Self::Canonicalization { .. } => "authoring_canonicalization_failed",
+        }
+    }
+}
+
+pub(crate) fn malformed(field: impl Into<String>, detail: impl Into<String>) -> AuthoringError {
+    AuthoringError::Malformed {
+        field: field.into(),
+        detail: detail.into(),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────── the draft
+
+/// An observation the author asked for but did not state: resolved at seal time
+/// into a concrete value that becomes part of `K`.
+///
+/// This is what lets one grammar express both "any usable HTTP app" and "this
+/// exact content", without Ato deciding which the author meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Observed<T> {
+    Capture,
+    Stated(T),
+}
+
+/// How an author names an input's identity requirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputIdentityRequirement {
+    pub input: String,
+    pub digest: Observed<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRequirement {
+    pub port: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    /// A literal digest only. `capture` is refused — see `bind`.
+    pub body_digest: Option<Observed<String>>,
+}
+
+/// A content-addressed scenario requirement.
+///
+/// `scenario` is the `sha256:` reference of an `ato.scenario/1` object. It is
+/// always stated: a capture would have to read bytes this build does not have,
+/// so it is refused rather than bound to something nobody looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioRequirement {
+    pub port: String,
+    pub scenario: Observed<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequirementDraft {
+    Http(HttpRequirement),
+    InputIdentity(InputIdentityRequirement),
+    Scenario(ScenarioRequirement),
+}
+
+/// One condition that must hold for a continuation to be this Capsule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationDraft {
+    pub id: String,
+    pub requirement: RequirementDraft,
+}
+
+/// What the author says the Contract's identity depends on.
+///
+/// This is authoring intent, not part of the Contract: [`BoundContract`] keeps
+/// its `{schema, requirements}` shape, so stating an identity adds nothing to
+/// `K`. It only lets `bind` refuse a draft whose statements contradict the
+/// identity it claims — which is why an absent value means "bind exactly as
+/// authored" and is byte-identical to every document written before this
+/// field existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContractIdentity {
+    /// Nothing was stated. Bind the requirements exactly as authored.
+    #[default]
+    Unspecified,
+    /// `K` must not observe the source tree's identity: the same Contract holds
+    /// for any source that behaves the same way.
+    Behavioral,
+    /// `K` must observe exactly one workspace input's identity: this source
+    /// tree, and only this one.
+    SourceBound,
+}
+
+impl ContractIdentity {
+    /// The spelling used by the authoring grammars and the job wire format.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Behavioral => "behavioral",
+            Self::SourceBound => "source-bound",
+        }
+    }
+
+    /// Whether the author stated an identity at all.
+    pub fn is_explicit(self) -> bool {
+        !matches!(self, Self::Unspecified)
+    }
+}
+
+impl std::fmt::Display for ContractIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The author's proposed identity boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContractDraft {
+    /// An explicit statement checked against the requirements by `bind`.
+    /// Never digested.
+    pub identity: ContractIdentity,
+    pub requirements: Vec<ObservationDraft>,
+}
+
+/// An immutable object the route consumes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDraft {
+    pub id: String,
+    pub protocol: String,
+    /// Relative to the source root. `"."` is the whole tree.
+    pub path: String,
+}
+
+/// One typed action in the route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepDraft {
+    pub id: String,
+    pub protocol: String,
+    pub op: String,
+    /// `ato.process@1` — the argv, exactly as authored. Never inferred.
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+    /// `ato.browser@1` — the input whose tree is served.
+    pub source: Option<String>,
+    /// The subtree that is served, relative to the input. `None` is the root.
+    pub root: Option<String>,
+    pub entry: Option<String>,
+    pub spa_fallback: Option<bool>,
+    /// `ato.process@1` `exec` — the network this step needs. Declared, never
+    /// inferred from what the argv looks like.
+    pub network: StepNetwork,
+}
+
+/// The network a preparation step needs.
+///
+/// The step states what it NEEDS; the Formation policy states the most any
+/// step may have. The narrower of the two is what the step gets, and a step
+/// that needs more than the policy allows is refused before anything runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StepNetwork {
+    /// No network. The default, and absent from the canonical form, so every
+    /// Derivation formed before this field existed digests as it did.
+    #[default]
+    Denied,
+    /// Resolve dependencies from the network.
+    DependencyResolution,
+    ScopedDependencies,
+    ScopedBuild,
+    ScopedRuntime,
+}
+
+impl StepNetwork {
+    pub fn is_denied(&self) -> bool {
+        *self == Self::Denied
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortDraft {
+    pub id: String,
+    pub protocol: String,
+    pub from: String,
+    pub guest_port: Option<u16>,
+    pub client_address_transport: Option<ClientAddressTransport>,
+}
+
+/// How a Runner tells the service behind a Port who connected to it.
+///
+/// A Runner that publishes a Port terminates the client's connection and opens
+/// its own, so by default the service sees the Runner. A service whose policy
+/// depends on the peer — an SMTP server deciding whether to relay, for
+/// instance — declares here that it expects that address to be carried across
+/// the hop. It is transport metadata on the Port: the Runner writes the header
+/// and never inspects, or even parses, the payload that follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAddressTransport {
+    /// The service sees the address the Runner connects from.
+    None,
+    /// The Runner writes one PROXY protocol v2 header before any payload.
+    ProxyProtocolV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDraft {
+    pub id: String,
+    pub protocol: String,
+    pub mount: String,
+    pub access: StateAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StateAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+/// A runtime this route needs provisioned, at an exact version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDraft {
+    pub name: String,
+    pub version: String,
+}
+
+/// What re-executing this route does to the world OUTSIDE the continuation.
+///
+/// Deliberately separate from `K`, and deliberately not consulted by anything
+/// yet. Two executions can both satisfy `K` while charging a card twice —
+/// "produces a K-equivalent continuation" and "is safe to run again" are
+/// different claims, and collapsing them is how a planner learns to re-send
+/// somebody's email. v0 carries the declaration so a planner can be written
+/// against it later; it never infers one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EffectClass {
+    /// No effect outside the continuation. The default a build with no external
+    /// effects declares by saying nothing.
+    #[default]
+    Pure,
+    Idempotent,
+    RecordSubstitutable,
+    RequiresConfirmation,
+    NonRepeatable,
+}
+
+/// The proposed route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DerivationDraft {
+    pub runtime_port_operations: Vec<crate::port_operations::RuntimePortOperation>,
+    pub variable_bindings: Vec<crate::variables::VariableRequirement>,
+    pub requirements: crate::requirements::ExecutionRequirements,
+    pub inputs: Vec<InputDraft>,
+    pub runtimes: Vec<RuntimeDraft>,
+    pub steps: Vec<StepDraft>,
+    pub ports: Vec<PortDraft>,
+    pub state: Vec<StateDraft>,
+    /// The native Adapter this route's `runtime_launch` realization runs.
+    ///
+    /// Only an OCI route realizes a Terminal, so binding refuses it anywhere
+    /// else. Omitted when the author declares none — and then it is absent from
+    /// the bound bytes too, which is why every Derivation formed before this
+    /// field existed keeps its exact `DerivationRef`.
+    pub native_surface: Option<crate::native_surface::NativeSurfaceAdapter>,
+    /// The route needs the workspace built before it is served, into this
+    /// subtree.
+    ///
+    /// Synthesized by `node-static/v1` and, in v0, by nothing else: expressing
+    /// a package-manager build as explicit `ato.process@1` steps needs the
+    /// resolver that picks the package manager and the Node version, which
+    /// still lives in the execution projection. Carried in the digest because
+    /// it changes what the route does, and deliberately not yet authorable —
+    /// see the projection's `unsupported_step` refusal.
+    pub workspace_build: Option<String>,
+    /// Which PLATFORM-MANAGED compiler builds the workspace, when one does.
+    ///
+    /// `workspace_build` says a build happens and where it writes;
+    /// this says WHO owns the toolchain. `node-static/v1` leaves it None,
+    /// because the package's own script is the authority there. Digested, for
+    /// the same reason `workspace_build` is: two routes that run different
+    /// compilers do different things, and a Capsule identity that could not
+    /// tell them apart would let one be resumed as the other.
+    pub workspace_compiler: Option<String>,
+    pub source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
+    /// The platforms this route can run on, when the author restricts them.
+    /// Empty: no restriction stated.
+    pub platforms: Vec<PlatformDraft>,
+    pub effects: EffectClass,
+}
+
+/// One platform a route can run on: `os` and `arch` as a Runtime reports
+/// them (`linux`/`macos`/`windows`, `x86_64`/`aarch64`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformDraft {
+    pub os: String,
+    pub arch: String,
+}
+
+/// Where a draft came from. **Never digested.**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthoringProvenance {
+    /// An author wrote `capsule.toml`.
+    Authored,
+    /// A Preset synthesized it because no `capsule.toml` existed.
+    PresetSynthesized { preset: &'static str },
+}
+
+/// What either frontend produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoringDraft {
+    pub contract: ContractDraft,
+    pub derivation: DerivationDraft,
+    /// Carried alongside so a person can be told where this came from, and
+    /// excluded from both digests so it cannot split one Capsule into two.
+    pub provenance: AuthoringProvenance,
+}
+
+// ────────────────────────────────────────────────────────────── bound + digests
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundRequirement {
+    pub id: String,
+    /// The acceptance verifier that decides this condition.
+    pub verifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+/// The Capsule's identity, once every captured observation is a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundContract {
+    pub schema: String,
+    /// Sorted by id. A contract is a SET of conditions; the order somebody
+    /// happened to type them in is not part of what they chose to preserve.
+    pub requirements: Vec<BoundRequirement>,
+}
+
+/// An immutable *logical* input reference of a route.
+///
+/// `content_ref` names exactly one immutable object; `protocol` decides how it
+/// is resolved and what it references in turn. It is not, in general, "an
+/// object inside the bundle":
+///
+/// - `ato.workspace@1` — the workspace tree; the tree and everything it
+///   references are in the bundle closure;
+/// - `ato.model-set@1` — a Model Set manifest
+///   ([`crate::model_set::ModelSetManifest`]); the manifest is in the bundle,
+///   the Model Objects it lists are resolved by digest through the data plane.
+///
+/// A consumer that does not know a protocol refuses the input rather than
+/// guessing how to resolve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundInput {
+    pub id: String,
+    pub protocol: String,
+    /// The resolved immutable reference. Two different trees are two different
+    /// Derivations, which is the whole reason binding happens before hashing.
+    pub content_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundStep {
+    pub id: String,
+    pub protocol: String,
+    pub op: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spa_fallback: Option<bool>,
+    /// What network this step needs. `denied` is the default and is never
+    /// written, so a route that states nothing keeps its `DerivationRef`.
+    #[serde(default, skip_serializing_if = "StepNetwork::is_denied")]
+    pub network: StepNetwork,
+    // The three step-scoped fields below are absent from every Derivation
+    // formed before a route could hold more than one serving step, so those
+    // Derivations digest exactly as they did.
+    /// Runtime facts owned by THIS step, for routes whose steps run
+    /// different images. Route-wide facts stay in `BoundDerivation::runtimes`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtimes: BTreeMap<String, String>,
+    /// Ids of `BoundDerivation::state` slots visible to this step only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<String>,
+    /// Ids of Application Bindings injected into this step only, so a secret
+    /// is visible to the one service that needs it and to no sibling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundPort {
+    pub id: String,
+    pub protocol: String,
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_port: Option<u16>,
+    /// Omitted, and absent from the canonical bytes, unless the Application
+    /// asked for it — so a Contract that predates this field keeps its exact
+    /// `ContractRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_address_transport: Option<ClientAddressTransport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundState {
+    pub id: String,
+    pub protocol: String,
+    pub mount: String,
+    pub access: StateAccess,
+}
+
+/// One executable route, addressable and reusable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundDerivation {
+    /// Optional Adapter configuration. Omission preserves pre-native D bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_surface: Option<crate::native_surface::NativeSurfaceAdapter>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_port_operations: Vec<crate::port_operations::RuntimePortOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variable_bindings: Vec<crate::variables::VariableRequirement>,
+    pub schema: String,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::requirements::ExecutionRequirements::is_empty"
+    )]
+    pub requirements: crate::requirements::ExecutionRequirements,
+    pub inputs: Vec<BoundInput>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtimes: BTreeMap<String, String>,
+    /// Steps keep AUTHORED ORDER. A route is a sequence; sorting it would
+    /// change what it does.
+    pub steps: Vec<BoundStep>,
+    pub ports: Vec<BoundPort>,
+    pub state: Vec<BoundState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_build: Option<String>,
+    // Absent from an existing derivation's JSON, so every Capsule formed
+    // before this existed digests exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_compiler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
+    /// The platforms this route can run on. A route that states none digests
+    /// exactly as before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<PlatformDraft>,
+    pub effects: EffectClass,
+}
+
+fn digest_of<T: Serialize>(value: &T) -> Result<String, AuthoringError> {
+    let bytes = serde_jcs::to_vec(value).map_err(|error| AuthoringError::Canonicalization {
+        detail: error.to_string(),
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(&bytes)))
+}
+
+impl BoundContract {
+    /// `CapsuleId`. The canonical Contract and nothing else — no route, no
+    /// source, no host, no time, no actor.
+    pub fn contract_ref(&self) -> Result<String, AuthoringError> {
+        digest_of(self)
+    }
+}
+
+impl BoundDerivation {
+    pub fn derivation_ref(&self) -> Result<String, AuthoringError> {
+        if let Some(native) = &self.native_surface {
+            native
+                .validate(&self.ports, &self.steps)
+                .map_err(|error| malformed("native_surface", error))?;
+        }
+        if self
+            .runtime_port_operations
+            .iter()
+            .any(|o| !o.legacy_exploration_supported())
+        {
+            return Err(malformed(
+                "runtime_port_operations",
+                "advanced HTTP operations require separately approved functional verification",
+            ));
+        }
+        crate::port_operations::validate_bound(
+            &self.runtime_port_operations,
+            &self.ports,
+            &self.steps,
+            &self.variable_bindings,
+            &self.requirements,
+        )
+        .map_err(|e| malformed("runtime_port_operations", e))?;
+        if self
+            .requirements
+            .canonicalized()
+            .map_err(|e| malformed("requirements", e.0))?
+            != self.requirements
+        {
+            return Err(malformed("requirements", "requirements must be canonical"));
+        }
+        digest_of(self)
+    }
+}
+
+/// What the seal-time environment can answer.
+///
+/// Small on purpose: everything here is something the Formation worker already
+/// holds when it finishes acquiring a source. A binding context that needed a
+/// running process would move binding after execution, and then a Derivation
+/// could not be addressed before being run.
+pub struct BindingContext<'a> {
+    /// The resolved source closure of the tree this build was handed.
+    pub source_closure_ref: &'a str,
+}
+
+/// Resolve a draft into the two addressable objects.
+pub fn bind(
+    draft: &AuthoringDraft,
+    context: &BindingContext<'_>,
+) -> Result<(BoundContract, BoundDerivation), AuthoringError> {
+    let derivation = bind_derivation(&draft.derivation, context)?;
+    let known_inputs: BTreeSet<&str> = derivation.inputs.iter().map(|i| i.id.as_str()).collect();
+    let known_ports: BTreeSet<&str> = derivation.ports.iter().map(|p| p.id.as_str()).collect();
+    let contract = bind_contract(&draft.contract, &derivation, &known_inputs, &known_ports)?;
+    Ok((contract, derivation))
+}
+
+/// Bind a route draft against an ALREADY frozen Contract.
+///
+/// This is the transformation path: K is not derived here and is never
+/// returned or rewritten. The function only proves the Derivation can satisfy
+/// the frozen Contract's references — an HTTP observation must name a Port the
+/// Derivation declares, an input identity must name one of its inputs — so the
+/// caller can carry the frozen canonical Contract bytes into the new bundle.
+pub fn bind_derivation_against_contract(
+    draft: &DerivationDraft,
+    context: &BindingContext<'_>,
+    contract: &BoundContract,
+) -> Result<BoundDerivation, AuthoringError> {
+    let derivation = bind_derivation(draft, context)?;
+    validate_derivation_against_contract(&derivation, contract)?;
+    Ok(derivation)
+}
+
+/// Does this Derivation declare every Port and input the frozen Contract
+/// names?
+///
+/// Contract identity is not re-derived: this only checks the references that
+/// bind K to a specific route. A Contract requirement with no `port` and no
+/// `input` (for example an Instance snapshot observation) binds the index, not
+/// the Derivation, so it is not checked here.
+pub fn validate_derivation_against_contract(
+    derivation: &BoundDerivation,
+    contract: &BoundContract,
+) -> Result<(), AuthoringError> {
+    let known_inputs: BTreeSet<&str> = derivation.inputs.iter().map(|i| i.id.as_str()).collect();
+    let known_ports: BTreeSet<&str> = derivation.ports.iter().map(|p| p.id.as_str()).collect();
+    for requirement in &contract.requirements {
+        if let Some(port) = &requirement.port
+            && !known_ports.contains(port.as_str())
+        {
+            return Err(AuthoringError::Unresolved {
+                referrer: format!("contract.require.{}", requirement.id),
+                what: "port",
+                id: port.clone(),
+            });
+        }
+        if let Some(input) = &requirement.input
+            && !known_inputs.contains(input.as_str())
+        {
+            return Err(AuthoringError::Unresolved {
+                referrer: format!("contract.require.{}", requirement.id),
+                what: "input",
+                id: input.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a route draft into one addressable Derivation, without a Contract.
+///
+/// [bind] is the normal path: it binds the Derivation and then the Contract the
+/// author declared. Contract-preserving transformation is the case where the
+/// Contract is already frozen elsewhere (an existing bundle), so only the
+/// Derivation is derived from the new source. The caller then binds that
+/// Derivation to the frozen Contract with
+/// [`bind_derivation_against_contract`].
+pub fn bind_derivation(
+    draft: &DerivationDraft,
+    context: &BindingContext<'_>,
+) -> Result<BoundDerivation, AuthoringError> {
+    let mut seen = BTreeSet::new();
+    let mut inputs = Vec::with_capacity(draft.inputs.len());
+    for input in &draft.inputs {
+        if !seen.insert(input.id.clone()) {
+            return Err(AuthoringError::Duplicate {
+                what: "input",
+                id: input.id.clone(),
+            });
+        }
+        // v0 resolves exactly one kind of input: the source tree this build was
+        // handed, whose closure the worker has already verified. A subtree
+        // input would need its own closure and is refused rather than bound to
+        // the wrong digest.
+        if input.protocol != WORKSPACE_PROTOCOL {
+            return Err(malformed(
+                format!("input.{}", input.id),
+                format!("this build resolves only {WORKSPACE_PROTOCOL} inputs"),
+            ));
+        }
+        if input.path != "." {
+            return Err(malformed(
+                format!("input.{}.path", input.id),
+                "this build resolves only the source root \".\"",
+            ));
+        }
+        inputs.push(BoundInput {
+            id: input.id.clone(),
+            protocol: input.protocol.clone(),
+            content_ref: context.source_closure_ref.to_owned(),
+        });
+    }
+    inputs.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut runtimes = BTreeMap::new();
+    for runtime in &draft.runtimes {
+        if runtimes
+            .insert(runtime.name.clone(), runtime.version.clone())
+            .is_some()
+        {
+            return Err(AuthoringError::Duplicate {
+                what: "runtime",
+                id: runtime.name.clone(),
+            });
+        }
+    }
+
+    let mut step_ids = BTreeSet::new();
+    let mut steps = Vec::with_capacity(draft.steps.len());
+    for step in &draft.steps {
+        if !step_ids.insert(step.id.clone()) {
+            return Err(AuthoringError::Duplicate {
+                what: "derive.step",
+                id: step.id.clone(),
+            });
+        }
+        if let Some(source) = &step.source
+            && !inputs.iter().any(|input| &input.id == source)
+        {
+            return Err(AuthoringError::Unresolved {
+                referrer: format!("derive.step.{}", step.id),
+                what: "input",
+                id: source.clone(),
+            });
+        }
+        steps.push(BoundStep {
+            id: step.id.clone(),
+            protocol: step.protocol.clone(),
+            op: step.op.clone(),
+            argv: step.argv.clone(),
+            cwd: step.cwd.clone(),
+            env: step.env.clone(),
+            source: step.source.clone(),
+            root: step.root.clone(),
+            entry: step.entry.clone(),
+            spa_fallback: step.spa_fallback,
+            network: step.network,
+            runtimes: BTreeMap::new(),
+            state: Vec::new(),
+            bindings: Vec::new(),
+        });
+    }
+
+    let mut port_ids = BTreeSet::new();
+    let mut ports = Vec::with_capacity(draft.ports.len());
+    for port in &draft.ports {
+        if !port_ids.insert(port.id.clone()) {
+            return Err(AuthoringError::Duplicate {
+                what: "port",
+                id: port.id.clone(),
+            });
+        }
+        if !step_ids.contains(&port.from) {
+            return Err(AuthoringError::Unresolved {
+                referrer: format!("port.{}", port.id),
+                what: "derive.step",
+                id: port.from.clone(),
+            });
+        }
+        ports.push(BoundPort {
+            id: port.id.clone(),
+            protocol: port.protocol.clone(),
+            from: port.from.clone(),
+            guest_port: port.guest_port,
+            client_address_transport: port.client_address_transport,
+        });
+    }
+    ports.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut state_ids = BTreeSet::new();
+    let mut state = Vec::with_capacity(draft.state.len());
+    for slot in &draft.state {
+        if !state_ids.insert(slot.id.clone()) {
+            return Err(AuthoringError::Duplicate {
+                what: "state",
+                id: slot.id.clone(),
+            });
+        }
+        if !slot.mount.starts_with('/')
+            || slot.mount.contains("/../")
+            || slot.mount.ends_with("/..")
+        {
+            return Err(malformed(
+                format!("state.{}.mount", slot.id),
+                format!(
+                    "{:?} is not an absolute, traversal-free guest path",
+                    slot.mount
+                ),
+            ));
+        }
+        state.push(BoundState {
+            id: slot.id.clone(),
+            protocol: slot.protocol.clone(),
+            mount: slot.mount.clone(),
+            access: slot.access,
+        });
+    }
+    state.sort_by(|a, b| a.id.cmp(&b.id));
+
+    if let Some(recipe) = &draft.source_oci {
+        recipe.validate().map_err(|e| malformed("source_oci", e))?;
+    }
+    crate::variables::validate(&draft.variable_bindings)
+        .map_err(|e| malformed("variable_bindings", e))?;
+    let mut variable_bindings = draft.variable_bindings.clone();
+    variable_bindings.sort_by(|a, b| (&a.name, a.phase).cmp(&(&b.name, b.phase)));
+    if draft
+        .runtime_port_operations
+        .iter()
+        .any(|o| !o.legacy_exploration_supported())
+    {
+        return Err(malformed(
+            "runtime_port_operations",
+            "advanced HTTP operations require separately approved functional verification",
+        ));
+    }
+    crate::port_operations::validate_bound(
+        &draft.runtime_port_operations,
+        &ports,
+        &steps,
+        &variable_bindings,
+        &draft.requirements,
+    )
+    .map_err(|e| malformed("runtime_port_operations", e))?;
+    if !draft.runtime_port_operations.is_empty()
+        && (draft.source_oci.is_some() || runtimes.contains_key("oci.image"))
+    {
+        return Err(malformed(
+            "runtime_port_operations",
+            "OCI Port operations are not bound in this release",
+        ));
+    }
+    // A native Adapter is a declaration about the physical realization of one
+    // OCI `runtime_launch` route. Static Web is a materialization and a process
+    // route has no native Adapter at all, so refuse the declaration instead of
+    // carrying it to a host that cannot honor it.
+    let native_surface = draft.native_surface.clone();
+    if let Some(native) = &native_surface {
+        if steps.len() != 1 || steps[0].protocol != crate::source_oci_plan::OCI_PROTOCOL {
+            return Err(malformed(
+                "derive.native_surface",
+                "a native Surface requires exactly one ato.oci@1 runtime_launch step",
+            ));
+        }
+        native
+            .validate(&ports, &steps)
+            .map_err(|error| malformed("derive.native_surface", error))?;
+    } else if let Some(port) = ports
+        .iter()
+        .find(|port| port.protocol == crate::native_surface::TERMINAL_PORT_PROTOCOL)
+    {
+        return Err(malformed(
+            format!("port.{}", port.id),
+            "an ato.pty@1 Port must be named by a declared native Surface",
+        ));
+    }
+    Ok(BoundDerivation {
+        native_surface,
+        runtime_port_operations: draft.runtime_port_operations.clone(),
+        variable_bindings,
+        schema: BOUND_DERIVATION_SCHEMA.to_owned(),
+        requirements: draft
+            .requirements
+            .canonicalized()
+            .map_err(|e| malformed("requirements", e.0))?,
+        inputs,
+        runtimes,
+        steps,
+        ports,
+        state,
+        workspace_build: draft.workspace_build.clone(),
+        workspace_compiler: draft.workspace_compiler.clone(),
+        source_oci: draft.source_oci.clone(),
+        platforms: {
+            let mut platforms = draft.platforms.clone();
+            platforms.sort();
+            platforms.dedup();
+            platforms
+        },
+        effects: draft.effects,
+    })
+}
+
+fn bind_contract(
+    draft: &ContractDraft,
+    derivation: &BoundDerivation,
+    known_inputs: &BTreeSet<&str>,
+    known_ports: &BTreeSet<&str>,
+) -> Result<BoundContract, AuthoringError> {
+    let mut ids = BTreeSet::new();
+    let mut requirements = Vec::with_capacity(draft.requirements.len());
+    for observation in &draft.requirements {
+        if !ids.insert(observation.id.clone()) {
+            return Err(AuthoringError::Duplicate {
+                what: "contract.require",
+                id: observation.id.clone(),
+            });
+        }
+        let bound = match &observation.requirement {
+            RequirementDraft::Http(http) => {
+                if !known_ports.contains(http.port.as_str()) {
+                    return Err(AuthoringError::Unresolved {
+                        referrer: format!("contract.require.{}", observation.id),
+                        what: "port",
+                        id: http.port.clone(),
+                    });
+                }
+                let body_digest = match &http.body_digest {
+                    None => None,
+                    Some(Observed::Stated(value)) => Some(value.clone()),
+                    // Resolving this needs a live response from the running
+                    // continuation, and Formation does not run one: the process
+                    // starts on a Runner, later. Accepting it and hashing
+                    // nothing would mint a Capsule identity that claims to
+                    // observe content nobody looked at.
+                    Some(Observed::Capture) => {
+                        return Err(AuthoringError::CaptureUnresolvable {
+                            field: format!(
+                                "contract.require.{}.expect.body_digest",
+                                observation.id
+                            ),
+                            detail:
+                                "a response body can only be captured from a running continuation, \
+                                 which this build does not have; state the digest, or observe the \
+                                 input's identity instead"
+                                    .to_owned(),
+                        });
+                    }
+                };
+                BoundRequirement {
+                    id: observation.id.clone(),
+                    verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
+                    port: Some(http.port.clone()),
+                    method: Some(http.method.clone()),
+                    path: Some(http.path.clone()),
+                    status: Some(http.status),
+                    body_digest,
+                    input: None,
+                    digest: None,
+                }
+            }
+            RequirementDraft::InputIdentity(identity) => {
+                if !known_inputs.contains(identity.input.as_str()) {
+                    return Err(AuthoringError::Unresolved {
+                        referrer: format!("contract.require.{}", observation.id),
+                        what: "input",
+                        id: identity.input.clone(),
+                    });
+                }
+                let digest = match &identity.digest {
+                    Observed::Stated(value) => value.clone(),
+                    // Resolvable, and this is the one the Preset uses: the tree
+                    // is right here and its closure has already been verified.
+                    Observed::Capture => derivation
+                        .inputs
+                        .iter()
+                        .find(|input| input.id == identity.input)
+                        .map(|input| input.content_ref.clone())
+                        .expect("the input was just checked to exist"),
+                };
+                BoundRequirement {
+                    id: observation.id.clone(),
+                    verifier: WORKSPACE_CONTRACT_VERIFIER.to_owned(),
+                    port: None,
+                    method: None,
+                    path: None,
+                    status: None,
+                    body_digest: None,
+                    input: Some(identity.input.clone()),
+                    digest: Some(digest),
+                }
+            }
+            RequirementDraft::Scenario(scenario) => {
+                if !known_ports.contains(scenario.port.as_str()) {
+                    return Err(AuthoringError::Unresolved {
+                        referrer: format!("contract.require.{}", observation.id),
+                        what: "port",
+                        id: scenario.port.clone(),
+                    });
+                }
+                let reference = match &scenario.scenario {
+                    Observed::Stated(value) if crate::scenario::is_scenario_ref(value) => {
+                        value.clone()
+                    }
+                    Observed::Stated(_) => {
+                        return Err(malformed(
+                            format!("contract.require.{}.scenario", observation.id),
+                            "expected a scenario reference as sha256:<64 lowercase hex>",
+                        ));
+                    }
+                    Observed::Capture => {
+                        return Err(AuthoringError::CaptureUnresolvable {
+                            field: format!("contract.require.{}.scenario", observation.id),
+                            detail: "a scenario is content-addressed; state its digest rather \
+                                     than asking this build to capture one"
+                                .to_owned(),
+                        });
+                    }
+                };
+                BoundRequirement {
+                    id: observation.id.clone(),
+                    verifier: SCENARIO_CONTRACT_VERIFIER.to_owned(),
+                    port: Some(scenario.port.clone()),
+                    method: None,
+                    path: None,
+                    status: None,
+                    body_digest: None,
+                    input: None,
+                    digest: Some(reference),
+                }
+            }
+        };
+        requirements.push(bound);
+    }
+    requirements.sort_by(|a, b| a.id.cmp(&b.id));
+
+    if requirements.is_empty() {
+        // A Capsule whose contract observes nothing is satisfied by every
+        // continuation in existence, including the ones that do not work.
+        return Err(malformed(
+            "contract",
+            "a Capsule identified by no observation is satisfied by anything; \
+             state at least one condition",
+        ));
+    }
+    validate_identity(draft.identity, &requirements, derivation)?;
+
+    Ok(BoundContract {
+        schema: BOUND_CONTRACT_SCHEMA.to_owned(),
+        requirements,
+    })
+}
+
+/// An explicit identity must match what the requirements actually observe.
+///
+/// Only an explicit statement is checked. `Unspecified` is today's behaviour
+/// (bind whatever was authored), and tightening it here would reinterpret
+/// every document that never mentioned an identity.
+fn validate_identity(
+    identity: ContractIdentity,
+    requirements: &[BoundRequirement],
+    derivation: &BoundDerivation,
+) -> Result<(), AuthoringError> {
+    let source_requirements = requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == WORKSPACE_CONTRACT_VERIFIER)
+        .collect::<Vec<_>>();
+    match identity {
+        ContractIdentity::Unspecified => Ok(()),
+        ContractIdentity::Behavioral => match source_requirements.first() {
+            Some(requirement) => Err(AuthoringError::BehavioralContractHasSourceRequirement {
+                requirement: requirement.id.clone(),
+            }),
+            None => Ok(()),
+        },
+        ContractIdentity::SourceBound => {
+            let [requirement] = source_requirements.as_slice() else {
+                return Err(AuthoringError::SourceBoundContractHasNoSourceRequirement {
+                    detail: format!(
+                        "found {} source-identity observations; a source-bound Contract \
+                             observes exactly one",
+                        source_requirements.len()
+                    ),
+                });
+            };
+            let resolved_digest = requirement
+                .digest
+                .as_deref()
+                .is_some_and(|digest| !digest.is_empty());
+            let binds_declared_input = requirement.input.as_deref().is_some_and(|input| {
+                derivation
+                    .inputs
+                    .iter()
+                    .any(|declared| declared.id == input)
+            });
+            if !resolved_digest || !binds_declared_input {
+                return Err(AuthoringError::SourceBoundContractHasNoSourceRequirement {
+                    detail: "the source-identity observation must bind a declared workspace \
+                                 input to a resolved digest"
+                        .to_owned(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> BindingContext<'static> {
+        BindingContext {
+            source_closure_ref: "sha256:aa",
+        }
+    }
+
+    fn minimal(provenance: AuthoringProvenance) -> AuthoringDraft {
+        AuthoringDraft {
+            contract: ContractDraft {
+                identity: ContractIdentity::Unspecified,
+                requirements: vec![ObservationDraft {
+                    id: "root".to_owned(),
+                    requirement: RequirementDraft::Http(HttpRequirement {
+                        port: "app.http".to_owned(),
+                        method: "GET".to_owned(),
+                        path: "/".to_owned(),
+                        status: 200,
+                        body_digest: None,
+                    }),
+                }],
+            },
+            derivation: DerivationDraft {
+                native_surface: None,
+                runtime_port_operations: vec![],
+                variable_bindings: vec![],
+                requirements: Default::default(),
+                inputs: vec![InputDraft {
+                    id: "workspace".to_owned(),
+                    protocol: WORKSPACE_PROTOCOL.to_owned(),
+                    path: ".".to_owned(),
+                }],
+                runtimes: vec![],
+                platforms: vec![],
+                steps: vec![StepDraft {
+                    id: "site".to_owned(),
+                    protocol: BROWSER_PROTOCOL.to_owned(),
+                    op: "serve".to_owned(),
+                    argv: vec![],
+                    cwd: String::new(),
+                    env: BTreeMap::new(),
+                    source: Some("workspace".to_owned()),
+                    root: None,
+                    entry: Some("index.html".to_owned()),
+                    spa_fallback: Some(true),
+                    network: StepNetwork::Denied,
+                }],
+                ports: vec![PortDraft {
+                    id: "app.http".to_owned(),
+                    protocol: HTTP_PROTOCOL.to_owned(),
+                    from: "site".to_owned(),
+                    guest_port: None,
+                    client_address_transport: None,
+                }],
+                state: vec![],
+                workspace_build: None,
+                workspace_compiler: None,
+                source_oci: None,
+                effects: EffectClass::Pure,
+            },
+            provenance,
+        }
+    }
+
+    #[test]
+    fn provenance_is_outside_both_digests() {
+        // The invariant the whole Preset unification rests on. A Preset-
+        // synthesized draft and a hand-written one that say the same thing are
+        // the same Capsule and the same route; recording WHERE they came from
+        // must not make them two.
+        let (ka, da) = bind(&minimal(AuthoringProvenance::Authored), &ctx()).expect("binds");
+        let (kb, db) = bind(
+            &minimal(AuthoringProvenance::PresetSynthesized {
+                preset: "single-html/v1",
+            }),
+            &ctx(),
+        )
+        .expect("binds");
+        assert_eq!(ka.contract_ref().unwrap(), kb.contract_ref().unwrap());
+        assert_eq!(da.derivation_ref().unwrap(), db.derivation_ref().unwrap());
+    }
+
+    /// Port transport metadata is new, so it must be invisible to every
+    /// Contract that does not ask for it — otherwise adding the field would
+    /// silently re-address every Capsule that already exists.
+    #[test]
+    fn a_port_without_transport_metadata_keeps_its_contract_ref() {
+        let (baseline_k, baseline_d) =
+            bind(&minimal(AuthoringProvenance::Authored), &ctx()).expect("binds");
+        let baseline_json = serde_json::to_string(&baseline_d).unwrap();
+        assert!(
+            !baseline_json.contains("client_address_transport"),
+            "{baseline_json}"
+        );
+
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.derivation.ports[0].client_address_transport =
+            Some(ClientAddressTransport::ProxyProtocolV2);
+        let (asking_k, asking_d) = bind(&draft, &ctx()).expect("binds");
+        assert_eq!(
+            asking_k.contract_ref().unwrap(),
+            baseline_k.contract_ref().unwrap(),
+            "the Contract observes behaviour, not how the Runner addresses clients"
+        );
+        assert_ne!(
+            asking_d.derivation_ref().unwrap(),
+            baseline_d.derivation_ref().unwrap(),
+            "the Derivation is what changes when a Port is published differently"
+        );
+        assert!(
+            serde_json::to_string(&asking_d)
+                .unwrap()
+                .contains("\"client_address_transport\":\"proxy_protocol_v2\""),
+            "the declared value is carried verbatim"
+        );
+    }
+
+    #[test]
+    fn a_different_source_is_a_different_derivation_and_the_same_contract() {
+        // The weak-contract case: an author who observes only "GET / is 200"
+        // has said two different sources are the same resumable point. The
+        // ROUTE still differs, and is addressed separately — which is exactly
+        // what makes one Capsule able to have many Derivations.
+        let draft = minimal(AuthoringProvenance::Authored);
+        let (k1, d1) = bind(&draft, &ctx()).expect("binds");
+        let (k2, d2) = bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: "sha256:bb",
+            },
+        )
+        .expect("binds");
+        assert_eq!(k1.contract_ref().unwrap(), k2.contract_ref().unwrap());
+        assert_ne!(d1.derivation_ref().unwrap(), d2.derivation_ref().unwrap());
+    }
+
+    #[test]
+    fn a_captured_input_identity_makes_the_source_part_of_the_capsule() {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.contract.requirements.push(ObservationDraft {
+            id: "source-identity".to_owned(),
+            requirement: RequirementDraft::InputIdentity(InputIdentityRequirement {
+                input: "workspace".to_owned(),
+                digest: Observed::Capture,
+            }),
+        });
+        let (k1, _) = bind(&draft, &ctx()).expect("binds");
+        let (k2, _) = bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: "sha256:bb",
+            },
+        )
+        .expect("binds");
+        assert_ne!(k1.contract_ref().unwrap(), k2.contract_ref().unwrap());
+    }
+
+    #[test]
+    fn the_order_conditions_were_typed_in_is_not_part_of_the_contract() {
+        let mut forward = minimal(AuthoringProvenance::Authored);
+        forward.contract.requirements.push(ObservationDraft {
+            id: "source-identity".to_owned(),
+            requirement: RequirementDraft::InputIdentity(InputIdentityRequirement {
+                input: "workspace".to_owned(),
+                digest: Observed::Capture,
+            }),
+        });
+        let mut reversed = forward.clone();
+        reversed.contract.requirements.reverse();
+        assert_eq!(
+            bind(&forward, &ctx()).unwrap().0.contract_ref().unwrap(),
+            bind(&reversed, &ctx()).unwrap().0.contract_ref().unwrap(),
+        );
+    }
+
+    #[test]
+    fn a_contract_that_observes_nothing_is_refused() {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.contract.requirements.clear();
+        assert_eq!(
+            bind(&draft, &ctx()).unwrap_err().code(),
+            "authoring_malformed"
+        );
+    }
+
+    #[test]
+    fn a_captured_body_digest_is_refused_rather_than_silently_dropped() {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.contract.requirements[0].requirement = RequirementDraft::Http(HttpRequirement {
+            port: "app.http".to_owned(),
+            method: "GET".to_owned(),
+            path: "/".to_owned(),
+            status: 200,
+            body_digest: Some(Observed::Capture),
+        });
+        assert_eq!(
+            bind(&draft, &ctx()).unwrap_err().code(),
+            "authoring_capture_unresolvable"
+        );
+    }
+
+    #[test]
+    fn an_observation_of_a_port_no_step_exports_is_refused() {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.derivation.ports.clear();
+        let error = bind(&draft, &ctx()).unwrap_err();
+        assert_eq!(error.code(), "authoring_unresolved_reference");
+    }
+
+    #[test]
+    fn a_route_is_a_sequence_and_keeps_its_order() {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        let second = StepDraft {
+            id: "aaa-runs-second".to_owned(),
+            protocol: PROCESS_PROTOCOL.to_owned(),
+            op: "exec".to_owned(),
+            argv: vec!["true".to_owned()],
+            cwd: String::new(),
+            env: BTreeMap::new(),
+            source: None,
+            root: None,
+            entry: None,
+            spa_fallback: None,
+            network: StepNetwork::Denied,
+        };
+        draft.derivation.steps.push(second);
+        let (_, bound) = bind(&draft, &ctx()).expect("binds");
+        assert_eq!(
+            bound
+                .steps
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["site", "aaa-runs-second"],
+            "sorting a route would change what it does"
+        );
+    }
+
+    #[test]
+    fn a_traversing_state_mount_is_refused() {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.derivation.state.push(StateDraft {
+            id: "app_data".to_owned(),
+            protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+            mount: "/data/../etc".to_owned(),
+            access: StateAccess::ReadWrite,
+        });
+        assert_eq!(
+            bind(&draft, &ctx()).unwrap_err().code(),
+            "authoring_malformed"
+        );
+    }
+}

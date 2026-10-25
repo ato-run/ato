@@ -1,0 +1,53 @@
+schema = "ato.capsule/2"
+
+# Data Plane probe: a route that consumes a small Model Set. The manifest is
+# carried with the source and pinned by digest; its objects are delivered by
+# the data plane, never from upstream and never inside the bundle.
+
+[application]
+title = "Model Set probe"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[input]]
+id = "models"
+use = "ato.model-set@1"
+path = "models/probe.model-set.json"
+ref = "sha256:3881fe2c6ade65dba5717197f0832a7fc924ca154513669ba01aa8cbd8b384d9"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:72082f81f8dfafd1160670d32359f43737930a3778d4180cd08b3e5c05516d4e"
+
+[[derivation]]
+id = "gpu"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[derivation.host]
+os = "linux"
+arch = "x86_64"
+min_memory_mib = 15000
+
+[[derivation.host.accelerators]]
+vendor = "nvidia"
+count = 1
+min_vram_mib = 16000
+
+[effects]
+default = "pure"

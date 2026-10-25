@@ -1,0 +1,1495 @@
+//! Launching a `RuntimeLaunchSpecV1` whose realization is `process`.
+//!
+//! Deliberately generic. There is no Python in this module and there must not
+//! be: the spec already says what to run, and a language-specific executor
+//! would be a second place where runtime knowledge lives — the exact drift the
+//! spec exists to prevent.
+//!
+//! Almost all of the work is already done elsewhere, so this is a translation:
+//!
+//! ```text
+//! RuntimeLaunchSpecV1  --resolve-->  ResolvedRuntimeLaunchContext
+//!                                             |
+//!                                             v
+//!                                        ProcessSpec
+//!                                             |
+//!                                             v
+//!                       ato-adapter-process::ProcessAdapter (spawn, groups,
+//!                       env_clear, terminate_process_tree)
+//! ```
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail, ensure};
+use ato_adapter_process::{
+    ProcessAdapter, ProcessHandle, ProcessSpec, force_kill_process_tree, process_group_is_alive,
+};
+use ato_ipc::runtime_launch::{
+    LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
+};
+
+use super::resolved::ResolvedRuntimeLaunchContext;
+
+/// Where a state attachment's working copy lives, relative to the workspace.
+///
+/// Inside the workspace on purpose. `StateAttachmentV1::mount_target` is an
+/// absolute path *inside a guest* (`/data`), and a `process` realization has no
+/// guest — it shares the Runner's filesystem with every other slot. Honouring
+/// `/data` literally would mean writing to an arbitrary host directory, which
+/// is exactly the thing a multi-tenant Runner must never do.
+pub const STATE_WORKING_ROOT: &str = ".ato/state";
+
+/// A convenience variable naming a state attachment's GUEST path.
+///
+/// No longer an ABI. The workload now finds its state at
+/// `attachment.mount_target` — a real bind mount inside the sandbox — so a
+/// ComputeSchema can declare `DATABASE_PATH=/data/app.sqlite` and mean it
+/// under both the process and the future OCI realization. This variable is
+/// kept because it costs nothing and helps a workload that would rather be
+/// told, but nothing has to read it and nothing should depend on it.
+pub fn state_path_env_name(state_key: &str) -> String {
+    format!(
+        "ATO_STATE_PATH_{}",
+        state_key
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
+}
+
+/// Translate a validated spec plus its Runner-local resolution into the
+/// argument the existing process adapter already understands.
+pub fn process_spec_for(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+) -> Result<ProcessSpec> {
+    spec.validate().context("runtime launch spec is invalid")?;
+
+    let argv = match &spec.realization {
+        LaunchRealizationV1::Process(process) => {
+            let mut argv = process.argv.clone();
+            if let Some(requirement) = &process.executable {
+                ensure!(
+                    argv[0] == requirement.name
+                        || (requirement.name == "python" && argv[0] == "python3"),
+                    "process argv[0] does not name its declared executable requirement"
+                );
+                argv[0] = resolve_executable(requirement)?.0;
+            }
+            argv
+        }
+        LaunchRealizationV1::Oci(_) => {
+            // Refused by name rather than ignored. An OCI spec that silently
+            // launched as a bare process would run the workload without the
+            // isolation the spec asked for.
+            bail!(
+                "runtime launch spec requests an `oci` realization, which this executor does not \
+                 implement"
+            );
+        }
+    };
+
+    // The resolved cwd is absolute and already checked to be inside the
+    // workspace. The adapter joins its own workspace argument, so hand it the
+    // relative remainder rather than relying on `join` swallowing an absolute
+    // path.
+    let cwd = context
+        .effective_cwd()
+        .strip_prefix(context.workspace_root())
+        .context("resolved cwd escaped the workspace after resolution")?
+        .to_path_buf();
+
+    // Host-path form, used only where there is no sandbox to give the
+    // attachment a guest path. `guest_environment` overrides both of these for
+    // a real launch.
+    let mut environment = context.environment_for_spawn();
+    for attachment in context.state_attachments() {
+        environment.insert(
+            state_path_env_name(attachment.state_key()),
+            attachment
+                .working_copy_for_mount()
+                .to_str()
+                .context("state working copy path is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
+    for endpoint in context.endpoints() {
+        environment.insert(
+            super::sandbox::endpoint_port_env_name(&endpoint.name),
+            endpoint.host_port.to_string(),
+        );
+    }
+
+    Ok(ProcessSpec {
+        id: spec.context.run_id.clone(),
+        command: argv,
+        cwd,
+        environment,
+        isolated_group: true,
+    })
+}
+
+/// The working-copy path a state attachment must be materialized into.
+pub fn state_working_copy(workspace_root: &Path, state_key: &str) -> PathBuf {
+    workspace_root.join(STATE_WORKING_ROOT).join(state_key)
+}
+
+/// A launched workload, held only for as long as the Run.
+///
+/// Not serializable and not persisted: an active process is not a durable
+/// object. What survives a Run is its committed state revision, and the
+/// receipt that names it.
+pub struct LaunchedProcess {
+    #[cfg(unix)]
+    isolated_network: Option<Box<IsolatedProcessNetwork>>,
+    handle: ProcessHandle,
+    run_id: String,
+    runtime_executable: String,
+    runtime_version: Option<String>,
+    stopped: bool,
+    startup_record: PathBuf,
+}
+
+impl LaunchedProcess {
+    pub fn pid(&self) -> u32 {
+        self.handle.pid()
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn runtime_executable(&self) -> &str {
+        &self.runtime_executable
+    }
+
+    pub fn runtime_version(&self) -> Option<&str> {
+        self.runtime_version.as_deref()
+    }
+
+    /// Has the workload already exited on its own?
+    ///
+    /// A server that exits during readiness has failed; waiting for the
+    /// timeout would turn a two-second failure into a sixty-second one and
+    /// report the wrong cause.
+    pub fn exited(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        self.handle
+            .try_wait()
+            .context("failed to poll the workload")
+    }
+
+    /// Stop the workload and prove it is gone.
+    ///
+    /// ```text
+    /// SIGTERM the group
+    ///   -> wait up to graceful_shutdown_ms
+    ///   -> still alive? SIGKILL the group
+    ///   -> wait up to force_kill_after_ms
+    ///   -> reap
+    ///   -> verify the subtree is gone
+    /// ```
+    ///
+    /// Returning before the subtree is gone would be the dangerous kind of
+    /// wrong: the caller packs state next, and a surviving child still writing
+    /// to the state directory produces a torn SQLite file whose digest makes
+    /// the corruption permanent.
+    ///
+    /// Termination targets the process GROUP throughout. A workload that
+    /// forked children — a dev server spawning a reloader — would otherwise
+    /// leave them behind.
+    pub fn stop(mut self, lifecycle: &ato_ipc::runtime_launch::LifecycleV1) -> Result<StopOutcome> {
+        let outcome = self.stop_owned(lifecycle)?;
+        self.stopped = true;
+        Ok(outcome)
+    }
+
+    fn stop_owned(
+        &mut self,
+        lifecycle: &ato_ipc::runtime_launch::LifecycleV1,
+    ) -> Result<StopOutcome> {
+        let group = self.handle.process_group();
+        let pid = self.handle.pid();
+        if let Some(status) = self
+            .handle
+            .try_wait()
+            .context("failed to reap the workload")?
+            && (group == 0 || !process_group_is_alive(group))
+        {
+            return Ok(StopOutcome {
+                kind: StopKind::AlreadyExited,
+                exit_status: Some(status),
+            });
+        }
+        // A reaped leader does not prove that its descendants stopped.
+        // Signal and wait for the whole owned group even after leader exit.
+        let signalled = self.handle.terminate();
+        if let Some(status) = wait_for_stop(&mut self.handle, lifecycle.graceful_shutdown_ms)? {
+            return Ok(StopOutcome {
+                kind: StopKind::Graceful,
+                exit_status: Some(status),
+            });
+        }
+        // A failed TERM still allows a bounded KILL attempt; neither signal
+        // result substitutes for the disappearance check below.
+        let _ = signalled;
+        force_kill_process_tree(pid, group).context("failed to force-stop the workload")?;
+        let status = wait_for_stop(&mut self.handle, lifecycle.force_kill_after_ms.max(1))?
+            .context("workload or process group survived termination; refusing to pack state")?;
+        Ok(StopOutcome {
+            kind: StopKind::Forced,
+            exit_status: Some(status),
+        })
+    }
+}
+
+impl Drop for LaunchedProcess {
+    fn drop(&mut self) {
+        if !self.stopped {
+            // This owns only physical cleanup. The Hosted caller retains its
+            // writer/lease and recovery authority; Drop cannot commit/release.
+            let _ = self.stop_owned(&ato_ipc::runtime_launch::LifecycleV1 {
+                graceful_shutdown_ms: 100,
+                force_kill_after_ms: 2_000,
+            });
+        }
+    }
+}
+
+/// How a workload ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopKind {
+    /// It had already exited before the Runner asked.
+    AlreadyExited,
+    /// It exited within `graceful_shutdown_ms` of SIGTERM.
+    Graceful,
+    /// It had to be killed.
+    Forced,
+}
+
+/// The result of stopping, and the evidence that it worked.
+#[derive(Debug, Clone)]
+pub struct StopOutcome {
+    pub kind: StopKind,
+    pub exit_status: Option<std::process::ExitStatus>,
+}
+
+fn wait_for_stop(
+    handle: &mut ProcessHandle,
+    budget_ms: u64,
+) -> Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    loop {
+        if let Some(status) = handle.try_wait().context("failed to reap the workload")?
+            && (handle.process_group() == 0 || !process_group_is_alive(handle.process_group()))
+        {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Spawn the workload described by `spec`, contained.
+///
+/// Containment is a precondition, not an enhancement: a Runner that cannot
+/// contain a workload refuses the Run rather than running it unconfined and
+/// reporting success.
+pub fn launch_process(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+) -> Result<LaunchedProcess> {
+    let runtime_root = context
+        .workspace_root()
+        .parent()
+        .context("workspace has no lease root")?
+        .join("process-runtime");
+    let shim = std::env::current_exe().context("cannot locate this Runner's own binary")?;
+    // The libtest executable has no sandbox-exec command. Linux integration
+    // tests point at the built worker; production always uses its own binary.
+    #[cfg(test)]
+    let shim = std::env::var_os("ATO_TEST_WORKER_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(shim);
+    launch_process_with(
+        spec,
+        context,
+        &ProcessLaunchHost {
+            shim,
+            runtime_root,
+            output: None,
+        },
+    )
+}
+
+/// What the host supplies to a contained launch, beyond the spec.
+///
+/// A Runner run fills this from its lease; a caller with a shorter lifecycle
+/// — a Formation measuring a candidate — fills it from its own scratch space
+/// and launches through the same containment, port and teardown machinery.
+pub struct ProcessLaunchHost {
+    /// The binary bwrap re-enters as `sandbox-exec` to apply Landlock.
+    pub shim: PathBuf,
+    /// Host-side scratch for the launch: the serialized sandbox policy.
+    pub runtime_root: PathBuf,
+    /// Where the workload's stdout/stderr go, and at most how many bytes of
+    /// it are kept. `None` inherits.
+    pub output: Option<(PathBuf, u64)>,
+}
+
+/// [`launch_process`] with the host-side inputs named explicitly.
+pub fn launch_process_with(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+) -> Result<LaunchedProcess> {
+    launch_process_inner(spec, context, host, None)
+}
+
+pub fn launch_process_with_scoped_network(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+    egress_socket: &Path,
+    ingress_root: &Path,
+) -> Result<LaunchedProcess> {
+    launch_process_inner(spec, context, host, Some((egress_socket, ingress_root)))
+}
+
+#[cfg(unix)]
+struct IsolatedProcessNetwork {
+    _egress: crate::network_bridge::HostBridge,
+    ingress: Vec<(u16, std::sync::Arc<crate::network_bridge::IngressBridge>)>,
+}
+
+/// Reuse the scoped namespace transport, denying all undeclared runtime
+/// egress. The trusted ingress listeners stay outside the workload namespace.
+#[cfg(unix)]
+pub fn launch_process_isolated(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+) -> Result<LaunchedProcess> {
+    use std::os::unix::fs::PermissionsExt;
+    ensure!(
+        super::host_boundary::active().is_none(),
+        "isolated process requires namespaces"
+    );
+    std::fs::create_dir_all(&host.runtime_root)?;
+    let ingress_root = host.runtime_root.join("ingress");
+    std::fs::create_dir(&ingress_root)?;
+    std::fs::set_permissions(&ingress_root, std::fs::Permissions::from_mode(0o700))?;
+    let egress_socket = host.runtime_root.join("egress.sock");
+    let egress = crate::network_bridge::HostBridge::deny(&egress_socket)?;
+    let mut ingress = Vec::new();
+    for endpoint in context.endpoints() {
+        ingress.push((
+            endpoint.host_port,
+            std::sync::Arc::new(crate::network_bridge::IngressBridge::start(
+                ingress_root.join(format!("{}.sock", endpoint.host_port)),
+                endpoint.host_port,
+            )?),
+        ));
+    }
+    let mut process =
+        launch_process_with_scoped_network(spec, context, host, &egress_socket, &ingress_root)?;
+    process.isolated_network = Some(Box::new(IsolatedProcessNetwork {
+        _egress: egress,
+        ingress,
+    }));
+    Ok(process)
+}
+
+#[cfg(not(unix))]
+pub fn launch_process_isolated(
+    _: &RuntimeLaunchSpecV1,
+    _: &ResolvedRuntimeLaunchContext,
+    _: &ProcessLaunchHost,
+) -> Result<LaunchedProcess> {
+    anyhow::bail!("isolated process network requires Unix namespaces")
+}
+
+fn launch_process_inner(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+    scoped: Option<(&Path, &Path)>,
+) -> Result<LaunchedProcess> {
+    if let LaunchRealizationV1::Process(process) = &spec.realization
+        && let Some(abi) = &process.required_abi
+    {
+        super::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)?;
+    }
+    let process_spec = process_spec_for(spec, context)?;
+    // The final executable gate: what would this spawn actually exec, given
+    // ctx argv and the environment PATH? Admission checked declarations; argv
+    // and PATH can name another toolchain. It runs before any spawn.
+    // The environment the gate must judge is the one the child would get: the
+    // host-boundary launch supplies a default PATH when the spec states none.
+    let mut gate_environment = process_spec.environment.clone();
+    if super::host_boundary::active().is_some() {
+        gate_environment
+            .entry("PATH".into())
+            .or_insert_with(|| "/usr/local/bin:/usr/bin:/bin".into());
+    }
+    let node_implied = launch_node_implied(spec, &process_spec.command[0]);
+    let validated = super::executable_gate::validate_and_resolve(
+        &process_spec.command[0],
+        context.effective_cwd(),
+        &gate_environment,
+        node_implied,
+    )?;
+    let toolchain_roots =
+        super::executable_gate::toolchain_roots(&gate_environment, Some(&validated.path));
+    let (runtime_executable, runtime_version) = match &spec.realization {
+        LaunchRealizationV1::Process(process) => match &process.executable {
+            Some(requirement) => {
+                let (path, version) = resolve_executable(requirement)?;
+                (path, Some(version))
+            }
+            // The resolved path, not the bare name, so the receipt names what
+            // actually ran and which toolchain release it came from.
+            None => (validated.path_text(), validated.node_version.clone()),
+        },
+        LaunchRealizationV1::Oci(_) => unreachable!("process_spec_for refused OCI"),
+    };
+    super::sandbox::require_containment()?;
+
+    // Every attachment's directory must exist before the workload starts. An
+    // app that finds its state path missing does not wait for it; it either
+    // fails or, worse, creates its own somewhere else.
+    for attachment in context.state_attachments() {
+        std::fs::create_dir_all(attachment.working_copy_for_mount()).with_context(|| {
+            format!(
+                "failed to create the working copy for state `{}`",
+                attachment.state_key()
+            )
+        })?;
+    }
+
+    let policy_path = host.runtime_root.join("sandbox-policy.json");
+    if super::host_boundary::active().is_none() {
+        ensure!(
+            context.read_only_inputs().is_empty() && context.output_dir().is_none(),
+            "delivered inputs and saved outputs run only on a host-boundary Runner in v0"
+        );
+    }
+    if let Some(boundary) = super::host_boundary::active() {
+        // No namespace exists on this host, so there is no isolated network to
+        // put a broker in front of. Refuse rather than share the host network
+        // with a workload that was promised a scoped one.
+        ensure!(
+            scoped.is_none(),
+            "a scoped-network launch cannot run on a host-boundary Runner"
+        );
+        return launch_host_boundary(
+            spec,
+            context,
+            host,
+            process_spec,
+            &policy_path,
+            boundary,
+            runtime_executable,
+            runtime_version,
+            &toolchain_roots,
+        );
+    }
+    let mut sandboxed = match scoped {
+        Some((socket, ingress)) => super::sandbox::sandboxed_command_scoped(
+            context,
+            &process_spec.command,
+            &host.shim,
+            &policy_path,
+            socket,
+            ingress,
+            &toolchain_roots,
+        )?,
+        None => super::sandbox::sandboxed_command(
+            context,
+            &process_spec.command,
+            &host.shim,
+            &policy_path,
+            true,
+            &toolchain_roots,
+        )?,
+    };
+    if let Some(parent) = policy_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create the sandbox policy directory")?;
+    }
+    std::fs::write(
+        &policy_path,
+        serde_json::to_vec_pretty(&sandboxed.policy)
+            .context("failed to serialize the sandbox policy")?,
+    )
+    .context("failed to write the sandbox policy")?;
+
+    let mut environment = super::sandbox::guest_environment(context);
+    if scoped.is_some() {
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            environment.insert(
+                key.into(),
+                format!("http://127.0.0.1:{}", crate::network_bridge::PROXY_PORT),
+            );
+        }
+        // Loopback requests stay within the isolated namespace. All external
+        // requests either use the owner broker or fail without an interface.
+        environment.insert("NO_PROXY".into(), "127.0.0.1,localhost".into());
+        environment.insert("no_proxy".into(), "127.0.0.1,localhost".into());
+        // Source-supplied environment must not affect bwrap or the owner
+        // relay before containment. Only the shim's eventual workload exec
+        // receives it, after the owner relay and Landlock are installed.
+        let shim = sandboxed
+            .argv
+            .windows(2)
+            .position(|v| v == ["/.ato/runner", "sandbox-exec"])
+            .context("owner shim boundary missing")?;
+        let boundary = sandboxed
+            .argv
+            .iter()
+            .enumerate()
+            .find_map(|(i, v)| (i > shim && v == "--").then_some(i))
+            .context("owner workload boundary missing")?;
+        let options: Vec<String> = environment
+            .iter()
+            .flat_map(|(key, value)| ["--env".to_owned(), format!("{key}={value}")])
+            .collect();
+        sandboxed.argv.splice(boundary..boundary, options);
+        environment.clear();
+    }
+    let adapter = ProcessAdapter::new(ProcessSpec {
+        // The workload's cwd is set INSIDE the sandbox (`--chdir /app`), so
+        // the outer command runs from the workspace root and the guest cwd is
+        // the spec's, not the Runner's.
+        cwd: PathBuf::new(),
+        command: sandboxed.argv,
+        environment,
+        ..process_spec
+    })
+    .context("sandboxed process spec is unusable")?;
+    let adapter = match &host.output {
+        Some((path, max_bytes)) => adapter.with_output_file(path, *max_bytes),
+        None => adapter,
+    };
+    let handle = adapter
+        .spawn(context.workspace_root())
+        .context("failed to spawn the contained workload")?;
+    Ok(LaunchedProcess {
+        #[cfg(unix)]
+        isolated_network: None,
+        handle,
+        run_id: spec.context.run_id.clone(),
+        runtime_executable,
+        runtime_version,
+        stopped: false,
+        startup_record: host.runtime_root.join("process-startup.json"),
+    })
+}
+
+/// The host-boundary launch: the same adapter, port and teardown machinery,
+/// with the shim changing user in place of bwrap setting up namespaces.
+#[allow(clippy::too_many_arguments)]
+fn launch_host_boundary(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+    process_spec: ProcessSpec,
+    policy_path: &Path,
+    boundary: super::host_boundary::HostBoundary,
+    runtime_executable: String,
+    runtime_version: Option<String>,
+    toolchain_roots: &[std::path::PathBuf],
+) -> Result<LaunchedProcess> {
+    let scratch = host.runtime_root.join("scratch");
+    super::host_boundary::prepare_ownership(context, &scratch, boundary)?;
+    let sandboxed = super::host_boundary::host_boundary_command(
+        context,
+        &process_spec.command,
+        &host.shim,
+        policy_path,
+        &scratch,
+        boundary,
+        toolchain_roots,
+    )?;
+    std::fs::write(
+        policy_path,
+        serde_json::to_vec_pretty(&sandboxed.policy)
+            .context("failed to serialize the sandbox policy")?,
+    )
+    .context("failed to write the sandbox policy")?;
+
+    // `process_spec.environment` is the host-path form: there is no guest
+    // namespace here, so `ATO_STATE_PATH_<KEY>` names a real directory. It
+    // holds only what the spec declared; nothing of the Runner's own
+    // environment — its credential, an enrollment token — is passed on.
+    let mut environment = process_spec.environment.clone();
+    let scratch_text = scratch
+        .to_str()
+        .context("scratch path is not valid UTF-8")?
+        .to_owned();
+    environment.insert("TMPDIR".into(), scratch_text.clone());
+    environment.insert("HOME".into(), scratch_text);
+    if let Some(dir) = context.output_dir() {
+        environment.insert(
+            "ATO_OUTPUT_DIR".into(),
+            dir.to_str()
+                .context("output path is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
+    for input in context.read_only_inputs() {
+        environment.insert(
+            input.env_name.clone(),
+            input
+                .path
+                .to_str()
+                .context("input path is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
+    environment
+        .entry("PATH".into())
+        .or_insert_with(|| "/usr/local/bin:/usr/bin:/bin".into());
+
+    let adapter = ProcessAdapter::new(ProcessSpec {
+        cwd: PathBuf::new(),
+        command: sandboxed.argv,
+        environment,
+        ..process_spec
+    })
+    .context("host-boundary process spec is unusable")?;
+    let adapter = match &host.output {
+        Some((path, max_bytes)) => adapter.with_output_file(path, *max_bytes),
+        None => adapter,
+    };
+    let handle = adapter
+        .spawn(context.workspace_root())
+        .context("failed to spawn the host-boundary workload")?;
+    Ok(LaunchedProcess {
+        #[cfg(unix)]
+        isolated_network: None,
+        handle,
+        run_id: spec.context.run_id.clone(),
+        runtime_executable,
+        runtime_version,
+        stopped: false,
+        startup_record: host.runtime_root.join("process-startup.json"),
+    })
+}
+
+/// Does this launch imply Node, even though the launch spec carries no
+/// Derivation? Either the spec declares a Node executable requirement, or the
+/// program the spawner would exec is named `node`/`nodejs`. Anything else is
+/// not the Node runtime policy's business.
+fn launch_node_implied(spec: &RuntimeLaunchSpecV1, program: &str) -> bool {
+    let required = match &spec.realization {
+        LaunchRealizationV1::Process(process) => process
+            .executable
+            .as_ref()
+            .is_some_and(|requirement| matches!(requirement.name.as_str(), "node" | "nodejs")),
+        LaunchRealizationV1::Oci(_) => false,
+    };
+    let named = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "node" | "nodejs"));
+    required || named
+}
+
+fn resolve_executable(
+    requirement: &ato_ipc::runtime_launch::ExecutableRequirementV1,
+) -> Result<(String, String)> {
+    ensure!(
+        requirement.name == "python",
+        "Runner does not provide executable runtime `{}`",
+        requirement.name
+    );
+    let root = Path::new(super::sandbox::TOOLCHAIN_ROOT).join("python");
+    resolve_python_from_root(requirement, &root)
+}
+
+fn resolve_python_from_root(
+    requirement: &ato_ipc::runtime_launch::ExecutableRequirementV1,
+    root: &Path,
+) -> Result<(String, String)> {
+    let mut versions = std::fs::read_dir(root)
+        .with_context(|| format!("Python toolchain root {} is unavailable", root.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|version| {
+            version == &requirement.version
+                || version.starts_with(&format!("{}.", requirement.version))
+        })
+        .collect::<Vec<_>>();
+    versions.sort();
+    let selected = versions
+        .pop()
+        .with_context(|| format!("Python {} is not provisioned", requirement.version))?;
+    let executable = root.join(&selected).join("bin").join("python3");
+    ensure!(
+        executable.is_file(),
+        "Python {} executable is missing",
+        requirement.version
+    );
+    let output = std::process::Command::new(&executable)
+        .arg("--version")
+        .output()
+        .context("inspect provisioned Python runtime")?;
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success()
+            && reported
+                .trim()
+                .strip_prefix("Python ")
+                .is_some_and(|version| {
+                    version == requirement.version
+                        || version.starts_with(&format!("{}.", requirement.version))
+                }),
+        "provisioned Python does not satisfy {}: {}",
+        requirement.version,
+        reported.trim()
+    );
+    Ok((executable.display().to_string(), reported.trim().to_owned()))
+}
+
+/// Which state attachments this Run may commit back.
+///
+/// A read-only attachment is never committed, no matter what the workload did
+/// to its working copy — the copy is a convenience, not the record.
+pub fn writable_state_keys(context: &ResolvedRuntimeLaunchContext) -> Vec<&str> {
+    context
+        .state_attachments()
+        .iter()
+        .filter(|attachment| attachment.access() == StateAccessV1::ReadWrite)
+        .map(|attachment| attachment.state_key())
+        .collect()
+}
+
+/// Block until the workload reports ready, or the spec's timeout expires.
+///
+/// Readiness is the workload's own signal, never "the process did not exit
+/// yet". A `process` readiness is accepted as the weakest useful form, and the
+/// spec says so.
+pub fn wait_until_ready(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    launched: &mut LaunchedProcess,
+    probe: &dyn ReadinessProbe,
+) -> Result<()> {
+    let (timeout_ms, target) = match &spec.readiness {
+        ReadinessV1::Http {
+            endpoint_name,
+            path,
+            timeout_ms,
+        } => (
+            *timeout_ms,
+            Some((host_port_for(context, endpoint_name)?, path.clone())),
+        ),
+        ReadinessV1::Tcp {
+            endpoint_name,
+            timeout_ms,
+        } => (
+            *timeout_ms,
+            Some((host_port_for(context, endpoint_name)?, String::new())),
+        ),
+        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
+    };
+
+    // A `process` readiness has nothing to poll: the workload is ready because
+    // it is up, which is already true here.
+    let Some((port, path)) = target else {
+        return Ok(());
+    };
+    // The host-side bridge may listen before the workload. Its handshake is
+    // readiness only after the namespace-side application accepted a socket.
+    #[cfg(unix)]
+    let tcp_bridge = if path.is_empty() {
+        launched.isolated_network.as_ref().and_then(|network| {
+            network
+                .ingress
+                .iter()
+                .find(|(endpoint_port, _)| *endpoint_port == port)
+                .map(|(_, bridge)| std::sync::Arc::clone(bridge))
+        })
+    } else {
+        None
+    };
+    let record = launched.startup_record.clone();
+    crate::startup::wait_for_readiness(
+        Duration::from_millis(timeout_ms),
+        |budget| {
+            #[cfg(unix)]
+            if let Some(bridge) = &tcp_bridge {
+                return Ok(crate::startup::ReadinessObservation {
+                    ready: bridge.ready().is_ok(),
+                    http_status: None,
+                    detail: None,
+                });
+            }
+            probe
+                .observe(port, &path, budget)
+                .map_err(anyhow::Error::msg)
+        },
+        || {
+            probe.check_control()?;
+            if let Some(status) = launched.exited()? {
+                return Err(crate::startup::StartupProcessExited {
+                    exit_code: status.code(),
+                }
+                .into());
+            }
+            Ok(())
+        },
+        |progress| crate::startup::write_progress(&record, progress),
+    )?;
+    Ok(())
+}
+
+fn host_port_for(context: &ResolvedRuntimeLaunchContext, endpoint_name: &str) -> Result<u16> {
+    context
+        .endpoints()
+        .iter()
+        .find(|endpoint| endpoint.name == endpoint_name)
+        .map(|endpoint| endpoint.host_port)
+        .with_context(|| {
+            format!("readiness names endpoint `{endpoint_name}`, which is not allocated")
+        })
+}
+
+/// How readiness is observed. A trait so the executor is testable without a
+/// listening socket.
+pub trait ReadinessProbe {
+    fn probe(&self, host_port: u16, path: &str) -> Result<(), String>;
+    fn check_control(&self) -> Result<()> {
+        Ok(())
+    }
+    fn observe(
+        &self,
+        host_port: u16,
+        path: &str,
+        _budget: Duration,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        match self.probe(host_port, path) {
+            Ok(()) => Ok(crate::startup::ReadinessObservation {
+                ready: true,
+                http_status: None,
+                detail: None,
+            }),
+            Err(detail) => Ok(crate::startup::ReadinessObservation {
+                ready: false,
+                http_status: None,
+                detail: Some(detail),
+            }),
+        }
+    }
+}
+
+/// Keeps preparation inside the caller's existing stop/authorization fence.
+pub struct ControlledReadinessProbe<'a> {
+    inner: &'a dyn ReadinessProbe,
+    control: std::cell::RefCell<&'a mut dyn FnMut() -> Result<()>>,
+}
+
+impl<'a> ControlledReadinessProbe<'a> {
+    pub fn new(inner: &'a dyn ReadinessProbe, control: &'a mut dyn FnMut() -> Result<()>) -> Self {
+        Self {
+            inner,
+            control: std::cell::RefCell::new(control),
+        }
+    }
+}
+
+impl ReadinessProbe for ControlledReadinessProbe<'_> {
+    fn probe(&self, port: u16, path: &str) -> Result<(), String> {
+        self.check_control().map_err(|e| e.to_string())?;
+        self.inner.probe(port, path)
+    }
+    fn check_control(&self) -> Result<()> {
+        (self.control.borrow_mut())()
+    }
+    fn observe(
+        &self,
+        port: u16,
+        path: &str,
+        budget: Duration,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        self.inner.observe(port, path, budget)
+    }
+}
+
+/// The real probe: a loopback request to the port the Runner allocated.
+pub struct LoopbackReadinessProbe {
+    client: reqwest::blocking::Client,
+}
+
+impl LoopbackReadinessProbe {
+    pub fn new(client: reqwest::blocking::Client) -> Self {
+        Self { client }
+    }
+}
+
+impl ReadinessProbe for LoopbackReadinessProbe {
+    fn observe(
+        &self,
+        host_port: u16,
+        path: &str,
+        budget: Duration,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        if path.is_empty() {
+            let target = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
+            return Ok(crate::startup::ReadinessObservation {
+                ready: std::net::TcpStream::connect_timeout(&target, budget).is_ok(),
+                http_status: None,
+                detail: None,
+            });
+        }
+        crate::startup::http_probe(
+            &self.client,
+            &format!("http://127.0.0.1:{host_port}{path}"),
+            budget,
+        )
+        .map_err(|e| e.to_string())
+    }
+    fn probe(&self, host_port: u16, path: &str) -> Result<(), String> {
+        if path.is_empty() {
+            return std::net::TcpStream::connect(("127.0.0.1", host_port))
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+        let response = self
+            .client
+            .get(format!("http://127.0.0.1:{host_port}{path}"))
+            .send()
+            .map_err(|error| error.to_string())?;
+        let status = response.status();
+        ensure_ready(status).map_err(|error| error.to_string())
+    }
+}
+
+fn ensure_ready(status: reqwest::StatusCode) -> Result<()> {
+    ensure!(status.is_success(), "readiness probe returned {status}");
+    Ok(())
+}
+
+/// The non-secret facts about a launch that a receipt may record.
+///
+/// Built by hand rather than derived, so adding a field to the resolved
+/// context cannot quietly publish it.
+pub fn observed_launch(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    launched: &LaunchedProcess,
+) -> BTreeMap<String, String> {
+    let mut observed = BTreeMap::new();
+    observed.insert("run_id".to_owned(), spec.context.run_id.clone());
+    observed.insert(
+        "compute_instance_id".to_owned(),
+        spec.context.compute_instance_id.clone(),
+    );
+    observed.insert("pid".to_owned(), launched.pid().to_string());
+    observed.insert(
+        "runtime_executable".to_owned(),
+        launched.runtime_executable().to_owned(),
+    );
+    if let Some(version) = launched.runtime_version() {
+        observed.insert("runtime_version".to_owned(), version.to_owned());
+    }
+    observed.insert(
+        "secret_names".to_owned(),
+        context.observed_secret_names().join(","),
+    );
+    observed.insert(
+        "state".to_owned(),
+        context
+            .observed_state()
+            .iter()
+            .map(|state| {
+                format!(
+                    "{}@{}",
+                    state.state_key,
+                    state.revision_ref.unwrap_or("<new>")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    observed
+}
+
+#[cfg(test)]
+mod tests {
+    use ato_ipc::runtime_launch::{LifecycleV1, OciRealizationV1};
+
+    use super::super::resolved::{ResolvedSecret, ResolvedStateAttachment};
+    use super::*;
+
+    const PROCESS_FIXTURE: &str = include_str!(
+        "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v1/fastapi-process.json"
+    );
+    const OCI_FIXTURE: &str =
+        include_str!("../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v1/fastapi-oci.json");
+
+    fn spec(fixture: &str) -> RuntimeLaunchSpecV1 {
+        RuntimeLaunchSpecV1::parse(fixture).expect("fixture is a valid spec")
+    }
+
+    struct Fixture {
+        _workspace: tempfile::TempDir,
+        context: ResolvedRuntimeLaunchContext,
+    }
+
+    fn context_with_state(access: StateAccessV1) -> Fixture {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let root = workspace.path().to_path_buf();
+        let working = state_working_copy(&root, "app_data");
+        let context = ResolvedRuntimeLaunchContext::new(
+            root,
+            "",
+            BTreeMap::from([("PORT".to_owned(), "8000".to_owned())]),
+            vec![ResolvedSecret::new("APP_SECRET_KEY", "hunter2")],
+            vec![ResolvedStateAttachment::new(
+                "app_data", None, working, "/data", access,
+            )],
+            vec![super::super::resolved::allocate_endpoint(
+                &ato_ipc::runtime_launch::EndpointV1 {
+                    name: "web".to_owned(),
+                    protocol: "http".to_owned(),
+                    guest_port: Some(8000),
+                    allocation: ato_ipc::runtime_launch::EndpointAllocationV1::Automatic,
+                    preferred_port: None,
+                },
+                34567,
+            )],
+        )
+        .expect("context resolves");
+        Fixture {
+            _workspace: workspace,
+            context,
+        }
+    }
+
+    #[test]
+    fn an_oci_realization_is_refused_by_name() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let error = process_spec_for(&spec(OCI_FIXTURE), &fixture.context).unwrap_err();
+        // Silently launching it as a bare process would run the workload
+        // without the isolation the spec asked for.
+        assert!(error.to_string().contains("oci"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a built connected Worker and a Linux namespace host"]
+    fn isolated_process_serves_http_but_cannot_reach_host_or_control_credentials() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let host_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let host_port = host_listener.local_addr().unwrap().port();
+        let code = format!(
+            r#"
+import os, socket, sqlite3
+from http.server import BaseHTTPRequestHandler, HTTPServer
+s = socket.socket(); s.settimeout(0.2)
+assert s.connect_ex(('127.0.0.1', {host_port})) != 0, 'host network reachable'
+s.close()
+assert 'ATO_RUNNER_TOKEN' not in os.environ
+assert not os.path.exists('/root/.ssh/authorized_keys')
+db = sqlite3.connect('/data/test.sqlite')
+db.execute('CREATE TABLE IF NOT EXISTS proof(value TEXT)')
+db.execute('INSERT INTO proof VALUES (?)', ('isolated',)); db.commit()
+class H(BaseHTTPRequestHandler):
+ def do_GET(self):
+  self.send_response(200); self.end_headers(); self.wfile.write(b'isolated')
+HTTPServer(('127.0.0.1', 34567), H).serve_forever()
+"#
+        );
+        std::fs::write(fixture.context.workspace_root().join("probe.py"), code).unwrap();
+        let mut spec = spec(PROCESS_FIXTURE);
+        spec.realization =
+            LaunchRealizationV1::Process(ato_ipc::runtime_launch::ProcessRealizationV1 {
+                argv: vec!["python3".into(), "/app/probe.py".into()],
+                executable: None,
+                required_abi: None,
+            });
+        spec.endpoints[0].name = "web".into();
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "web".into(),
+            path: "/".into(),
+            timeout_ms: 5000,
+        };
+        let runtime = tempfile::Builder::new()
+            .prefix("isolated-")
+            .tempdir()
+            .unwrap();
+        let host = ProcessLaunchHost {
+            shim: std::env::var_os("ATO_TEST_WORKER_BIN")
+                .expect("built worker path")
+                .into(),
+            runtime_root: runtime.path().join("runtime"),
+            output: None,
+        };
+        let mut launched = launch_process_isolated(&spec, &fixture.context, &host).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let probe = LoopbackReadinessProbe::new(client.clone());
+        wait_until_ready(&spec, &fixture.context, &mut launched, &probe).unwrap();
+        assert_eq!(
+            client
+                .get("http://127.0.0.1:34567/")
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "isolated"
+        );
+        launched.stop(&spec.lifecycle).unwrap();
+        assert!(std::net::TcpStream::connect(("127.0.0.1", 34567)).is_err());
+        assert!(
+            state_working_copy(fixture.context.workspace_root(), "app_data")
+                .join("test.sqlite")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn the_workload_learns_its_state_path_by_name() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let process = process_spec_for(&spec(PROCESS_FIXTURE), &fixture.context).expect("spec");
+        let declared = process
+            .environment
+            .get("ATO_STATE_PATH_APP_DATA")
+            .expect("state path is exported");
+        // `/data` is a path inside a GUEST. A process realization has no
+        // guest, so honouring it literally would write to an arbitrary host
+        // directory.
+        assert_ne!(declared, "/data");
+        assert!(declared.ends_with("/.ato/state/app_data"));
+    }
+
+    #[test]
+    fn secrets_reach_the_spawn_environment_and_nothing_else() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let process = process_spec_for(&spec(PROCESS_FIXTURE), &fixture.context).expect("spec");
+        assert_eq!(
+            process
+                .environment
+                .get("APP_SECRET_KEY")
+                .map(String::as_str),
+            Some("hunter2")
+        );
+        // ...but not into anything a receipt records.
+        let launched_observation = fixture.context.observed_secret_names();
+        assert_eq!(launched_observation, vec!["APP_SECRET_KEY"]);
+        assert!(!format!("{:?}", fixture.context).contains("hunter2"));
+    }
+
+    #[test]
+    fn a_read_only_attachment_is_never_committed() {
+        let writable = context_with_state(StateAccessV1::ReadWrite);
+        assert_eq!(writable_state_keys(&writable.context), vec!["app_data"]);
+
+        let read_only = context_with_state(StateAccessV1::ReadOnly);
+        // The working copy is a convenience, not the record: whatever the
+        // workload wrote into it is not a revision.
+        assert!(writable_state_keys(&read_only.context).is_empty());
+    }
+
+    #[test]
+    fn readiness_names_an_endpoint_that_must_be_allocated() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let mut spec = spec(PROCESS_FIXTURE);
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "nonexistent".to_owned(),
+            path: "/health".to_owned(),
+            timeout_ms: 10,
+        };
+        let mut launched = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
+            handle: spawn_true(),
+            run_id: spec.context.run_id.clone(),
+            runtime_executable: "/bin/true".to_owned(),
+            runtime_version: None,
+            stopped: false,
+            startup_record: fixture._workspace.path().join("process-startup.json"),
+        };
+        struct NeverProbed;
+        impl ReadinessProbe for NeverProbed {
+            fn probe(&self, _port: u16, _path: &str) -> Result<(), String> {
+                panic!("an unallocated endpoint must not be probed")
+            }
+        }
+        let error =
+            wait_until_ready(&spec, &fixture.context, &mut launched, &NeverProbed).unwrap_err();
+        assert!(error.to_string().contains("not allocated"), "{error}");
+        let _ = launched.stop(&LifecycleV1 {
+            graceful_shutdown_ms: 100,
+            force_kill_after_ms: 200,
+        });
+    }
+
+    #[test]
+    fn missing_python_requirement_fails_admission_with_a_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let requirement = ato_ipc::runtime_launch::ExecutableRequirementV1 {
+            name: "python".to_owned(),
+            version: "3.12".to_owned(),
+        };
+        let error = resolve_python_from_root(&requirement, root.path()).unwrap_err();
+        assert!(error.to_string().contains("is not provisioned"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_patch_pinned_python_runtime_is_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("3.11.11/bin/python3");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\necho 'Python 3.11.11'\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for version in ["3.11.11", "3.11"] {
+            let requirement = ato_ipc::runtime_launch::ExecutableRequirementV1 {
+                name: "python".to_owned(),
+                version: version.to_owned(),
+            };
+            assert_eq!(
+                resolve_python_from_root(&requirement, root.path())
+                    .unwrap()
+                    .1,
+                "Python 3.11.11"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mismatched_python_version_fails_admission_with_a_reason() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("3.12.7/bin/python3");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\necho 'Python 3.11.9'\n").unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let requirement = ato_ipc::runtime_launch::ExecutableRequirementV1 {
+            name: "python".to_owned(),
+            version: "3.12".to_owned(),
+        };
+
+        let error = resolve_python_from_root(&requirement, root.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("does not satisfy 3.12"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_workload_that_never_reports_ready_fails_rather_than_hangs() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let mut spec = spec(PROCESS_FIXTURE);
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "web".to_owned(),
+            path: "/health".to_owned(),
+            timeout_ms: 60,
+        };
+        let mut launched = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
+            handle: spawn_sleep(),
+            run_id: spec.context.run_id.clone(),
+            runtime_executable: "/bin/sleep".to_owned(),
+            runtime_version: None,
+            stopped: false,
+            startup_record: fixture._workspace.path().join("process-startup.json"),
+        };
+        struct AlwaysRefused;
+        impl ReadinessProbe for AlwaysRefused {
+            fn probe(&self, _port: u16, _path: &str) -> Result<(), String> {
+                Err("connection refused".to_owned())
+            }
+        }
+        let error =
+            wait_until_ready(&spec, &fixture.context, &mut launched, &AlwaysRefused).unwrap_err();
+        // The last probe failure is carried, because "not ready" without a
+        // reason is the least useful diagnostic there is.
+        assert!(error.to_string().contains("connection refused"), "{error}");
+        launched
+            .stop(&LifecycleV1 {
+                graceful_shutdown_ms: 500,
+                force_kill_after_ms: 1000,
+            })
+            .expect("stops");
+    }
+
+    // `a_launched_workload_actually_runs_and_stops` lives in
+    // apps/formation-worker/tests/process_launch_v1.rs: it needs a real
+    // `sandbox-exec` shim, and a libtest binary is not one.
+
+    #[test]
+    fn an_oci_spec_is_refused_before_anything_is_spawned() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let mut spec = spec(PROCESS_FIXTURE);
+        spec.realization = LaunchRealizationV1::Oci(OciRealizationV1 {
+            native_surface: None,
+            image_digest_ref: format!("sha256:{}", "ab".repeat(32)),
+            image_reference: None,
+            platform: None,
+            resource_limits: None,
+            entrypoint: None,
+            user: None,
+            argv: None,
+            working_dir: None,
+            workspace_mount_path: None,
+        });
+        assert!(launch_process(&spec, &fixture.context).is_err());
+    }
+
+    #[cfg(unix)]
+    fn stubborn_group() -> (tempfile::TempDir, LaunchedProcess) {
+        let root = tempfile::tempdir().expect("fixture root");
+        // The leader and its child ignore TERM. Drop and explicit stop
+        // must reach KILL for the whole group.
+        let script = "trap '' TERM; touch ready; sleep 60 & wait";
+        let handle = ProcessAdapter::new(ProcessSpec {
+            id: "owned-stubborn-group".into(),
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: PathBuf::new(),
+            environment: BTreeMap::new(),
+            isolated_group: true,
+        })
+        .expect("spec")
+        .spawn(root.path())
+        .expect("spawn");
+        let process = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
+            handle,
+            run_id: "owned".into(),
+            runtime_executable: "/bin/sh".into(),
+            runtime_version: None,
+            stopped: false,
+            startup_record: root.path().join("process-startup.json"),
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            assert!(Instant::now() < deadline, "fixture did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (root, process)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_stops_a_group_which_ignores_term_without_touching_another_run() {
+        let (_first_root, first) = stubborn_group();
+        let (_second_root, mut second) = stubborn_group();
+        let first_group = first.pid();
+        drop(first);
+        assert!(
+            !process_group_is_alive(first_group),
+            "Drop left descendants"
+        );
+        assert!(
+            second.exited().expect("poll").is_none(),
+            "another Run was stopped"
+        );
+        second
+            .stop(&LifecycleV1 {
+                graceful_shutdown_ms: 20,
+                force_kill_after_ms: 2_000,
+            })
+            .expect("second stops");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_term_resistant_group_confirms_forced_cessation() {
+        let (_root, process) = stubborn_group();
+        let group = process.pid();
+        let stopped = process
+            .stop(&LifecycleV1 {
+                graceful_shutdown_ms: 20,
+                force_kill_after_ms: 2_000,
+            })
+            .expect("group stopped");
+        assert_eq!(stopped.kind, StopKind::Forced);
+        assert!(!process_group_is_alive(group));
+    }
+
+    fn spawn_true() -> ProcessHandle {
+        ProcessAdapter::new(ProcessSpec {
+            id: "probe".to_owned(),
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 5".to_owned()],
+            cwd: PathBuf::new(),
+            environment: BTreeMap::new(),
+            isolated_group: true,
+        })
+        .expect("spec")
+        .spawn(Path::new("/tmp"))
+        .expect("spawns")
+    }
+
+    fn spawn_sleep() -> ProcessHandle {
+        spawn_true()
+    }
+    #[test]
+    fn preparation_cancellation_is_recorded_and_the_process_is_reaped() {
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let mut spec = spec(PROCESS_FIXTURE);
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "web".into(),
+            path: "/health".into(),
+            timeout_ms: 180000,
+        };
+        let mut launched = LaunchedProcess {
+            #[cfg(unix)]
+            isolated_network: None,
+            handle: spawn_sleep(),
+            run_id: spec.context.run_id.clone(),
+            runtime_executable: "/bin/sleep".into(),
+            runtime_version: None,
+            stopped: false,
+            startup_record: fixture._workspace.path().join("startup.json"),
+        };
+        struct NeverReady;
+        impl ReadinessProbe for NeverReady {
+            fn probe(&self, _: u16, _: &str) -> Result<(), String> {
+                Err("HTTP 503".into())
+            }
+        }
+        let mut cancel = || Err(crate::startup::StartupCancelled.into());
+        let probe = ControlledReadinessProbe::new(&NeverReady, &mut cancel);
+        assert!(
+            wait_until_ready(&spec, &fixture.context, &mut launched, &probe)
+                .unwrap_err()
+                .is::<crate::startup::StartupCancelled>()
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&launched.startup_record).unwrap()).unwrap();
+        assert_eq!(record["phase"], "cancelled");
+        let pid = launched.pid();
+        let stopped = launched
+            .stop(&LifecycleV1 {
+                graceful_shutdown_ms: 500,
+                force_kill_after_ms: 1000,
+            })
+            .unwrap();
+        assert!(stopped.exit_status.is_some());
+        assert!(!process_group_is_alive(pid));
+    }
+}

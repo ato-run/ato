@@ -1,0 +1,485 @@
+{
+  "schema": "ato.formation-bound-http-controls/1",
+  "at": "2026-10-02T09:07:09.354995+00:00",
+  "scope": "Actual isolated Coordinator/Runtime owned Source HTTP controls; preregistered fixed exchanges, not autonomous OSS/provider acceptance",
+  "execution_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "authority_source_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+  "build_provenance": {
+    "execution_code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+    "authority_source_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+    "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+    "authority_WASM_sha256": "9420802a52f32a021fb0839ef64d46f63299a8b5db59ed92c9522c483217987b",
+    "binaries": {
+      "ato": {
+        "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/ato",
+        "sha256": "bad2737892da0d76fa17eef1ab0a017b8d2a368ce8baea75d753d3e1048e6b9b"
+      },
+      "worker": {
+        "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/ato-formation-worker",
+        "sha256": "5986f96105e407579c305931bce8e7b23f6b4e86c6c6c46b6c4559cb8a53b59a"
+      },
+      "preflight": {
+        "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/preflight",
+        "sha256": "b4f352809188e6d28a5884a884ed74537cf229e31b029eed9125b477222ee388"
+      }
+    }
+  },
+  "controls": [
+    {
+      "case": "success",
+      "Search_id": "search_80aa3c809d7e15c0622489e988a0375c",
+      "K": "sha256:76dff85cd1fb7f9b7b9942de9eba6ece2c88957bd1b227191a33c2a564a73956",
+      "typed_K_PASS": true,
+      "requester_status": null,
+      "input_requirements": [],
+      "attempts": [
+        {
+          "attempt_id": "01M3XXNB8M2WA575Y5D0DSEXRA",
+          "D": "sha256:ff6960f586fb2103ed1baa075b8355d392202573a98852f9219b6009bb233466",
+          "status": "pass",
+          "failure": null,
+          "execution_started": true,
+          "record": "finished",
+          "candidate_stop": "confirmed",
+          "realization": {
+            "build_network": "phase-scoped-connect",
+            "candidate_network": "isolated namespace; declared ingress; phase-scoped HTTPS egress broker",
+            "containment": "bwrap+landlock",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "guest 3000 -> host 3000"
+            },
+            "executor": "runtime-process",
+            "port_operations": [
+              {
+                "guard": true,
+                "observation": {
+                  "kind": "request_template",
+                  "template": {
+                    "json_bindings": {},
+                    "method": "GET",
+                    "path": "/"
+                  }
+                },
+                "operation_index": 0,
+                "port": "app.http"
+              },
+              {
+                "guard": true,
+                "observation": {
+                  "kind": "response_status",
+                  "status": 302
+                },
+                "operation_index": 0,
+                "port": "app.http"
+              },
+              {
+                "guard": false,
+                "observation": {
+                  "kind": "request_template",
+                  "template": {
+                    "json_bindings": {
+                      "password": "PROOF_INPUT"
+                    },
+                    "method": "POST",
+                    "path": "/source/owner"
+                  }
+                },
+                "operation_index": 0,
+                "port": "app.http"
+              },
+              {
+                "guard": false,
+                "observation": {
+                  "kind": "response_status",
+                  "status": 201
+                },
+                "operation_index": 0,
+                "port": "app.http"
+              }
+            ],
+            "workspace": "disposable-copy, read-only at /app; /tmp is tmpfs"
+          },
+          "receipt": {
+            "contract_ref": "sha256:76dff85cd1fb7f9b7b9942de9eba6ece2c88957bd1b227191a33c2a564a73956",
+            "derivation_ref": "sha256:ff6960f586fb2103ed1baa075b8355d392202573a98852f9219b6009bb233466",
+            "execution": {
+              "attempt_id": "01M3XXNB8M2WA575Y5D0DSEXRA",
+              "endpoint": "http://127.0.0.1:3000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3XXNA5AYVHBV8Q9KT858J44"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:a50d157472c383d825561b8db300f206ceb9ce0b3d84825a34e83e6a01de36b7",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:2b8fe7e745793366caa7cb932d307e11edca2ec640b25091ea275069772f84cd",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "metadata_mismatch": []
+        }
+      ],
+      "coordinator_status": "satisfied",
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:03:26.334Z",
+        "deadline_at": "2026-10-02T09:05:26.334Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5120,
+          "reserved": 0,
+          "remaining": 1073736704
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1589,
+          "reserved": 0,
+          "remaining": 2147482059
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 4608,
+          "reserved": 0,
+          "remaining": 1073737216
+        }
+      },
+      "private_readonly_delivery_observation": {
+        "ACKs": [
+          {
+            "attempt_id": "01M3XXNB8M2WA575Y5D0DSEXRA",
+            "closed_sha256": "fc77b5831e1795c8de5fcce3b8939de723c7abc50225584ea800a2c7355ed241",
+            "result_response_sha256": "11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878"
+          }
+        ],
+        "ticket_limits": [
+          {
+            "path": "/exploration/max_retries",
+            "value": 1
+          }
+        ],
+        "source_POST_stdout_markers": []
+      },
+      "rounds_consumed": 2,
+      "fixed_session_exchanges": 3,
+      "plan_sha256": "56b83397840638ec70d25c7f252495776c04b866f68dc8c53cad006c454fabd8",
+      "preregistration_sha256": "418354f92f4f47d56c1ce09654ff8f8c42e350ec082354236cdd558875a0be00",
+      "result_sha256": "ce8f85a96a7bc18b504b57e2812b3e6d94cd6554720cbc7de616246cc0fcea37",
+      "final_status_sha256": "6e6f3778d7829479f43dd80971781a527c2435886148e8bbdcd9dd809ab325f4",
+      "input_proof": {
+        "schema": "ato.formation-bound-http-control-input-proof/1",
+        "case": "success",
+        "registered_scope": "source",
+        "encrypted_values_before_revoke": 1,
+        "encrypted_values_after_revoke": 0,
+        "public_value_occurrences": 0,
+        "public_files_checked": 59,
+        "same_original_Search": true,
+        "paid_provider_calls": 0,
+        "OSS_unique_success": false,
+        "preregistration_sha256": "418354f92f4f47d56c1ce09654ff8f8c42e350ec082354236cdd558875a0be00"
+      },
+      "ordinary_Run_permission": false,
+      "new_unique_OSS_apps": 0,
+      "paid_API_calls": 0,
+      "actual_provider_calls": null
+    },
+    {
+      "case": "scope_outside",
+      "Search_id": "search_de9c909a2d2378f23949cbc76e5bbe60",
+      "K": "sha256:76dff85cd1fb7f9b7b9942de9eba6ece2c88957bd1b227191a33c2a564a73956",
+      "typed_K_PASS": false,
+      "requester_status": "needs_input",
+      "input_requirements": [
+        {
+          "candidates": [],
+          "deadline_at": "2026-10-02T09:04:35.999Z",
+          "obtain": "Provide the required configuration, selecting this Formation or reusable scope.",
+          "reason": "scope_mismatch",
+          "requirement": {
+            "artifact_embedding": false,
+            "kind": "configuration",
+            "name": "PROOF_INPUT",
+            "operation": "execute",
+            "phase": "runtime",
+            "purpose": "Initialize the owned source-declared HTTP fixture",
+            "resource": "app.http",
+            "secret": true,
+            "temporary": false
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "attempt_id": "01M3XXPHY9NZ7SRWETE29A15NQ",
+          "D": "sha256:ff6960f586fb2103ed1baa075b8355d392202573a98852f9219b6009bb233466",
+          "status": "inconclusive",
+          "failure": {
+            "code": "round_deadline_exceeded",
+            "stage": "admission",
+            "message": "runtime retry backoff exceeds the frozen deadline"
+          },
+          "execution_started": false,
+          "record": "not_started",
+          "candidate_stop": null,
+          "realization": null,
+          "receipt": null,
+          "metadata_mismatch": []
+        }
+      ],
+      "coordinator_status": "unsatisfied",
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:04:05.999Z",
+        "deadline_at": "2026-10-02T09:04:35.999Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5120,
+          "reserved": 0,
+          "remaining": 1073736704
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1589,
+          "reserved": 0,
+          "remaining": 2147482059
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "private_readonly_delivery_observation": {
+        "ACKs": [
+          {
+            "attempt_id": "01M3XXPHY9NZ7SRWETE29A15NQ",
+            "closed_sha256": "fc77b5831e1795c8de5fcce3b8939de723c7abc50225584ea800a2c7355ed241",
+            "result_response_sha256": "11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878"
+          }
+        ],
+        "ticket_limits": [
+          {
+            "path": "/exploration/max_retries",
+            "value": 1
+          }
+        ],
+        "source_POST_stdout_markers": []
+      },
+      "rounds_consumed": null,
+      "fixed_session_exchanges": 2,
+      "plan_sha256": "6c2a5a8fe48a80c396fa996fefea7391c5522d9eb992d2db9ed58dae096db981",
+      "preregistration_sha256": "8158962d7b5dc88c6f2f14d501564fadf432e92ba1081aeb361479b8c8189e4b",
+      "result_sha256": "04e5190096d85987bcbdf22d920c8b80f89dc9b997ab7864b29639762862a2ed",
+      "final_status_sha256": "d8be1fc497d941ce13bb48590e60ebd715a2a46da634a66bda9fbb228b7f535f",
+      "input_proof": {
+        "schema": "ato.formation-bound-http-control-input-proof/1",
+        "case": "scope_outside",
+        "registered_scope": "outside_source",
+        "encrypted_values_before_revoke": 1,
+        "encrypted_values_after_revoke": 0,
+        "public_value_occurrences": 0,
+        "public_files_checked": 42,
+        "same_original_Search": true,
+        "paid_provider_calls": 0,
+        "OSS_unique_success": false,
+        "preregistration_sha256": "8158962d7b5dc88c6f2f14d501564fadf432e92ba1081aeb361479b8c8189e4b"
+      },
+      "ordinary_Run_permission": false,
+      "new_unique_OSS_apps": 0,
+      "paid_API_calls": 0,
+      "actual_provider_calls": null
+    },
+    {
+      "case": "lost_response",
+      "Search_id": "search_84204f1ed65d82199ad5970b9ad42746",
+      "K": "sha256:76dff85cd1fb7f9b7b9942de9eba6ece2c88957bd1b227191a33c2a564a73956",
+      "typed_K_PASS": false,
+      "requester_status": null,
+      "input_requirements": [],
+      "attempts": [
+        {
+          "attempt_id": "01M3XXR7KJR6JWB6DC4KNSGB4Q",
+          "D": "sha256:adcdd80348189bddd51785a9036fd2306dabe58e85622a3dd068fd0ba677e822",
+          "status": "fail",
+          "failure": {
+            "code": "source_runtime_http_operation_failed",
+            "stage": "admission",
+            "message": "declared HTTP interaction did not return a complete status; request is not automatically replayed"
+          },
+          "execution_started": true,
+          "record": "finished",
+          "candidate_stop": "confirmed",
+          "realization": {
+            "build_network": "phase-scoped-connect",
+            "candidate_network": "isolated namespace; declared ingress; phase-scoped HTTPS egress broker",
+            "containment": "bwrap+landlock",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "guest 3000 -> host 3000"
+            },
+            "executor": "runtime-process",
+            "port_operations": [
+              {
+                "guard": true,
+                "observation": {
+                  "kind": "request_template",
+                  "template": {
+                    "json_bindings": {},
+                    "method": "GET",
+                    "path": "/"
+                  }
+                },
+                "operation_index": 0,
+                "port": "app.http"
+              },
+              {
+                "guard": true,
+                "observation": {
+                  "kind": "response_status",
+                  "status": 302
+                },
+                "operation_index": 0,
+                "port": "app.http"
+              },
+              {
+                "guard": false,
+                "observation": {
+                  "kind": "request_template",
+                  "template": {
+                    "json_bindings": {
+                      "password": "PROOF_INPUT"
+                    },
+                    "method": "POST",
+                    "path": "/source/owner"
+                  }
+                },
+                "operation_index": 0,
+                "port": "app.http"
+              }
+            ],
+            "workspace": "disposable-copy, read-only at /app; /tmp is tmpfs"
+          },
+          "receipt": null,
+          "metadata_mismatch": []
+        }
+      ],
+      "coordinator_status": "unsatisfied",
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:05:00.931Z",
+        "deadline_at": "2026-10-02T09:05:30.931Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 5120,
+          "reserved": 0,
+          "remaining": 1073736704
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1589,
+          "reserved": 0,
+          "remaining": 2147482059
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "private_readonly_delivery_observation": {
+        "ACKs": [
+          {
+            "attempt_id": "01M3XXR7KJR6JWB6DC4KNSGB4Q",
+            "closed_sha256": "fc77b5831e1795c8de5fcce3b8939de723c7abc50225584ea800a2c7355ed241",
+            "result_response_sha256": "11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878"
+          }
+        ],
+        "ticket_limits": [
+          {
+            "path": "/exploration/max_retries",
+            "value": 1
+          }
+        ],
+        "source_POST_stdout_markers": []
+      },
+      "rounds_consumed": 2,
+      "fixed_session_exchanges": 3,
+      "plan_sha256": "9c931d74f3a97d94775e8ce17635253ae7bff614e054be1cd3095b199fbe67bd",
+      "preregistration_sha256": "2d97352cb08c4ad0759740fe57ecc4c2f613e23127bc74e52ae9a86aa2e1b0b8",
+      "result_sha256": "0b3d270cc016c4c38ab8376ed47b2568042fa550c3a4a8311c636e54c204b247",
+      "final_status_sha256": "ac98d721e33c8680cb7f14e6db138b8de7469583d69f9c46a601c2ffff48e678",
+      "input_proof": {
+        "schema": "ato.formation-bound-http-control-input-proof/1",
+        "case": "lost_response",
+        "registered_scope": "source",
+        "encrypted_values_before_revoke": 1,
+        "encrypted_values_after_revoke": 0,
+        "public_value_occurrences": 0,
+        "public_files_checked": 56,
+        "same_original_Search": true,
+        "paid_provider_calls": 0,
+        "OSS_unique_success": false,
+        "preregistration_sha256": "2d97352cb08c4ad0759740fe57ecc4c2f613e23127bc74e52ae9a86aa2e1b0b8"
+      },
+      "ordinary_Run_permission": false,
+      "new_unique_OSS_apps": 0,
+      "paid_API_calls": 0,
+      "actual_provider_calls": null
+    }
+  ],
+  "prior_fixture_failure": {
+    "fixture": "bound-http-gate-3bb-v1/success",
+    "failure": "20 GiB free-space preflight rejected before Search/Runtime creation",
+    "Search_or_attempt_created": false,
+    "preserved": true
+  },
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "paid_API_calls": 0,
+  "new_unique_OSS_apps": 0,
+  "deployment": false,
+  "remote_migration": false
+}

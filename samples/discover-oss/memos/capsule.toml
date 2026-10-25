@@ -1,0 +1,39 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Memos"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/var/opt/memos"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "app-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:e63d98baffb2a1557668483aad3b0b5675a3319540bfc1e75cd9171c1c607b75"
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["--addr", "0.0.0.0", "--port", "5230", "--data", "/var/opt/memos"]
+cwd = "."
+guest_port = 5230
+runtimes = { "oci.image" = "docker.io/neosmemo/memos@sha256:51a4cef418b1f173ac37139ad99de08da5b8662136007231d3ac8a0498a3095a", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/usr/local/memos/memos", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "128" }
+
+[effects]
+default = "pure"
