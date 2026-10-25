@@ -24,12 +24,18 @@ starts an ephemeral Run without advancing an authored branch.
 
 `reform` builds a candidate Derivation from a new source directory under an
 existing `.capsule`'s frozen Contract K, then verifies it through the same
-portable attempt and receipt as `run`. It refuses before building when K is
-source-bound (`ato.contract.workspace@1`), and refuses before executing when
-the new source derives a different K. A new `--out` directory receives
+portable attempt and receipt as `run`. The candidate Derivation is bound
+directly to the frozen Contract body: the new source cannot mint or redefine
+K, and the output bundle's root Contract object is the frozen canonical bytes.
+The candidate manifest may omit `[contract]` (a derivation-candidate
+manifest); if it declares one it must canonicalize byte-for-byte to the frozen
+K, otherwise the command refuses with `candidate_contract_mismatch` before
+building or executing anything. It also refuses before building when K is
+source-bound (`ato.contract.workspace@1`). A new `--out` directory receives
 `candidate.capsule`, `receipt.json` and a `report.json` sidecar
 (`ato.transformation-candidate/1`); the input bundle and its receipts are never
-modified, and nothing is published or activated.
+modified, and nothing is published or activated. `ato pack` still requires the
+`[contract]` section.
 
 There are no current lifecycle commands for `lock`, `decap`, or `snapshot`.
 `ato run .` and `ato run github.com/owner/repository` belong to the superseded
