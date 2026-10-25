@@ -1,4 +1,6 @@
 //! Executable requirements are part of D; ceilings and approval are not.
+pub mod inspection;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

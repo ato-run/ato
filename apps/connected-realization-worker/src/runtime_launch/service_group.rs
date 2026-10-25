@@ -13,6 +13,7 @@ use ato_adapter_oci::{OciNetwork, OciOwner, OciServiceGroup};
 use ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2;
 use ato_runtime_attempt::launch::oci::{self as oci_launch, ServiceEgress};
 
+use super::managed_embedding_relay::{self, ManagedEmbeddingRelay};
 use super::process_executor::ReadinessProbe;
 use super::resolved::ResolvedRuntimeLaunchContext;
 use super::{lease::NetworkAuthorization, network_broker::TcpEgressBroker};
@@ -27,6 +28,18 @@ pub fn launch_service_group(
     owner: &OciOwner,
     network_authorization: Option<&NetworkAuthorization>,
 ) -> Result<OciServiceGroup> {
+    // Validate every scoped authority and redeemed pair before creating any resource.
+    let managed_credentials = network_authorization
+        .map(|authorization| {
+            managed_embedding_relay::validate_group_grants(spec, authorization)?;
+            authorization
+                .managed_embeddings
+                .iter()
+                .map(|grant| ManagedEmbeddingRelay::credentials(grant, context))
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let mut egress = Vec::new();
     if let Some(authorization) = network_authorization {
         for grant in &authorization.egress {
@@ -41,6 +54,28 @@ pub fn launch_service_group(
                 environment_value: broker.binding_value(),
                 network,
                 guard: Box::new(broker),
+                expected_secret_value: None,
+            });
+        }
+    }
+    if let Some(authorization) = network_authorization {
+        for (grant, (token, original_base)) in authorization
+            .managed_embeddings
+            .iter()
+            .zip(managed_credentials)
+        {
+            let network = OciNetwork::create_egress(
+                &format!("{}-managed-{}", spec.context.run_id, grant.service_id),
+                &owner.labels(Some(&grant.service_id))?,
+            )?;
+            let relay = ManagedEmbeddingRelay::start(network.gateway_address()?, grant, token)?;
+            egress.push(ServiceEgress {
+                service: grant.service_id.clone(),
+                environment_name: "OPENAI_BASE_URL".to_owned(),
+                environment_value: relay.binding_value(),
+                expected_secret_value: Some(original_base),
+                network,
+                guard: Box::new(relay),
             });
         }
     }

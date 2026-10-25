@@ -41,6 +41,10 @@ pub mod dependency_transport;
 pub mod hosted_export;
 pub mod instance_snapshot;
 pub mod local_instance;
+#[cfg(test)]
+mod native_surface_tests;
+#[cfg(test)]
+mod native_terminal_authoring_tests;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
@@ -357,6 +361,8 @@ impl PortableRealizationKind {
 #[derive(Debug, Clone)]
 pub struct PortableHttpRequirementSpec {
     pub id: String,
+    /// Logical observation Port; omission retains the existing app.http target.
+    pub port: Option<String>,
     pub path: String,
     pub status: u16,
     pub body_digest: Option<String>,
@@ -477,6 +483,19 @@ pub fn binding_environment_name(id: &str) -> String {
     format!("ATO_BINDING_{}", id.to_ascii_uppercase())
 }
 
+/// Explicit protocol-owned SDK projections. `api-key` delivers only the Broker's
+/// short-lived per-Run embedding capability, never a provider credential.
+pub const OPENAI_EMBEDDING_API_KEY_PROTOCOL: &str = "ato.openai.embeddings.api-key@1";
+pub const OPENAI_EMBEDDING_BASE_URL_PROTOCOL: &str = "ato.openai.embeddings.base-url@1";
+
+pub fn application_binding_environment_name(binding: &ApplicationBindingV1) -> String {
+    match binding.protocol.as_str() {
+        OPENAI_EMBEDDING_API_KEY_PROTOCOL => "OPENAI_API_KEY".to_owned(),
+        OPENAI_EMBEDDING_BASE_URL_PROTOCOL => "OPENAI_BASE_URL".to_owned(),
+        _ => binding_environment_name(&binding.id),
+    }
+}
+
 pub fn resolve_application_bindings(
     application: &ValidatedApplication,
     supplied: &BTreeMap<String, String>,
@@ -514,7 +533,7 @@ pub fn resolve_application_bindings(
                 binding.id
             )));
         }
-        environment.insert(binding_environment_name(&binding.id), value.clone());
+        environment.insert(application_binding_environment_name(binding), value.clone());
     }
     Ok(environment)
 }
@@ -873,8 +892,17 @@ fn validate_selected_derivation(
         validate_static_http_paths(&contract, &application, &tree)?;
     }
     let model_sets = validated_model_sets(bundle, &derivation)?;
-    if !model_sets.is_empty() && realization != PortableRealizationKind::LocalProcess {
-        return Err(profile("v0 delivers a Model Set only to a process route"));
+    if !model_sets.is_empty()
+        && !matches!(
+            realization,
+            PortableRealizationKind::LocalProcess
+                | PortableRealizationKind::OciContainer
+                | PortableRealizationKind::OciServiceGroup
+        )
+    {
+        return Err(profile(
+            "v0 delivers a Model Set only to a process or explicitly assigned OCI route",
+        ));
     }
     let scenarios = validated_scenarios(bundle, &contract, &derivation)?;
 
@@ -1047,6 +1075,7 @@ fn validate_application_bindings(
     bindings: &[ApplicationBindingV1],
 ) -> Result<(), PortableApplicationError> {
     let mut ids = BTreeSet::new();
+    let mut environments = BTreeSet::new();
     for binding in bindings {
         let valid_id = !binding.id.is_empty()
             && binding.id.len() <= 64
@@ -1073,6 +1102,11 @@ fn validate_application_bindings(
                 "application Binding `{}` has an invalid protocol",
                 binding.id
             )));
+        }
+        if !environments.insert(application_binding_environment_name(binding)) {
+            return Err(profile(
+                "application Bindings project to a repeated environment name",
+            ));
         }
         if !ids.insert(binding.id.as_str()) {
             return Err(profile(format!(
@@ -1173,6 +1207,7 @@ pub fn build_multi_derivation_bundle(
     let static_draft = AuthoringDraft {
         contract: process_draft.contract.clone(),
         derivation: DerivationDraft {
+            native_surface: None,
             runtime_port_operations: vec![],
             variable_bindings: vec![],
             requirements: Default::default(),
@@ -1343,7 +1378,12 @@ pub(crate) fn contract_from_spec(
         .map(|requirement| BoundRequirement {
             id: requirement.id.clone(),
             verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
-            port: Some("app.http".to_owned()),
+            port: Some(
+                requirement
+                    .port
+                    .clone()
+                    .unwrap_or_else(|| "app.http".to_owned()),
+            ),
             method: Some("GET".to_owned()),
             path: Some(requirement.path.clone()),
             status: Some(requirement.status),
@@ -1486,6 +1526,7 @@ fn authored_bundle_spec_v2(
             .into_iter()
             .map(|observation| PortableHttpRequirementSpec {
                 id: observation.id,
+                port: Some(observation.port),
                 path: observation.path,
                 status: observation.status,
                 body_digest: observation.body_digest,
@@ -1516,6 +1557,75 @@ fn authored_bundle_spec_v2(
             .collect::<Result<_, PortableApplicationError>>()?,
         scenarios,
     })
+}
+
+/// Compile one `ato.capsule/1` route that declares a Terminal `native_surface`
+/// into the canonical wire v3 bundle the hosted validator imports.
+///
+/// The manifest is authoring input and is never embedded in the artifact tree.
+/// Only an OCI derivation is realized through the `runtime_launch` lease that
+/// owns a native Adapter, so nothing else is emitted; binding has already
+/// refused every other shape.
+pub fn build_native_terminal_bundle(
+    source_root: &Path,
+    manifest: &Path,
+    title: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    if title.trim().is_empty() {
+        return Err(profile("application title must not be empty"));
+    }
+    let text = read(manifest.to_path_buf())?;
+    let text = std::str::from_utf8(&text)
+        .map_err(|error| profile(format!("capsule.toml is not UTF-8: {error}")))?;
+    let draft = parse_capsule_toml(text)
+        .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
+    let native =
+        draft.derivation.native_surface.clone().ok_or_else(|| {
+            profile("native bundle requires a [derive.native_surface] declaration")
+        })?;
+    if native.surface.kind() != "terminal" {
+        return Err(profile(
+            "this bundle profile carries one declared Terminal native Surface",
+        ));
+    }
+    let excluded = manifest
+        .strip_prefix(source_root)
+        .ok()
+        .and_then(|path| path.to_str())
+        .map(|path| vec![path.replace(std::path::MAIN_SEPARATOR, "/")])
+        .unwrap_or_default();
+    let (mut objects, tree_ref) =
+        build_portable_tree_with_schema(source_root, PORTABLE_TREE_V2_SCHEMA, &excluded)?;
+    let (contract, derivation) = bind(
+        &draft,
+        &BindingContext {
+            source_closure_ref: &tree_ref,
+        },
+    )
+    .map_err(|error| PortableApplicationError::Binding(error.to_string()))?;
+    let application = ApplicationV2 {
+        schema: APPLICATION_V2_SCHEMA.to_owned(),
+        title: title.to_owned(),
+        surfaces: vec![ApplicationSurfaceV2 {
+            id: "main".to_owned(),
+            port: native.surface.port().to_owned(),
+            path: "/".to_owned(),
+        }],
+        bindings: Vec::new(),
+    };
+    let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
+    let derivation_ref = add_structured(&mut objects, &derivation, BOUND_DERIVATION_SCHEMA)?;
+    let application_ref = add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?;
+    let bundle = finish_bundle(
+        objects,
+        contract_ref,
+        application_ref,
+        vec![derivation_ref],
+        BundleShape::v3(),
+    );
+    validate_bundle(&bundle)?;
+    let bytes = encode_portable_application_bundle(&bundle)?;
+    Ok((bytes, bundle))
 }
 
 pub fn build_dynamic_routes_bundle(
@@ -1653,6 +1763,7 @@ fn build_routes_bundle(
     }
     route_inputs.sort_by(|a, b| a.id.cmp(&b.id));
     let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
+        native_surface: None,
         runtime_port_operations: vec![],
         variable_bindings: vec![],
         requirements: ato_formation::requirements::ExecutionRequirements {
@@ -1910,10 +2021,96 @@ pub fn verify_materialized_tree(
     Ok(())
 }
 
+/// Native admission is a format check, never an execution capability. Reuse
+/// the existing OCI/workspace/Binding constraints against the private HTTP
+/// probe route; the original K, D and Application remain unchanged and are
+/// returned to every verifier. No projected object is hashed or executed.
+fn validate_native_route(
+    contract: &BoundContract,
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+) -> Result<PortableRealizationKind, PortableApplicationError> {
+    let native = derivation.native_surface.as_ref().expect("native route");
+    native
+        .validate(&derivation.ports, &derivation.steps)
+        .map_err(profile)?;
+    if application.schema != APPLICATION_V2_SCHEMA
+        || application.surfaces.len() != 1
+        || derivation.steps.len() != 1
+        || derivation.ports.len() != 2
+        || derivation.steps[0].protocol != OCI_PROTOCOL
+        || application.surfaces[0].port != native.surface.port()
+        || application.surfaces[0].path != "/"
+        || derivation.requirements.startup.is_some()
+    {
+        return Err(profile(
+            "native profile requires one OCI step, one native Surface and a distinct private HTTP probe",
+        ));
+    }
+    validate_dynamic_surface(&application.surfaces[0])?;
+    if !derivation.runtimes.contains_key(OCI_USER_RUNTIME) {
+        return Err(profile(
+            "native OCI profile requires an explicit non-root execution identity",
+        ));
+    }
+    let http = contract
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
+        .collect::<Vec<_>>();
+    if http.len() != native.operations.len()
+        || native.operations.iter().any(|operation| {
+            http.iter()
+                .filter(|requirement| {
+                    requirement.port.as_deref() == Some(native.probe_port.as_str())
+                        && requirement.path.as_deref() == Some(operation.path())
+                        && requirement.method.as_deref() == Some("GET")
+                        && requirement.status == Some(200)
+                        && requirement.body_digest.as_deref().is_some_and(|digest| {
+                            parse_ref(digest, "native probe body digest").is_ok()
+                        })
+                })
+                .count()
+                != 1
+        })
+    {
+        return Err(profile(
+            "every native operation requires one independent HTTP K observation with an exact output digest",
+        ));
+    }
+    let mut probe_application = application.clone();
+    probe_application.surfaces[0].port = native.probe_port.clone();
+    let mut probe_route = derivation.clone();
+    probe_route.native_surface = None;
+    probe_route
+        .ports
+        .retain(|port| port.id == native.probe_port);
+    let host_native = derivation
+        .ports
+        .iter()
+        .all(|port| port.guest_port.is_none());
+    let realization =
+        validate_route_profile(contract, &probe_application, &probe_route, host_native)?;
+    debug_assert_eq!(realization, PortableRealizationKind::OciContainer);
+    Ok(realization)
+}
+
 fn validate_initial_route(
     contract: &BoundContract,
     application: &ValidatedApplication,
     derivation: &BoundDerivation,
+) -> Result<PortableRealizationKind, PortableApplicationError> {
+    if derivation.native_surface.is_some() {
+        return validate_native_route(contract, application, derivation);
+    }
+    validate_route_profile(contract, application, derivation, false)
+}
+
+fn validate_route_profile(
+    contract: &BoundContract,
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+    host_native: bool,
 ) -> Result<PortableRealizationKind, PortableApplicationError> {
     if !matches!(
         application.schema.as_str(),
@@ -1933,7 +2130,16 @@ fn validate_initial_route(
         let surface_port = validate_oci_service_group(application, derivation)?;
         let input = workspace_input(derivation)
             .ok_or_else(|| profile("route omitted its workspace input"))?;
-        validate_route_requirements(contract, input, surface_port)?;
+        validate_route_requirements(
+            contract,
+            input,
+            &derivation
+                .ports
+                .iter()
+                .map(|port| port.id.as_str())
+                .collect(),
+            surface_port,
+        )?;
         return Ok(PortableRealizationKind::OciServiceGroup);
     }
     if application.surfaces.len() != 1
@@ -1982,7 +2188,7 @@ fn validate_initial_route(
     }
     if let Some(binding) = application.bindings.iter().find(|binding| {
         step.env
-            .contains_key(&binding_environment_name(&binding.id))
+            .contains_key(&application_binding_environment_name(binding))
     }) {
         return Err(profile(format!(
             "Binding `{}` conflicts with an authored environment value",
@@ -2104,7 +2310,7 @@ fn validate_initial_route(
                 || step.root.is_some()
                 || step.entry.is_some()
                 || step.spa_fallback.is_some()
-                || port.guest_port.is_none()
+                || (port.guest_port.is_none() && !host_native)
             {
                 return Err(profile(
                     "OCI derivation is outside the declared container HTTP profile",
@@ -2137,7 +2343,12 @@ fn validate_initial_route(
         }
     }
 
-    validate_route_requirements(contract, input, &port.id)?;
+    validate_route_requirements(
+        contract,
+        input,
+        &BTreeSet::from([port.id.as_str()]),
+        port.id.as_str(),
+    )?;
     Ok(realization)
 }
 
@@ -2146,6 +2357,7 @@ fn validate_initial_route(
 fn validate_route_requirements(
     contract: &BoundContract,
     input: &BoundInput,
+    observation_ports: &BTreeSet<&str>,
     surface_port: &str,
 ) -> Result<(), PortableApplicationError> {
     let requirement_ids = contract
@@ -2168,17 +2380,22 @@ fn validate_route_requirements(
                 }
             }
             HTTP_CONTRACT_VERIFIER => {
-                if requirement.port.as_deref() != Some(surface_port)
+                if !requirement
+                    .port
+                    .as_deref()
+                    .is_some_and(|port| observation_ports.contains(port))
                     || requirement.method.as_deref() != Some("GET")
                 {
                     return Err(profile(
-                        "HTTP requirement does not target the declared application surface",
+                        "HTTP requirement does not target a declared observation Port",
                     ));
                 }
                 let path = requirement.path.as_deref().unwrap_or("/");
                 if !path.starts_with('/')
                     || path.starts_with("//")
-                    || path.contains('\0')
+                    || path
+                        .chars()
+                        .any(|c| c.is_ascii_control() || c.is_ascii_whitespace())
                     || path.contains("#")
                 {
                     return Err(profile(
@@ -2381,6 +2598,13 @@ fn validate_oci_service_group<'a>(
         .iter()
         .map(|state| state.id.as_str())
         .collect::<BTreeSet<_>>();
+    let model_input_ids = derivation
+        .inputs
+        .iter()
+        .filter(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+        .map(|input| input.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut input_readers = BTreeSet::new();
     let mut step_ids = BTreeSet::new();
     let mut state_readers = BTreeMap::<&str, usize>::new();
     let mut binding_readers = BTreeMap::<&str, usize>::new();
@@ -2431,8 +2655,58 @@ fn validate_oci_service_group<'a>(
             }
             None => "/app",
         };
+        if let Some(raw) = step
+            .runtimes
+            .get(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME)
+        {
+            let ids = ato_ipc::oci_component_inputs::parse_input_ids(raw).map_err(profile)?;
+            let projected_names = ids
+                .iter()
+                .map(|id| ato_ipc::oci_component_inputs::input_env_name(id))
+                .chain(std::iter::once("ATO_OUTPUT_DIR".to_owned()))
+                .collect::<BTreeSet<_>>();
+            if step.env.keys().any(|name| projected_names.contains(name))
+                || application
+                    .bindings
+                    .iter()
+                    .filter(|binding| step.bindings.contains(&binding.id))
+                    .any(|binding| {
+                        projected_names.contains(&application_binding_environment_name(binding))
+                    })
+                || std::iter::once(workspace_mount)
+                    .chain(
+                        derivation
+                            .state
+                            .iter()
+                            .filter(|state| step.state.contains(&state.id))
+                            .map(|state| state.mount.as_str()),
+                    )
+                    .any(|target| {
+                        Path::new(target).starts_with("/.ato-data")
+                            || Path::new("/.ato-data").starts_with(target)
+                    })
+            {
+                return Err(profile(
+                    "component input/output conflicts with environment or mounts",
+                ));
+            }
+            for id in ids {
+                if id != ato_ipc::oci_component_inputs::ASSETS_INPUT_ID
+                    && !model_input_ids.contains(id.as_str())
+                {
+                    return Err(profile(format!(
+                        "service `{}` selects undeclared input `{id}`",
+                        step.id
+                    )));
+                }
+                input_readers.insert(id);
+            }
+        }
         if step.runtimes.len()
-            != 4 + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
+            != 4 + usize::from(
+                step.runtimes
+                    .contains_key(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME),
+            ) + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_USER_RUNTIME))
         {
@@ -2473,7 +2747,15 @@ fn validate_oci_service_group<'a>(
                     step.id
                 )));
             }
-            if step.env.contains_key(&binding_environment_name(binding_id)) {
+            let binding = application
+                .bindings
+                .iter()
+                .find(|binding| binding.id == *binding_id)
+                .ok_or_else(|| profile("service names an undeclared Binding"))?;
+            if step
+                .env
+                .contains_key(&application_binding_environment_name(binding))
+            {
                 return Err(profile(format!(
                     "Binding `{binding_id}` conflicts with an authored environment value of service `{}`",
                     step.id
@@ -2481,6 +2763,14 @@ fn validate_oci_service_group<'a>(
             }
             *binding_readers.entry(binding_id.as_str()).or_default() += 1;
         }
+    }
+    if model_input_ids
+        .iter()
+        .any(|id| !input_readers.contains(*id))
+    {
+        return Err(profile(
+            "Model Set input has no explicitly declared service consumer",
+        ));
     }
     if group_totals(limits).is_none() {
         return Err(profile(
@@ -3537,6 +3827,229 @@ default = "pure"
         assert_ne!(without.index.derivations, bundle.index.derivations);
     }
 
+    fn attach_model_input(bundle: &mut PortableApplicationBundle, reference: &str) -> String {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-model-set-probe");
+        let (_, model_bundle) = build_authored_bundle_v2(&root).unwrap();
+        let model_route = validate_all_derivations(&model_bundle).unwrap().remove(0);
+        let input = model_route
+            .derivation
+            .inputs
+            .iter()
+            .find(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+            .unwrap()
+            .clone();
+        bundle.index.objects.push(
+            model_bundle
+                .index
+                .objects
+                .iter()
+                .find(|object| object.reference == input.content_ref)
+                .unwrap()
+                .clone(),
+        );
+        bundle.payloads.push(
+            model_bundle
+                .payloads
+                .iter()
+                .find(|payload| payload.reference == input.content_ref)
+                .unwrap()
+                .clone(),
+        );
+        bundle
+            .index
+            .objects
+            .sort_by(|a, b| a.reference.cmp(&b.reference));
+        bundle
+            .payloads
+            .sort_by(|a, b| a.reference.cmp(&b.reference));
+        replace_derivation(bundle, reference, |derivation| {
+            derivation.inputs.push(input);
+            derivation.inputs.sort_by(|a, b| a.id.cmp(&b.id));
+        })
+    }
+
+    #[test]
+    fn single_oci_and_native_model_inputs_validate_and_project_without_rewriting_k() {
+        for native in [None, Some(false), Some(true)] {
+            let mut bundle = match native {
+                Some(pixel) => crate::native_surface_tests::fixture(pixel),
+                None => {
+                    build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec())
+                        .unwrap()
+                        .1
+                }
+            };
+            let old_k = bundle.index.root_contract_ref.clone();
+            let selected = route_ref(&bundle, PortableRealizationKind::OciContainer);
+            let selected = attach_model_input(&mut bundle, &selected);
+            let bytes = encode_portable_application_bundle(&bundle).unwrap();
+            let (_, routes) = validate_bytes_all(&bytes).unwrap();
+            let route = routes
+                .iter()
+                .find(|route| route.derivation_ref.as_str() == selected)
+                .unwrap();
+            assert_eq!(route.model_sets.len(), 1);
+            assert_eq!(route.model_sets[0].input_id, "models");
+            assert_eq!(
+                route.model_sets[0].reference,
+                route.model_sets[0].manifest.reference().unwrap()
+            );
+            assert_eq!(bundle.index.root_contract_ref, old_k);
+            assert_eq!(route.contract.contract_ref().unwrap(), old_k);
+            let reports = validator_agent::tests_support::route_reports(&routes).unwrap();
+            let report = reports
+                .iter()
+                .find(|r| r.derivation_ref == selected)
+                .unwrap();
+            let report = serde_json::to_value(report).unwrap();
+            assert_eq!(
+                report["realization"],
+                if native.is_some() {
+                    "native_oci_container"
+                } else {
+                    "oci"
+                }
+            );
+            assert_eq!(report["model_sets"][0]["input_id"], "models");
+            assert_eq!(report["model_sets"][0]["object_count"], 2);
+            assert_eq!(report["model_sets"][0]["total_bytes"], 1_048_596);
+            assert_eq!(
+                report["model_sets"][0]["content_ref"],
+                route.model_sets[0].reference
+            );
+            // The container profile admits the data shape, not local execution.
+            let refused = ato_runtime_attempt::admission::admit(
+                &route.attempt_spec(None),
+                ato_runtime_attempt::admission::EffectAuthorization::UserInvoked {
+                    derivation_ref: route.derivation_ref.as_str(),
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                refused.code,
+                if native.is_some() {
+                    "native_surface_unavailable"
+                } else {
+                    "model_set_unavailable"
+                }
+            );
+            for model in &route.model_sets[0].manifest.objects {
+                assert!(
+                    bundle
+                        .descriptor(&ContentRef::parse(model.digest.clone()).unwrap())
+                        .is_none()
+                );
+            }
+            // The legacy process route in the same bundle stays untouched.
+            if native.is_none() {
+                assert!(
+                    routes
+                        .iter()
+                        .find(|r| r.realization == PortableRealizationKind::LocalProcess)
+                        .unwrap()
+                        .model_sets
+                        .is_empty()
+                );
+            }
+            // Manifest payload tampering remains a closure/digest failure.
+            let manifest_ref = route.model_sets[0].reference.clone();
+            let payload = bundle
+                .payloads
+                .iter_mut()
+                .find(|p| p.reference == manifest_ref)
+                .unwrap();
+            payload.bytes = base64::engine::general_purpose::STANDARD.encode(b"{}");
+            assert!(encode_portable_application_bundle(&bundle).is_err());
+        }
+    }
+
+    #[test]
+    fn group_model_input_assignment_is_explicit_and_preserves_k() {
+        let root = authored_root(SERVICE_GROUP_TOML);
+        let (_, mut bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        let k = bundle.index.root_contract_ref.clone();
+        let selected = bundle.index.derivations[0].clone();
+        let selected = attach_model_input(&mut bundle, &selected);
+        replace_derivation(&mut bundle, &selected, |d| {
+            d.steps[0]
+                .runtimes
+                .insert("oci.input_ids".into(), "[\"models\"]".into());
+        });
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(bundle.index.root_contract_ref, k);
+        assert_eq!(routes[0].model_sets[0].input_id, "models");
+        let reports = crate::validator_agent::tests_support::route_reports(&routes).unwrap();
+        assert_eq!(
+            reports[0].services[0].input_ids.as_deref(),
+            Some(["models".to_owned()].as_slice())
+        );
+        assert!(reports[0].services[1].input_ids.is_none());
+        let legacy = serde_json::to_value(&reports[0].services[1]).unwrap();
+        assert!(legacy.get("input_ids").is_none());
+        let route = &routes[0];
+        for invalid in [
+            "[\"unknown\"]",
+            "[\"workspace\"]",
+            "[\"models\",\"models\"]",
+            "[ \"models\" ]",
+            "[]",
+        ] {
+            assert!(
+                revalidate(route, |d| {
+                    d.steps[0]
+                        .runtimes
+                        .insert("oci.input_ids".into(), invalid.into());
+                })
+                .is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            revalidate(route, |d| {
+                d.steps[0]
+                    .env
+                    .insert("ATO_INPUT_PATH_MODELS".into(), "shadow".into());
+            })
+            .is_err()
+        );
+        assert!(
+            revalidate(route, |d| {
+                d.steps[0]
+                    .env
+                    .insert("ATO_OUTPUT_DIR".into(), "shadow".into());
+            })
+            .is_err()
+        );
+        replace_derivation(&mut bundle, routes[0].derivation_ref.as_str(), |d| {
+            d.steps[1]
+                .runtimes
+                .insert("oci.input_ids".into(), "[\"models\"]".into());
+        });
+        let routes = validate_all_derivations(&bundle).unwrap();
+        let reports = crate::validator_agent::tests_support::route_reports(&routes).unwrap();
+        assert_eq!(
+            reports[0].services[0].input_ids,
+            reports[0].services[1].input_ids
+        );
+        assert_eq!(bundle.index.root_contract_ref, k);
+    }
+
+    #[test]
+    fn model_inputs_remain_unsupported_for_static_and_unassigned_service_groups() {
+        let (_, static_bundle) =
+            build_static_bundle(&fixture_root(), "Static model refusal").unwrap();
+        let root = authored_root(SERVICE_GROUP_TOML);
+        let (_, group_bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        for mut bundle in [static_bundle, group_bundle] {
+            let selected = bundle.index.derivations[0].clone();
+            attach_model_input(&mut bundle, &selected);
+            let error = validate_all_derivations(&bundle).unwrap_err().to_string();
+            assert!(error.contains("Model Set"), "{error}");
+        }
+    }
+
     #[test]
     fn a_model_set_whose_manifest_is_not_the_pinned_digest_is_refused() {
         let root =
@@ -3778,6 +4291,59 @@ default = "pure"
             bundle.index.derivations,
             vec!["sha256:25fffed8e727f6716513f3846ff988ff0291fbca17e8725712a2a2684cb2d61d"]
         );
+    }
+
+    #[test]
+    fn component_contract_keeps_logical_ports_and_requires_every_observation() {
+        use ato_formation::verify::{RuntimeHttpObservation, RuntimeObservation, verify_runtime};
+        let source = SERVICE_GROUP_TOML.replace(
+            "[[derivation]]",
+            r#"
+[[contract.observation]]
+id = "backend-health"
+use = "ato.contract.http@1"
+port = "backend.http"
+path = "/health"
+status = 200
+
+[[derivation]]"#,
+        );
+        let root = authored_root(&source);
+        let (_, bundle) = build_authored_bundle_v2(root.path()).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        let requirement = route
+            .contract
+            .requirements
+            .iter()
+            .find(|r| r.id == "backend-health")
+            .unwrap();
+        assert_eq!(requirement.port.as_deref(), Some("backend.http"));
+        let mut observation = RuntimeObservation {
+            input_refs: route.attempt_spec(None).input_refs,
+            http: vec![RuntimeHttpObservation::from_response(
+                "app.http", "GET", "/", 200, b"ok",
+            )],
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
+        observation.http.push(RuntimeHttpObservation::from_response(
+            "backend.http",
+            "GET",
+            "/health",
+            503,
+            b"down",
+        ));
+        assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
+        observation.http[1] =
+            RuntimeHttpObservation::from_response("backend.http", "GET", "/health", 200, b"ok");
+        assert!(verify_runtime(&route.contract, &observation).fully_satisfied());
+        // Same path on another logical Port cannot stand in for this component.
+        observation.http[1].port = "app.http".to_owned();
+        assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
+        let bad_source = source.replace("port = \"backend.http\"", "port = \"undeclared.http\"");
+        let bad_root = authored_root(&bad_source);
+        assert!(build_authored_bundle_v2(bad_root.path()).is_err());
     }
 
     #[test]
@@ -4424,7 +4990,7 @@ default = "pure"
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
     }
 
-    fn datasette_fixture_root() -> PathBuf {
+    pub(super) fn datasette_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-datasette")
     }
 
@@ -4471,7 +5037,7 @@ default = "pure"
         assert_eq!(renamed_bundle.index.derivations, bundle.index.derivations);
     }
 
-    fn datasette_spec() -> PortableDynamicBundleSpec {
+    pub(super) fn datasette_spec() -> PortableDynamicBundleSpec {
         PortableDynamicBundleSpec {
             title: "Datasette catalog".to_owned(),
             surface_path: "/".to_owned(),
@@ -4502,12 +5068,14 @@ default = "pure"
             requirements: vec![
                 PortableHttpRequirementSpec {
                     id: "entry".to_owned(),
+                    port: None,
                     path: "/".to_owned(),
                     status: 200,
                     body_digest: None,
                 },
                 PortableHttpRequirementSpec {
                     id: "rows".to_owned(),
+                    port: None,
                     path: "/catalog/items.json?_shape=array&_sort=id".to_owned(),
                     status: 200,
                     body_digest: Some(format!("sha256:{}", "cd".repeat(32))),
@@ -4839,6 +5407,110 @@ default = "pure"
             !bytes
                 .windows(secret.len())
                 .any(|window| window == secret.as_bytes())
+        );
+    }
+
+    #[test]
+    fn explicit_embedding_protocols_project_only_their_declared_sdk_environment() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let mut spec = datasette_spec();
+        spec.bindings = vec![
+            ApplicationBindingV1 {
+                id: "embedding_key".into(),
+                protocol: OPENAI_EMBEDDING_API_KEY_PROTOCOL.into(),
+                required: true,
+            },
+            ApplicationBindingV1 {
+                id: "embedding_url".into(),
+                protocol: OPENAI_EMBEDDING_BASE_URL_PROTOCOL.into(),
+                required: true,
+            },
+            ApplicationBindingV1 {
+                id: "opaque_json".into(),
+                protocol: "ato.binding.secret@1".into(),
+                required: false,
+            },
+        ];
+        let (bytes, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+        assert_eq!(
+            bundle.index.root_contract_ref,
+            original.index.root_contract_ref
+        );
+        assert_eq!(bundle.index.derivations, original.index.derivations);
+        let (_, routes) = validate_bytes_all(&bytes).unwrap();
+        for route in routes {
+            let environment = resolve_application_bindings(
+                &route.application,
+                &BTreeMap::from([
+                    ("embedding_key".into(), "short-run-capability".into()),
+                    (
+                        "embedding_url".into(),
+                        "https://broker.invalid/v1/managed-secrets".into(),
+                    ),
+                    ("opaque_json".into(), r#"{"api_key":"opaque-json"}"#.into()),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(environment.len(), 3);
+            assert_eq!(environment["OPENAI_API_KEY"], "short-run-capability");
+            assert_eq!(
+                environment["OPENAI_BASE_URL"],
+                "https://broker.invalid/v1/managed-secrets"
+            );
+            assert_eq!(
+                environment["ATO_BINDING_OPAQUE_JSON"],
+                r#"{"api_key":"opaque-json"}"#
+            );
+            assert!(!environment.contains_key("ATO_BINDING_EMBEDDING_KEY"));
+            assert!(
+                !bytes
+                    .windows(b"short-run-capability".len())
+                    .any(|w| w == b"short-run-capability")
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_environment_conflicts_and_duplicate_protocol_targets_are_refused() {
+        let mut spec = datasette_spec();
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "embedding".into(),
+            protocol: OPENAI_EMBEDDING_API_KEY_PROTOCOL.into(),
+            required: true,
+        }];
+        spec.process.env.insert(
+            "OPENAI_API_KEY".into(),
+            "public-value-cannot-shadow-capability".into(),
+        );
+        assert!(
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with an authored environment")
+        );
+        spec.process.env.clear();
+        spec.bindings.push(ApplicationBindingV1 {
+            id: "second".into(),
+            protocol: OPENAI_EMBEDDING_API_KEY_PROTOCOL.into(),
+            required: true,
+        });
+        assert!(
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("repeated environment name")
+        );
+        // Similar protocol strings do not opt in to SDK projection.
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "embedding".into(),
+            protocol: "ato.openai.embeddings.api-key@2".into(),
+            required: true,
+        }];
+        assert_eq!(
+            application_binding_environment_name(&spec.bindings[0]),
+            "ATO_BINDING_EMBEDDING"
         );
     }
 

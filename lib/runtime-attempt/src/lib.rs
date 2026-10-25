@@ -33,6 +33,7 @@ pub mod exploration_realizer;
 pub mod formation_realizer;
 pub mod journal;
 pub mod launch;
+pub mod native_launch;
 pub mod network_bridge;
 pub mod plan;
 pub mod realize;

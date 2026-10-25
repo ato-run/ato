@@ -214,9 +214,19 @@ pub fn prepare_ownership(
     }
     if let Some(dir) = context.output_dir() {
         std::fs::create_dir_all(dir).context("failed to create the output directory")?;
-        chown_tree(dir, boundary)?;
+        prepare_output_ownership(dir, boundary)?;
     }
     Ok(())
+}
+
+/// Hand only an already-validated Run output tree to the configured workload
+/// identity. OCI and Process share this policy; an authored UID is not authority.
+pub(super) fn prepare_output_ownership(dir: &Path, boundary: HostBoundary) -> Result<()> {
+    ensure!(
+        boundary.uid != 0 && boundary.gid != 0,
+        "output workload identity must not be root"
+    );
+    chown_tree(dir, boundary)
 }
 
 #[cfg(unix)]
@@ -419,6 +429,7 @@ mod tests {
         let policy = landlock_policy(
             &context(workspace.path(), &state, StateAccessV1::ReadWrite).with_read_only_inputs(
                 vec![crate::launch::resolved::ResolvedReadOnlyInput {
+                    input_id: None,
                     env_name: "ATO_INPUT_PATH_MODELS".to_owned(),
                     path: inputs.path().to_path_buf(),
                 }],

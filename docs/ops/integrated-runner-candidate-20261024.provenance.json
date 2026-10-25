@@ -1,0 +1,118 @@
+{
+  "format": "ato-runner-build-provenance/1",
+  "created_at": "2026-10-24T03:56:14.396158+00:00",
+  "source": {
+    "repository": "https://github.com/ato-run/ato",
+    "commit": "b6341239acea53132ed7583c44b32d731387d8dc",
+    "branch_at_export": "integration/formation-native-models-v1",
+    "export": "git archive --format=tar b6341239acea53132ed7583c44b32d731387d8dc",
+    "git_archive_sha256": "b6af8fce0061e48ff8fb63e7c48e5c1ab8067a672a4a426c8d5aef6ccc6ecd16",
+    "transport_sha256": "07d6823de8bc23a0caa58f85bac536f26dbe3fca31ce0ffdf525dfac28dff34e",
+    "regular_files": 2489,
+    "symlinks": 0,
+    "all_files_manifest_sha256": "68ac9cba968d2745d475d98069ced7a4866f7cd94ba1def64897900b10cad19d",
+    "rust_cargo_literal_include_inputs": 663,
+    "inputs_manifest_sha256": "f0be9118dddb09e85e9c30cb6e55058effb72bd5cad35628332aaef3954cee9a",
+    "before_after_hashes_match": true
+  },
+  "build": {
+    "target": "x86_64-unknown-linux-gnu",
+    "profile": "dev",
+    "debug_info": 0,
+    "incremental": false,
+    "jobs": 2,
+    "offline": true,
+    "locked": true,
+    "command": "cargo build -p ato-connected-realization-worker --bin ato-connected-realization-worker --offline --locked",
+    "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2",
+    "shared_target": "/home/ekohsuke/ato-run/.tmp/native-surface-20261023/runner-source/target",
+    "fresh_task_home_tmp_and_empty_docker_config": true,
+    "home_env_overridden": false
+  },
+  "artifact": {
+    "path": "/home/ekohsuke/ato-run/.tmp/integrated-runner-candidate-20261024/artifacts/ato-connected-realization-worker",
+    "sha256": "444ac71b9195db34d3d1f49846e08c6e7d0d1466eff75e7e6bc78531c2b85360",
+    "bytes": 50479808,
+    "package": "ato-connected-realization-worker",
+    "package_version": "0.1.0",
+    "version_authority": "Cargo.toml package version; CLI has no --version command",
+    "binary_kind": "normal Runner executable, not test harness",
+    "file": "../artifacts/ato-connected-realization-worker: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 3.2.0, BuildID[sha1]=748fceb3c699f1b1fb0fe4e2113de525572061a8, not stripped",
+    "linkage": [
+      "\tlinux-vdso.so.1 (0x000074877bb36000)",
+      "\tlibgcc_s.so.1 => /usr/lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000074877baf8000)",
+      "\tlibm.so.6 => /usr/lib/x86_64-linux-gnu/libm.so.6 (0x00007487798da000)",
+      "\tlibc.so.6 => /usr/lib/x86_64-linux-gnu/libc.so.6 (0x0000748779600000)",
+      "\t/lib64/ld-linux-x86-64.so.2 (0x000074877bb38000)"
+    ]
+  },
+  "validation": {
+    "focused_browser_fixture_tests": 7,
+    "worker_passed": 184,
+    "worker_ignored": 21,
+    "netd_lib_passed": 121,
+    "netd_egress_passed": 3,
+    "netd_ingress_isolated_passed": 11,
+    "netd_lifecycle_passed": 5,
+    "netd_resolver_passed": 9,
+    "netd_real_pixel_tests_ignored": 2,
+    "aggregate_unique_passed": 333,
+    "aggregate_ignored": 23,
+    "worker_netd_all_target_clippy": "passed",
+    "workspace_fmt_check": "passed",
+    "normal_binary_help": "passed",
+    "notes": [
+      "Final standard test targets passed across serial invocations; no ignored real Docker test was run.",
+      "Initial long TMPDIR caused three SUN_LEN failures and one Chrome CDP failure; all four passed with the standard short task TMPDIR.",
+      "Combined netd ingress had fixed-port40000 EADDRINUSE; its11 tests passed in an isolated invocation. Both failure logs are retained.",
+      "Only exact owned test netd subprocesses from irc.0MIetR were cleaned up; existing Runner/services/listeners were not changed."
+    ]
+  },
+  "boundaries": {
+    "prepare_only": true,
+    "installed": false,
+    "services_restarted": false,
+    "enrollment_performed": false,
+    "runner_credentials_read": false,
+    "operator_flags_changed": false,
+    "capability_advertisement_sent": false,
+    "new_docker_run_executed": false,
+    "paid_resources_used": false,
+    "root_source_or_frozen_pr_changed": false,
+    "limitations": [
+      "Development-profile Linux candidate; release/LTO build has not been prepared.",
+      "No staging installation or authenticated Hosted Run acceptance is claimed.",
+      "Existing shared slots use the same Runner identity; deployment must not mix distinct capabilities under that identity.",
+      "Operational authorization, rollout/isolation and flag policy remain separate work."
+    ]
+  },
+  "log_sha256": {
+    "logs/artifact-file.log": "ae98f9c9d08920cf1a7268dc0c40be6a1806282b5ce1fb9c9f264266360d626f",
+    "logs/artifact-ldd.log": "48a5dbc3b38d0ac2c869e6077b978a5b8e9589a05014f68352a1e260f22b0457",
+    "logs/artifact-size.log": "3dc7a78a5b5be5560c935fb33a275352a1a7c8cc8cb5b1fdd651a158b40332e7",
+    "logs/build-short-tmpdir.log": "40108eb5c2e432741fc7f36afdf5c793ec02b19e7b1ce5e51bdd2ba377bd26cb",
+    "logs/build.log": "1d2992bce4745344bd95575413160508fcaa30ff09051a894bd11270af6edd0f",
+    "logs/cargo-version.log": "b6ef6807dd96d18b833474ad68e7a23a29e562a29c67afa71a59fb9a73df0068",
+    "logs/clippy.log": "9fc11bf50eff4f050a23d7b3a21b9ab0a7ae1f2f39e15a4569aa5bbd1e0561d8",
+    "logs/fixture7.log": "5f9f039b1c54f3eb73d5d497f1a50fa4f67cb33a71ff5d76e8e9d9e93944edca",
+    "logs/fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "logs/ingress-isolated.log": "55dd8cd0caa9d42dd2fac7c7b3ed5a5da824ad6eb2f4ed08f28e49f96f3b16ca",
+    "logs/inputs-after.log": "db0846d58047477f96cbd0de5ca320719c20c1255b2d000dae959e2cb148284c",
+    "logs/inputs-before.log": "db0846d58047477f96cbd0de5ca320719c20c1255b2d000dae959e2cb148284c",
+    "logs/remaining-targets.log": "1c39a4cc37ac8bdb08f5adad4c3f61f3681ace1646c72d3e2abf58c749a3110a",
+    "logs/rustc-version.log": "f64c55ed9f210d80a9b248206104a47175faf5ec94a093e4ad132549209089fc",
+    "logs/source-after.log": "53bb2613e7dfc8ec7991f2bbb87d2c2ffed71dd2d0e9df8d331b712ab02ddc8e",
+    "logs/source-before.log": "53bb2613e7dfc8ec7991f2bbb87d2c2ffed71dd2d0e9df8d331b712ab02ddc8e",
+    "logs/transport.sha256": "3d12b3cca71bf2304438b028fe3708da6099e074e33e63dcf04ec92db99618b2",
+    "logs/worker-help.log": "05072554a8d57d4c617050f7461c7470d320c5d60d9ed54a7cdddae8dc9758cf",
+    "logs/worker-netd-alltargets-long-tmpdir.log": "b23f1f39abafd2d20cd95cd27993a9bc1b99d8a65d03cfe44695a709020adc6d",
+    "logs/worker-netd-alltargets.log": "1f0e02e4dea56c037794c2c361992288c8a4ca6a4d605016c67d04fe9779b2b5"
+  },
+  "command_script_sha256": {
+    "build-candidate.sh": "9873e13e6f6df73ed06f5acb75b55f3ab5a279263f6f0b6c3080d96a3f6ad18d",
+    "final-checks.sh": "caaeb5d3975bc52759f4fda59ca5022f2933ff3c024040336c4a99c33cf7dfbe",
+    "remaining-targets.sh": "187f8fee77b9404218285c0cbc18551ca1d3be4b9ddf4e77f592f11563957111",
+    "resume-short-tmpdir.sh": "a9eae5863f279531cdc654fa7b5e33583075952a6bf1359ca532c9c2c70f9d2e"
+  }
+}

@@ -667,6 +667,7 @@ fn observe_http(
     control: Option<&crate::control::ExecutionControl>,
 ) -> Result<Vec<RuntimeHttpObservation>> {
     let client = reqwest::blocking::Client::builder()
+        .no_proxy()
         // A candidate has no business redirecting its Contract observation
         // somewhere else; what it answers directly is what is measured.
         .redirect(reqwest::redirect::Policy::none())

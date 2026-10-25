@@ -561,6 +561,11 @@ fn run_step_with_variables(
     let mut command = std::process::Command::new(program);
     command
         .args(arguments)
+        // bwrap's --clearenv only clears the eventual workload environment.
+        // Its PID-1 reaper still exposes its initial environment via /proc,
+        // so remove controller credentials before bwrap itself is exec'd.
+        .env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

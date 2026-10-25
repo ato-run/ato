@@ -75,7 +75,10 @@ pub fn serve_terminal_vsock(_port: u32, _state: Arc<TerminalBrokerState>) -> io:
 }
 
 #[cfg(target_os = "linux")]
-fn serve_terminal_stream(mut stream: File, state: Arc<TerminalBrokerState>) -> io::Result<()> {
+pub(crate) fn serve_terminal_stream(
+    mut stream: File,
+    state: Arc<TerminalBrokerState>,
+) -> io::Result<()> {
     let attachment = state.attach()?;
     let generation = attachment.generation;
     let writer = Arc::new(Mutex::new(stream.try_clone()?));
@@ -86,6 +89,12 @@ fn serve_terminal_stream(mut stream: File, state: Arc<TerminalBrokerState>) -> i
             rows: attachment.rows,
         },
     )?;
+
+    // A readiness probe reads Ready then disconnects. Do not consume the
+    // workload's initial prompt/screen until an actual viewer sends its first
+    // bounded input/control frame (the PWA always starts with its viewport).
+    let first_frame = read_frame(&mut stream)?;
+    let mut pending_frame = Some(first_frame);
 
     let mut output = attachment.master.try_clone()?;
     let output_writer = Arc::clone(&writer);
@@ -163,7 +172,10 @@ fn serve_terminal_stream(mut stream: File, state: Arc<TerminalBrokerState>) -> i
     let mut master_input = attachment.master.try_clone()?;
     let input_result = (|| {
         loop {
-            let (kind, payload) = read_frame(&mut stream)?;
+            let (kind, payload) = match pending_frame.take() {
+                Some(frame) => frame,
+                None => read_frame(&mut stream)?,
+            };
             match kind {
                 FRAME_INPUT if payload.len() <= MAX_TERMINAL_INPUT_FRAME_BYTES => {
                     master_input.write_all(&payload)?
