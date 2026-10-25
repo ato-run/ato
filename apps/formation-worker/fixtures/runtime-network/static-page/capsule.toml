@@ -1,0 +1,37 @@
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+entry = "index.html"
+spa_fallback = false
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+
+[[contract.require]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+
+[contract.require.expect]
+digest = "capture"

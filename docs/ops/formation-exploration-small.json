@@ -1,0 +1,1413 @@
+{
+  "schema": "ato.formation-exploration-small-ledger/1",
+  "status": "actual_execution_gates_passed",
+  "fixtures": [
+    {
+      "index": 101,
+      "upstream_OSS": false,
+      "functional_measured": false,
+      "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+      "D_ref": "sha256:196a691a977e226901b347d082bc8fcc49f26aafee9de172de92503c281f5e46",
+      "attempt_id": "01M3S4K9XVVDP0FS3A5Z16TE4A",
+      "receipt": {
+        "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+        "derivation_ref": "sha256:196a691a977e226901b347d082bc8fcc49f26aafee9de172de92503c281f5e46",
+        "execution": {
+          "attempt_id": "01M3S4K9XVVDP0FS3A5Z16TE4A",
+          "endpoint": "http://127.0.0.1:8080/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M3S4K69KYNGB7VY7YRD8RT4R"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "requirements": {
+        "authority": [
+          {
+            "operation": "bind",
+            "phase": "runtime",
+            "protocol": "ato.http@1",
+            "resource": "app.http"
+          }
+        ],
+        "network": [
+          {
+            "host": "registry.npmjs.org",
+            "phase": "dependencies",
+            "port": 443
+          }
+        ]
+      },
+      "rounds": 2,
+      "result_sha256": "8397f94a1e6cecc01e395cfe392afe535fc954749a0d6fe255ba107e6739515e",
+      "normal_verified_routes": 0
+    },
+    {
+      "index": 102,
+      "upstream_OSS": false,
+      "functional_measured": false,
+      "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+      "D_ref": "sha256:196a691a977e226901b347d082bc8fcc49f26aafee9de172de92503c281f5e46",
+      "attempt_id": "01M3S4KQ2Q2DX6NMKZBG0DVBG6",
+      "receipt": {
+        "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+        "derivation_ref": "sha256:196a691a977e226901b347d082bc8fcc49f26aafee9de172de92503c281f5e46",
+        "execution": {
+          "attempt_id": "01M3S4KQ2Q2DX6NMKZBG0DVBG6",
+          "endpoint": "http://127.0.0.1:8080/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M3S4KHM5YNQHATVYB9SKCBC5"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "requirements": {
+        "authority": [
+          {
+            "operation": "bind",
+            "phase": "runtime",
+            "protocol": "ato.http@1",
+            "resource": "app.http"
+          }
+        ],
+        "network": [
+          {
+            "host": "registry.npmjs.org",
+            "phase": "dependencies",
+            "port": 443
+          }
+        ]
+      },
+      "rounds": 2,
+      "result_sha256": "350fccebcf87e33ce8567d710a7f2cc2fae82a1d04c8a4f1d82bb3ef0a0c96d1",
+      "normal_verified_routes": 0
+    }
+  ],
+  "upstream_pilots": [
+    {
+      "index": 2,
+      "typed_K_PASS": false,
+      "result_sha256": "efbbc82b5436dbf3f2fc60f5683a1204a2be0e3e02afaed0177c3df7eaab9db5",
+      "rounds": 3,
+      "attempts": [
+        {
+          "attempt_id": "01M3S3W8EH5M10ZB3QV91VQ6KT",
+          "claimed": true,
+          "derivation_ref": "sha256:88ea5c7b92906aadea82c3f08c588632d3be7c9d008b209811b7b4a46a5a4a04",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "authority_denied",
+          "materialization_ref": null,
+          "record": "not_started",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "inconclusive",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3S3WF63SCJ9AWGQ0ETETYEY",
+          "claimed": true,
+          "derivation_ref": "sha256:b4442a76139f145603db0fc22a1fde4da8b962cd2a5062348945ab004ebd494f",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "candidate_not_observable",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "fail",
+          "unknown_resolved": false
+        }
+      ],
+      "stop": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:16:14.511Z"
+      }
+    },
+    {
+      "index": 69,
+      "typed_K_PASS": false,
+      "result_sha256": "5982229375b90aa4c5c335a34f3dbf7f5dcd38e58faa5dec8da44b803260d0f8",
+      "rounds": 3,
+      "attempts": [
+        {
+          "attempt_id": "01M3S3XFZDDZ3YMGE8P46Q382G",
+          "claimed": true,
+          "derivation_ref": "sha256:337a6bcbea22cd82c100d7a027e99a1d7412c039f6d69887af28204d0c03f284",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "candidate_not_observable",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "fail",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3S3XVS5ZGH6B7E4AK4BT735",
+          "claimed": true,
+          "derivation_ref": "sha256:35fbd548a6c86768441d01eaa850fbc33d1c6f5a605649c55b638acaad055893",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "candidate_not_observable",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "fail",
+          "unknown_resolved": false
+        }
+      ],
+      "stop": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:16:49.108Z"
+      }
+    }
+  ],
+  "fixed_gates": {
+    "rounds_3": {
+      "rounds": 3,
+      "attempts": [],
+      "submission": null,
+      "stop": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:29:19.881Z"
+      },
+      "live_provider_calls": 0,
+      "result_sha256": "9504c8ca7b53cbb1e7b68599d5631b6d628c65985f0d0abd60f7751ebeb11516"
+    },
+    "authority_repair_reduction": {
+      "rounds": 3,
+      "attempts": [
+        {
+          "attempt_id": "01M3S4KZZBTSJPD10EGYV83VQY",
+          "claimed": true,
+          "derivation_ref": "sha256:e847f898e3bd70c952ffd89e03499c175f8395386398d58d6691053afde93675",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "authority_denied",
+          "materialization_ref": null,
+          "record": "not_started",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "inconclusive",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3S4M214XFZK816XNSBPM06X",
+          "claimed": true,
+          "derivation_ref": "sha256:f80caf492b27affef57f5cfa97ae4fce8da9efaff1b5ca43118e7e92ec8c60f0",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:924b07c26deb6fd8cd8d7ed7333398f6f364883c5886dda27ba94650874f95be",
+          "record": "finished",
+          "retained_ref": "sha256:f992223cc536704e2982fbdd04e68c995ce6d2be529347e592d29ba144f0986f",
+          "route_accepted": true,
+          "runtime_id": "local",
+          "status": "pass",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3S4M8C9Q3D2K3AX0TWJXPWK",
+          "claimed": true,
+          "derivation_ref": "sha256:eceaa22faa9f1e7cae06e87dd137863099ae19d4d27bfdb8ecbafa1a9fa5502a",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:924b07c26deb6fd8cd8d7ed7333398f6f364883c5886dda27ba94650874f95be",
+          "record": "finished",
+          "retained_ref": "sha256:4caba56ed5daba4b4a3e3ba30e0836ec2b4e3735a260c06fbc71015749cae415",
+          "route_accepted": true,
+          "runtime_id": "local",
+          "status": "pass",
+          "unknown_resolved": false
+        }
+      ],
+      "submission": {
+        "attempt_id": "01M3S4M8C9Q3D2K3AX0TWJXPWK",
+        "contract": {
+          "requirements": [
+            {
+              "id": "root",
+              "method": "GET",
+              "path": "/",
+              "port": "app.http",
+              "status": 200,
+              "verifier": "ato.contract.http@1"
+            },
+            {
+              "digest": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+              "id": "source-identity",
+              "input": "workspace",
+              "verifier": "ato.contract.workspace@1"
+            }
+          ],
+          "schema": "ato.contract/1"
+        },
+        "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+        "derivation": {
+          "effects": "pure",
+          "inputs": [
+            {
+              "content_ref": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+              "id": "workspace",
+              "protocol": "ato.workspace@1"
+            }
+          ],
+          "ports": [
+            {
+              "from": "app",
+              "guest_port": 8080,
+              "id": "app.http",
+              "protocol": "ato.http@1"
+            }
+          ],
+          "requirements": {
+            "authority": [
+              {
+                "operation": "bind",
+                "phase": "runtime",
+                "protocol": "ato.http@1",
+                "resource": "app.http"
+              }
+            ],
+            "network": [
+              {
+                "host": "registry.npmjs.org",
+                "phase": "dependencies",
+                "port": 443
+              }
+            ]
+          },
+          "runtimes": {
+            "node": "22.14.0"
+          },
+          "schema": "ato.derivation/1",
+          "state": [],
+          "steps": [
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/node",
+                "--version"
+              ],
+              "cwd": ".",
+              "id": "check-toolchain",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "ci",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                "--omit=dev"
+              ],
+              "cwd": ".",
+              "id": "dependencies-1",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/node",
+                "/app/server.mjs"
+              ],
+              "cwd": ".",
+              "id": "app",
+              "op": "serve",
+              "protocol": "ato.process@1"
+            }
+          ]
+        },
+        "derivation_ref": "sha256:eceaa22faa9f1e7cae06e87dd137863099ae19d4d27bfdb8ecbafa1a9fa5502a",
+        "receipt": {
+          "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+          "derivation_ref": "sha256:eceaa22faa9f1e7cae06e87dd137863099ae19d4d27bfdb8ecbafa1a9fa5502a",
+          "execution": {
+            "attempt_id": "01M3S4M8C9Q3D2K3AX0TWJXPWK",
+            "endpoint": "http://127.0.0.1:8080/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M3S4KZ8Z54QYZV9XMNMNAVJK"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "status": "k_reached_awaiting_assessment"
+      },
+      "stop": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T12:29:04.555Z"
+      },
+      "live_provider_calls": 0,
+      "result_sha256": "8f4a11990ed277ef40417be7f1b146fd5b79f27912988b98523788c7033fad1a"
+    },
+    "ceiling_exceeded": {
+      "rounds": 1,
+      "attempts": [],
+      "submission": null,
+      "stop": {
+        "reason": "exploration_authority_exceeded",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:29:16.464Z"
+      },
+      "live_provider_calls": 0,
+      "result_sha256": "0efac17e66b9a072bc156e8ccab75bdd04e026a150f1bea533fb291ba644d0fe"
+    },
+    "no_progress": {
+      "rounds": 2,
+      "attempts": [
+        {
+          "attempt_id": "01M3S5EY0F7NESCW87D5F5KB38",
+          "claimed": true,
+          "derivation_ref": "sha256:e847f898e3bd70c952ffd89e03499c175f8395386398d58d6691053afde93675",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "authority_denied",
+          "materialization_ref": null,
+          "record": "not_started",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "inconclusive",
+          "unknown_resolved": false
+        }
+      ],
+      "submission": null,
+      "stop": {
+        "reason": "no_progress",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:43:36.290Z"
+      },
+      "live_provider_calls": 0,
+      "result_sha256": "7bf01c6bd3c66ec9779c2cf4b607b3e5812423e89194c7489ae7e6668608b1dc"
+    },
+    "rounds_1": {
+      "rounds": 1,
+      "attempts": [],
+      "submission": null,
+      "stop": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:29:21.516Z"
+      },
+      "live_provider_calls": 0,
+      "result_sha256": "61d83ad59b21809a09bd1287e4694c342977e39f493d41341e174ae468ffe8b8"
+    },
+    "rounds_5_valid": {
+      "rounds": 5,
+      "attempts": [],
+      "submission": null,
+      "stop": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:43:31.284Z"
+      },
+      "live_provider_calls": 0,
+      "result_sha256": "9ca52c9f396a87247dd0f9cc077c495f1d63ed12360eac855984a6547b0b330d"
+    },
+    "failed_reduction": {
+      "rounds": 3,
+      "attempts": [
+        {
+          "attempt_id": "01M3S4MEQ2ZT5VZVM6X4XDGCJC",
+          "claimed": true,
+          "derivation_ref": "sha256:f80caf492b27affef57f5cfa97ae4fce8da9efaff1b5ca43118e7e92ec8c60f0",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:924b07c26deb6fd8cd8d7ed7333398f6f364883c5886dda27ba94650874f95be",
+          "record": "finished",
+          "retained_ref": "sha256:9a34b4db675d70d84e487f7fb27539beac640d409052790598b1aed2806b07f8",
+          "route_accepted": true,
+          "runtime_id": "local",
+          "status": "pass",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3S4MJQ5DV9WJ4XXNTJMTMWA",
+          "claimed": true,
+          "derivation_ref": "sha256:e847f898e3bd70c952ffd89e03499c175f8395386398d58d6691053afde93675",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "authority_denied",
+          "materialization_ref": null,
+          "record": "not_started",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "inconclusive",
+          "unknown_resolved": false
+        }
+      ],
+      "submission": {
+        "attempt_id": "01M3S4MEQ2ZT5VZVM6X4XDGCJC",
+        "contract": {
+          "requirements": [
+            {
+              "id": "root",
+              "method": "GET",
+              "path": "/",
+              "port": "app.http",
+              "status": 200,
+              "verifier": "ato.contract.http@1"
+            },
+            {
+              "digest": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+              "id": "source-identity",
+              "input": "workspace",
+              "verifier": "ato.contract.workspace@1"
+            }
+          ],
+          "schema": "ato.contract/1"
+        },
+        "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+        "derivation": {
+          "effects": "pure",
+          "inputs": [
+            {
+              "content_ref": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+              "id": "workspace",
+              "protocol": "ato.workspace@1"
+            }
+          ],
+          "ports": [
+            {
+              "from": "app",
+              "guest_port": 8080,
+              "id": "app.http",
+              "protocol": "ato.http@1"
+            }
+          ],
+          "requirements": {
+            "authority": [
+              {
+                "operation": "bind",
+                "phase": "runtime",
+                "protocol": "ato.http@1",
+                "resource": "app.http"
+              }
+            ],
+            "network": [
+              {
+                "host": "registry.npmjs.org",
+                "phase": "dependencies",
+                "port": 443
+              },
+              {
+                "host": "registry.npmjs.org",
+                "phase": "build",
+                "port": 443
+              }
+            ]
+          },
+          "runtimes": {
+            "node": "22.14.0"
+          },
+          "schema": "ato.derivation/1",
+          "state": [],
+          "steps": [
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/node",
+                "--version"
+              ],
+              "cwd": ".",
+              "id": "check-toolchain",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "ci",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                "--omit=dev"
+              ],
+              "cwd": ".",
+              "id": "dependencies-1",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/node",
+                "/app/server.mjs"
+              ],
+              "cwd": ".",
+              "id": "app",
+              "op": "serve",
+              "protocol": "ato.process@1"
+            }
+          ]
+        },
+        "derivation_ref": "sha256:f80caf492b27affef57f5cfa97ae4fce8da9efaff1b5ca43118e7e92ec8c60f0",
+        "receipt": {
+          "contract_ref": "sha256:36d8dbce6264b6d679b7a5707735b81709612feaa96de5f3d247b79f6e880b96",
+          "derivation_ref": "sha256:f80caf492b27affef57f5cfa97ae4fce8da9efaff1b5ca43118e7e92ec8c60f0",
+          "execution": {
+            "attempt_id": "01M3S4MEQ2ZT5VZVM6X4XDGCJC",
+            "endpoint": "http://127.0.0.1:8080/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M3S4MEMGNGJ35MM5R6JJGD7G"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:ff99718a57f7740beb5a6b2f743822de5d52831c0dca04e4fc60d442e808e1d0",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "status": "k_reached_awaiting_assessment"
+      },
+      "stop": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T12:29:14.748Z"
+      },
+      "live_provider_calls": 0,
+      "result_sha256": "ae9a283183028044704955c63a9b0f2207b0f2f7f7147ebfa52b3f2f9b53e291"
+    },
+    "unknown_history": {
+      "rounds": 0,
+      "attempts": [
+        {
+          "attempt_id": "01M3S5F1GQ4WY2DE0HMCWDNC68",
+          "claimed": true,
+          "derivation_ref": "sha256:f80caf492b27affef57f5cfa97ae4fce8da9efaff1b5ca43118e7e92ec8c60f0",
+          "effects": null,
+          "environment_id": "native",
+          "failure_code": "attempt_history_unavailable",
+          "materialization_ref": null,
+          "record": "history_unavailable",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "unknown",
+          "unknown_resolved": false
+        }
+      ],
+      "submission": null,
+      "stop": null,
+      "live_provider_calls": 0,
+      "result_sha256": "7e2220d7ab106bfa800b4ea232a4f4639d9a3d4a664a3273a5d6e6b6f66e3516"
+    },
+    "original_rounds5_providercap4_continuation": {
+      "result_sha256": "cc708c5a40f32423ce4bfc0fa4504af4f52486e3d0a906cab8728fadd3a58d05",
+      "rounds": 4,
+      "frozen_policy_changed": false,
+      "stop": "budget_exhausted",
+      "live_provider_calls": 0
+    }
+  },
+  "restart_UNKNOWN": {
+    "status": "passed",
+    "observations": [
+      {
+        "name": "failed_reduction",
+        "status": "satisfied",
+        "rounds": 3,
+        "attempts": 2,
+        "result_sha256": "62bbbda4e1bcd649f48206408182647573be13f4ac2acb3d51900474c47c3e4d"
+      },
+      {
+        "name": "unknown_history",
+        "status": "unknown",
+        "rounds": 0,
+        "attempts": 1,
+        "result_sha256": "7e2220d7ab106bfa800b4ea232a4f4639d9a3d4a664a3273a5d6e6b6f66e3516"
+      }
+    ],
+    "actual_Coordinator_Runtime_restart": true,
+    "live_provider_calls": 0,
+    "unknown_automatically_retried": false
+  },
+  "live_CP_calls": 10,
+  "live_DP_calls": 0,
+  "provider_calls": [
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 1881,
+        "kind": "llm",
+        "latency_ms": 2888,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 3327,
+          "output_tokens": 735
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 2336,
+        "kind": "llm",
+        "latency_ms": 3047,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 4758,
+          "output_tokens": 756
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 1915,
+        "kind": "llm",
+        "latency_ms": 2981,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 3696,
+          "output_tokens": 671
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 2452,
+        "kind": "llm",
+        "latency_ms": 3187,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 5062,
+          "output_tokens": 777
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 2993,
+        "kind": "llm",
+        "latency_ms": 2604,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 7685,
+          "output_tokens": 572
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 3175,
+        "kind": "llm",
+        "latency_ms": 2819,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 7930,
+          "output_tokens": 663
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 3395,
+        "kind": "llm",
+        "latency_ms": 3601,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 7917,
+          "output_tokens": 849
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 2780,
+        "kind": "llm",
+        "latency_ms": 2564,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 7685,
+          "output_tokens": 395
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 2858,
+        "kind": "llm",
+        "latency_ms": 2584,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 7747,
+          "output_tokens": 444
+        }
+      },
+      "status": "success"
+    },
+    {
+      "error_class": null,
+      "provenance": {
+        "estimated_cost_usd_micros": 2828,
+        "kind": "llm",
+        "latency_ms": 2225,
+        "model": "deepseek-flash",
+        "prompt_version": "ato.formation-candidate-producer-prompt/3",
+        "provider": "deepseek",
+        "schema": "ato.formation-proposal-provenance/1",
+        "usage": {
+          "input_tokens": 7757,
+          "output_tokens": 416
+        }
+      },
+      "status": "success"
+    }
+  ],
+  "estimated_cost_usd_micros": 26613,
+  "conservative_charged_usd_micros": 98310,
+  "unresolved_model_reservations": 0,
+  "raw_manifest": [
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/config.json",
+      "sha256": "a5b4f56a203b688d16cc38eb8ef759b87a28c15346ef565d158d42d00a7d31f2",
+      "bytes": 4573
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/preflight-config.json",
+      "sha256": "04839afd9fd21474de55a5aa2a59cdfd2d896385795ebf49236bacc2f1378082",
+      "bytes": 3462
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/preflight.json",
+      "sha256": "7e4c10fc203214502043325a5d0a06ea2adc4dabab83673e3382a9a1e1d2c417",
+      "bytes": 19535
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/preflight.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/preflight.stdout.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/producer.decision.jsonl",
+      "sha256": "131062483b39e1f39a482db7885750b42076d8d8e12f334e8f89abe86cfe1c14",
+      "bytes": 128
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/producer.jsonl",
+      "sha256": "704ca31b56169d5c31de0a5621412e85998894e6eee101d3b7aa97772bd46bf9",
+      "bytes": 1118
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/producer.search.json",
+      "sha256": "ca93aa130b7d98b9ed18e034bfed672cd3f5bc5d1b9931585280fd0654b6d265",
+      "bytes": 2360
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/requester.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/requester.stdout.log",
+      "sha256": "8397f94a1e6cecc01e395cfe392afe535fc954749a0d6fe255ba107e6739515e",
+      "bytes": 32790
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/status.json",
+      "sha256": "43f2bcc1f3c465d36599c2d1b93dc8dd02b4f437e98a169782d5b412b8877d37",
+      "bytes": 50716
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/101/summary.json",
+      "sha256": "9caf4c0e19e9e40f976839e7900af12b6002104529b349042b1eef483267abe2",
+      "bytes": 423
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/config.json",
+      "sha256": "ab7cf7711fcec2225d89e5ba23d5bf577594321d140a89144059486d2fcdaca8",
+      "bytes": 4573
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/preflight-config.json",
+      "sha256": "04839afd9fd21474de55a5aa2a59cdfd2d896385795ebf49236bacc2f1378082",
+      "bytes": 3462
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/preflight.json",
+      "sha256": "9402d16fa334a92180b3a1e999f92169379088bd856315914017a76525209d4d",
+      "bytes": 19535
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/preflight.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/preflight.stdout.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/producer.decision.jsonl",
+      "sha256": "131062483b39e1f39a482db7885750b42076d8d8e12f334e8f89abe86cfe1c14",
+      "bytes": 128
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/producer.jsonl",
+      "sha256": "4b9f1bb2630d52198985368b8817d35cb7c2583ce2bf8fcb957a51d2a36805f2",
+      "bytes": 1118
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/producer.search.json",
+      "sha256": "51b903b24f2ac4fd7f6e4eb69e5c2770efbffd921216da009a748e7c3e123619",
+      "bytes": 2360
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/requester.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/requester.stdout.log",
+      "sha256": "350fccebcf87e33ce8567d710a7f2cc2fae82a1d04c8a4f1d82bb3ef0a0c96d1",
+      "bytes": 33188
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/status.json",
+      "sha256": "e763fe7c59bc9d140d24e917e591b1a8c057f9da707f055477cc2e270048609c",
+      "bytes": 60064
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/cells/102/summary.json",
+      "sha256": "2ab0bb306d0f94f268e33209c6d32b6e505fd3084e4be5d0eb181f5e5b41fed8",
+      "bytes": 423
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/authority_repair_reduction/config.json",
+      "sha256": "6ee22ba09c877e47b32f8cec2ff8d86812acedf9531e5d0224130e07d5ca3dbf",
+      "bytes": 12093
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/authority_repair_reduction/created.json",
+      "sha256": "4761b2948eb304b444e54383937d7a62d2bef9f4a7d11bf786e483a1d44e211c",
+      "bytes": 6874
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/authority_repair_reduction/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/authority_repair_reduction/result.json",
+      "sha256": "8f4a11990ed277ef40417be7f1b146fd5b79f27912988b98523788c7033fad1a",
+      "bytes": 124531
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/authority_repair_reduction/summary.json",
+      "sha256": "45307d9beb8f7b7de6f75d03d6f856e6fe5c1f47bc36e8655fd120b7f3cba702",
+      "bytes": 347
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/ceiling_exceeded/config.json",
+      "sha256": "e24360d7239005cf68cc02c22b347e1f48d226d2f2cf2bbb2a1e79f4e00e0d9e",
+      "bytes": 7493
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/ceiling_exceeded/created.json",
+      "sha256": "1c4cd79022d1a2a7eef533a1b3bda69b8a44887f0f96eaee3bc89bd454c70b6f",
+      "bytes": 6854
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/ceiling_exceeded/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/ceiling_exceeded/result.json",
+      "sha256": "0efac17e66b9a072bc156e8ccab75bdd04e026a150f1bea533fb291ba644d0fe",
+      "bytes": 18336
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/ceiling_exceeded/summary.json",
+      "sha256": "f51bef00a07859ad6fd67615775e01ad3b665e5ed917460fcf10c53c83496f99",
+      "bytes": 341
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/config.json",
+      "sha256": "6730508249e095919317e0cf7148d1978b131461ebaad29147eaa6a802bc429e",
+      "bytes": 7382
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/config.resume.json",
+      "sha256": "c08ff4f7edebf17201ddf2e85dcd4df5e6887a9a98bc3c8b9e816870a2252c55",
+      "bytes": 4769
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/created.json",
+      "sha256": "5cc001bb8c3046b6b4ac866f208a590c3217f1547c51a65da4071e6cdb38fa25",
+      "bytes": 9062
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/requester.resume.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/result.json",
+      "sha256": "ae9a283183028044704955c63a9b0f2207b0f2f7f7147ebfa52b3f2f9b53e291",
+      "bytes": 74803
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/result.resume.json",
+      "sha256": "62bbbda4e1bcd649f48206408182647573be13f4ac2acb3d51900474c47c3e4d",
+      "bytes": 67294
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/failed_reduction/summary.json",
+      "sha256": "9f14444c249483e677b05b1d2cfd91e21c3dbbd1731784877010077c49e3fbcc",
+      "bytes": 337
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/no_progress/config.json",
+      "sha256": "d4250d1ed46857c204204757ea086218f9c1972d538c878245b7847e657187c9",
+      "bytes": 9362
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/no_progress/created.json",
+      "sha256": "64e7c54aaf09eb6fdb30da0b8686636ac9319aeca3abb44c8450294badc8a7d1",
+      "bytes": 6844
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/no_progress/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/no_progress/result.json",
+      "sha256": "7bf01c6bd3c66ec9779c2cf4b607b3e5812423e89194c7489ae7e6668608b1dc",
+      "bytes": 65340
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/no_progress/summary.json",
+      "sha256": "2072fdd052ab9bc74800a6678f05d7a9de7431f02193533d1a01c9b1d7a2f215",
+      "bytes": 317
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_1/config.json",
+      "sha256": "21b339a417922eb1c44d3f3221d1391d5d89f37d8504e1950d0b7a80ad92a90e",
+      "bytes": 4822
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_1/created.json",
+      "sha256": "dea635b80bbc731a93d571bf4bbfe6a6ff29416f65be7730196dcdadde56fb06",
+      "bytes": 6838
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_1/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_1/result.json",
+      "sha256": "61d83ad59b21809a09bd1287e4694c342977e39f493d41341e174ae468ffe8b8",
+      "bytes": 14660
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_1/summary.json",
+      "sha256": "b3d2eb9fecbc6a1cbf2df0151bfbb6ab0e194172a3427002d720d173e1f0c4f2",
+      "bytes": 319
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_3/config.json",
+      "sha256": "f6e157e75e5916ce6fcf3fba2c03f080bdf73f8b06e065fa5056c6a0dc4a24a2",
+      "bytes": 5044
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_3/created.json",
+      "sha256": "fd7b06d8d93ffad7269b325509d8973d926e1a6db1305678d8d7b5c97cb3b45e",
+      "bytes": 6838
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_3/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_3/result.json",
+      "sha256": "9504c8ca7b53cbb1e7b68599d5631b6d628c65985f0d0abd60f7751ebeb11516",
+      "bytes": 21917
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_3/summary.json",
+      "sha256": "7c391348a7c51fd79395237227be7036161648b05a1102534b8b5b5ef9a8ce3e",
+      "bytes": 319
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5/config.json",
+      "sha256": "36ba4819a3c6a7fbaef4b0d6b9b15548ea1fa1348ce8e3923e0425b0c163fc26",
+      "bytes": 5374
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5/config.resume.json",
+      "sha256": "7503d547284111f74511b5ee86bc0a4c40beb790f61efc5c24f7d7e30e7570ed",
+      "bytes": 4707
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5/created.json",
+      "sha256": "0f2375b6d734c0000154466183dbd2ab05bb05c9c463bdabf97c329f0bd53d3c",
+      "bytes": 6838
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5/requester.log",
+      "sha256": "adad402e1a684b370e2b8fb8e7eaafc504464a6c445dc7a0f8582f4544e75a54",
+      "bytes": 77
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5/requester.resume.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5/result.resume.json",
+      "sha256": "cc708c5a40f32423ce4bfc0fa4504af4f52486e3d0a906cab8728fadd3a58d05",
+      "bytes": 16173
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5_valid/config.json",
+      "sha256": "36f624160b9bc0f4dc76b33184cfc61854b2907658ae7389fb946a38be381e36",
+      "bytes": 5398
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5_valid/created.json",
+      "sha256": "55fa861fa008fef801fd9fc2064fd9caad485312663430682b4275ee444ab0b1",
+      "bytes": 6850
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5_valid/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5_valid/result.json",
+      "sha256": "9ca52c9f396a87247dd0f9cc077c495f1d63ed12360eac855984a6547b0b330d",
+      "bytes": 29153
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/rounds_5_valid/summary.json",
+      "sha256": "833d2674a81b7e42b561d8d70e1fa5d31ddccb49a79d8629c19f176145f45f3f",
+      "bytes": 325
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/config.json",
+      "sha256": "5f13fe6a3ae5864778e4cea8dcb63ca8413b2f565b16c53d200efbb3688224d3",
+      "bytes": 4740
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/config.resume.json",
+      "sha256": "22ff5ac4e017fa6427bcded2bdf149d587e1bb155eafcdb70a4d65c62d78f033",
+      "bytes": 4765
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/created.json",
+      "sha256": "807e545460a806befaf4a82f217594093616f5b791183c4f008b6b138c6d0572",
+      "bytes": 9060
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/requester.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/requester.resume.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/result.json",
+      "sha256": "7e2220d7ab106bfa800b4ea232a4f4639d9a3d4a664a3273a5d6e6b6f66e3516",
+      "bytes": 15932
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/result.resume.json",
+      "sha256": "7e2220d7ab106bfa800b4ea232a4f4639d9a3d4a664a3273a5d6e6b6f66e3516",
+      "bytes": 15932
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1/fixed/unknown_history/summary.json",
+      "sha256": "664b2457d39fe500e02ead1bd6c8442c97d6172f67ac881000093077fecfdf2a",
+      "bytes": 217
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/config.json",
+      "sha256": "c80a2ee739b2f67de0ef30649b4b61a1d91694e9a9b2d5eddbbeb584543a921c",
+      "bytes": 4573
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/operator-status.json",
+      "sha256": "ce1641a69f12b5d7444242ffb5180ace3c91afbd7d822e141aec59e5aeffd9a9",
+      "bytes": 117643
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/preflight-config.json",
+      "sha256": "04839afd9fd21474de55a5aa2a59cdfd2d896385795ebf49236bacc2f1378082",
+      "bytes": 3462
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/preflight.json",
+      "sha256": "be45dd9d79e2f5bbbf63305b48393fe66e10b288348cdfa174d7ff241f9a4f06",
+      "bytes": 156679
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/preflight.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/preflight.stdout.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/producer.decision.jsonl",
+      "sha256": "131062483b39e1f39a482db7885750b42076d8d8e12f334e8f89abe86cfe1c14",
+      "bytes": 128
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/producer.jsonl",
+      "sha256": "d5391b0f7ee88477047e04dd01badf4a6e8e7db596671da24c8089f45aff1076",
+      "bytes": 1611
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/producer.search.json",
+      "sha256": "8bf292ad759d1ab77eb9465f58af0d2ef0797b5b7e8eb8ad6883ad90828140a2",
+      "bytes": 2360
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/requester.stderr.log",
+      "sha256": "57879acbaf64ba7b0868a300b657e32164a4954caae2b62738e74781e9e118ba",
+      "bytes": 55
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/requester.stdout.log",
+      "sha256": "efbbc82b5436dbf3f2fc60f5683a1204a2be0e3e02afaed0177c3df7eaab9db5",
+      "bytes": 36367
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/002/summary.json",
+      "sha256": "1fb7394175e00126cf4426449ba301dfbecdd27d5c133930bd9adb5f1d8ce2b0",
+      "bytes": 386
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/config.json",
+      "sha256": "ec269653c34929ad59f0e9b5073876f533416a80d4b437231301b57e429c2c0b",
+      "bytes": 4573
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/preflight-config.json",
+      "sha256": "04839afd9fd21474de55a5aa2a59cdfd2d896385795ebf49236bacc2f1378082",
+      "bytes": 3462
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/preflight.json",
+      "sha256": "2871819da500599391c7be78dc89eececec71143d64f8a41501afd87cd2fa456",
+      "bytes": 241640
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/preflight.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/preflight.stdout.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/producer.decision.jsonl",
+      "sha256": "131062483b39e1f39a482db7885750b42076d8d8e12f334e8f89abe86cfe1c14",
+      "bytes": 128
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/producer.jsonl",
+      "sha256": "a9ed21e63cf78ec6c4d3a607ed040cf4e5ce94347ec8350ac63e3bb0b7f03646",
+      "bytes": 1611
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/producer.search.json",
+      "sha256": "7576267acfa43b2d0f3ae1077dda415e8a5073652229ba1d9fbc782f4f99620a",
+      "bytes": 2360
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/requester.stderr.log",
+      "sha256": "57879acbaf64ba7b0868a300b657e32164a4954caae2b62738e74781e9e118ba",
+      "bytes": 55
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/requester.stdout.log",
+      "sha256": "5982229375b90aa4c5c335a34f3dbf7f5dcd38e58faa5dec8da44b803260d0f8",
+      "bytes": 27323
+    },
+    {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4/cells/069/summary.json",
+      "sha256": "a8587d85f81ac9268bb51762cc057353a31f8cae7a7384a25da7b3d099caa0b8",
+      "bytes": 393
+    }
+  ],
+  "implemented": true,
+  "verified": "actual Coordinator/Runtime; live provider fixtures and upstream failures recorded separately",
+  "merged": false,
+  "deployed": false
+}

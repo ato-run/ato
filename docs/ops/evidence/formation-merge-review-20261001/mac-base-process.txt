@@ -1,0 +1,40 @@
+   Compiling ato-computation v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/computation)
+   Compiling ato-ipc v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/ipc)
+   Compiling ato-materializer-static-web v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/materializers/static-web)
+   Compiling ato-formation v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/formation)
+   Compiling ato-sandbox v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/sandbox)
+   Compiling ato-adapter-oci v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/oci)
+   Compiling ato-formation-worker v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/apps/formation-worker)
+   Compiling ato-cli v0.7.9 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/apps/cli)
+   Compiling ato-objects v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/objects)
+   Compiling ato-adapter-api v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/api)
+   Compiling ato-kernel v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/kernel)
+   Compiling ato-compose v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/compose)
+   Compiling ato-materializer-api v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/materializers/api)
+   Compiling ato-adapter-process v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/process)
+   Compiling ato-record-writer v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/record-writer)
+   Compiling ato-materializer-replay v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/materializers/replay)
+   Compiling ato-materializer-snapshot v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/materializers/snapshot)
+   Compiling ato-adapter-browser v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/browser)
+   Compiling ato-player v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/player)
+   Compiling ato-adapter-workspace v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/workspace)
+   Compiling netd v0.5.2 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/services/netd)
+   Compiling ato-contracts v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/contracts)
+   Compiling ato-materializer-vm-snapshot v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/materializers/vm-snapshot)
+   Compiling ato-adapter-http v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/http)
+   Compiling ato-adapter-binding v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/binding)
+   Compiling ato-browser-semantics v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/semantics/browser)
+   Compiling ato-adapter-pty v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/adapters/pty)
+   Compiling ato-runtime-object-graph v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/apps/runtime-object-graph)
+   Compiling ato-realization-planner v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/extensions/planner)
+   Compiling ato-local-execution v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/local-execution)
+   Compiling ato-runtime-attempt v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/lib/runtime-attempt)
+   Compiling ato-portable-application v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-base-20261001/apps/portable-application)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.03s
+     Running tests/portable_application.rs (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/target/debug/deps/portable_application-b5d9ad8bfcdf6be7)
+
+running 1 test
+test a_process_run_is_owned_by_its_run_until_stopped ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 1.29s
+

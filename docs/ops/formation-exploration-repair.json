@@ -1,0 +1,3120 @@
+{
+  "schema": "ato.formation-exploration-repair-ledger/1",
+  "scope": "bounded upstream repair pilots; not 100-app remeasurement",
+  "original_100": {
+    "baseline_typed_K": 7,
+    "exploration_typed_K": 7,
+    "additional": 0,
+    "unchanged": true
+  },
+  "pins": {
+    "zero_and_replay": "dfced9182159c143dd1ca994f42bf160eddc9f40",
+    "final_failed": "2ad8c108b58a170a8673663d03ad8c7eaa6988fa",
+    "metadata": "44772cb2f1347a353a1d2c0593af4481c5da1e61",
+    "API_JS": "b20bba7ab9daf282f8d5b1e22affe549ad3492a3"
+  },
+  "cases": [
+    {
+      "label": "zero",
+      "index": 57,
+      "name": "SVGOMG",
+      "typed_K_pass": true,
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "fresh_submission": {
+        "attempt_id": "01M3STQFGJQ1K0E2XAQMCK4DGM",
+        "contract": {
+          "requirements": [
+            {
+              "id": "root",
+              "method": "GET",
+              "path": "/",
+              "port": "app.http",
+              "status": 200,
+              "verifier": "ato.contract.http@1"
+            },
+            {
+              "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+              "id": "source-identity",
+              "input": "workspace",
+              "verifier": "ato.contract.workspace@1"
+            }
+          ],
+          "schema": "ato.contract/1"
+        },
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation": {
+          "effects": "pure",
+          "inputs": [
+            {
+              "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+              "id": "workspace",
+              "protocol": "ato.workspace@1"
+            }
+          ],
+          "ports": [
+            {
+              "from": "app",
+              "id": "app.http",
+              "protocol": "ato.http@1"
+            }
+          ],
+          "requirements": {
+            "authority": [
+              {
+                "operation": "bind",
+                "phase": "runtime",
+                "protocol": "ato.http@1",
+                "resource": "app.http"
+              }
+            ],
+            "network": [
+              {
+                "host": "registry.npmjs.org",
+                "phase": "dependencies",
+                "port": 443
+              }
+            ]
+          },
+          "runtimes": {
+            "node": "22.14.0"
+          },
+          "schema": "ato.derivation/1",
+          "state": [],
+          "steps": [
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/node",
+                "--version"
+              ],
+              "cwd": ".",
+              "id": "check-toolchain",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "ci",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund"
+              ],
+              "cwd": ".",
+              "id": "dependencies-1",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "run",
+                "build"
+              ],
+              "cwd": ".",
+              "id": "build-2",
+              "network": "scoped-build",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "cwd": ".",
+              "entry": "index.html",
+              "id": "app",
+              "op": "serve",
+              "protocol": "ato.browser@1",
+              "root": "build",
+              "source": "workspace",
+              "spa_fallback": false
+            }
+          ]
+        },
+        "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+        "receipt": {
+          "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "execution": {
+            "attempt_id": "01M3STQFGJQ1K0E2XAQMCK4DGM",
+            "endpoint": "http://127.0.0.1:38205/",
+            "platform": "linux/aarch64",
+            "realization": "static_web",
+            "request_id": "01M3STQC79DAMMD5866VGCX1PS"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:189d8ea09123aefea62af9acd955bf3147858e5e1eb76bede398cf2b7c3d31bf",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "status": "k_reached_awaiting_assessment"
+      },
+      "final_requirements": {
+        "authority": [
+          {
+            "operation": "bind",
+            "phase": "runtime",
+            "protocol": "ato.http@1",
+            "resource": "app.http"
+          }
+        ],
+        "network": [
+          {
+            "host": "registry.npmjs.org",
+            "phase": "dependencies",
+            "port": 443
+          }
+        ]
+      },
+      "final_requirement_basis": [
+        {
+          "reason": "package.json declares build script 'gulp clean-build' producing static output and sirv serves 'build' on port 8080",
+          "source": {
+            "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+            "file_id": "f_7ae45ad102eab3b6d7e7896a"
+          }
+        },
+        {
+          "reason": "gulpfile (client tooling) emits static assets into 'build/' directory referenced by the start script",
+          "source": {
+            "digest": "sha256:ac5b4f38788164eab74cd7d527b2aeb8b4c5da80580204b953f6853572d6c664",
+            "file_id": "f_25789e3ba4c2adf4a6899626"
+          }
+        }
+      ],
+      "permission_reduction": {
+        "attempts": [],
+        "final_receipt_attempt_id": "01M3STQFGJQ1K0E2XAQMCK4DGM",
+        "final_verified_derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+        "mathematical_minimality_claimed": false,
+        "successful_D_retained": true,
+        "unverified_reduction_submitted": false
+      },
+      "rounds_consumed": 3,
+      "known_attempts": 0,
+      "generated_attempts": 1,
+      "attempts": [
+        {
+          "attempt_id": "01M3STQFGJQ1K0E2XAQMCK4DGM",
+          "claimed": true,
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:533c31b79fb90d048f31943ef48fff04aa5c6b85db101b80be3abf0e2487e932",
+          "record": "finished",
+          "retained_ref": "sha256:2654f348d8d6ad10b8124e7ae96bb9587b9053c549dfe0195d7128952c640cfb",
+          "route_accepted": true,
+          "runtime_id": "local",
+          "status": "pass",
+          "unknown_resolved": false
+        }
+      ],
+      "stop": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T18:55:45.851Z"
+      },
+      "elapsed_seconds": 39.845,
+      "rounds": [
+        {
+          "round_seq": 1,
+          "raw_sha256": "sha256:d2b37f4995f0fe74f32af063633aef8c558cdff5eb29e232c9df82dad076f82a",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "admitted",
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": 8080,
+                "static_output": "build",
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 2,
+          "raw_sha256": "sha256:9c0b57b7b60c8c6e67ea8ec8629c2bbc7852637010a2da0c3a5a9e7cf145ea46",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "unsupported"
+          ],
+          "decline_reasons": [
+            "unsupported_toolchain"
+          ],
+          "outcomes": [
+            {
+              "status": "unsupported"
+            }
+          ],
+          "plans": [],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [
+              "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            ],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:a0cfe0000387a7fff3b7868a3a65a8bbfe1874f968ed19e79af237a244816b5f",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 1536,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:61c778279bef02c9eda30d40b926605aaadab0f175b48de93a4d3fed0c3d756f",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 1552,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 3,
+          "raw_sha256": "sha256:c97e5a9fcd0f58a7ac95da8c9a772ab9096660d29cc1eb83f932ccdc49fa8fc6",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "admitted",
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": 8080,
+                "static_output": "build",
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [
+              "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            ],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:a0cfe0000387a7fff3b7868a3a65a8bbfe1874f968ed19e79af237a244816b5f",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 1536,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:61c778279bef02c9eda30d40b926605aaadab0f175b48de93a4d3fed0c3d756f",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 1552,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        }
+      ],
+      "round_timing": [
+        {
+          "candidates": [
+            {
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+                "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.node.22.14.0"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            }
+          ],
+          "derivations": [
+            {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "requirements": {
+                "authority": [
+                  {
+                    "operation": "bind",
+                    "phase": "runtime",
+                    "protocol": "ato.http@1",
+                    "resource": "app.http"
+                  }
+                ],
+                "network": [
+                  {
+                    "host": "registry.npmjs.org",
+                    "phase": "dependencies",
+                    "port": 443
+                  }
+                ]
+              },
+              "runtimes": {
+                "node": "22.14.0"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/node",
+                    "--version"
+                  ],
+                  "cwd": ".",
+                  "id": "check-toolchain",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "ci",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund"
+                  ],
+                  "cwd": ".",
+                  "id": "dependencies-1",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "run",
+                    "build"
+                  ],
+                  "cwd": ".",
+                  "id": "build-2",
+                  "network": "scoped-build",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "cwd": ".",
+                  "entry": "index.html",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.browser@1",
+                  "root": "build",
+                  "source": "workspace",
+                  "spa_fallback": false
+                }
+              ]
+            }
+          ],
+          "expires_at_ms": 1790794540518,
+          "opened_at_ms": 1790794510518,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790794569817,
+          "opened_at_ms": 1790794539817,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [
+            {
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+                "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.node.22.14.0"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            }
+          ],
+          "derivations": [
+            {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "requirements": {
+                "authority": [
+                  {
+                    "operation": "bind",
+                    "phase": "runtime",
+                    "protocol": "ato.http@1",
+                    "resource": "app.http"
+                  }
+                ],
+                "network": [
+                  {
+                    "host": "registry.npmjs.org",
+                    "phase": "dependencies",
+                    "port": 443
+                  }
+                ]
+              },
+              "runtimes": {
+                "node": "22.14.0"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/node",
+                    "--version"
+                  ],
+                  "cwd": ".",
+                  "id": "check-toolchain",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "ci",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund"
+                  ],
+                  "cwd": ".",
+                  "id": "dependencies-1",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "run",
+                    "build"
+                  ],
+                  "cwd": ".",
+                  "id": "build-2",
+                  "network": "scoped-build",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "cwd": ".",
+                  "entry": "index.html",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.browser@1",
+                  "root": "build",
+                  "source": "workspace",
+                  "spa_fallback": false
+                }
+              ]
+            }
+          ],
+          "expires_at_ms": 1790794571816,
+          "opened_at_ms": 1790794541816,
+          "outcome": "completed"
+        }
+      ],
+      "attempt_timing": [
+        {
+          "claimed_at": "2026-09-30T18:55:15.241Z",
+          "finished_at": "2026-09-30T18:55:39.817Z",
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "status": "pass"
+        }
+      ],
+      "calls": [
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2911,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7505,
+              "output_tokens": 549
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2369,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7774,
+              "output_tokens": 30
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2995,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7774,
+              "output_tokens": 551
+            }
+          },
+          "status": "success"
+        }
+      ],
+      "CP_calls": 3,
+      "DP_calls": 0,
+      "input_tokens": 23053,
+      "output_tokens": 1130,
+      "estimated_cost_usd_micros": 8275,
+      "conservative_charge_usd_micros": 29493,
+      "functional_acceptance": "not_measured",
+      "persistence": "not_measured",
+      "normal_verified_routes": 0,
+      "unresolved_model_reservations": 0,
+      "result_sha256": "87217ccf7aedc4f93a77b20c0706e8d9e90448ca8bdc7eb1691ae90b9ea4213c",
+      "status_sha256": "c9b1e16f2c95849d25f0ec39b2e4a34e51018f4f1a9ddf6e208ec8d7710753fe"
+    },
+    {
+      "label": "zero",
+      "index": 69,
+      "name": "copyparty",
+      "typed_K_pass": false,
+      "contract_ref": "sha256:d3a888357b07a9a556a11311bbc9f797c0926b88450da4b047245ff964c4d96c",
+      "fresh_submission": null,
+      "final_requirements": null,
+      "final_requirement_basis": null,
+      "permission_reduction": {
+        "reason": "K_not_reached",
+        "verified": false
+      },
+      "rounds_consumed": 3,
+      "known_attempts": 0,
+      "generated_attempts": 0,
+      "attempts": [],
+      "stop": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T18:56:13.545Z"
+      },
+      "elapsed_seconds": 20.689,
+      "rounds": [
+        {
+          "round_seq": 1,
+          "raw_sha256": "sha256:6baf3890801d566b62fc2c357625e7d7eae81e435dd07221fe7aab8509e61014",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "rejected",
+              "code": "unsupported_dependency_manifest"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "python",
+                  "version": "3.12.7"
+                },
+                "entrypoint": {
+                  "file_id": "f_9eaee52716633798b0195b13",
+                  "digest": "sha256:798d47c351859540720109dc8da0d5c755e799aacc37161606c5f828afb188e9"
+                },
+                "argv": [
+                  "--http-only",
+                  "-p",
+                  "8080",
+                  "-v",
+                  "/data::rw"
+                ],
+                "cwd": ".",
+                "module": "copyparty",
+                "guest_port": 8080,
+                "static_output": null,
+                "dependencies": [
+                  {
+                    "kind": "python_requirements",
+                    "requirements": {
+                      "file_id": "f_50c86b7ed8ac2cf95bd48334",
+                      "digest": "sha256:ca57a0cb0bd249a1650e9793dd49c7f87041a8bebbf8af951bfd14ffebf24bbe"
+                    }
+                  }
+                ],
+                "build_scripts": [],
+                "state": [
+                  {
+                    "id": "app.data",
+                    "mount": "/data",
+                    "access": "read-write"
+                  }
+                ],
+                "requirements": {
+                  "network": [],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    },
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.state.filesystem@1",
+                      "resource": "app.data",
+                      "operation": "read"
+                    },
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.state.filesystem@1",
+                      "resource": "app.data",
+                      "operation": "write"
+                    },
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.state.filesystem@1",
+                      "resource": "app.data",
+                      "operation": "create"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:72b00535748c1570431e477152c371dd3514b41b7048e1c7038db0930f44f1b0",
+                "logical_id": "f_50c86b7ed8ac2cf95bd48334",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:25c82debf2178173bd4bc2d9a3223b887a407513a1a4b21aab6a59ff28517956",
+                "logical_id": "f_9eaee52716633798b0195b13",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:0c0de20d8d02f8c59e513f90b603e16428f49d588a38b9cc6d017a89679c9fea",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:117a099ab1b1a103cfe340a1f045e1824051002169857fd458bd3ad21bfc8da9",
+                "logical_id": "f_d8dab7aebea6a9da5ef5d4b1",
+                "text_bytes": 1536,
+                "truncated": true
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 2,
+          "raw_sha256": "sha256:a9e96921e47a2db0245614739eda0dcc8235a45e8d428a9e63935fddf9c5682a",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "unsupported"
+          ],
+          "decline_reasons": [
+            "unsupported_dependency_operation"
+          ],
+          "outcomes": [
+            {
+              "status": "unsupported"
+            }
+          ],
+          "plans": [],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [
+              "unsupported_dependency_manifest"
+            ],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:72b00535748c1570431e477152c371dd3514b41b7048e1c7038db0930f44f1b0",
+                "logical_id": "f_50c86b7ed8ac2cf95bd48334",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:25c82debf2178173bd4bc2d9a3223b887a407513a1a4b21aab6a59ff28517956",
+                "logical_id": "f_9eaee52716633798b0195b13",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:0c0de20d8d02f8c59e513f90b603e16428f49d588a38b9cc6d017a89679c9fea",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:117a099ab1b1a103cfe340a1f045e1824051002169857fd458bd3ad21bfc8da9",
+                "logical_id": "f_d8dab7aebea6a9da5ef5d4b1",
+                "text_bytes": 1536,
+                "truncated": true
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 3,
+          "raw_sha256": "sha256:c5c53205bbe37bddd60a97406390e65ca646c12d9ce9520f9fa19e2ffb96aff8",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "rejected",
+              "code": "execution_plan_bounds"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "python",
+                  "version": "3.12.7"
+                },
+                "entrypoint": {
+                  "file_id": "f_9eaee52716633798b0195b13",
+                  "digest": "sha256:798d47c351859540720109dc8da0d5c755e799aacc37161606c5f828afb188e9"
+                },
+                "argv": [
+                  "-m",
+                  "copyparty",
+                  "-p",
+                  "8080",
+                  "-v",
+                  "/data::A"
+                ],
+                "cwd": ".",
+                "module": "copyparty",
+                "guest_port": 8080,
+                "static_output": null,
+                "dependencies": [
+                  {
+                    "kind": "python_requirements",
+                    "requirements": {
+                      "file_id": "f_50c86b7ed8ac2cf95bd48334",
+                      "digest": "sha256:ca57a0cb0bd249a1650e9793dd49c7f87041a8bebbf8af951bfd14ffebf24bbe"
+                    }
+                  }
+                ],
+                "build_scripts": [],
+                "state": [
+                  {
+                    "id": "app.data",
+                    "mount": "/data",
+                    "access": "read-write"
+                  }
+                ],
+                "requirements": {
+                  "network": [],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    },
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.state.filesystem@1",
+                      "resource": "app.data",
+                      "operation": "read"
+                    },
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.state.filesystem@1",
+                      "resource": "app.data",
+                      "operation": "write"
+                    },
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.state.filesystem@1",
+                      "resource": "app.data",
+                      "operation": "create"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [
+              "unsupported_dependency_manifest"
+            ],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:72b00535748c1570431e477152c371dd3514b41b7048e1c7038db0930f44f1b0",
+                "logical_id": "f_50c86b7ed8ac2cf95bd48334",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:25c82debf2178173bd4bc2d9a3223b887a407513a1a4b21aab6a59ff28517956",
+                "logical_id": "f_9eaee52716633798b0195b13",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:0c0de20d8d02f8c59e513f90b603e16428f49d588a38b9cc6d017a89679c9fea",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 2048,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:117a099ab1b1a103cfe340a1f045e1824051002169857fd458bd3ad21bfc8da9",
+                "logical_id": "f_d8dab7aebea6a9da5ef5d4b1",
+                "text_bytes": 1536,
+                "truncated": true
+              }
+            ]
+          }
+        }
+      ],
+      "round_timing": [
+        {
+          "candidates": [],
+          "diagnostics": [
+            "unsupported_dependency_manifest"
+          ],
+          "expires_at_ms": 1790794592639,
+          "opened_at_ms": 1790794562639,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790794597153,
+          "opened_at_ms": 1790794567153,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "diagnostics": [
+            "execution_plan_bounds"
+          ],
+          "expires_at_ms": 1790794599545,
+          "opened_at_ms": 1790794569545,
+          "outcome": "completed"
+        }
+      ],
+      "attempt_timing": [],
+      "calls": [
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 3259,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7713,
+              "output_tokens": 787
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2354,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7720,
+              "output_tokens": 31
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2774,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7720,
+              "output_tokens": 381
+            }
+          },
+          "status": "success"
+        }
+      ],
+      "CP_calls": 3,
+      "DP_calls": 0,
+      "input_tokens": 23153,
+      "output_tokens": 1199,
+      "estimated_cost_usd_micros": 8387,
+      "conservative_charge_usd_micros": 29493,
+      "functional_acceptance": "not_measured",
+      "persistence": "not_measured",
+      "normal_verified_routes": 0,
+      "unresolved_model_reservations": 0,
+      "result_sha256": "e0e86e6ec9798a07b84d0b2da959138df2ca856aa2f07bf992383efbab6eb4ed",
+      "status_sha256": "d0e1d3854fcb477ce63fa344e9f0f14aa892c99ee67bd2c9ab47c8c089034d14"
+    },
+    {
+      "label": "replay",
+      "index": 57,
+      "name": "SVGOMG",
+      "typed_K_pass": true,
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "fresh_submission": {
+        "attempt_id": "01M3STTWV1GNK7HDX8407AS2S8",
+        "contract": {
+          "requirements": [
+            {
+              "id": "root",
+              "method": "GET",
+              "path": "/",
+              "port": "app.http",
+              "status": 200,
+              "verifier": "ato.contract.http@1"
+            },
+            {
+              "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+              "id": "source-identity",
+              "input": "workspace",
+              "verifier": "ato.contract.workspace@1"
+            }
+          ],
+          "schema": "ato.contract/1"
+        },
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation": {
+          "effects": "pure",
+          "inputs": [
+            {
+              "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+              "id": "workspace",
+              "protocol": "ato.workspace@1"
+            }
+          ],
+          "ports": [
+            {
+              "from": "app",
+              "id": "app.http",
+              "protocol": "ato.http@1"
+            }
+          ],
+          "requirements": {
+            "authority": [
+              {
+                "operation": "bind",
+                "phase": "runtime",
+                "protocol": "ato.http@1",
+                "resource": "app.http"
+              }
+            ],
+            "network": [
+              {
+                "host": "registry.npmjs.org",
+                "phase": "dependencies",
+                "port": 443
+              }
+            ]
+          },
+          "runtimes": {
+            "node": "22.14.0"
+          },
+          "schema": "ato.derivation/1",
+          "state": [],
+          "steps": [
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/node",
+                "--version"
+              ],
+              "cwd": ".",
+              "id": "check-toolchain",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "ci",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund"
+              ],
+              "cwd": ".",
+              "id": "dependencies-1",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "run",
+                "build"
+              ],
+              "cwd": ".",
+              "id": "build-2",
+              "network": "scoped-build",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "cwd": ".",
+              "entry": "index.html",
+              "id": "app",
+              "op": "serve",
+              "protocol": "ato.browser@1",
+              "root": "build",
+              "source": "workspace",
+              "spa_fallback": false
+            }
+          ]
+        },
+        "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+        "receipt": {
+          "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "execution": {
+            "attempt_id": "01M3STTWV1GNK7HDX8407AS2S8",
+            "endpoint": "http://127.0.0.1:33879/",
+            "platform": "linux/aarch64",
+            "realization": "static_web",
+            "request_id": "01M3STT1S85YYB516HPZ4QBPVT"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:189d8ea09123aefea62af9acd955bf3147858e5e1eb76bede398cf2b7c3d31bf",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "status": "k_reached_awaiting_assessment"
+      },
+      "final_requirements": {
+        "authority": [
+          {
+            "operation": "bind",
+            "phase": "runtime",
+            "protocol": "ato.http@1",
+            "resource": "app.http"
+          }
+        ],
+        "network": [
+          {
+            "host": "registry.npmjs.org",
+            "phase": "dependencies",
+            "port": 443
+          }
+        ]
+      },
+      "final_requirement_basis": [
+        {
+          "reason": "package.json declares scripts.build 'gulp clean-build' and devDependencies including gulp; previous build failed with 'gulp: not found' exit 127, indicating dev dependencies were not installed.",
+          "source": {
+            "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+            "file_id": "f_7ae45ad102eab3b6d7e7896a"
+          }
+        },
+        {
+          "reason": "gulpfile dest('build') for copy, css, html and js tasks confirms static build output directory is build/.",
+          "source": {
+            "digest": "sha256:ac5b4f38788164eab74cd7d527b2aeb8b4c5da80580204b953f6853572d6c664",
+            "file_id": "f_25789e3ba4c2adf4a6899626"
+          }
+        },
+        {
+          "reason": "README documents install and dev flow, a static site served from build output.",
+          "source": {
+            "digest": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+            "file_id": "f_b335630551682c19a781afeb"
+          }
+        },
+        {
+          "reason": "package-lock.json present, required for npm_ci typed dependency.",
+          "source": {
+            "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac",
+            "file_id": "f_053150b640a7ce75eff69d1a"
+          }
+        }
+      ],
+      "permission_reduction": {
+        "attempts": [],
+        "final_receipt_attempt_id": "01M3STTWV1GNK7HDX8407AS2S8",
+        "final_verified_derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+        "mathematical_minimality_claimed": false,
+        "successful_D_retained": true,
+        "unverified_reduction_submitted": false
+      },
+      "rounds_consumed": 3,
+      "known_attempts": 1,
+      "generated_attempts": 1,
+      "attempts": [
+        {
+          "attempt_id": "01M3STT1WEPFC3X9P24334K629",
+          "claimed": true,
+          "derivation_ref": "sha256:257d10b9e0a8643f53ed5cafed8416b1ddb77fb65e832c2433f6c9a5e5b10a29",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "formation_failed",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "local",
+          "status": "fail",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3STTWV1GNK7HDX8407AS2S8",
+          "claimed": true,
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:5a4f5d65ee1bd42c32770a556876839b91c4dbbace46d1f9e733ff9135a087d7",
+          "record": "finished",
+          "retained_ref": "sha256:bd7661c4e95ce922f793f6fb482fbec34da1f4a9b792244042780a4efc8ce974",
+          "route_accepted": true,
+          "runtime_id": "local",
+          "status": "pass",
+          "unknown_resolved": false
+        }
+      ],
+      "stop": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T18:57:33.751Z"
+      },
+      "elapsed_seconds": 60.322,
+      "rounds": [
+        {
+          "round_seq": 1,
+          "raw_sha256": "sha256:052aafa3e5d472711c2225d54c2e6024766c74d08ecc86f3de17e74277e62dbb",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "rejected",
+              "code": "proposal_schema"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": null,
+                "static_output": "build",
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [
+              "formation_failed"
+            ],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 2,
+          "raw_sha256": "sha256:9c193dec5266d2e78b7ce31eb6cfd685f022d492d3fa0b7d02a0068bbb39fe05",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "rejected",
+              "code": "unsupported_entrypoint"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": 8080,
+                "static_output": null,
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [
+              "formation_failed"
+            ],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [
+              "proposal_schema"
+            ],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 3,
+          "raw_sha256": "sha256:8e81001b34133856cc302a4d3ea226d8bb4482285353b1286683b80d4c1120b1",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "admitted",
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": 8080,
+                "static_output": "build",
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [
+              "formation_failed"
+            ],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [
+              "unsupported_entrypoint"
+            ],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        }
+      ],
+      "round_timing": [
+        {
+          "candidates": [],
+          "diagnostics": [
+            "proposal_schema"
+          ],
+          "expires_at_ms": 1790794642654,
+          "opened_at_ms": 1790794612654,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "diagnostics": [
+            "unsupported_entrypoint"
+          ],
+          "expires_at_ms": 1790794645989,
+          "opened_at_ms": 1790794615989,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [
+            {
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+                "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.node.22.14.0"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            }
+          ],
+          "derivations": [
+            {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "requirements": {
+                "authority": [
+                  {
+                    "operation": "bind",
+                    "phase": "runtime",
+                    "protocol": "ato.http@1",
+                    "resource": "app.http"
+                  }
+                ],
+                "network": [
+                  {
+                    "host": "registry.npmjs.org",
+                    "phase": "dependencies",
+                    "port": 443
+                  }
+                ]
+              },
+              "runtimes": {
+                "node": "22.14.0"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/node",
+                    "--version"
+                  ],
+                  "cwd": ".",
+                  "id": "check-toolchain",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "ci",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund"
+                  ],
+                  "cwd": ".",
+                  "id": "dependencies-1",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "run",
+                    "build"
+                  ],
+                  "cwd": ".",
+                  "id": "build-2",
+                  "network": "scoped-build",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "cwd": ".",
+                  "entry": "index.html",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.browser@1",
+                  "root": "build",
+                  "source": "workspace",
+                  "spa_fallback": false
+                }
+              ]
+            }
+          ],
+          "expires_at_ms": 1790794650510,
+          "opened_at_ms": 1790794620510,
+          "outcome": "completed"
+        }
+      ],
+      "attempt_timing": [
+        {
+          "claimed_at": "2026-09-30T18:56:38.952Z",
+          "finished_at": "2026-09-30T18:56:52.654Z",
+          "derivation_ref": "sha256:257d10b9e0a8643f53ed5cafed8416b1ddb77fb65e832c2433f6c9a5e5b10a29",
+          "status": "fail"
+        },
+        {
+          "claimed_at": "2026-09-30T18:57:07.618Z",
+          "finished_at": "2026-09-30T18:57:33.751Z",
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "status": "pass"
+        }
+      ],
+      "calls": [
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2981,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7679,
+              "output_tokens": 564
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 3198,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7684,
+              "output_tokens": 743
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 3186,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7684,
+              "output_tokens": 733
+            }
+          },
+          "status": "success"
+        }
+      ],
+      "CP_calls": 3,
+      "DP_calls": 0,
+      "input_tokens": 23047,
+      "output_tokens": 2040,
+      "estimated_cost_usd_micros": 9365,
+      "conservative_charge_usd_micros": 29493,
+      "functional_acceptance": "not_measured",
+      "persistence": "not_measured",
+      "normal_verified_routes": 0,
+      "unresolved_model_reservations": 0,
+      "result_sha256": "f3c9c23e61b5250d69487abd90bc397e3f4dd43650b7cee9a131a75714e6ed65",
+      "status_sha256": "214b1aa89d11a71592142373f5ec4b4b9b0462e7277c73397f00b61b947c5397"
+    },
+    {
+      "label": "final",
+      "index": 57,
+      "name": "SVGOMG",
+      "typed_K_pass": false,
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "fresh_submission": null,
+      "final_requirements": null,
+      "final_requirement_basis": null,
+      "permission_reduction": {
+        "reason": "K_not_reached",
+        "verified": false
+      },
+      "rounds_consumed": 3,
+      "known_attempts": 0,
+      "generated_attempts": 0,
+      "attempts": [],
+      "stop": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T19:24:39.607Z"
+      },
+      "elapsed_seconds": 15.099,
+      "rounds": [
+        {
+          "round_seq": 1,
+          "raw_sha256": "sha256:5f75dde5e5181eeca52a58032b14ab249ffdc3e31f130c44f37e808a337a416b",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "rejected",
+              "code": "proposal_schema"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": null,
+                "static_output": "build",
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    },
+                    {
+                      "phase": "build",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": false
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 2,
+          "raw_sha256": "sha256:0b62b353668a0408861fc4222a9df32323ff437c8cc42ef66ae8b9f20f8a8032",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "unsupported"
+          ],
+          "decline_reasons": [
+            "unsupported_entrypoint"
+          ],
+          "outcomes": [
+            {
+              "status": "unsupported"
+            }
+          ],
+          "plans": [],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [
+              "proposal_schema"
+            ],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 3,
+          "raw_sha256": "sha256:58e46c5ca68e6f69337f58745da7451bfa5f8f9f58257bf75a60ef54aa72ee25",
+          "raw_json_validation": {
+            "code": "invalid_json",
+            "position": 2089
+          },
+          "kinds": [],
+          "decline_reasons": [],
+          "outcomes": [],
+          "plans": [],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [
+              "proposal_schema"
+            ],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        }
+      ],
+      "round_timing": [
+        {
+          "candidates": [],
+          "diagnostics": [
+            "proposal_schema"
+          ],
+          "expires_at_ms": 1790796298949,
+          "opened_at_ms": 1790796268949,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790796302588,
+          "opened_at_ms": 1790796272588,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790796304716,
+          "opened_at_ms": 1790796274716,
+          "outcome": "provider_error"
+        }
+      ],
+      "attempt_timing": [],
+      "calls": [
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 3014,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7507,
+              "output_tokens": 634
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2289,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7512,
+              "output_tokens": 29
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 3163,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7512,
+              "output_tokens": 757
+            }
+          },
+          "status": "success"
+        }
+      ],
+      "CP_calls": 3,
+      "DP_calls": 0,
+      "input_tokens": 22531,
+      "output_tokens": 1420,
+      "estimated_cost_usd_micros": 8466,
+      "conservative_charge_usd_micros": 29493,
+      "functional_acceptance": "not_measured",
+      "persistence": "not_measured",
+      "normal_verified_routes": 0,
+      "unresolved_model_reservations": 0,
+      "result_sha256": "d048e3596dda61ffdb78a85a61d1956d59173b69a33ff91c44f325fe1bd9d931",
+      "status_sha256": "aa3c07f9fd735434f4ebbd3a4ab539ffd30b79f900aa748ee3a267892b0a61eb"
+    },
+    {
+      "label": "metadata",
+      "index": 57,
+      "name": "SVGOMG",
+      "typed_K_pass": true,
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "fresh_submission": {
+        "attempt_id": "01M3SXDB4FM7AFA4124N2D8PNQ",
+        "contract": {
+          "requirements": [
+            {
+              "id": "root",
+              "method": "GET",
+              "path": "/",
+              "port": "app.http",
+              "status": 200,
+              "verifier": "ato.contract.http@1"
+            },
+            {
+              "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+              "id": "source-identity",
+              "input": "workspace",
+              "verifier": "ato.contract.workspace@1"
+            }
+          ],
+          "schema": "ato.contract/1"
+        },
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation": {
+          "effects": "pure",
+          "inputs": [
+            {
+              "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+              "id": "workspace",
+              "protocol": "ato.workspace@1"
+            }
+          ],
+          "ports": [
+            {
+              "from": "app",
+              "id": "app.http",
+              "protocol": "ato.http@1"
+            }
+          ],
+          "requirements": {
+            "authority": [
+              {
+                "operation": "bind",
+                "phase": "runtime",
+                "protocol": "ato.http@1",
+                "resource": "app.http"
+              }
+            ],
+            "network": [
+              {
+                "host": "registry.npmjs.org",
+                "phase": "dependencies",
+                "port": 443
+              }
+            ]
+          },
+          "runtimes": {
+            "node": "22.14.0"
+          },
+          "schema": "ato.derivation/1",
+          "state": [],
+          "steps": [
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/node",
+                "--version"
+              ],
+              "cwd": ".",
+              "id": "check-toolchain",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "ci",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund"
+              ],
+              "cwd": ".",
+              "id": "dependencies-1",
+              "network": "scoped-dependencies",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "argv": [
+                "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                "run",
+                "build"
+              ],
+              "cwd": ".",
+              "id": "build-2",
+              "network": "scoped-build",
+              "op": "exec",
+              "protocol": "ato.process@1"
+            },
+            {
+              "cwd": ".",
+              "entry": "index.html",
+              "id": "app",
+              "op": "serve",
+              "protocol": "ato.browser@1",
+              "root": "build",
+              "source": "workspace",
+              "spa_fallback": false
+            }
+          ]
+        },
+        "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+        "receipt": {
+          "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "execution": {
+            "attempt_id": "01M3SXDB4FM7AFA4124N2D8PNQ",
+            "endpoint": "http://127.0.0.1:41227/",
+            "platform": "linux/aarch64",
+            "realization": "static_web",
+            "request_id": "01M3SXD7DT4DWWA9FD4VCTPCJR"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:189d8ea09123aefea62af9acd955bf3147858e5e1eb76bede398cf2b7c3d31bf",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "status": "k_reached_awaiting_assessment"
+      },
+      "final_requirements": {
+        "authority": [
+          {
+            "operation": "bind",
+            "phase": "runtime",
+            "protocol": "ato.http@1",
+            "resource": "app.http"
+          }
+        ],
+        "network": [
+          {
+            "host": "registry.npmjs.org",
+            "phase": "dependencies",
+            "port": 443
+          }
+        ]
+      },
+      "final_requirement_basis": [
+        {
+          "reason": "package.json declares scripts.build='gulp clean-build' producing a static site, and start='sirv build --port 8080' confirming output directory 'build'.",
+          "source": {
+            "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+            "file_id": "f_7ae45ad102eab3b6d7e7896a"
+          }
+        },
+        {
+          "reason": "gulpfile writes compiled assets to build/ (gulp.dest('build')), confirming static output directory.",
+          "source": {
+            "digest": "sha256:ac5b4f38788164eab74cd7d527b2aeb8b4c5da80580204b953f6853572d6c664",
+            "file_id": "f_25789e3ba4c2adf4a6899626"
+          }
+        },
+        {
+          "reason": "Verified package-lock.json is the npm_ci lockfile required for deterministic dependency installation.",
+          "source": {
+            "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac",
+            "file_id": "f_053150b640a7ce75eff69d1a"
+          }
+        }
+      ],
+      "permission_reduction": {
+        "attempts": [],
+        "final_receipt_attempt_id": "01M3SXDB4FM7AFA4124N2D8PNQ",
+        "final_verified_derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+        "mathematical_minimality_claimed": false,
+        "successful_D_retained": true,
+        "unverified_reduction_submitted": false
+      },
+      "rounds_consumed": 3,
+      "known_attempts": 0,
+      "generated_attempts": 1,
+      "attempts": [
+        {
+          "attempt_id": "01M3SXDB4FM7AFA4124N2D8PNQ",
+          "claimed": true,
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:ec87ab4046d5d8d2198ff4d7e1435d4bd2a339c9d73e815b950d61b518a806f4",
+          "record": "finished",
+          "retained_ref": "sha256:96919dc8b85f6441d24a0bbace64c9bccff56fb4221cecc2ba4fecdf6ce2f294",
+          "route_accepted": true,
+          "runtime_id": "local",
+          "status": "pass",
+          "unknown_resolved": false
+        }
+      ],
+      "stop": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T19:42:46.931Z"
+      },
+      "elapsed_seconds": 47.828,
+      "rounds": [
+        {
+          "round_seq": 1,
+          "raw_sha256": "sha256:4dbe95e8d8de4aa431c2cfc8eabf1f78cd01db44cd6414a462d3a831172d69c1",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "admitted",
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": null,
+                "static_output": "build",
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:755d181c7a23ff6dfbba314e4f8d750b725b84403ffbf002f01f8be81e5d064e",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 4096,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 2064,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 2,
+          "raw_sha256": "sha256:bc5fea6ceb1b27fe078fa15ecbf0c78f356b310b2cfacc441d05489fa2fd219b",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "propose_derivation"
+          ],
+          "decline_reasons": [],
+          "outcomes": [
+            {
+              "status": "rejected",
+              "code": "proposal_source_digest_mismatch"
+            }
+          ],
+          "plans": [
+            {
+              "execution": {
+                "runtime": {
+                  "name": "node",
+                  "version": "22.14.0"
+                },
+                "entrypoint": {
+                  "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                  "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                },
+                "argv": [],
+                "cwd": ".",
+                "module": null,
+                "guest_port": 0,
+                "static_output": "build",
+                "dependencies": [
+                  {
+                    "kind": "npm_ci",
+                    "manifest": {
+                      "file_id": "f_7ae45ad102eab3b6d7e7896a",
+                      "digest": "sha256:28f088b2a202cf76436779a519deec0e80204973104642f9c0a3d6d80f543284"
+                    },
+                    "lockfile": {
+                      "file_id": "f_053150b640a7ce75eff69d1a",
+                      "digest": "sha256:a0627bc2f0feffcd527e6841b7d51bbef7603bfabbf9c295c3c77320ee928fac"
+                    }
+                  }
+                ],
+                "build_scripts": [
+                  "build"
+                ],
+                "state": [],
+                "requirements": {
+                  "network": [
+                    {
+                      "phase": "dependencies",
+                      "host": "registry.npmjs.org",
+                      "port": 443
+                    }
+                  ],
+                  "authority": [
+                    {
+                      "phase": "runtime",
+                      "protocol": "ato.http@1",
+                      "resource": "app.http",
+                      "operation": "bind"
+                    }
+                  ]
+                }
+              },
+              "environment_keys_only": [],
+              "diagnostic_fields_present": {
+                "basis": true,
+                "unknowns": true
+              }
+            }
+          ],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [
+              "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            ],
+            "proposal_diagnostics": [],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:a0cfe0000387a7fff3b7868a3a65a8bbfe1874f968ed19e79af237a244816b5f",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 1536,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:dee929e93000a7f8b0a4ce8f35692124ece36adea50bf175805ecf88572d4243",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 1040,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        },
+        {
+          "round_seq": 3,
+          "raw_sha256": "sha256:cf7a786cfc14c54b310fb79e73c0561e2ab5954fa432b183995703f87c45779f",
+          "raw_json_validation": "well_formed",
+          "kinds": [
+            "unsupported"
+          ],
+          "decline_reasons": [
+            "insufficient_source"
+          ],
+          "outcomes": [
+            {
+              "status": "unsupported"
+            }
+          ],
+          "plans": [],
+          "actually_transmitted_context": {
+            "failure_codes": [],
+            "previous_derivation_refs": [
+              "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc"
+            ],
+            "proposal_diagnostics": [
+              "proposal_source_digest_mismatch"
+            ],
+            "source_entries": [
+              {
+                "content_sha256": "sha256:1b1206549371903b3082cd742c3e67c4a987425f458abaf02b552570ab39f743",
+                "logical_id": "f_0b0354d6fc2d2a2e01c5877f",
+                "text_bytes": 451,
+                "truncated": false
+              },
+              {
+                "content_sha256": "sha256:a0cfe0000387a7fff3b7868a3a65a8bbfe1874f968ed19e79af237a244816b5f",
+                "logical_id": "f_25789e3ba4c2adf4a6899626",
+                "text_bytes": 1536,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:dee929e93000a7f8b0a4ce8f35692124ece36adea50bf175805ecf88572d4243",
+                "logical_id": "f_7ae45ad102eab3b6d7e7896a",
+                "text_bytes": 1040,
+                "truncated": true
+              },
+              {
+                "content_sha256": "sha256:721da79f329a9f6a14430e092ec7edbe5a2d6b39cbd73ba7525a80f18fd746b3",
+                "logical_id": "f_b335630551682c19a781afeb",
+                "text_bytes": 456,
+                "truncated": false
+              }
+            ]
+          }
+        }
+      ],
+      "round_timing": [
+        {
+          "candidates": [
+            {
+              "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+                "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.node.22.14.0"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            }
+          ],
+          "derivations": [
+            {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "requirements": {
+                "authority": [
+                  {
+                    "operation": "bind",
+                    "phase": "runtime",
+                    "protocol": "ato.http@1",
+                    "resource": "app.http"
+                  }
+                ],
+                "network": [
+                  {
+                    "host": "registry.npmjs.org",
+                    "phase": "dependencies",
+                    "port": 443
+                  }
+                ]
+              },
+              "runtimes": {
+                "node": "22.14.0"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/node",
+                    "--version"
+                  ],
+                  "cwd": ".",
+                  "id": "check-toolchain",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "ci",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund"
+                  ],
+                  "cwd": ".",
+                  "id": "dependencies-1",
+                  "network": "scoped-dependencies",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/node/22.14.0/bin/npm",
+                    "run",
+                    "build"
+                  ],
+                  "cwd": ".",
+                  "id": "build-2",
+                  "network": "scoped-build",
+                  "op": "exec",
+                  "protocol": "ato.process@1"
+                },
+                {
+                  "cwd": ".",
+                  "entry": "index.html",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.browser@1",
+                  "root": "build",
+                  "source": "workspace",
+                  "spa_fallback": false
+                }
+              ]
+            }
+          ],
+          "expires_at_ms": 1790797353655,
+          "opened_at_ms": 1790797323655,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "diagnostics": [
+            "proposal_source_digest_mismatch"
+          ],
+          "expires_at_ms": 1790797389822,
+          "opened_at_ms": 1790797359822,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790797394402,
+          "opened_at_ms": 1790797364402,
+          "outcome": "completed"
+        }
+      ],
+      "attempt_timing": [
+        {
+          "claimed_at": "2026-09-30T19:42:08.346Z",
+          "finished_at": "2026-09-30T19:42:39.822Z",
+          "derivation_ref": "sha256:d57e640c8f7e0c3cdfc483e644fc8b9023cdd06bb62b6c0f29d45aa8aa773ebc",
+          "status": "pass"
+        }
+      ],
+      "calls": [
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 3023,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7507,
+              "output_tokens": 641
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 3178,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7663,
+              "output_tokens": 732
+            }
+          },
+          "status": "success"
+        },
+        {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 2336,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/4",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 7673,
+              "output_tokens": 28
+            }
+          },
+          "status": "success"
+        }
+      ],
+      "CP_calls": 3,
+      "DP_calls": 0,
+      "input_tokens": 22843,
+      "output_tokens": 1401,
+      "estimated_cost_usd_micros": 8537,
+      "conservative_charge_usd_micros": 29493,
+      "functional_acceptance": "not_measured",
+      "persistence": "not_measured",
+      "normal_verified_routes": 0,
+      "unresolved_model_reservations": 0,
+      "result_sha256": "c55e65a511f08f65d8c98a1e080f77f9e557bd0ff5040651058e351d4ae28b5f",
+      "status_sha256": "0663c1cd4a82a020302f25ef67e4063b518fd66920671611d888f953825b0dd1"
+    }
+  ],
+  "interrupted": {
+    "label": "interrupted-wbo",
+    "index": 2,
+    "typed_K_pass": false,
+    "classification": "untyped requester wait expiry, harness parse error; Coordinator UNKNOWN",
+    "application_terminal": "not_established",
+    "automatic_retry": false,
+    "CP_calls": 1,
+    "DP_calls": 0,
+    "input_tokens": 7500,
+    "output_tokens": 532,
+    "estimated_cost_usd_micros": 2889,
+    "conservative_charge_usd_micros": 9831,
+    "unresolved_model_reservations": 0,
+    "runtime_UNKNOWN": 1,
+    "status_sha256": "760c4972b191eade29126f9a34f0d0a54e98bb117dd06b07f1a9e6c7b96d4dd5"
+  },
+  "totals": {
+    "CP_calls": 16,
+    "DP_calls": 0,
+    "input_tokens": 122127,
+    "output_tokens": 7722,
+    "estimated_cost_usd_micros": 45919,
+    "conservative_charge_usd_micros": 157296,
+    "unique_additional_typed_K_apps": 1,
+    "pass_cases": 3,
+    "remaining_usd_micros": 564906,
+    "unresolved_model_reservations": 0,
+    "unresolved_runtime_UNKNOWN": 1,
+    "per_call_latency": "not_recorded; case elapsed is not provider latency"
+  },
+  "permission_recovery": {
+    "original_100_network": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "original_100_authority": [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    "small_pilot_network_failure": "WBO denied in logs, but never returned typed Runtime evidence; no recovery claim"
+  },
+  "raw_manifest_sha256": "15f957b9b6d51172751fd3a2603df909a3714a1b429eba798e16ef3e02d14ce9",
+  "implemented": true,
+  "verified": "real Coordinator/Runtime/live provider subset; per-case exact pins",
+  "merged": false,
+  "deployed": false,
+  "remote_migration": false
+}

@@ -1,0 +1,469 @@
+{
+  "schema": "ato.formation-agent-linux-ci-comparison/1",
+  "measurement_id": "formation-agent-ci-linux-20261003-01",
+  "date": "2026-10-03",
+  "scope": "new native Linux CI fixture comparison; no reassignment of prior Formation measurements",
+  "original_GitHub_CI": {
+    "repository": "ato-run/ato-api",
+    "job_name": "instance-state-sync",
+    "log": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api-linux-state.log",
+      "sha256": "acf2e142e9dadd25460eb86b7ef7a18143fb433184247b48dea383f88d57f062"
+    },
+    "Node_setup": "22",
+    "actual_Node": "22.23.3",
+    "Node_evidence_lines": [
+      150,
+      162,
+      1541
+    ],
+    "merge_commit": "73d1da278406ca791539a75d6119e37e0bff66e7",
+    "merge_and_head_tree": "4ca2e04c7b0f43c0ab5acc55a5a53cb9402e4a1d",
+    "tree_equality_command": "git rev-parse 73d1da278406ca791539a75d6119e37e0bff66e7^{tree} 9b483d4a^{tree}; git diff --stat 73d1da278406ca791539a75d6119e37e0bff66e7 9b483d4a",
+    "OS": "Ubuntu 24.04.5 x64",
+    "runner_image": "ubuntu-24.04 20260927.320.1",
+    "Node25_clarification": "25.6.0 was the previous local measurement condition, not the original Linux CI condition",
+    "old_evidence_source": "docs/ops/evidence/formation-budget-terminal-ci-comparison-20261003.json local_Node/CI_Node/API_CI.Node_limit",
+    "new_GitHub_CI_execution": false
+  },
+  "pins": {
+    "base": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+    "head": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+    "fixed": "42d464d96fe26e7188c4c2352f4c2d7e30826919"
+  },
+  "trees": {
+    "base": "042546753acc25d582988f3d66cb65c4fbe39265",
+    "head": "4ca2e04c7b0f43c0ab5acc55a5a53cb9402e4a1d",
+    "fixed": "91510e77045a7e341ebd28e48225b8915c06258d"
+  },
+  "environment": {
+    "platform": "Linux-6.17.0-1016-oracle-aarch64-with-glibc2.39",
+    "machine": "aarch64",
+    "os_release": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n",
+    "disk": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1       290G  272G   18G  94% /",
+    "task_size": "2.5G\t.",
+    "os_packages": [
+      {
+        "file": "libabsl20220623t64_20220623.1-3.1ubuntu3.2_arm64.deb",
+        "sha256": "bb2c97960dd21896e0e0a9d0df7aa552943b75cee653ca817e51f53d827cffd4"
+      },
+      {
+        "file": "libavif16_1.0.4-1ubuntu3_arm64.deb",
+        "sha256": "0dfdf3b2281df61345f72dfaffa61775ddad2c7e77f52d6928f41ac22cb27166"
+      },
+      {
+        "file": "libevent-2.1-7t64_2.1.12-stable-9ubuntu2_arm64.deb",
+        "sha256": "e095ad42f0ab92bc63c007234ad90c34bc27b1e01d55f971161581d96bc0107a"
+      },
+      {
+        "file": "libflite1_2.2-6build3_arm64.deb",
+        "sha256": "d792b1148cb4fa09946dfb32c502df80bdaa7c77662a3a8f57e1f999a5bd16d3"
+      },
+      {
+        "file": "libgav1-1_0.18.0-1build3_arm64.deb",
+        "sha256": "403d560357251c0002f42037e0c69dc6cb59649fcd025d26db916f630f08127d"
+      },
+      {
+        "file": "libgstreamer-plugins-bad1.0-0_1.24.2-1ubuntu4_arm64.deb",
+        "sha256": "917784636880a70102884e4842b4bf226feafb5b29417fdd71522dff4253c2ec"
+      },
+      {
+        "file": "libwoff1_1.0.2-2build1_arm64.deb",
+        "sha256": "01b015124ee5b01cb0e194fb98f14d9902dbfce6aba78d2e044dbd35fc7eea93"
+      },
+      {
+        "file": "libyuv0_0.0~git202401110.af6ac82-1_arm64.deb",
+        "sha256": "927405a85ab7b53612ded42f680e6d6d4f83a394220ad276504d5e45869c25e5"
+      }
+    ],
+    "lock_sha256": {
+      "base": "9555b0afe5dc40cdc06a8541735181d1dfea62a93f0e01aa6fd9149c6e42a20e",
+      "head": "9555b0afe5dc40cdc06a8541735181d1dfea62a93f0e01aa6fd9149c6e42a20e",
+      "fixed": "9555b0afe5dc40cdc06a8541735181d1dfea62a93f0e01aa6fd9149c6e42a20e"
+    },
+    "host": "oci-linux-test",
+    "dedicated_root": "/home/ubuntu/ato-run/.tmp/formation-agent-ci-linux-20261003-01",
+    "preflight_observed_free_disk": "21 GiB",
+    "native_Linux": true,
+    "GitHub_x64_environment_identical": false,
+    "toolchain": {
+      "22.23.3": {
+        "node": "v22.23.3",
+        "pnpm": "10.15.0",
+        "archive_sha256": "a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f",
+        "official_SHA_source": "https://nodejs.org/dist/v22.23.3/SHASUMS256.txt"
+      },
+      "25.6.0": {
+        "node": "v25.6.0",
+        "pnpm": "10.15.0",
+        "archive_sha256": "e5509c8954771ea0f9291a65e71d2e3dee84b713cdd4e9a55432ca91b75a1922",
+        "official_SHA_source": "https://nodejs.org/dist/v25.6.0/SHASUMS256.txt"
+      }
+    },
+    "toolchain_log": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/toolchain-final.json",
+      "sha256": "440de1426298f4f98c24bf53a9f094a8372f7af95b7e2bbb5fd91eba71ef5aab"
+    },
+    "environment_log": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/environment-final.json",
+      "sha256": "ce7d2111bbfe9feb2568267bade0244c26ffc3cba8fd7ed06da6b098d18985fb"
+    },
+    "dependency_install": "pnpm install --frozen-lockfile --store-dir <dedicated-root>/pnpm-store for each source archive",
+    "install_logs": [
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-install.log",
+        "sha256": "875fc7b9ebd5434ad1f48830f69e120ed47b1eb35f26d8af7b10e89c4d7fccb2"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/head-install.log",
+        "sha256": "5db6566982469bc780250ea02df4a48ca61cd1aaf293df84fad97b36db9e7f50"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/fixed-install.log",
+        "sha256": "b8ec331060874ef18e6662f019f7f93e88634b7d62b34f4ceeb4d382ba52ed0a"
+      }
+    ],
+    "Node25_reused_same_installed_dependencies": true,
+    "Playwright": "1.55.0",
+    "browser_builds": {
+      "chromium": 1187,
+      "chromium_headless_shell": 1187,
+      "webkit": 2203,
+      "ffmpeg": 1011
+    },
+    "browser_versions": {
+      "webkit": "26.0",
+      "chromium": "140.0.7339.16"
+    },
+    "ready_browser_probe": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/browser-environment-ready.log",
+      "sha256": "87dec44fefcab8df1923bc8bf35d63e5f5196435632a7a759660a37b23c9b52e"
+    },
+    "PLAYWRIGHT_BROWSERS_PATH": "<dedicated-root>/browsers",
+    "TMPDIR": "<dedicated-root>/scratch",
+    "LD_LIBRARY_PATH": "<dedicated-root>/os-deps/root/usr/lib/aarch64-linux-gnu",
+    "global_OS_package_install_or_update": false,
+    "OS_dependency_preparation": "apt-get download eight packages; dpkg-deb --extract into dedicated prefix; no apt install or apt update",
+    "WebKit_library_preparation": "downloaded launcher overwrites LD_LIBRARY_PATH; add 206 previously absent symlinks to dedicated minibrowser-wpe/sys/lib; no existing-file replacement or launcher/binary changes",
+    "WebKit_library_links": {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/webkit-library-links.json",
+      "sha256": "58b646c0b6acac962d07d6eb923ce8ec005548d1c8d05d33497c270c2ae3b1bc"
+    },
+    "excluded_preparation_logs": [
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-test-initial.log",
+        "sha256": "b95b57d1f61f41a9b6e56480ed8c46ff61b3b2370bd380f975299f564979732e"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-test-isolated-libs.log",
+        "sha256": "678a5e46797373178386034a3fd6dc35a4178315d3dbebd94067bcc7966e22d4"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/head-test-isolated-libs.log",
+        "sha256": "8a2bd663077e95033c6a88b2dfe5115dce53d0a2624ae2991020bba2d58aa276"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/fixed-test-isolated-libs.log",
+        "sha256": "2cd43d16889745aa8281f13494a4f008c962981641f5dfae323b19cfca9e054c"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-test-final.log",
+        "sha256": "c9f876905bb89dbbadf894bd81d69cd8115a5782ff00a4bc3e9108024a002d63"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/head-test-final.log",
+        "sha256": "1aeab69e0955e154589194c81217f2bd9f46bb1dee37f49e22916aa8bdf6acba"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/fixed-test-final.log",
+        "sha256": "2cd43d16889745aa8281f13494a4f008c962981641f5dfae323b19cfca9e054c"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/browser-environment-probe.log",
+        "sha256": "0842fe3881ca96c6d4a7425fe2484eb10c6943d8b2bfc662df9cdf5dbf93c838"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/browser-environment-probe-complete.log",
+        "sha256": "0041e3fe2ff146403c1be5daae661577f5a098dae2b2012c9f1be28642dd8cb7"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/os-deps-absl-download.log",
+        "sha256": "2dd20af102d5dc2b41751ee716c7529c2a1bf3270c887cbeed8486aef30354fe"
+      }
+    ],
+    "excluded_preparation_classification": "missing browser libraries or failed preparation package lookup before launch; not comparable WebSocket measurements"
+  },
+  "source_integrity": {
+    "materialization": "git archive exact commit into new per-pin directories, original worktrees untouched",
+    "validation": "git ls-tree -r manifests; recompute every Git blob SHA-1, including symlink target bytes",
+    "runs": {
+      "source-verification-before.json": {
+        "result": {
+          "base": {
+            "tracked_files": 1810,
+            "mismatches": []
+          },
+          "head": {
+            "tracked_files": 1811,
+            "mismatches": []
+          },
+          "fixed": {
+            "tracked_files": 1811,
+            "mismatches": []
+          }
+        },
+        "log": {
+          "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/source-verification-before.json",
+          "sha256": "641b50adacd587a5794eb5e77c99e4f798388c95eaa92ae0ac8ecfe99db333d2"
+        }
+      },
+      "source-verification-ready.json": {
+        "result": {
+          "base": {
+            "tracked_files": 1810,
+            "mismatches": []
+          },
+          "head": {
+            "tracked_files": 1811,
+            "mismatches": []
+          },
+          "fixed": {
+            "tracked_files": 1811,
+            "mismatches": []
+          }
+        },
+        "log": {
+          "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/source-verification-ready.json",
+          "sha256": "641b50adacd587a5794eb5e77c99e4f798388c95eaa92ae0ac8ecfe99db333d2"
+        }
+      },
+      "source-verification-measured-after.json": {
+        "result": {
+          "base": {
+            "tracked_files": 1810,
+            "mismatches": []
+          },
+          "head": {
+            "tracked_files": 1811,
+            "mismatches": []
+          },
+          "fixed": {
+            "tracked_files": 1811,
+            "mismatches": []
+          }
+        },
+        "log": {
+          "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/source-verification-measured-after.json",
+          "sha256": "641b50adacd587a5794eb5e77c99e4f798388c95eaa92ae0ac8ecfe99db333d2"
+        }
+      },
+      "source-verification-node25-after.json": {
+        "result": {
+          "base": {
+            "tracked_files": 1810,
+            "mismatches": []
+          },
+          "head": {
+            "tracked_files": 1811,
+            "mismatches": []
+          },
+          "fixed": {
+            "tracked_files": 1811,
+            "mismatches": []
+          }
+        },
+        "log": {
+          "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/source-verification-node25-after.json",
+          "sha256": "641b50adacd587a5794eb5e77c99e4f798388c95eaa92ae0ac8ecfe99db333d2"
+        }
+      }
+    }
+  },
+  "matrix": [
+    {
+      "Node": "22.23.3",
+      "purpose": "same exact Node version as original Linux CI",
+      "case": "base",
+      "API_commit": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+      "command": "/usr/bin/time -f \"elapsed_seconds=%e\" pnpm test:instance-state-sync",
+      "exit_code": 1,
+      "elapsed_seconds": 18.53,
+      "classification": "existing fixture failure: WebKit coop-presence handshake at run.mjs:196",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-test-measured.log",
+        "sha256": "77ee6d4d27e73192e523d5db12ae594a4b6aa42ebb632e7fdcc17c34370db77c"
+      },
+      "exit_file": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-test-measured.exit",
+        "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+      },
+      "passed_checks": [],
+      "existing_telemetry_warning_observed": true
+    },
+    {
+      "Node": "22.23.3",
+      "purpose": "same exact Node version as original Linux CI",
+      "case": "head",
+      "API_commit": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+      "command": "/usr/bin/time -f \"elapsed_seconds=%e\" pnpm test:instance-state-sync",
+      "exit_code": 1,
+      "elapsed_seconds": 17.55,
+      "classification": "existing fixture failure: WebKit coop-presence handshake at run.mjs:196",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/head-test-measured.log",
+        "sha256": "ddf6942217a52adae983d04cf1754ce50466d613a32e76048b6d00dd848cd1de"
+      },
+      "exit_file": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/head-test-measured.exit",
+        "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+      },
+      "passed_checks": [],
+      "existing_telemetry_warning_observed": true
+    },
+    {
+      "Node": "22.23.3",
+      "purpose": "same exact Node version as original Linux CI",
+      "case": "fixed",
+      "API_commit": "42d464d96fe26e7188c4c2352f4c2d7e30826919",
+      "command": "/usr/bin/time -f \"elapsed_seconds=%e\" pnpm test:instance-state-sync",
+      "exit_code": 0,
+      "elapsed_seconds": 49.96,
+      "classification": "PASS full browser fixture",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/fixed-test-measured.log",
+        "sha256": "d02e894924addcf9de2eb7a043973bce12579935ec55509795c60d82736648ee"
+      },
+      "exit_file": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/fixed-test-measured.exit",
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      "passed_checks": [
+        "no sharing, owner 2 tabs + separate mobile context; separate instance isolated",
+        "no loops, redundant saves, or dependency on first tab",
+        "same transport admits invited editor after access grant",
+        "response-loss retry idempotency and payload conflict",
+        "reset broadcasts empty state and fences old operations",
+        "disconnected client catches up on return",
+        "final notification loss converges without another event",
+        "obsolete GET cannot roll back an acknowledged local commit",
+        "bridge retries frozen operation while preserving newer confirmed and pending edits separately",
+        "reset discards an offline client's pending old-generation writes",
+        "schema change stops stale software writes without forced reload",
+        "reserved path rewrite/allowlist, old bundled bridge replacement, browser error check"
+      ],
+      "existing_telemetry_warning_observed": true
+    },
+    {
+      "Node": "25.6.0",
+      "purpose": "supplementary comparison with the prior local Node version; not original CI",
+      "case": "base",
+      "API_commit": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+      "command": "/usr/bin/time -f \"elapsed_seconds=%e\" pnpm test:instance-state-sync",
+      "exit_code": 1,
+      "elapsed_seconds": 16.61,
+      "classification": "existing fixture failure: WebKit coop-presence handshake at run.mjs:196",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-test-node25.log",
+        "sha256": "0d562f2fa0d1c2594a1fbaa4138025994370690f3a6e4b3c1e5a9dd42bd49b29"
+      },
+      "exit_file": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/base-test-node25.exit",
+        "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+      },
+      "passed_checks": [],
+      "existing_telemetry_warning_observed": true
+    },
+    {
+      "Node": "25.6.0",
+      "purpose": "supplementary comparison with the prior local Node version; not original CI",
+      "case": "head",
+      "API_commit": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+      "command": "/usr/bin/time -f \"elapsed_seconds=%e\" pnpm test:instance-state-sync",
+      "exit_code": 1,
+      "elapsed_seconds": 16.33,
+      "classification": "existing fixture failure: WebKit coop-presence handshake at run.mjs:196",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/head-test-node25.log",
+        "sha256": "7ff05edeabd30c3d3fbc2b40896dc6487fffd68b659cb671c9137dac0a5624f2"
+      },
+      "exit_file": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/head-test-node25.exit",
+        "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+      },
+      "passed_checks": [],
+      "existing_telemetry_warning_observed": true
+    },
+    {
+      "Node": "25.6.0",
+      "purpose": "supplementary comparison with the prior local Node version; not original CI",
+      "case": "fixed",
+      "API_commit": "42d464d96fe26e7188c4c2352f4c2d7e30826919",
+      "command": "/usr/bin/time -f \"elapsed_seconds=%e\" pnpm test:instance-state-sync",
+      "exit_code": 0,
+      "elapsed_seconds": 49.1,
+      "classification": "PASS full browser fixture",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/fixed-test-node25.log",
+        "sha256": "1ce80ad6ae1adf6423e5160fa3f1d2b794e3aeb319ce8150c0d961053b178354"
+      },
+      "exit_file": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/linux-native-20261003-01/fixed-test-node25.exit",
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      "passed_checks": [
+        "no sharing, owner 2 tabs + separate mobile context; separate instance isolated",
+        "no loops, redundant saves, or dependency on first tab",
+        "same transport admits invited editor after access grant",
+        "response-loss retry idempotency and payload conflict",
+        "reset broadcasts empty state and fences old operations",
+        "disconnected client catches up on return",
+        "final notification loss converges without another event",
+        "obsolete GET cannot roll back an acknowledged local commit",
+        "bridge retries frozen operation while preserving newer confirmed and pending edits separately",
+        "reset discards an offline client's pending old-generation writes",
+        "schema change stops stale software writes without forced reload",
+        "reserved path rewrite/allowlist, old bundled bridge replacement, browser error check"
+      ],
+      "existing_telemetry_warning_observed": true
+    }
+  ],
+  "cause": {
+    "classification": "existing fixture defect on exact base and head; not a new Session regression",
+    "production_handler": "src/app_proxy.ts:2340-2341 returns 503 presence_unavailable if COOP_PRESENCE_ROOM absent",
+    "old_fixture": "exports AppRoom only and binds APP_ROOM only",
+    "fix": "import/export real existing CoopPresenceRoom and register COOP_PRESENCE_ROOM in Miniflare",
+    "subsequent_authorization_assertion": "existing authenticated non-member production behavior is 404/not_found; replace stale 403 expectation and check JSON body",
+    "diff_from_exact_head": [
+      "tests/instance-state-sync/run.mjs",
+      "tests/instance-state-sync/worker.ts"
+    ],
+    "production_authorization_changed": false,
+    "test_skips_added": false,
+    "browser_error_filters_added": false,
+    "telemetry_warning": "nodeCrypto.randomBytes is not a function remains in all six results; not suppressed or resolved"
+  },
+  "unresolved_scope": {
+    "original_macOS_worker_failure": "UNREPRODUCED; missing child log prevents original cause attribution; controlled missing-Python diagnosis is separate",
+    "native_Windows_MSVC_execution": "NOT_MEASURED; Windows GNU cross-clippy success stays distinct",
+    "API_Activity_CORS": "previous exact Node22 macOS base/head comparison has same 13 failures and 155 passes; not rerun or fixed here",
+    "GitHub_full_CI_success": false,
+    "Session_or_real_agent_acceptance": "not measured by this browser fixture",
+    "full_orchestration_private_input_nonexposure": "not measured by this public local fixture"
+  },
+  "actions": {
+    "Formation_searches_created": 0,
+    "new_paid_API_calls": 0,
+    "real_Runtime_attempts": 0,
+    "real_private_inputs_created": 0,
+    "local_Miniflare_D1_and_browser_fixture": true,
+    "deployment": false,
+    "remote_migration": false,
+    "feature_flag_change": false,
+    "previous_measurements_modified": false,
+    "existing_worktrees_or_data_deleted": false,
+    "Formation_inference_dispatches": 0,
+    "independent_LLM_provider_API_calls": 0,
+    "Codex_orchestration_internal_LLM_calls": "unknown",
+    "Codex_orchestration_cost": "unknown"
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "schema": "ato.formation-agent-ci-comparison/1",
+  "measurement_id": "formation-agent-ci-20261003-01",
+  "date": "2026-10-03",
+  "scope": "new CI implementation and comparison; no reassignment of previous Formation execution evidence",
+  "environment": {
+    "os": "macOS 15.8.1",
+    "arch": "arm64",
+    "rust": "1.96.0 (ac68faa20 2026-05-25)",
+    "Node": "22.23.3",
+    "Node_archive_sha256": "23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53",
+    "Node_SHA_verified_against": "https://nodejs.org/dist/v22.23.3/SHASUMS256.txt"
+  },
+  "baseline_pins": {
+    "Ato_base": "3b28421048c8d4fcd00b83c8022f4b0f28c217b7",
+    "Ato_head": "31a6d6b4d6df03a7463058ea38f87b7ff1e525a3",
+    "API_base": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+    "API_head": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+    "all_baseline_worktrees_clean": true
+  },
+  "fix_commits": {
+    "runtime_portability": "47482409",
+    "CLI_fixture_diagnostics_and_declared_CI_python": "b6f55a2d",
+    "API_fixture": "42d464d9"
+  },
+  "Windows": {
+    "classification": "existing compile failure on exact PR base and head",
+    "local_target": "x86_64-pc-windows-gnu",
+    "CI_target": "x86_64-pc-windows-msvc",
+    "before_command": "cargo +1.96.0 check --locked --offline -p ato-runtime-attempt --target x86_64-pc-windows-gnu",
+    "before_base_errors": 13,
+    "before_head_errors": 13,
+    "cause": "unconditional Unix browser socket/process-group APIs and non-Unix missing bail macro",
+    "after_runtime_command": "cargo +1.96.0 clippy --locked --offline -p ato-runtime-attempt --target x86_64-pc-windows-gnu --all-targets -- -D warnings",
+    "after_runtime_result": "PASS",
+    "after_CLI_command": "cargo +1.96.0 check --locked --offline -p ato-cli --target x86_64-pc-windows-gnu",
+    "after_CLI_result": "PASS with two pre-existing Unix-only formation-worker import warnings",
+    "after_CLI_uncommitted_parent_Session_changes": true,
+    "actual_Windows_execution": false,
+    "cache": "fresh separate base/head target directories; prior targets untouched",
+    "logs": [
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/windows-head-before.log",
+        "sha256": "4e263b17a9b46f78a87781f1079c0c292575b85adc4e6da2788fc573a759aad1"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-ci-base-1476/.tmp/ci/windows-base-before.log",
+        "sha256": "17636d8bf53cc365979d4e3a024994ca9ad021ebfa5a0427f2bedb035b8cb8cd"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/windows-runtime-final.log",
+        "sha256": "6dbaaebef78975c7a6efa6f5c3a754e864664c04afb1ded8ad8dfe9dd323ab37"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/windows-cli-final.log",
+        "sha256": "2761685842ea9c15c3ed0d0cbb1e388b683f91c055a98d3843d07182ddf2e55e"
+      }
+    ],
+    "native_Runtime_lib_tests": {
+      "command": "CARGO_INCREMENTAL=0 cargo +1.96.0 test --locked --offline -p ato-runtime-attempt --lib",
+      "os": "macOS 15.8.1 arm64",
+      "result": "95 PASS / 0 FAIL",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/runtime-native-tests.log",
+        "sha256": "2e49529d0c844165b12b53311d95190eecb01b689b868480c9bd854feeb365d2"
+      }
+    },
+    "after_full_CLI_clippy": {
+      "command": "cargo +1.96.0 clippy --locked --offline -p ato-cli --target x86_64-pc-windows-gnu --all-targets -- -D warnings",
+      "result": "FAIL at parallel new Session code boxed_local and too_many_arguments; returned to Session owner",
+      "log": {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/windows-cli-clippy-final.log",
+        "sha256": "5da206bca6602181a7e43a3324e5e0c3deeb8f84173f46134e2304d7e5782d84"
+      },
+      "Session_source_sha256": "8ad65698de30b1a3703ce4a23b160ee59ce20ac23aaa620e6f717444dc1de99f"
+    }
+  },
+  "macOS": {
+    "before_command": "CARGO_INCREMENTAL=0 cargo +1.96.0 test --locked --offline -p ato-cli --test portable_application",
+    "exact_base_result": "15 PASS / 0 FAIL",
+    "exact_head_result": "15 PASS / 0 FAIL",
+    "after_result": "15 PASS / 0 FAIL; parallel parent Session changes present",
+    "original_CI_job": 111133810822,
+    "original_CI_failure": "worker exited before becoming active; underlying output.log was not uploaded",
+    "controlled_case": "empty PATH prevents finding pinned Python 3.12; same generic parent error reproduced, child log identifies missing Python, active_run is null",
+    "controlled_case_is_original_CI_cause_proof": false,
+    "classification": "original CI cause remains unproven; unavailable-runtime error propagation reproduced as a common harness flaw",
+    "test_change": "reads this non-secret fixture worker log before TempDir cleanup; preserves the existing two admission reasons only; asserts no receipt and no remaining active Run on admission rejection; unknown worker failure still fails",
+    "controlled_after_result": "1 PASS / 0 FAIL with empty PATH (admission rejection, not process verification PASS)",
+    "CI_change": "setup-python@v5 declares Python 3.12 matching the portable process fixture",
+    "new_CI_run_executed": false,
+    "cache": "shared prior target sequentially with CARGO_INCREMENTAL=0; no workspace test sources mixed",
+    "logs": [
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-ci-base-1476/.tmp/ci/macos-base-before.log",
+        "sha256": "1b7106da731e7a2dfa050100107948745b24692d4b0abb6e522bd0a6e737acdd"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-ci-head-1476/.tmp/ci/macos-head-before-exact.log",
+        "sha256": "b6b140ed446b3ac99ce3eaecc92283aab107cace11a46b6d8750256837d497ed"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-ci-head-1476/.tmp/ci/runtime-absent/result.json",
+        "sha256": "09f077a460211c5a4d307542eea378b816bb4143b62945132521ee1639167ac1"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/macos-head-after.log",
+        "sha256": "15f75d26e9499b31568f7e9affd3a1bff20761e2ee1cf793e00ab6d19dcd9b02"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/macos-process-admission-after.log",
+        "sha256": "1ace3efba92c14c30f81740573652ae9cb8cf0dc72dc8cba33a004b3366a41dd"
+      }
+    ],
+    "CLI_workflow_YAML_parse": "PASS with Ruby YAML.load_file"
+  },
+  "API_instance_state_sync": {
+    "command": "pnpm test:instance-state-sync",
+    "exact_Node_matches_CI": true,
+    "before_base_result": "FAIL WebKit coop-presence bad response from server at run.mjs:196",
+    "before_head_result": "same failure",
+    "cause": "fixture omitted the existing COOP_PRESENCE_ROOM binding/export; production handler responds presence_unavailable instead of upgrading WebSocket",
+    "second_failure": "test expected 403 for authenticated non-member, while current production authorization conceals App existence with 404/not_found",
+    "fix": "register real CoopPresenceRoom in the acceptance harness; assert the current 404 and body without changing production authorization",
+    "after_result": "PASS through all browser/Room/D1/recovery/schema assertions on macOS",
+    "typecheck_after": "PASS",
+    "prettier_check": "PASS",
+    "Linux_native_after_execution": false,
+    "Linux_limitation": "Docker daemon stopped; local macOS Node 22.23.3 reproduced the same endpoint rejection; no Linux or CI rerun claimed",
+    "remaining_warning": "nodeCrypto.randomBytes is not a function during telemetry; present on exact base/head and after. A bare alias to node:crypto caused an initialization failure and was reverted, not suppressed.",
+    "logs": [
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api-ci-base-727/.tmp/ci/state-base-before.log",
+        "sha256": "c785f46238d2a889dcf0a9b1bfd01d0823b448c9c4ae3dee2099b6a03428a36d"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api-ci-head-727/.tmp/ci/state-head-before-exact.log",
+        "sha256": "9b63a88b2c7e6740bbf0c529a65a53aab4d74cfb3ae378e251787dc2f52e4ad3"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/state-head-after-presence.log",
+        "sha256": "5b52bf38c479f985453d7e61262e8eddccd36d3eb2bdb3cd07149a7a8d5aacab"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api/.tmp/ci/typecheck-after.log",
+        "sha256": "0b68bf82c79208659f688a1a849834a733ea992258cf344930dc3f23eb9ed291"
+      }
+    ],
+    "after_parallel_input_cancel_changes": true
+  },
+  "API_activity_CI": {
+    "command": "pnpm exec vitest run src/tests/activities.test.ts src/tests/activity-placement.test.ts src/tests/activity-rtc.test.ts src/tests/activity-runs-migration.test.ts src/tests/activity-tokens.test.ts src/tests/oauth-instance-grants.test.ts src/tests/node/operations-declaration.test.ts src/tests/node/operations-catalog.test.ts src/tests/node/operations-executor.test.ts src/tests/node/cors-headers-audit.test.ts",
+    "Node": "22.23.3",
+    "exact_base_result": {
+      "failed": 13,
+      "passed": 155
+    },
+    "exact_head_result": {
+      "failed": 13,
+      "passed": 155
+    },
+    "same_failure_names": true,
+    "classification": "existing failures, not a new budget-terminal regression; no suppressions or skips added",
+    "failure_names": [
+      "FAIL  |node| src/tests/node/cors-headers-audit.test.ts > CORS allowHeaders audit (#246) > every custom x-* header a route reads is preflight-allowed or justified as non-browser",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > binds an executor minted across Activity start to the extended live expiry",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > creates one hosted Run and adds the Guest as its second writer",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > does not mint an executor when Activity end wins after authorization",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > keeps a committed shared join successful when Room notification fails and recovers the same capability",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > keeps the first graceful-stop deadline across Activity lifecycle retries",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > mints a hash-only run-scoped executor session after lease claim",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > notifies guests when a multi-slot runner drops exactly one of its runs",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > replaces a runner socket only when its runs are re-claimed and suppresses the phantom disconnect",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > revokes Guest leave without ending the Activity",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > revokes a shared executor and requests lease shutdown on End",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > routes generic shared input to the Runner without issuing canonical order",
+      "FAIL  |workers| src/tests/activities.test.ts > Activity Run placement control plane > starts shared mode after one Runner Run and both subscriptions are ready"
+    ],
+    "logs": [
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api-ci-base-727/.tmp/ci/activity-comparison.log",
+        "sha256": "9a7208cc1176d494981b687c00cf9b25e78827cff9f25ce9d6ccc4d449fb3029"
+      },
+      {
+        "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/api-ci-head-727/.tmp/ci/activity-comparison.log",
+        "sha256": "da58e15c898b229c4984e02c0f2cd9531cc40310e3a59f564f7f3e1b9660566b"
+      }
+    ]
+  },
+  "CI_billing_failure": false,
+  "explicit_CI_rerun": false,
+  "new_paid_API_calls": 0,
+  "deployment": false,
+  "remote_migration": false,
+  "feature_flag_change": false,
+  "previous_measurements_modified": false
+}

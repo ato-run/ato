@@ -1,0 +1,491 @@
+# Native Surface producer and Runner adapter
+
+Status: Draft. Adapter/runtime orchestration, outside Capsule identity.
+
+## Trusted HostBoundary identity for GUI file exchange
+
+The accepted Materialization and Protocol Adapter contracts keep physical
+placement outside identity, keep credentials outside capture, and require the
+same owned Adapter lifecycle through shutdown. A root HostBoundary Runner uses
+its existing configured nonroot workload UID/GID for both its GUI application
+and display helper. Neither the application's authored UID nor an HTTP request
+may select a different helper identity. An explicit conflicting application
+identity is refused before materialization or native actions. The existing trusted
+boundary is enabled and its workspace reachability is checked before helper
+preparation. Preparation freezes that physical helper identity; a later launch
+cannot silently choose a different user from changed directory metadata.
+
+Only freshly created private display children that the helper must write
+(`x11` and `rfb`) are handed to that configured identity. The private runtime
+parent, work root, credential files and application source retain their original
+ownership; no world-writable mode is introduced. The read-only per-Run auth
+mount and ephemeral cookie retain their existing capture exclusion and lifetime
+cleanup. Ordinary nonroot local Runners keep their existing helper ownership.
+The shared OCI data-plane projection mounts granted inputs and output only into
+the application; the ancillary display helper receives neither. Original K,
+scoped viewer authorization, lease recovery and physical resource admission
+remain the same independent gates.
+
+A native application uses the existing session-surface profiles, gateway
+assertions, Runner lease, and workload supervisor. Surface readiness is transport
+evidence. It cannot replace or rewrite Contract K or issue a satisfied receipt.
+
+## Linux GUI producer
+
+`SupervisorConfig.pixel_surface` optionally selects a `PixelChildWorkload` for
+one long-running service. Existing configurations omit the field and keep their
+serialized shape. The supervisor still owns binding delivery, rotation, stop,
+process group cleanup, and restore. GUI plus sibling services are refused by
+this initial profile rather than wrapping every sibling in a display server.
+
+The common producer starts an independent TigerVNC X server, executes the
+existing argv, and stops both when either exits. It never scrapes an existing
+window or host desktop. Width/height, unprivileged RFB port, and a private display
+are validated. A private Xauthority cookie prevents accidentally attaching to
+an existing display. TCP X11 and clipboard in both directions are disabled.
+RFB listens on loopback; cross-guest access requires an explicitly isolated
+Runner relay and the existing assertion gateway. A public RFB mapping is invalid.
+The guest image must contain Bash, TigerVNC standalone, xauth, and xdpyinfo.
+Missing dependencies produce a failed workload, never a ready surface.
+
+The producer does not interpret argv as shell text. Binding file paths use the
+existing child-only environment composition. Operator managed secrets must not
+be injected into this general-purpose workload.
+
+## Runner gateway
+
+The common `netd::native_surface` lifecycle wraps the existing Pixel first-frame
+probe and Terminal ready probe. It keeps exact origins, scoped HMAC assertions,
+one-time grants, and the existing PTY resize/input protocol. Reconnect attaches
+to the same workload; it does not launch another Run. Idle time counts user input
+rather than framebuffer polling. Expiry closes listeners and viewers; the owning
+Runner must stop the workload through its existing lease lifecycle.
+
+The `ato-native-surface-gateway` sidecar reads one bounded configuration through
+Runner-owned stdin. Assertion keys use the existing keyring, never command-line
+arguments or output. The same private owner channel remains open; EOF, TERM,
+INT, or idle closes the gateway. Readiness emits `contract_verified: false`.
+The listener is loopback-only and public access stays behind the existing TLS
+session boundary. Unsupported platforms refuse the sidecar.
+
+File upload/download and clipboard are currently denied capabilities. File
+exchange needs separate per-Run authorization and path validation; no generic
+host filesystem channel is inferred from possession of a surface assertion.
+
+## Integration gates
+
+The existing v1 submission subset remains Web/Terminal. Installing a producer
+or passing an RFB test does not advertise a complete hosted GUI submission lane.
+The portable application HTTP profile remains unchanged. Image-builder config,
+Runner launch/lease wiring, native Contract observations, and the shared PWA
+frame must all be connected and verified before Pixel submission is enabled.
+The physical display and endpoint never enter Capsule semantic identity.
+
+## Verification
+
+The Linux acceptance script launches the common producer inside a private
+network/rootfs sandbox and optionally connects through the actual Rust gateway.
+It observes real pixels, keyboard changes, desktop resize, reconnect, assertion
+rejection, and teardown. These are surface observations; the report deliberately
+contains no Contract success or application acceptance claim.
+
+## Explicit guest image selection
+
+The existing `ato-firecracker-guest-image` tool accepts `--terminal-surface` or
+`--pixel-surface-config <json>` as explicit, mutually exclusive physical-profile
+choices. The Pixel JSON is only `{width,height,rfb_port,display}` and is bounded
+at 8 KiB. The image plan records the choice as materialization evidence while
+keeping the same ComputationRef, immutable workspace, and declared argv. Web
+remains the default and omits the new optional plan fields.
+
+Generation writes the existing guest supervisor configuration and checks that
+GUI dependencies exist in the digest-pinned base image. Pixel generates the
+existing guest TCP relay from the guest-private address to loopback RFB. Relay
+port conflicts fail closed. This is not a public mapping or automatic admission:
+the connected Runner still must negotiate the descriptor, validate its declared
+Port, start its authenticated gateway, and pass the app's independent K before
+publishing a hosted session. No GUI Contract is inferred from image generation.
+
+## Connected Runner assertion scope
+
+Connected Runner gateways accept an optional physical `execution` claim containing
+`run_id`, `lease_id` and `runner_id`. This is authorization metadata, outside
+Capsule identity. The API derives the existing per-Runner verification key and
+uses the Surface audience with key id `ato.runner-surface@1`; a User Runner must
+never receive the deployment-global Surface keyring. The existing signed claim
+shape is byte-compatible when `execution` is omitted.
+
+A gateway configured for a claimed execution requires exact equality of all
+three fields. A legacy gateway rejects scoped assertions, and a scoped gateway
+rejects legacy assertions. The readiness probe uses the same execution scope.
+The Runner-owned sidecar accepts this scope through bounded stdin configuration,
+requires the single Runner key for a scoped execution and never prints key
+material. End-to-end lease launch/placement and native Contract verification
+remain separate integration gates; this change does not advertise native support.
+
+## Private Unix Terminal producer
+
+A non-VM sandbox may opt into `ATO_GUEST_AGENT_TERMINAL_UNIX_SOCKET` while
+using stdio supervisor control and the existing single PTY workload profile.
+The Agent requires an absolute normalized path in a canonical directory owned
+by its effective uid with no group/other access. The socket is 0600. Existing
+files/sockets are never overwritten; teardown removes only its own socket inode.
+A bounded `CONNECT 1026`/`OK 1026` preface connects the same existing Terminal
+frame broker used by Firecracker; the common Runner gateway is unchanged.
+This is an explicit private transport, not host shell access or a public endpoint.
+
+Stopping the handle disconnects an attached viewer, joins its bounded server
+thread and removes the socket. Dropping the PTY workload stops its process group
+with bounded TERM/KILL grace; an unconfirmed stop retains its generation for
+recovery. Supervisor stdio EOF therefore does not leave this owned PTY running.
+The existing VM/vsock default is unchanged when the opt-in is absent.
+
+Both transports send Ready before reading output but wait for the first bounded
+client frame before draining the PTY. A readiness-only connection can close
+without stealing the initial prompt/screen. The existing PWA sends a viewport
+Resize after Ready. This transport-level Ready does not satisfy application K.
+
+## Portable v3 native declaration (format admission only)
+
+`BoundDerivation.native_surface` is an optional Adapter declaration. It is
+omitted from old canonical bytes. Native configuration changes D, never K;
+physical listener addresses, host/Provider identities, Run/lease identifiers,
+authorization keys and expected answers are absent from the declaration.
+Kernel and computation-root wire v2 are unchanged.
+
+The first portable native shape is one digest-pinned OCI serving step with
+an explicit non-root numeric UID:GID, one logical native presentation Port,
+and a distinct private HTTP probe Port on that same step. The Application
+uses its existing `ato.application/2` logical Surface and names the native
+Port. Terminal uses the existing `ato.pty@1` Protocol; pixel uses the existing
+payload-opaque `ato.tcp@1` Port. RFB semantics belong to the Adapter and
+`ato.pixel-stream.v1` session profile; no new Core Protocol is registered.
+
+Example declaration (byte arrays are public, authored interaction input):
+
+```json
+{
+  "surface": {"kind":"terminal","port":"app.terminal","cols":80,"rows":24},
+  "probe_port":"app.probe",
+  "operations":[{
+    "kind":"terminal_exchange",
+    "path":"/result/calculate",
+    "input":[50,43,50,10],
+    "output_delimiter":[69,78,68],
+    "max_output_bytes":4096,
+    "timeout_ms":1000
+  }]
+}
+```
+
+`NativeSurfaceAdapter::validate_catalog` is the shared pure bounds validator;
+`validate(ports, steps)` additionally checks the logical graph. A catalog has
+one to eight actions in authored order, distinct normalized result paths,
+at most 30 seconds per action, 120 seconds total, and 64 MiB aggregate output.
+An unknown field or action kind is rejected.
+
+Terminal catalog input is one to 4096 printable ASCII/CR/LF bytes; interactive
+viewer input retains the existing PTY byte protocol. Output is at most 64 KiB. The nonempty
+completion delimiter is at most 256 bytes, fits within the output cap, and
+cannot occur in a conservative representation of the input's line-discipline
+echo. The validator removes CR/LF while comparing and also rejects ECHOCTL
+`^M` variants; newline-only delimiters are refused. This closes ICRNL/ONLCR
+and related newline-translation echo completion without assuming termios
+settings. The delimiter frames completion; it is not an
+expected answer. Measured output includes the delimiter and preserves prior
+pending PTY output. Applications and K must account for echo and other actual
+output rather than treating an echoed input or a prompt as app success.
+An Adapter must also refuse a delimiter already present in pending output
+before it sends this operation's input.
+
+Pixel presentation is 64 to 4096 pixels per dimension. `pixel_key_frame`
+contains one to 32 keysyms, a result path, timeout, and `max_frame_bytes`
+exactly equal to width × height × 4, bounded by the 64 MiB aggregate capture
+limit. Each keysym means one down/up pair in
+authored order. The captured result is one full B,G,R,X frame using RFB's
+32-bpp, depth-24, little-endian true-colour format, channel maxima 255 and
+red/green/blue shifts 16/8/0. It is not a PNG, RGBA buffer, readiness frame,
+or a boolean outcome. The HTTP result body is the 72 ASCII bytes
+`sha256:<SHA-256 hex of the actual captured BGRX frame>\n`; it never contains
+the full frame. `pixel_probe_result` is the shared pure encoder. This fits
+the existing Hosted observation body bounds without changing any legacy
+transport limit. K's `body_digest` is the digest of this measured HTTP body,
+not a frame digest given to the Adapter. A different actual frame therefore
+changes the observed response and fails K unless its original expectation
+matches that response.
+
+The physical Adapter must perform each action once, capture actual bounded
+output, and freeze the result before any observation is published. Repeated
+GET retrieves the frozen bytes and never repeats the input. It must not
+receive the expected K digest or synthesize a `PASS` result. Every catalog
+path requires exactly one original HTTP K observation on the private probe
+Port, with GET, status 200 and an explicit SHA-256 body digest. Extra actions,
+missing observations, native-Surface observations and digest-free health
+checks are refused by format admission. The existing Rust HTTP verifier and
+receipt decide satisfaction; Surface readiness remains independent evidence.
+
+The validator report adds kind/profile only for native Surfaces and carries
+the exact per-D native declaration. Its native route discriminator is
+`native_oci_container`, so an older Coordinator refuses it rather than
+launching it as ordinary Web OCI. Existing Web report fields remain omitted
+as before. The Runner lease DTO can carry the existing typed
+`SessionSurfaceDescriptor` as optional `session_surface` metadata outside
+the launch-spec digest.
+
+This slice admits the native bundle format, not native execution. Existing
+local/Formation execution lowering and attempt admission refuse a native D.
+The Connected Runner rejects native `session_surface` before launch and
+continues to advertise Web only. Native probe implementation, producer
+attachment, capability matching, private endpoint resolution, authenticated
+publication, lease-owned cleanup and staging app acceptance require subsequent
+implementation and validation. No existing deployment flag is enabled here.
+
+### Runner-owned application observation probe
+
+The common sidecar may explicitly receive `application_probe` containing a
+private loopback `listen_addr` and the selected D's shared `NativeSurfaceAdapter`.
+It validates configuration/authority before touching the workload, performs
+all declared bounded actions once, then publishes only frozen actual results.
+The execution scope is mandatory for application observations. Expected hashes,
+K verdicts, Provider identity and host paths never enter the authored catalog.
+
+Terminal line-profile input is printable ASCII plus CR/LF. Catalog validation
+rejects completion delimiters reproducible by normal PTY echo transforms.
+Queued startup output is retained, and a completion already present before the
+input is refused. Capture ends at the authored delimiter; overflow, exit,
+trailing bytes in that frame and timeout fail without publishing any result.
+Full TUI escape/control-sequence probes need a future explicit profile; viewer
+input itself retains the existing unrestricted bounded Terminal transport.
+
+Pixel operations negotiate the shared fixed BGRX32 format, send each key once,
+and require one complete nonoverlapping frame. The HTTP result is exactly the
+shared `pixel_probe_result` encoding: `sha256:<actual frame hex digest>\n`.
+K compares the digest of this measured 72-byte response. No expected frame hash
+is supplied to the Adapter and existing HTTP response limits remain unchanged.
+
+The result listener accepts only bodyless GETs of declared exact paths, never
+re-executes an action, and is distinct from the public Surface. The existing
+Run/lease/Runner/Port/path-scoped observation ingress must be its only Hosted
+route. All captures must finish before publication; a later failed action
+prevents even earlier results being served. Startup cancellation and owner
+EOF/signal/idle close owned gateway/probe listeners and in-flight clients.
+
+Frozen evidence does not attest that a workload remains alive. Runner wiring
+must still monitor its owned workload and preserve the existing stop/recovery
+and quarantine fences. This implementation does not advertise Native capability
+or bypass the portable runtime admission guard added in PR #1514.
+
+### Digested native launch declaration (execution remains unavailable)
+
+A v1 OCI Runtime Launch Spec may contain `realization.native_surface` as an
+opaque JSON object, bounded to 256 KiB by IPC. IPC does not depend on Formation
+or interpret Adapter semantics. Omission preserves existing canonical bytes.
+The runtime layer strictly decodes `{derivation_ref, adapter}` using the existing
+`NativeSurfaceAdapter` catalog, rejecting unknown fields at every catalog level.
+The validator report's explicit lowering projects its exact selected D ref and
+unchanged catalog into this field; it never derives or replaces K.
+
+The Connected Runner first verifies the complete spec digest and Run/Instance
+identity, then requires the native declaration's D ref to match the command's
+`portable_derivation_ref`. The separate session descriptor must match its kind,
+profile and dimensions. Pixel uses the existing viewport; Terminal uses explicit
+integer `cols` and `rows` entries in the existing scalar capabilities map, with
+no inferred defaults. A legacy native descriptor without a digested declaration
+cannot authorize execution. This comparison binds a validated control-plane
+projection; it does not independently recompute a D ref from absent D bytes.
+
+Even a correctly bound declaration returns `native_surface_unavailable` until
+Runner-owned native lifecycle integration exists. The ordinary common OCI
+conversion also refuses any native declaration, so another caller cannot ignore
+it and silently execute the Web OCI path. No native capability is advertised.
+API dispatch, native endpoint allocation and lease-owned sidecar attachment are
+separate follow-ups; this wire extension enables none of them by itself.
+
+### Selected native Port facts
+
+The optional `ports` field of the digested native launch declaration carries
+exactly the selected D's existing two `BoundPort` values. The validator report
+projects them as `native_ports`; lowering copies them unchanged. It never
+invents or erases a declared `guest_port`. Legacy absence preserves old wire
+bytes but is insufficient for execution by a host-owned Native backend.
+
+A host-owned Terminal presentation and observation binding may omit both guest
+TCP ports. Both remain logical Ports on the same serving step; an execution
+attempt resolves them to its owned private PTY/UDS and HTTP listener. Mixed
+omitted/present guest ports are refused. Pixel still requires declared guest
+TCP ports in this profile. Ordinary Web/process/OCI validation is unchanged.
+A backend unable to honor a declared guest TCP listener must refuse that D,
+not lower it into a different physical promise. Port facts change D and the
+launch digest, never K. No provider or runtime address enters Capsule identity.
+
+### Per-route session descriptor projection
+
+An optional `PortableRouteReport.session_surface` reuses the existing IPC
+`SessionSurfaceDescriptor`. Runtime-attempt projects it from that route's exact
+selected native D and the Application's authored Surface id. Terminal uses its
+declared `cols`/`rows` capability integers; Pixel uses its declared viewport.
+The established profile/transport and fixed viewer capability metadata are the
+same v1 contract used by the Coordinator. The descriptor contains no URL, key,
+lease identity or publication grant. Web reports omit it for compatibility.
+
+The Coordinator may validate and forward this existing DTO, without reparsing
+the opaque native catalog or inferring dimensions. The Runner still compares
+kind/profile/dimensions against the catalog in the verified launch digest.
+Missing metadata does not authorize a native launch. In multi-D bundles this
+field belongs to each route; the top-level report Surface cannot substitute
+metadata from a different D. Producing a descriptor advertises no Runner
+capability and does not remove any Native admission guard.
+
+### Owned OCI Terminal execution primitive (dispatch still closed)
+
+`runtime_launch::native::start_terminal` executes a validated host-bound Terminal
+D using one existing lease owner and OCI resource handle. It validates the
+selected native declaration, exact D ref and descriptor, omitted guest TCP
+facts, scope/key/Origin, bounded lifetime and numeric nonroot OCI constraints
+before creating an external workload. Legacy declarations without Port facts,
+real guest TCP promises, OCI endpoints, root users and unsupported platforms are
+refused. The existing ordinary OCI conversion continues to reject Native input.
+
+The existing Docker Adapter explicitly creates the declared entrypoint with a
+main-process PTY, then attaches before starting it. It needs no helper, shell,
+Agent or VNC binary in the application image. All existing readonly workspace,
+mount, resource, owner label, unprivileged user and capability restrictions
+remain. This Native profile always uses an internal Docker network; no Docker
+socket or owner credential enters the workload. The trusted host Docker CLI
+performs only a fixed owned-container resize request through its configured
+`system dial-stdio` transport. User input cannot select a daemon URL or method.
+
+A Runner-owned private 0600 Unix socket implements the existing Terminal framing.
+Output and disconnected buffering are bounded; input/resize are the existing
+validated frames. Reader tasks retain partial frames across output arrival.
+A Linux directory fd keeps long owned paths usable without chdir or exposing
+physical paths in D/K. Reconnect attaches the same PTY. The common Native probe
+performs the selected operations once and freezes measured output; its private
+HTTP listener and scoped Surface gateway start only after successful capture.
+Their readiness never supplies a Contract verdict or public Run readiness.
+
+One owner actor holds workload, attach client, producer, observation listener,
+Surface gateway and directory handle. Owner EOF, handle drop/stop, startup
+failure, bounded workload-status failure, producer failure, idle limit, maximum
+lifetime and workload exit tear them down. Creation/capture use the same bounded
+startup/lifetime deadline; cleanup has a separate existing stop budget. Failed
+or unconfirmed cleanup returns the existing physical StopOutcome. The caller
+must preserve existing recovery journals/writer quarantine, never release a
+slot or commit state from unconfirmed termination. Container/network recovery
+uses the existing exact lease labels and StopBudget rather than a second model.
+
+This primitive does not change connected Runner dispatch, native runtime
+admission, capabilities or deployment configuration. Next integration must use
+the existing authenticated lease/control/heartbeat, pass its per-Runner scoped
+assertion key through runtime memory, map the owned private observation address
+to the exact declared logical Port and existing HTTP K authority, and publish
+only after that authority accepts the Run. Surface readiness alone remains
+insufficient. Pixel requires an equivalent explicitly provisioned trusted
+producer; arbitrary OCI images are not assumed to contain Xvnc or an Agent.
+
+### Connected lease dispatch (explicit Runner opt-in)
+
+The existing `runtime_launch` command may carry optional `session_id`,
+`surface_origin` and `surface_contract_version`. Native Terminal requires the
+current Run's `run:<RunId>` session, exact normalized HTTPS server-policy
+Origin, version `1`, the exact selected route's existing session descriptor,
+finite `max_duration_secs`, no guest endpoints, process readiness and no mutable
+network authorization. Web commands retain their old omitted metadata. The
+Coordinator derives policy from its trusted site configuration, never a request
+or Capsule. The claim's existing per-Runner assertion key is mandatory for
+Native and is not copied into command JSON, the workload, D, K or evidence.
+
+Dispatch reuses the existing workspace resolver, PreparedRun writers, lease
+journal and startup-control callback. Its Native work variant holds the owned
+physical lifecycle; the same finish gate commits only after confirmed stop and
+quarantines an unconfirmed writer. The async/sync bridge runs the existing
+blocking control callback in a blocking-safe context. Native control, renewal,
+heartbeat and transport-ready requests are bounded to 500ms while a workload
+is alive; the common authorization monitor still owns refusal/expiry decisions.
+A Native ready report has the existing OCI/principal execution envelope and no
+invented guest port mapping.
+
+The existing proxy mux maps only the exact logical probe Port to this attempt's
+private frozen-result listener. Its existing observation proof binds Run,
+lease, Runner, method and path. The Surface path retains the common gateway's
+independent scoped assertion and Origin checks. Transport-ready enables private
+verification ingress; it is not a K verdict. The API counterpart must withhold
+browser access/assertions until the existing current Run/lease verification job
+and accepted import receipt agree and every original observation is satisfied.
+No second success status, receipt format or TypeScript K algorithm is added.
+
+`ATO_RUNNER_NATIVE_TERMINAL` defaults to false. Only explicit opt-in together
+with Linux and an available OCI runtime advertises the existing
+`native_surface_probe_v1` feature and Terminal profile/transport together. Typed
+surface negotiation is mandatory; that feature alone cannot place Pixel work.
+`ATO_NATIVE_SURFACE_IDLE_SECS` is bounded to 1..86400 (default 300). Pixel,
+ordinary Native attempt/CLI admission and unsupported native guest TCP promises
+remain refused. Installing the complete API receiver/access gate and verifying
+it precede any shared Runner opt-in. No installation or flag change is part of
+this source change.
+
+## Host Pixel bindings and declared render intervals
+
+Native Pixel may use the existing pair of None guest-port facts for a host-owned
+display and HTTP probe. Some facts remain unchanged; a backend that cannot honor
+those real guest listeners must refuse them, never erase or guess bindings.
+Ordinary Web/OCI constraints are unchanged. Physical execution/publication stays
+independently gated after format validation.
+
+Adapter-owned PixelKeyFrame optionally declares settle_ms, omitted/default zero,
+at most 1000ms and strictly inside the existing total operation deadline. Keys
+execute once, the declared wait is cancellable, then one full frame is captured.
+No polling, expected answer, input replay, extended deadline or K rewriting is
+added. This accommodates X application rendering after delivered key events;
+zero retains the old serialized D bytes and capture wrapper behavior.
+
+## Owned OCI GUI helper (dispatch still closed)
+
+A connected Runner may explicitly materialize a trusted immutable display helper
+from the existing verified `PortableOciArchive` transport. This is a physical
+resource of the Run, not an Application service or semantic input. The app's
+own pinned image/argv remains unchanged. The helper creates an isolated X display,
+shares only owned Unix socket/Xauthority directories, disables TCP X11/RFB and
+clipboard, and reaches the existing scoped gateway through an owned private relay.
+Explicit app DISPLAY/XAUTHORITY or mount conflicts fail admission.
+
+The existing OCI group, Native actor, labels, StopBudget, journal and recovery
+own both containers. Root remains readonly, UIDs/GIDs numeric nonroot and resources
+bounded independently. Credentials are transient and excluded from preserved
+lease directories after confirmed crash recovery; unsafe symlink parents refuse
+cleanup/preservation. Optional application archive transport must match D's exact
+image/platform and pass the same existing archive verification before creation.
+Cold materialization retains the existing command bound and is a separate rollout
+gate; only an exactly verified loaded config/platform can be reused.
+
+## Local Pixel lease admission (opt-in child)
+
+`ATO_RUNNER_NATIVE_PIXEL` defaults false. A local Linux, single-slot Runner may
+explicitly configure a fully verified helper archive, its exact immutable image,
+bounded helper limits, and an existing cgroup v2 parent. These are physical
+Runner inputs, never lease/app-supplied helper credentials or Capsule identity.
+The frozen helper shares archive bytes across attempts. Only exact already-loaded
+config/platform permits advertisement; rollout requires prematerialization and
+never hides a cold load behind a longer command deadline.
+
+The first backend requires the default local Unix Docker endpoint and confirms
+that existing ambient label recovery resolves to that same endpoint. It refuses
+remote/ambiguous endpoints, rootless/unknown management principals, container
+boundaries, unsupported cgroup drivers/parent spellings, and unobserved capacity.
+The selected cgroup parent is passed explicitly to both container create calls.
+Admission measures its actual ancestors, effective cpuset/CPU quota, and available
+memory against app plus helper limits before resource creation. Dockerd's own
+service cgroup may be a sibling and is never used as the workload budget. Each
+created process must then be observed under that exact parent before probe or
+gateway publication. The actual cgroup-v2 root omits control interfaces by kernel
+design; omission anywhere else remains an unknown-capacity refusal.
+The physical admission also reserves 64MiB for the bounded Runner frame/coverage
+and transport buffers, outside either application's semantic requirements.
+
+Measurements describe current headroom, not guaranteed future resource supply.
+Both containers retain hard CPU/RAM/PID limits and the existing failure/stop/
+recovery ownership. The existing feature `native_surface_probe_v1` is advertised
+with the explicit `ato.pixel-stream.v1` / `rfb_websocket` typed intersection only
+after these physical checks. Terminal and legacy Web opt-ins remain independent.
+The existing same-attempt Rust K/receipt and API viewer-access authority continue
+to gate acceptance; transport readiness never grants browser access on its own.

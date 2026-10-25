@@ -1,0 +1,179 @@
+{
+  "schema": "ato.formation-preserved-infrastructure-failure/1",
+  "code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "search_id": "search_24c0047081996252c75981adb6f985ec",
+  "status": "unsatisfied",
+  "termination": {
+    "reason": "infrastructure_failure",
+    "status": "not_reached",
+    "stopped_at": "2026-10-02T08:32:21.284Z"
+  },
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-02T08:25:31.466Z",
+    "deadline_at": "2026-10-02T08:55:31.466Z",
+    "attempts": {
+      "max": 4,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 3
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 17844224,
+      "reserved": 0,
+      "remaining": 1055897600
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 16887438,
+      "reserved": 0,
+      "remaining": 2130596210
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 1073741824
+    }
+  },
+  "attempt": {
+    "attempt_id": "01M3XVS1MTK738JW752CDZY15K",
+    "status": "inconclusive",
+    "failure": {
+      "code": "exploration_admission_failed",
+      "stage": "admission",
+      "message": "path must be shorter than SUN_LEN"
+    },
+    "metadata_mismatch": [],
+    "resource_charged": {
+      "transfer_bytes": 17844224,
+      "expanded_bytes": 16887438,
+      "stored_bytes": 0
+    },
+    "claimed_at": "2026-10-02T08:30:31.592Z",
+    "finished_at": "2026-10-02T08:30:35.609Z"
+  },
+  "execution_started": false,
+  "ACKed_attempt_ids": [
+    "01M3XVS1MTK738JW752CDZY15K"
+  ],
+  "summary": {
+    "index": 7,
+    "name": "changedetection.io",
+    "provider": "codex_session",
+    "known_D": false,
+    "typed_K_pass": false,
+    "rounds_consumed": 2,
+    "reasoning_accounting": {
+      "API_calls": 0,
+      "actual_provider_calls": null,
+      "call_count": 5,
+      "calls": [
+        {
+          "call_id": "search_24c0047081996252c75981adb6f985ec_r1_s1",
+          "input_file": "r001_s001.input.json",
+          "input_sha256": "sha256:cd80c908194ec14ff3cb08d02c1081fb7ebf5b7e4ffa3487b14c7bf186c0a343",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [
+            {
+              "digest": "sha256:44fa7457c130e448a6e409ddf1dea056b9af940228cb351ca68866d555c298b6",
+              "file_id": "f_e5972d38da55694585ff779b"
+            }
+          ],
+          "latency_ms": 90288,
+          "output_file": "r001_s001.record.json",
+          "output_sha256": "sha256:d76879180d1b427675f236cb7439060b9a2b53b4f754c6227568cfef0ab64489",
+          "provider_call": null,
+          "reasoning_ms": 90288,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_24c0047081996252c75981adb6f985ec_r1_s2",
+          "input_file": "r001_s002.input.json",
+          "input_sha256": "sha256:c545010d5c345d01cf0e7362b50a95f6dfa1d423a0a44ef7744271a39254500b",
+          "inspection_error": null,
+          "inspection_ms": 32,
+          "inspection_refs": [
+            {
+              "digest": "sha256:8fd2bdd0455032ef4ebd4f9e201f5bd239e305e8b2ca8c0ca72b3acd23092041",
+              "file_id": "f_fff535675c4953d2d9411ee8"
+            }
+          ],
+          "latency_ms": 44175,
+          "output_file": "r001_s002.record.json",
+          "output_sha256": "sha256:cb4ac7d6d9a31e5578ee67ccbf4ec708ed326684b79000de762df3d4b0ea15ac",
+          "provider_call": null,
+          "reasoning_ms": 44142,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_24c0047081996252c75981adb6f985ec_r1_s3",
+          "input_file": "r001_s003.input.json",
+          "input_sha256": "sha256:c2f7b623a2b71f2858372da50d042c48b02fc5f732bdb814054386622a2bb40a",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 102940,
+          "output_file": "r001_s003.record.json",
+          "output_sha256": "sha256:76528bd251321629becf57894e33df853ae84abf06f35b3e55ef99a11ad11ecd",
+          "provider_call": null,
+          "reasoning_ms": 102902,
+          "validation_ms": 36
+        },
+        {
+          "call_id": "search_24c0047081996252c75981adb6f985ec_r1_s4",
+          "input_file": "r001_s004.input.json",
+          "input_sha256": "sha256:13e63facff5e81930f1253145f2aebcc1b6b4f14837d9eaadb228abb4721c67c",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 56331,
+          "output_file": "r001_s004.record.json",
+          "output_sha256": "sha256:3179912aac35e6247f747138a4a9acd119a7973276e59c2ffc771a096e3b020e",
+          "provider_call": null,
+          "reasoning_ms": 56255,
+          "validation_ms": 76
+        },
+        {
+          "call_id": "search_24c0047081996252c75981adb6f985ec_r2_s1",
+          "input_file": "r002_s001.input.json",
+          "input_sha256": "sha256:1fc86394def6afc637d1050db037c442a8ae1d721dddffe375d99293859a7c44",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 101534,
+          "output_file": "r002_s001.record.json",
+          "output_sha256": "sha256:aa6ea76d4f7f7190e2bc994aff5886e42053c2a8458da700752e13cc9f621a54",
+          "provider_call": null,
+          "reasoning_ms": 101498,
+          "validation_ms": 36
+        }
+      ],
+      "configuration_ref": "sha256:aefd26e024548e6cf63f9cf5f60045729fd0e4e2d4eac54f50fef4ca4d77f822",
+      "provider": "codex_session",
+      "provider_transport": null,
+      "schema": "ato.formation-reasoning-accounting/1",
+      "session_cost": "not_exposed",
+      "session_token_usage": "not_exposed; no fabricated usage"
+    },
+    "terminal_origin": "requester_verified",
+    "coordinator_status": "unsatisfied",
+    "automatic_retry": false,
+    "input_requirements": [],
+    "search_budget": null,
+    "result": "cells/007/requester.stdout.log",
+    "result_sha256": "10e5353bc455b19c1524cc273afe5203d83ced3c30516629644289aab31b2b98",
+    "exit_code": 1,
+    "elapsed_seconds": 426.364,
+    "functional_acceptance": "not_measured",
+    "deployed": false
+  },
+  "requester_resumed_or_original_budget_reset": false,
+  "fix": "new separately preregistered run with shorter Runtime work directory; same Source/K/plan and zero known D",
+  "paid_API_calls": 0,
+  "old_WBO_UNKNOWN_reexecuted": false
+}

@@ -1,0 +1,68 @@
+{
+  "schema": "ato.formation-static-functional-plan/1",
+  "fixed_before_execution": true,
+  "date": "2026-09-30",
+  "baseline": "docs/ops/formation-coverage-50.json (unchanged)",
+  "retained_availability": "baseline run/scratch removed; fresh formation from same archives",
+  "formation_binary": "same frozen coverage_baseline and ato-formation-worker used by 50-app baseline; hashes must match",
+  "policy": {
+    "network": "denied",
+    "candidate_producer": "off",
+    "decision_provider": "off",
+    "model_calls": 0,
+    "browser": "fresh Chrome context per app; all HTTP requests except exact loopback server denied; service workers blocked; local browser storage only",
+    "source_changes": false,
+    "attempts_per_app": 1
+  },
+  "apps": [
+    {
+      "index": 21,
+      "name": "2048",
+      "repo": "https://github.com/gabrielecirulli/2048",
+      "ref": "478b6ec346e3787f589e4af751378d06ded4cbbc",
+      "archive_sha256": "4f3e35b3b9124c5a5c16231b71684288d8d781c2d534754f6b36119336231e2e",
+      "source_closure": "sha256:1b92a5799e48141d70e3f0246626833c985e51885f2a037e5ebdfefc1c5f1aa4",
+      "retained_ref": "sha256:53ba1b1cff58f964e2e76c2b1ed6d54e713860c756afaa863f1d7662a4a9b932"
+    },
+    {
+      "index": 22,
+      "name": "reveal.js",
+      "repo": "https://github.com/hakimel/reveal.js",
+      "ref": "f8c9ec3bb3b288e061b166fba5e4975920dd5cd4",
+      "archive_sha256": "b695207d618d628b888f403a26f599322018fe81311cbb2f9ad84b0dad8d842f",
+      "source_closure": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+      "retained_ref": "sha256:0fb8473b13e753144d3cb55963214cf089af8ee45357762b55e75e7c7096d098"
+    }
+  ],
+  "acceptance": {
+    "2048": {
+      "actions": [
+        "ArrowLeft",
+        "ArrowUp",
+        "ArrowRight",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowUp",
+        "ArrowRight",
+        "ArrowDown"
+      ],
+      "expected": "start with two visible tiles; at least one key changes rendered tile values/positions; final board contains positive power-of-two tiles inside 4x4 bounds; score does not decrease",
+      "evidence": "read-only DOM snapshots before/after each real keyboard press plus screenshots; no seeded state or application function invocation"
+    },
+    "reveal.js": {
+      "actions": [
+        "ArrowRight",
+        "ArrowLeft"
+      ],
+      "expected": "initial present slide text Slide 1; next is Slide 2; previous returns to Slide 1",
+      "evidence": "read-only .slides>section.present text and classes + screenshots"
+    }
+  },
+  "separate_judgements": {
+    "typed_K": "fresh Rust receipt fully_satisfied, K/D/source refs match baseline",
+    "functional": "Chrome UI outcomes; outside the existing GET / and source identity K",
+    "persistence": "not measured; browser localStorage is not Ato state; no retention success claim"
+  },
+  "no_deploy": true,
+  "no_remote_migration": true
+}

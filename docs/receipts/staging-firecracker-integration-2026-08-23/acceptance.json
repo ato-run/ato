@@ -1,0 +1,72 @@
+{
+  "status": "complete",
+  "date": "2026-08-24",
+  "target_computation_ref": "blake3:b18ad849d301ad6b009e4e6c8ab413667050c87b3514d08ccfb9d9bca8baf291",
+  "record_frontier_ref": "blake3:9e7afe0897ebb624b976e9871a8de1e0dec37a7ae646cb462d7808388966adbf",
+  "vm_descriptor_ref": "blake3:eb33112d27a2c193e22421362544cce2cb9864e7151bf5a3f80ed5a7e9cf20af",
+  "capture_barrier_calls": 1,
+  "graph": {
+    "id": "cog_01M0RXDV9S714CG84ECJ5FMHX7",
+    "bundle_id": "bnd_01M0RXKR9HGXMA8CZ09QQEGB19",
+    "index_digest": "blake3:618723986d2294eec0585d2ce357751bc36a6553971ebd5085953f80336fc27e",
+    "declared_object_count": 105,
+    "client_put_count": 105,
+    "objects_stored_new": 105,
+    "objects_reused": 0,
+    "logical_bytes": 256533404,
+    "unique_stored_bytes": 256533404,
+    "validator": "pass"
+  },
+  "post": {
+    "id": "cpost_01M0RY2XRDRK6SKQQF6Z0RET63",
+    "share_id": "cps_56f07ef0662c336741f07e095b951d05f23e5dc4caefedfb41d16a7dcc40762a"
+  },
+  "runner": {
+    "id": "01KX0SWDPP2GA41NEXQXNDCC0D",
+    "binary_sha256": "364c5e05b5b1cd50752826805276652d1ea21189aed5b915c2166b4b313e0cbc",
+    "firecracker_version": "1.16.0",
+    "architecture": "x86_64",
+    "materializer": "ato.materialize.vm.snapshot@1"
+  },
+  "restores": [
+    {
+      "attempt": 1,
+      "lease_id": "01M0RZEMJT9XVXJ1EPCEHZD0BZ",
+      "run_id": "01M0RZEMJTXQ3V7VEV4TJQA124",
+      "execution_id": "vm:01M0RZEMJTXQ3V7VEV4TJQA124:01M0RZEMJT9XVXJ1EPCEHZD0BZ",
+      "firecracker_pid": 1737275,
+      "contract": "pass",
+      "keyboard_state_change": "pass",
+      "cleanup": "pass"
+    },
+    {
+      "attempt": 2,
+      "lease_id": "01M0RZP06QDPG0B9F21Q2PPFF1",
+      "run_id": "01M0RZP06QZJ46VFK8YZF94QN1",
+      "execution_id": "vm:01M0RZP06QZJ46VFK8YZF94QN1:01M0RZP06QDPG0B9F21Q2PPFF1",
+      "firecracker_pid": 1740410,
+      "contract": "pass",
+      "keyboard_state_change": "pass",
+      "cleanup": "pass"
+    },
+    {
+      "attempt": 3,
+      "lease_id": "01M0RZTNAV75S29683FPQKY4JJ",
+      "run_id": "01M0RZTNAVE64NR6F833B14RVW",
+      "execution_id": "vm:01M0RZTNAVE64NR6F833B14RVW:01M0RZTNAV75S29683FPQKY4JJ",
+      "firecracker_pid": 1742422,
+      "contract": "pass",
+      "keyboard_state_change": "pass",
+      "cleanup": "pass"
+    }
+  ],
+  "security_scan": "pass",
+  "production": {
+    "rows_inserted": 0,
+    "rows_updated": 0,
+    "rows_deleted": 0,
+    "objects_uploaded": 0,
+    "deploy": false,
+    "approval_requested": false
+  }
+}

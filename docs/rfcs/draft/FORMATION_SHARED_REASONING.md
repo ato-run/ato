@@ -1,0 +1,165 @@
+# Shared reasoning prototype
+
+This unmerged draft implements the user-requested Codex-first prototype.
+Historical ledgers and provider configurations remain immutable. The selected
+OSS and cases are preregistered in formation-codex-prototype-selection.json;
+executable, input, output and resource hashes are frozen before actual execution.
+
+The later shared-agent Session extension below is implemented but still awaits
+actual Native Codex/Claude Code acceptance. The original prototype measurements
+are not measurements of this extension.
+
+The common CandidateProducer input contains frozen K/source identity, bounded
+public inventory and acquired source context, operation/toolchain capabilities,
+the frozen sandbox ceiling, past canonical D/validation/execution evidence and
+remaining rounds/attempts/inspection/provider budgets. Only verified,
+credential-excluded source-relative inventory entries are public; physical
+source paths, private authorization maps, credential values and host identity
+are not. Every model-visible input and exact output is persisted with hashes.
+Omitted/truncated acquired context is explicitly recorded.
+
+An opt-in requester-side reasoning driver accepts the existing typed outputs:
+inspection request, D proposal or bounded reasoned decline. Inspection requests
+are validated by the common Rust validator and retrieve only frozen authorized
+bytes. Each round can make bounded inspection exchanges before one D. Inspection
+count, source bytes, inference input/output, calls and elapsed time are separate
+budgets. Initial manifest/entrypoint and earlier inspection results stay acquired;
+the projection remains bounded. An explicit frozen round timeout accommodates
+inspection/session transport without changing default max_rounds=3. Legacy
+round timeouts and wire bytes are unchanged.
+
+The session adapter exchanges JSON files with Codex; it cannot execute commands.
+Its delivery uses the existing untrusted fixed-byte receiver transport, while a
+separate durable inference journal records codex_session and exact input/output.
+This is not a fixed producer pretending to be an API call: session token usage
+and price are unavailable, never fabricated. Only ordinary validator → canonical
+D → lowering → admission → Runtime → frozen K Verifier executes the proposal.
+
+After a Codex actual OSS gate, the DeepSeek adapter consumes the same bounded
+input and inspection protocol from the same initial information. Codex success
+D/history is not a seed. Actual sends use the existing dollar reservation journal
+with unique per-exchange call keys; no credential enters common context. The
+receiver's per-round provenance aggregates exchange usage, while the requester
+journal remains the authority for actual call count and each request/response.
+
+Worker-composed proposal/2 carries validated inspection refs alongside the final
+unchanged proposal. It is only admitted under opt-in frozen reasoning limits;
+the receiver independently validates all refs and compiles the final D with its
+same Rust authority. Inspection does not manufacture a D or receipt. Durable
+request/response journals preserve acquired context and consumed budgets on
+restart. Unresolved API sends are conservatively charged and never resent.
+Claim/fence state stays owner-private; pending/UNKNOWN cannot be bypassed.
+
+Success remains k_reached_awaiting_assessment. Reductions consume later rounds
+and replace the success only with a fresh same-K PASS. No approval, normal Run
+grant, publication or deployment follows. App-specific presets, source rewrites,
+hidden setup and out-of-ceiling authority are prohibited in this prototype.
+
+Prototype configuration uses `ato.formation-exploration-config/2` and optional
+`exploration.reasoning` with frozen `round_timeout_ms`, `inspection_timeout_ms`
+and `inspection_source_bytes`. Legacy config/1 cannot extend its timeout.
+An inspection exchange counts toward the owner-local call and inspection budgets,
+not toward another proposal round. Total session exchange latency includes the
+file bridge wait; API latency is measured around each actual transport call.
+`reasoning-pilot.py` reuses the existing real Coordinator/Runtime controller.
+`reasoning-session.py` atomically delivers one input-digest-bound typed response;
+it never starts an app. Exact inputs and response records are hash checked on
+restart, including source/K identity and verified source text prefixes. API
+protocol/transport failures halt sends and preserve the journal's settlement;
+the recorded failure is replayed as evidence, never resent to the model.
+
+An optional bounded owner-authored `reasoning.goal` freezes an acceptance protocol
+(e.g. a least-privilege egress probe) and appears verbatim in the common input.
+It grants no execution rights and cannot change K or the ceiling. Both providers
+receive it; deliberate probes are reported separately from accidental failures.
+
+## Pre-dispatch call allowance exhaustion
+
+The per-Search exchange allowance is independent of the maximum reasoning rounds.
+Inspection and validation exchanges consume their actual call allowance without
+consuming an extra round. Reading a saved input/answer can recover delivery; a new
+input must be refused after the original allowance is consumed, including after
+Requester restart. API transport cells count against the same provider ceiling.
+
+A refusal before dispatch is an owner-local operational fact, not a provider
+call or an inference result. The claimed completion uses legacy `provider_error`
+with `pre_dispatch_error: call_budget_exhausted`, no raw output or provenance.
+The receiver persists the fact with the original completion fence and projects
+`reasoning_call_budget_exhausted` into the authenticated round diagnostics. Rust
+returns terminal `budget_exhausted`; expired clocks still yield
+`deadline_exceeded`, previously satisfied K still yields an assessment-pending
+submission, and unresolved workload effects keep their existing UNKNOWN fence.
+No allowance, round, Search deadline, reservation or cost is reset. Old records
+with no pre-dispatch fact retain their original classification. Receiver support
+and its additive migration must precede sending the new optional field.
+
+## Shared-agent Session extension
+
+`agent_session` accepts a frozen `agent` containing `kind` (`codex` or
+`claude_code`), observed product `version`, and optional observed `model`.
+Unknown model information remains absent in metadata and `unknown` in the
+provider model field. The legacy `codex_session` / `codex-session` configuration
+omits this field; its serialized bytes and digest retain their old meaning.
+Agent metadata participates in the new configuration digest and cannot be
+changed on reconnect. No automatic agent switch or direct LLM API fallback is
+provided. The independent API adapter remains available under its own explicit
+configuration and existing authority.
+
+The Owner uses the existing approved plan and `ato form --session-bridge PATH`.
+The Producer uses `ato form-session` or the same four Session MCP tools:
+`status`, `next`, `submit`, and `cancel`. Starting, resuming, granting execution,
+claiming attempts, and issuing receipts remain Owner/Coordinator/Rust concerns.
+The external broker and Producer-only descriptor are specified in
+[FORMATION_SESSION_PRODUCER_RELAY.md](FORMATION_SESSION_PRODUCER_RELAY.md).
+
+One exclusive Owner journal lock, saved start clock, original Search deadline,
+immutable exchange windows, input digest and exchange identifier govern the
+Session. `next` reads an already saved input without allocating another
+exchange. `submit` atomically publishes an input-bound typed inspection,
+proposal or decline. An identical saved response is idempotent; conflicting,
+stale, malformed or differently bound responses are rejected. Reconnect must
+reconcile saved responses, unacknowledged completions and running/UNKNOWN
+attempts before continuing. It must not create a new inference or execution to
+resolve uncertainty. Cancellation is saved before the API request; lost
+cancellation ACK closes new submissions until Owner reconciliation.
+
+Search budgets distinguish exchanges, D rounds, completed inspection exchanges,
+Runtime attempts and elapsed time. Session exchange counts do not imply internal
+LLM calls, tokens or cost: these remain `unknown`. Waiting, reconnecting and
+provider unavailability preserve all consumed allowances and the original
+deadline. ACK, confirmed execution stop, reservation release and private-input
+cleanup are independently observed; a terminal status alone is not completion.
+
+### Public input projection and digest
+
+The owner-saved `ato.formation-reasoning-input/1` bytes remain immutable.
+The Session view labels its separate model-visible projection as
+`ato.formation-session-public-input/1` and declares
+`input_sha256_scope = owner_saved_input`. The Producer must echo the provided
+digest and exchange identifier; hashing the projection is not a replacement
+for the saved-input digest.
+
+Owner variable metadata is strictly parsed and checked against the frozen
+Source closure and Search scope before exposing only typed slot requirements,
+reuse/expiry/revocation metadata. Free-text purpose, service, endpoint, account,
+tenant, grant candidates and application/scope lists are not projected. Runtime
+facts are allowlisted from the same validated typed operation catalog; unknown
+toolchain/image prefixes, host paths, arbitrary health text and unexpected
+metadata are omitted. This projection does not grant access to owner values,
+private grants, Runtime tickets, credentials or the Source filesystem. Whole
+process/tool isolation is a separate acceptance condition, not a consequence
+of file mode 0600 or Skill prose.
+
+### Saved response after a closed deadline
+
+After the immutable exchange or Search deadline closes, an already published
+response can be validated and recorded once as `session_closed_response`.
+The optional record contains the original exchange deadline, the minimum
+admission deadline and observation time. Its absence preserves old record
+serialization and interpretation. The public view then returns no new input,
+`closed_response_reconciled`, and an Owner reconciliation operation. This is an
+evidence receipt only: it cannot return a proposal for lowering, inspect more
+Source, launch Runtime, reset budget or revive a terminal Search. The requester
+classifies this path as timeout instead of provider infrastructure failure.
+Tampered responses, mismatched windows, ambiguous pending exchanges and UNKNOWN
+effects retain their existing rejection/fence behavior.

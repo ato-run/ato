@@ -1,0 +1,36 @@
+   Compiling ato-portable-application v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/base/apps/portable-application)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.28s
+     Running unittests src/lib.rs (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/target/debug/deps/ato_portable_application-f667ac5fbe2ef939)
+
+running 1 test
+test tests::local_static_server_rejects_browser_state_without_the_run_token ... 
+thread 'tests::local_static_server_rejects_browser_state_without_the_run_token' (3196349) panicked at apps/portable-application/src/lib.rs:3566:43:
+called `Result::unwrap()` on an `Err` value: Os { code: 104, kind: ConnectionReset, message: "Connection reset by peer" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::unwrap
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/result.rs:1233:23
+   4: ato_portable_application::tests::local_static_server_rejects_browser_state_without_the_run_token
+             at ./src/lib.rs:3566:43
+   5: ato_portable_application::tests::local_static_server_rejects_browser_state_without_the_run_token::{{closure}}
+             at ./src/lib.rs:3535:73
+   6: core::ops::function::FnOnce::call_once
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+
+failures:
+
+failures:
+    tests::local_static_server_rejects_browser_state_without_the_run_token
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p ato-portable-application --lib`

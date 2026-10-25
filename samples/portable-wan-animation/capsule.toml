@@ -1,0 +1,56 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Wan Animation"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[input]]
+id = "wan-models"
+use = "ato.model-set@1"
+path = "models/wan.model-set.json"
+ref = "sha256:ca369649c22de43e3688b11045012150445c03b89be1aa19c99d93f4ec4b31b1"
+
+[[input]]
+id = "software"
+use = "ato.model-set@1"
+path = "models/software.model-set.json"
+ref = "sha256:27aa45c39f373340e31df00235f4d0407321491fd017dbbd3f6d08d2e39f54e9"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "ready"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+status = 200
+body_digest = "sha256:de66f714cdfcd6d9c336d258b800098d95ee94f076961e2fb6d4deca50f0cc93"
+
+[[derivation]]
+id = "animation"
+use = "ato.process@1"
+argv = ["python3", "-B", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.11.11" }
+
+[derivation.host]
+os = "linux"
+arch = "x86_64"
+min_memory_mib = 65536
+min_scratch_mib = 102400
+
+[[derivation.host.accelerators]]
+vendor = "nvidia"
+count = 1
+min_vram_mib = 46000
+
+[effects]
+default = "pure"

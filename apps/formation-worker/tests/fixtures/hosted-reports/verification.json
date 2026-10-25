@@ -1,0 +1,52 @@
+{
+  "attempt_record": "finished",
+  "code": "http_status_mismatch",
+  "outcomes": {
+    "cleanup": {
+      "state": "succeeded"
+    },
+    "publication": {
+      "reason": "decided by the caller",
+      "state": "not_attempted"
+    },
+    "runtime_verification": {
+      "reason": "http_status_mismatch",
+      "state": "failed"
+    },
+    "seal": {
+      "reason": "http_status_mismatch",
+      "state": "failed"
+    }
+  },
+  "reason": "Hosted attempt stopped at verification (http_status_mismatch)",
+  "receipt": {
+    "contract_ref": "sha256:8cf97747dbf2b3f2031dcd598c9718e4f4a898413b3e0a3fea4fe2bad6bfdd38",
+    "derivation_ref": "sha256:4b713d058d08aef209d38a74a6722e23043057d4c462bc721e930336dc01f018",
+    "execution": {
+      "attempt_id": "hosted_attempt",
+      "endpoint": "http://127.0.0.1:63484/",
+      "platform": "macos/aarch64",
+      "realization": "static_web",
+      "request_id": "hosted_job"
+    },
+    "fully_satisfied": false,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:ea080747b5946205c3ffd4ddb4838f3db348eafe293e2f06068c2bcaf436bb6f",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "failure": "http_status_mismatch: GET / on web.http returned 200; expected 201",
+        "id": "page",
+        "outcome": "failed"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "stage": "verification"
+}

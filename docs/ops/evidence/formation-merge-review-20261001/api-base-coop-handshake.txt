@@ -1,0 +1,4 @@
+{"upgrade_status":503}
+WebSocket connection to 'ws://cinst-other.localhost:61437/__ato/coop-presence' failed: Error during WebSocket handshake: Unexpected response code: 503
+WebSocket connection to 'ws://cinst-other.localhost:61437/__ato/coop-presence' failed: Error during WebSocket handshake: Unexpected response code: 503
+{"browser":"Chromium","outcome":"handshake_rejected"}

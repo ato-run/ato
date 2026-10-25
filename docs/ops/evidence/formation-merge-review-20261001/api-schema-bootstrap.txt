@@ -1,0 +1,5 @@
+
+> ato-api@0.1.0 schema:test-bootstrap /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001
+> node scripts/test-schema-bootstrap.mjs
+
+schema bootstrap acceptance: PASS

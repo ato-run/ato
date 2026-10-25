@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Notes</title></head>
+<body>
+<h1>Notes</h1>
+<label for="note">New note</label>
+<input id="note" name="note" type="text" placeholder="Note title">
+<button id="add" type="button">Add</button>
+<ul id="notes"></ul>
+<script>
+const input = document.getElementById('note');
+const list = document.getElementById('notes');
+let notes = [];
+function render() {
+  list.replaceChildren(...notes.map((text) => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+}
+document.getElementById('add').addEventListener('click', () => {
+  const text = input.value.trim();
+  if (!text) return;
+  notes.push(text);  render(); input.value = '';
+});
+render();
+</script>
+</body>
+</html>

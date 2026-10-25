@@ -1,0 +1,345 @@
+{
+  "schema": "ato.formation-OSS100-final-comparison/1",
+  "measurement_id": "formation-v0-OSS100-native-20261006-01",
+  "plan_sha256": "826c7138d3e9ac05b183ce5d0848fd7db46660f36b076eb1ab25a9e75f7b697f",
+  "complete": true,
+  "release_done": false,
+  "pins": {
+    "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+    "API": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+    "API_bundle_sha256": "edcfd5834de80addf26079aafb24b5722f8d3aa2b00f75c9f56c38b1d6084cbc",
+    "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635",
+    "Runtime_binary_sha256": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+    "Runtime_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc"
+  },
+  "full_cohort": {
+    "denominator": 100,
+    "unique_OSS_PASS": 9,
+    "reach_rate": 0.09,
+    "initial_PASS": 7,
+    "repair_PASS": 2,
+    "preset_only_PASS": 7,
+    "Native_generated_D_PASS": 2
+  },
+  "declared_v0_route_cohort": {
+    "denominator": 77,
+    "unique_OSS_PASS": 9,
+    "reach_rate": 0.11688311688311688,
+    "posthoc_not_preregistered": true,
+    "classification_uses_outcomes": false,
+    "definition": "Immutable rooted Source declares a static/Node/Python application entry or one OCI image route. Runtime/builder binding failure does not remove it from the cohort. Multi-service orchestration is not included.",
+    "limitations": [
+      "Root declarations classify the intended v0 route cohort; they do not prove full functional support or runnable dependencies",
+      "Static typed-K reachability is separate from full backend functionality",
+      "No successful D or audit evidence is passed to Native contexts"
+    ]
+  },
+  "category_counts": {
+    "unsupported_capability": 58,
+    "withheld_old_UNKNOWN": 1,
+    "initial_PASS": 7,
+    "no_progress": 16,
+    "infrastructure_failure": 13,
+    "needs_input": 2,
+    "repair_PASS": 2,
+    "budget_exhausted": 1
+  },
+  "consumed": {
+    "new_Searches": 91,
+    "D_rounds": 96,
+    "exchanges": 150,
+    "Runtime_attempts": 19,
+    "inspections": 45,
+    "elapsed_ms": 10823084
+  },
+  "agents": {
+    "codex": {
+      "assigned_Sources": 50,
+      "Native_contexts_started": 41,
+      "Native_unique_OSS_PASS": 1,
+      "preset_only_PASS": 4,
+      "category_counts": {
+        "unsupported_capability": 30,
+        "initial_PASS": 4,
+        "no_progress": 10,
+        "repair_PASS": 1,
+        "budget_exhausted": 1,
+        "infrastructure_failure": 4
+      },
+      "consumed": {
+        "D_rounds": 44,
+        "exchanges": 70,
+        "Runtime_attempts": 6,
+        "inspections": 23,
+        "elapsed_ms": 4554158
+      },
+      "SDK_reported_cumulative_token_sum": {
+        "totalTokens": 8824678,
+        "inputTokens": 8785970,
+        "cachedInputTokens": 7218560,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 38708,
+        "reasoningOutputTokens": 1068
+      },
+      "SDK_reported_model_usage_sum": null,
+      "SDK_cost_estimate_sum_USD": "unknown",
+      "SDK_cost_estimate_contexts": 0,
+      "SDK_usage_missing_Native_contexts": 1,
+      "actual_internal_LLM_calls": "unknown",
+      "actual_account_invoice": "unknown",
+      "exchange_count_is_not_LLM_call_count": true,
+      "SDK_sum_basis": "sum of each saved last SDK result per Native context; not a count of provider sends or complete billing evidence",
+      "assignment_is_disjoint_not_paired_same_Source_comparison": true
+    },
+    "claude-code": {
+      "assigned_Sources": 50,
+      "Native_contexts_started": 40,
+      "Native_unique_OSS_PASS": 1,
+      "preset_only_PASS": 3,
+      "category_counts": {
+        "withheld_old_UNKNOWN": 1,
+        "unsupported_capability": 28,
+        "no_progress": 6,
+        "infrastructure_failure": 9,
+        "initial_PASS": 3,
+        "needs_input": 2,
+        "repair_PASS": 1
+      },
+      "consumed": {
+        "D_rounds": 52,
+        "exchanges": 80,
+        "Runtime_attempts": 13,
+        "inspections": 22,
+        "elapsed_ms": 6268926
+      },
+      "SDK_reported_cumulative_token_sum": null,
+      "SDK_reported_model_usage_sum": {
+        "claude-opus-5-5": {
+          "inputTokens": 762,
+          "outputTokens": 181006,
+          "cacheReadInputTokens": 13485128,
+          "cacheCreationInputTokens": 2031972,
+          "thinkingTokens": 40304,
+          "costUSD": 22.575969600000004
+        }
+      },
+      "SDK_cost_estimate_sum_USD": 22.575969600000004,
+      "SDK_cost_estimate_contexts": 40,
+      "SDK_usage_missing_Native_contexts": 1,
+      "actual_internal_LLM_calls": "unknown",
+      "actual_account_invoice": "unknown",
+      "exchange_count_is_not_LLM_call_count": true,
+      "SDK_sum_basis": "sum of each saved last SDK result per Native context; not a count of provider sends or complete billing evidence",
+      "assignment_is_disjoint_not_paired_same_Source_comparison": true
+    }
+  },
+  "PASS_applications": [
+    {
+      "index": 3,
+      "name": "Uptime Kuma",
+      "assigned_agent": "codex",
+      "preset_only_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "K_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+      "receipt": {
+        "attempt_id": "01M46N6MNNBGWCHAD0EK4HRG6N",
+        "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+        "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:5d597639311192a6a0f61c182166755486927f5d0cf6387f4871669aeb379f05",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 21,
+      "name": "2048",
+      "assigned_agent": "codex",
+      "preset_only_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "K_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+      "receipt": {
+        "attempt_id": "01M46RQ3RS4RCHHX91WSKZ0WTE",
+        "contract_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+        "derivation_ref": "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:4f8919a0c2f8f8782d34df115731c5951edd83a2db0435b9f49904e3946811d1",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 22,
+      "name": "reveal.js",
+      "assigned_agent": "claude-code",
+      "preset_only_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "K_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+      "receipt": {
+        "attempt_id": "01M46RT4B9T3XGB1R3M7SAJZ2E",
+        "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+        "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:07ea7d2d231e0b45c25df1356d4d881deda06e45f184c4146aa86489b37550c4",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 52,
+      "name": "Hextris",
+      "assigned_agent": "claude-code",
+      "preset_only_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "K_ref": "sha256:7e4bddf44a3edc33cc10bad17d2a1437a9984231582421e0fbabda37b77f9c31",
+      "receipt": {
+        "attempt_id": "01M46YDZP7X67PRTZE1W1GDRRN",
+        "contract_ref": "sha256:7e4bddf44a3edc33cc10bad17d2a1437a9984231582421e0fbabda37b77f9c31",
+        "derivation_ref": "sha256:2d0c8269649935cf2642ac59a2cccecdc34b736977c6fe49d09e7f150991a111",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:3acf070576844f71c300ef45d0fcca02c7656e660d9af409eb3895f1ae53c559",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 53,
+      "name": "0h h1",
+      "assigned_agent": "codex",
+      "preset_only_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "K_ref": "sha256:35372e623b3b66a885cf50510a79e021752a3a07625503028d0eebebcdc8f8a1",
+      "receipt": {
+        "attempt_id": "01M46YFBW5Y61EPG1MV7QV2Y2J",
+        "contract_ref": "sha256:35372e623b3b66a885cf50510a79e021752a3a07625503028d0eebebcdc8f8a1",
+        "derivation_ref": "sha256:969778402a949bae8113775c76d56e820018ea2adbe7356d5551eebb3d7c864c",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:3871b54f2b4262f93dcfed9e863aaee26084ab2e545249ea3a7d96253dedb233",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 54,
+      "name": "0h n0",
+      "assigned_agent": "claude-code",
+      "preset_only_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "K_ref": "sha256:a2beb4c1ee623f27aea307e1e31e6bb1a98262cfce31346fb0e16640ce1c6e8a",
+      "receipt": {
+        "attempt_id": "01M46YGT8DNFTT7JSGHT82ZATQ",
+        "contract_ref": "sha256:a2beb4c1ee623f27aea307e1e31e6bb1a98262cfce31346fb0e16640ce1c6e8a",
+        "derivation_ref": "sha256:463a0a477c22431ad7ff31523ea8e04ec668a3b605868106d5b73fd79b592374",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:2088e6e15d8c8aa564af60b5f3f1de782a42d8e2044ca15833c800d75549db9a",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 55,
+      "name": "Emoji search",
+      "assigned_agent": "codex",
+      "preset_only_PASS": true,
+      "initial_PASS": true,
+      "repair_PASS": false,
+      "K_ref": "sha256:e22a831acbc9dd03a96b5b09af48c7dc7657343e61549f4e362b7429b2ce9e9e",
+      "receipt": {
+        "attempt_id": "01M46YJ3G5YG4KX36Q6QQYN8NQ",
+        "contract_ref": "sha256:e22a831acbc9dd03a96b5b09af48c7dc7657343e61549f4e362b7429b2ce9e9e",
+        "derivation_ref": "sha256:1f6b836e0374ae7f789523222005138461104f3482f6c96570787f761464b873",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:29de63aa2becb8e3c4be649ca1185fcea555b84213650125fb1ac5734c10f93f",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 59,
+      "name": "hello wordl",
+      "assigned_agent": "codex",
+      "preset_only_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": true,
+      "K_ref": "sha256:37e24d98120dff83b08d7084ce1417d4092ee7feb889aab88cad1d0146b2554a",
+      "receipt": {
+        "attempt_id": "01M46Z1F0ZYZK1Y4H3P2XSJKXP",
+        "contract_ref": "sha256:37e24d98120dff83b08d7084ce1417d4092ee7feb889aab88cad1d0146b2554a",
+        "derivation_ref": "sha256:c766e58a841dc647184c7ca7c306863f9f600ce657cb93b6a193a9e730420b46",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:9cb060fb9320d680b8dcd3db3fb7b40c1c2efea7155b291bebcc8c85c83aca68",
+        "status": "k_reached_awaiting_assessment"
+      }
+    },
+    {
+      "index": 62,
+      "name": "SillyTavern",
+      "assigned_agent": "claude-code",
+      "preset_only_PASS": false,
+      "initial_PASS": false,
+      "repair_PASS": true,
+      "K_ref": "sha256:551c14516406660ced80cfa399c5c854e788df990745bb5396849c178586333e",
+      "receipt": {
+        "attempt_id": "01M4703JZ6BGG6RB24T3RV7MGW",
+        "contract_ref": "sha256:551c14516406660ced80cfa399c5c854e788df990745bb5396849c178586333e",
+        "derivation_ref": "sha256:1cbb5db28dae4b1c09f2492bd096a05c2cc0195104ceb7f2c33c766673f8479b",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:de1ea3fda58d9754973afb99d1331f7c21aefb19591f87a4b865be586a41d8e7",
+        "status": "k_reached_awaiting_assessment"
+      }
+    }
+  ],
+  "old_baseline": {
+    "unique_OSS_PASS": 7,
+    "full_denominator": 100,
+    "generated_D_PASS": 0,
+    "unchanged": true,
+    "additional_unique_OSS_PASS": 2,
+    "comparison_limitations": [
+      "Provider/version/prompt, multi-round and declared dependency/build network conditions differ from the old API one-round/network-denied measurement",
+      "81 original K were explicit static templates; typed-K PASS is not complete functional/persistence verification",
+      "Codex/Claude assignments are separate Sources, not paired independent producer evaluations",
+      "Old WBO UNKNOWN is preserved and not rerun; it remains in the full denominator",
+      "Scope denominator is a post-hoc immutable root-declaration classification, not verified support"
+    ]
+  },
+  "cleanup": {
+    "new_unresolved_UNKNOWN": 0,
+    "reservations": 0,
+    "active_writer": 0,
+    "temporary_inputs": 0,
+    "secret_scan_hits": 0,
+    "terminal_workload_directories": 0,
+    "aggregate_held": {
+      "D_rounds": 0,
+      "exchanges": 0,
+      "Runtime_attempts": 0,
+      "inspections": 0,
+      "sequential_elapsed_seconds": 0,
+      "searches": 0
+    }
+  },
+  "Ato_direct_LLM_calls": 0,
+  "actual_internal_LLM_calls": "unknown",
+  "actual_invoice": "unknown",
+  "ordinary_Run_or_publication_promoted": false,
+  "old_13_12_campaign_and_WBO_unchanged": true,
+  "campaign_wall_clock_ms_including_preparation_and_quota_wait": 23361266,
+  "elapsed_metric_note": "consumed.elapsed_ms sums saved Search elapsed time; campaign wall time additionally includes setup, cleanup, disk and quota waits",
+  "Native_quota_rejections": [
+    78,
+    93
+  ],
+  "Native_quota_not_executed_Sources": [
+    95,
+    97,
+    99
+  ],
+  "Native_auth_window_not_executed_Sources": [
+    96,
+    98,
+    100
+  ],
+  "all_100_Sources_executed": false,
+  "execution_coverage_note": "Full denominator includes WBO hold, two Source admission rejections, actual Native quota and three producer-unavailable cells; availability failures are not Source failures",
+  "created_at_ms": 1791247264818
+}

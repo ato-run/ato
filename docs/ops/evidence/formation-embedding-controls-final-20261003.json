@@ -1,0 +1,618 @@
+{
+  "schema": "ato.formation-final-embedding-controls/1",
+  "execution_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "scope": "Actual isolated Coordinator/Runtime Source-owned static build permission control; separate fresh Searches at the same Source/K, fixed exchanges, not independent provider/OSS acceptance",
+  "controller_sha256": "7591a08767d30abe0597797916fad79a055aaedab26459cafe80f0f8680c18f0",
+  "controls": [
+    {
+      "schema": "ato.formation-final-embedding-control/1",
+      "case": "forbidden",
+      "owner_explicit_nonsecret_embedding_permission": false,
+      "artifact_publication_authorized": false,
+      "private_value_files_and_permitted_artifact_excluded_from_public_scan": true,
+      "Search_id": "search_0711d01ca69c1b75bd63f38833d1a03d",
+      "K": "sha256:7bf50a8b499cabf1485244b8db2a3dc6ac8881544f9a156aeffb6cb112413cb2",
+      "typed_K_PASS": false,
+      "attempt": {
+        "attempt_id": "01M3XY2Z3PKD0SPYNE3BMAJ09N",
+        "runtime_id": "local",
+        "environment_id": "native",
+        "derivation_ref": "sha256:ce3bd80233acb22d87ac9fa235657ab298db07a888e76d5a4dec336a843460c8",
+        "status": "fail",
+        "capability_profile_ref": "sha256:8210471422d9158e158097b41de0b1db2e02f6f8dc5c96f8311fe1ee73bc690d",
+        "advertised_agent_version": "0.1.0",
+        "failure": {
+          "code": "secret_artifact_embedding_refused",
+          "stage": "build",
+          "message": "a protected runtime value entered the artifact; explicit embedding permission is required for non-secret configuration"
+        },
+        "attestation": {
+          "environment_id": "native",
+          "agent_version": "0.1.0",
+          "derivation_ref": "sha256:ce3bd80233acb22d87ac9fa235657ab298db07a888e76d5a4dec336a843460c8",
+          "contract_ref": "sha256:7bf50a8b499cabf1485244b8db2a3dc6ac8881544f9a156aeffb6cb112413cb2",
+          "effects": "pure",
+          "requirements": [
+            {
+              "fact": "containment",
+              "one_of": [
+                "bwrap+landlock"
+              ]
+            },
+            {
+              "fact": "toolchain.root"
+            }
+          ],
+          "provisions": [
+            "toolchain.node.22.14.0"
+          ],
+          "execution_started": true,
+          "attempt_record": "finished"
+        },
+        "metadata_mismatch": [],
+        "coordinator_note": null,
+        "formation_attempt": {
+          "attempt_id": "01M3XY2Z3PKD0SPYNE3BMAJ09N",
+          "candidate": "authored",
+          "contract_ref": "sha256:7bf50a8b499cabf1485244b8db2a3dc6ac8881544f9a156aeffb6cb112413cb2",
+          "derivation_ref": "sha256:ce3bd80233acb22d87ac9fa235657ab298db07a888e76d5a4dec336a843460c8",
+          "failure": {
+            "code": "secret_artifact_embedding_refused",
+            "message": "a protected runtime value entered the artifact; explicit embedding permission is required for non-secret configuration",
+            "stage": "build"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "no candidate was realized",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "secret_artifact_embedding_refused",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "secret_artifact_embedding_refused",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "secret_artifact_embedding_refused",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "failed"
+        },
+        "exploration_evidence": [
+          {
+            "kind": "exploration_network_evidence",
+            "reports": [
+              {
+                "phase": "dependencies",
+                "report": {
+                  "allowance": {
+                    "hosts": [
+                      "exploration-denied.invalid"
+                    ],
+                    "max_transfer_bytes": 134217728,
+                    "ports": [
+                      443
+                    ]
+                  },
+                  "allowed": [],
+                  "budget_exhausted": false,
+                  "refused": [],
+                  "transferred_bytes": 0
+                }
+              },
+              {
+                "phase": "build",
+                "report": {
+                  "allowance": {
+                    "hosts": [
+                      "exploration-denied.invalid"
+                    ],
+                    "max_transfer_bytes": 134217728,
+                    "ports": [
+                      443
+                    ]
+                  },
+                  "allowed": [],
+                  "budget_exhausted": false,
+                  "refused": [],
+                  "transferred_bytes": 0
+                }
+              },
+              {
+                "phase": "runtime",
+                "report": {
+                  "allowance": {
+                    "hosts": [
+                      "exploration-denied.invalid"
+                    ],
+                    "max_transfer_bytes": 134217728,
+                    "ports": [
+                      443
+                    ]
+                  },
+                  "allowed": [],
+                  "budget_exhausted": false,
+                  "refused": [],
+                  "transferred_bytes": 0
+                }
+              }
+            ]
+          },
+          {
+            "facts": [
+              {
+                "exit_code": 0,
+                "log_tail": "[verify-provisioned-node] \n",
+                "signal": null,
+                "stage": "build",
+                "step": "verify-provisioned-node"
+              },
+              {
+                "exit_code": 0,
+                "log_tail": "[check-toolchain] v22.14.0 \n",
+                "signal": null,
+                "stage": "build",
+                "step": "check-toolchain"
+              },
+              {
+                "exit_code": 0,
+                "log_tail": "[build-1] \n> build \n> node build.cjs \n",
+                "signal": null,
+                "stage": "build",
+                "step": "build-1"
+              }
+            ],
+            "kind": "exploration_execution_facts"
+          },
+          {
+            "kind": "exploration_phase_timings",
+            "phases": [
+              {
+                "phase": "source",
+                "started_at_ms": 1790932254554,
+                "elapsed_ms": 65
+              },
+              {
+                "phase": "source",
+                "started_at_ms": 1790932254620,
+                "elapsed_ms": 4
+              },
+              {
+                "phase": "source",
+                "started_at_ms": 1790932255048,
+                "elapsed_ms": 0
+              },
+              {
+                "phase": "build",
+                "started_at_ms": 1790932255048,
+                "elapsed_ms": 34
+              },
+              {
+                "phase": "dependencies",
+                "started_at_ms": 1790932255083,
+                "elapsed_ms": 16
+              },
+              {
+                "phase": "build",
+                "started_at_ms": 1790932255099,
+                "elapsed_ms": 198
+              },
+              {
+                "phase": "build",
+                "started_at_ms": 1790932255297,
+                "elapsed_ms": 8
+              },
+              {
+                "phase": "cleanup",
+                "started_at_ms": 1790932255320,
+                "elapsed_ms": 0
+              }
+            ]
+          }
+        ],
+        "resource_budget": {
+          "transfer_bytes": 4608,
+          "expanded_bytes": 536870912,
+          "stored_bytes": 536870912
+        },
+        "resource_charged": {
+          "transfer_bytes": 4608,
+          "expanded_bytes": 599,
+          "stored_bytes": 0
+        },
+        "claimed_at": "2026-10-02T09:10:54.521Z",
+        "finished_at": "2026-10-02T09:10:55.506Z",
+        "unknown_at": null
+      },
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:10:52.745Z",
+        "deadline_at": "2026-10-02T09:11:22.745Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 4608,
+          "reserved": 0,
+          "remaining": 1073737216
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 599,
+          "reserved": 0,
+          "remaining": 2147483049
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "result_ACK_attempt_ids": [
+        "01M3XY2Z3PKD0SPYNE3BMAJ09N"
+      ],
+      "public_files_checked": 59,
+      "public_value_occurrences": 0,
+      "encrypted_values_after_revoke": 0,
+      "paid_API_calls": 0,
+      "actual_provider_calls": null,
+      "new_unique_OSS_apps": 0,
+      "ordinary_Run_permission": false,
+      "raw_proof_sha256": "9191b0abdf67b4ea4cf038ed4c8dd20b6386ac1dce4bf5e2d2974b2dcd0801d3"
+    },
+    {
+      "schema": "ato.formation-final-embedding-control/1",
+      "case": "allowed",
+      "owner_explicit_nonsecret_embedding_permission": true,
+      "artifact_publication_authorized": true,
+      "private_value_files_and_permitted_artifact_excluded_from_public_scan": true,
+      "Search_id": "search_8220f80324ae9e9b36f7f4ae62dc78c6",
+      "K": "sha256:7bf50a8b499cabf1485244b8db2a3dc6ac8881544f9a156aeffb6cb112413cb2",
+      "typed_K_PASS": true,
+      "attempt": {
+        "attempt_id": "01M3XY546R1RF70KNG5CP2M9HK",
+        "runtime_id": "local",
+        "environment_id": "native",
+        "derivation_ref": "sha256:98dcf2d40685c553fc964efb596c5a1983be001ed13ab64662a0cba4d20758a1",
+        "status": "pass",
+        "capability_profile_ref": "sha256:8210471422d9158e158097b41de0b1db2e02f6f8dc5c96f8311fe1ee73bc690d",
+        "advertised_agent_version": "0.1.0",
+        "failure": null,
+        "attestation": {
+          "environment_id": "native",
+          "agent_version": "0.1.0",
+          "derivation_ref": "sha256:98dcf2d40685c553fc964efb596c5a1983be001ed13ab64662a0cba4d20758a1",
+          "contract_ref": "sha256:7bf50a8b499cabf1485244b8db2a3dc6ac8881544f9a156aeffb6cb112413cb2",
+          "effects": "pure",
+          "requirements": [
+            {
+              "fact": "containment",
+              "one_of": [
+                "bwrap+landlock"
+              ]
+            },
+            {
+              "fact": "toolchain.root"
+            }
+          ],
+          "provisions": [
+            "toolchain.node.22.14.0"
+          ],
+          "execution_started": true,
+          "attempt_record": "finished",
+          "candidate_stop": "confirmed"
+        },
+        "metadata_mismatch": [],
+        "coordinator_note": null,
+        "formation_attempt": {
+          "attempt_id": "01M3XY546R1RF70KNG5CP2M9HK",
+          "candidate": "authored",
+          "contract_ref": "sha256:7bf50a8b499cabf1485244b8db2a3dc6ac8881544f9a156aeffb6cb112413cb2",
+          "derivation_ref": "sha256:98dcf2d40685c553fc964efb596c5a1983be001ed13ab64662a0cba4d20758a1",
+          "outcomes": {
+            "cleanup": {
+              "state": "succeeded"
+            },
+            "publication": {
+              "state": "succeeded"
+            },
+            "runtime_verification": {
+              "state": "succeeded"
+            },
+            "seal": {
+              "state": "succeeded"
+            }
+          },
+          "realization": {
+            "build_network": "n/a",
+            "candidate_network": "loopback only",
+            "containment": "none; serves the produced bundle's files, runs nothing",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "loopback static server"
+            },
+            "executor": "runtime-static-loopback",
+            "workspace": "the produced static web bundle, read-only"
+          },
+          "receipt": {
+            "contract_ref": "sha256:7bf50a8b499cabf1485244b8db2a3dc6ac8881544f9a156aeffb6cb112413cb2",
+            "derivation_ref": "sha256:98dcf2d40685c553fc964efb596c5a1983be001ed13ab64662a0cba4d20758a1",
+            "execution": {
+              "attempt_id": "01M3XY546R1RF70KNG5CP2M9HK",
+              "endpoint": "http://127.0.0.1:39483/",
+              "platform": "linux/aarch64",
+              "realization": "static_web",
+              "request_id": "01M3XY534TXDR8X08TEX12R401"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:82eb05120e4af50390d8dad9d328174aff4db3723d4108d2c8ee163fc81898f4",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:f7edc310a795ef82b89e57e65ce1ac192205dbf89a0524d21e8bee5d44010a68",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "runtime_id": "local",
+          "status": "verified",
+          "verification": {
+            "verdicts": [
+              {
+                "id": "root",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              },
+              {
+                "id": "source-identity",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              }
+            ]
+          }
+        },
+        "exploration_evidence": [
+          {
+            "kind": "exploration_network_evidence",
+            "reports": [
+              {
+                "phase": "dependencies",
+                "report": {
+                  "allowance": {
+                    "hosts": [
+                      "exploration-denied.invalid"
+                    ],
+                    "max_transfer_bytes": 134217728,
+                    "ports": [
+                      443
+                    ]
+                  },
+                  "allowed": [],
+                  "budget_exhausted": false,
+                  "refused": [],
+                  "transferred_bytes": 0
+                }
+              },
+              {
+                "phase": "build",
+                "report": {
+                  "allowance": {
+                    "hosts": [
+                      "exploration-denied.invalid"
+                    ],
+                    "max_transfer_bytes": 134217728,
+                    "ports": [
+                      443
+                    ]
+                  },
+                  "allowed": [],
+                  "budget_exhausted": false,
+                  "refused": [],
+                  "transferred_bytes": 0
+                }
+              },
+              {
+                "phase": "runtime",
+                "report": {
+                  "allowance": {
+                    "hosts": [
+                      "exploration-denied.invalid"
+                    ],
+                    "max_transfer_bytes": 134217728,
+                    "ports": [
+                      443
+                    ]
+                  },
+                  "allowed": [],
+                  "budget_exhausted": false,
+                  "refused": [],
+                  "transferred_bytes": 0
+                }
+              }
+            ]
+          },
+          {
+            "facts": [
+              {
+                "exit_code": 0,
+                "log_tail": "[verify-provisioned-node] \n",
+                "signal": null,
+                "stage": "build",
+                "step": "verify-provisioned-node"
+              },
+              {
+                "exit_code": 0,
+                "log_tail": "[check-toolchain] v22.14.0 \n",
+                "signal": null,
+                "stage": "build",
+                "step": "check-toolchain"
+              },
+              {
+                "exit_code": 0,
+                "log_tail": "[build-1] \n> build \n> node build.cjs \n",
+                "signal": null,
+                "stage": "build",
+                "step": "build-1"
+              }
+            ],
+            "kind": "exploration_execution_facts"
+          },
+          {
+            "kind": "exploration_phase_timings",
+            "phases": [
+              {
+                "phase": "source",
+                "started_at_ms": 1790932325179,
+                "elapsed_ms": 64
+              },
+              {
+                "phase": "source",
+                "started_at_ms": 1790932325244,
+                "elapsed_ms": 4
+              },
+              {
+                "phase": "source",
+                "started_at_ms": 1790932325362,
+                "elapsed_ms": 0
+              },
+              {
+                "phase": "build",
+                "started_at_ms": 1790932325362,
+                "elapsed_ms": 42
+              },
+              {
+                "phase": "dependencies",
+                "started_at_ms": 1790932325405,
+                "elapsed_ms": 19
+              },
+              {
+                "phase": "build",
+                "started_at_ms": 1790932325425,
+                "elapsed_ms": 196
+              },
+              {
+                "phase": "build",
+                "started_at_ms": 1790932325622,
+                "elapsed_ms": 9
+              },
+              {
+                "phase": "launch",
+                "started_at_ms": 1790932325632,
+                "elapsed_ms": 0
+              },
+              {
+                "phase": "verification",
+                "started_at_ms": 1790932325632,
+                "elapsed_ms": 3
+              },
+              {
+                "phase": "cleanup",
+                "started_at_ms": 1790932325635,
+                "elapsed_ms": 0
+              },
+              {
+                "phase": "cleanup",
+                "started_at_ms": 1790932326046,
+                "elapsed_ms": 0
+              }
+            ]
+          }
+        ],
+        "resource_budget": {
+          "transfer_bytes": 4608,
+          "expanded_bytes": 536870912,
+          "stored_bytes": 536870912
+        },
+        "resource_charged": {
+          "transfer_bytes": 4608,
+          "expanded_bytes": 599,
+          "stored_bytes": 56320
+        },
+        "claimed_at": "2026-10-02T09:12:05.124Z",
+        "finished_at": "2026-10-02T09:12:06.379Z",
+        "unknown_at": null
+      },
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T09:12:03.439Z",
+        "deadline_at": "2026-10-02T09:12:33.439Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 4608,
+          "reserved": 0,
+          "remaining": 1073737216
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 599,
+          "reserved": 0,
+          "remaining": 2147483049
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 56320,
+          "reserved": 0,
+          "remaining": 1073685504
+        }
+      },
+      "result_ACK_attempt_ids": [
+        "01M3XY546R1RF70KNG5CP2M9HK"
+      ],
+      "public_files_checked": 59,
+      "public_value_occurrences": 0,
+      "encrypted_values_after_revoke": 0,
+      "paid_API_calls": 0,
+      "actual_provider_calls": null,
+      "new_unique_OSS_apps": 0,
+      "ordinary_Run_permission": false,
+      "raw_proof_sha256": "21febef916b0524d6ba675de0d29fe3a6034b52c9d52bd9b5433a4c5d619cfca"
+    }
+  ],
+  "paid_API_calls": 0,
+  "actual_provider_calls": null,
+  "new_unique_OSS_apps": 0,
+  "ordinary_Run_permission": false,
+  "deployment": false,
+  "remote_migration": false,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "limitations": [
+    "Explicitly permitted nonsecret embedded artifact is excluded from public evidence scanning",
+    "This pair does not measure permission-change resume of the original Search or the PWA UI; earlier UI evidence retains its own pins"
+  ]
+}

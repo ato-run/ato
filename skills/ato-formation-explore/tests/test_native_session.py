@@ -1,0 +1,218 @@
+"""Native launch admission boundaries; no provider inference or Source run."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+import unittest
+
+SKILL = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("native_session", SKILL / "scripts/native-session.py")
+NATIVE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(NATIVE)
+
+
+class NativeAdmissionTests(unittest.TestCase):
+    def test_owner_confirmation_requires_measured_complete_isolation(self):
+        proof = {"schema": "ato.formation-producer-isolation-os-fixture/1",
+                 "private_fixture_class_count": 8,
+                 "model_policy_sha256": "a" * 64,
+                 "checks": {key: True for key in NATIVE.ISOLATION.BOUNDARY_CHECKS}}
+        self.assertIn("Owner startup confirmation", NATIVE.owner_context(proof, "codex"))
+        for broken in ({}, dict(proof, checks={}), dict(proof, checks={"denied": False}),
+                       dict(proof, checks={"private_classes_read_denied": True}),
+                       dict(proof, model_policy_sha256='invalid'),
+                       dict(proof, private_fixture_class_count=7)):
+            with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, "isolation_evidence_required"):
+                NATIVE.owner_context(broken, "codex")
+
+    def setUp(self):
+        self.binding = {"search_id": "search-fixture", "configuration_ref": "sha256:" + "a" * 64,
+                        "agent": {"kind": "codex", "version": "0.160.0"}}
+        self.view = {"search_id": self.binding["search_id"],
+                     "configuration_ref": self.binding["configuration_ref"],
+                     "deadline_ms": int(time.time() * 1000) + 60000,
+                     "exchange_deadline_ms": int(time.time() * 1000) + 10000,
+                     "connected": True, "next_operation": "submit",
+                     "progress": {"status": "running", "unresolved_attempts": 0},
+                     "exchange": {"response_saved": False}}
+
+    def admit(self):
+        return NATIVE.admission(self.view, self.binding, "codex", "0.160.0")
+
+    def test_original_deadline_preserved_and_expired_round_rejected(self):
+        self.assertEqual(self.admit(), self.view["deadline_ms"])
+        self.view["exchange_deadline_ms"] = int(time.time() * 1000) - 1
+        with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, "deadline_exceeded"):
+            self.admit()
+
+    def test_unknown_reconnect_is_read_only_and_keeps_original_search_deadline(self):
+        view = dict(self.view, next_operation="owner_reconcile", exchange_deadline_ms=1,
+                    progress={"status": "running", "unresolved_attempts": 1,
+                              "attempts": [{"status": "unknown"}]})
+        self.assertEqual(NATIVE.admission(view, self.binding, "codex", "0.160.0", True),
+                         self.view["deadline_ms"])
+        self.assertEqual(NATIVE.RECONCILE_TOOLS, ["status", "next"])
+        for change in ({"deadline_ms": 0}, {"input": {"instructions": "new inference"}},
+                       {"progress": {"status": "cancelled", "unresolved_attempts": 1,
+                                     "attempts": [{"status": "unknown"}]}},
+                       {"progress": {"status": "running", "unresolved_attempts": 1,
+                                     "attempts": [{"status": "claimed"}]}}):
+            with self.subTest(change=change), self.assertRaises(NATIVE.ISOLATION.Rejected):
+                NATIVE.admission(dict(view, **change), self.binding, "codex", "0.160.0", True)
+        disconnected = dict(view, connected=False, deadline_ms=1,
+                            next_operation="owner_reconnect_or_assess", exchange=None)
+        self.assertEqual(NATIVE.admission(disconnected, self.binding, "codex", "0.160.0", True), 1)
+        self.assertEqual(disconnected['deadline_ms'], 1)
+        with self.assertRaises(NATIVE.ISOLATION.Rejected):
+            NATIVE.admission(self.view, self.binding, "codex", "0.160.0", True)
+
+    def test_reporting_window_is_separate_and_bounded_by_owner_campaign(self):
+        original = 1
+        wall = int(time.time() * 1000) + 30000
+        self.assertEqual(NATIVE.reporting_window(original, False, wall), original)
+        self.assertEqual(NATIVE.reporting_window(original, True, wall), wall)
+        with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, 'wall_clock_exceeded'):
+            NATIVE.reporting_window(original, True, 1)
+
+    def test_reconciliation_passes_explicit_authority_scope_and_separate_expiry_to_broker(self):
+        for read_only in (False, True):
+            command = NATIVE.broker_command('mcp', 'owner-connection', 'public-descriptor',
+                                           'private-capability', 'socket', read_only, 12345)
+            self.assertEqual('--reconcile-only' in command, read_only)
+            self.assertEqual('--relay-expiry-ms' in command, read_only)
+            if read_only:
+                self.assertEqual(command[command.index('--relay-expiry-ms') + 1], '12345')
+            self.assertEqual(command[command.index('--publish-capability-file') + 1], 'private-capability')
+
+    def test_private_transport_authorization_is_not_in_model_profile(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        temporary.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            root = Path(directory)
+            public, home, model = (root / k for k in ("public", "auth-host", "model"))
+            for path in (public, home, model):
+                path.mkdir()
+            native, mcp, private, selected = (root / k for k in ("native", "mcp", "private-capability", "socket"))
+            for path in (native, mcp, private, selected):
+                path.touch()
+            host = NATIVE.auth_host_profile(public, home, native, mcp, selected,
+                                            relay_capability=private)
+            child = NATIVE.ISOLATION.profile(public, model, [native])
+            self.assertIn(str(private), host)
+            self.assertNotIn(str(private), child)
+            self.assertNotIn('subpath "' + str(root) + '"', child)
+
+    def test_saved_response_disconnection_and_unknown_do_not_start_inference(self):
+        for change in ({"connected": False}, {"exchange": {"response_saved": True}},
+                       {"progress": {"status": "running", "unresolved_attempts": 1}},
+                       {"next_operation": "owner_reconcile"}):
+            view = dict(self.view, **change)
+            with self.subTest(change=change), self.assertRaises(NATIVE.ISOLATION.Rejected):
+                NATIVE.admission(view, self.binding, "codex", "0.160.0")
+
+    def test_input_wait_and_terminal_states_do_not_reopen(self):
+        for progress in ({"status": "running", "pause_reason": "needs_input"},
+                         {"status": "k_reached_awaiting_assessment"},
+                         {"status": "cancelled"}, {"status": "failed"}):
+            with self.subTest(progress=progress), self.assertRaises(NATIVE.ISOLATION.Rejected):
+                NATIVE.admission(dict(self.view, progress=progress), self.binding, "codex", "0.160.0")
+
+    def test_another_agent_or_search_cannot_attach(self):
+        for view, agent, version in ((dict(self.view, search_id="another"), "codex", "0.160.0"),
+                                     (self.view, "claude-code", "2.1.288"),
+                                     (self.view, "codex", "0.46.0")):
+            with self.assertRaisesRegex(NATIVE.ISOLATION.Rejected, "binding_mismatch"):
+                NATIVE.admission(view, self.binding, agent, version)
+
+    def test_known_pending_runtime_waits_without_inference(self):
+        for attempt_status in ("pending", "claimed"):
+            view = dict(self.view, next_operation="owner_reconcile", progress={
+                "status": "running", "unresolved_attempts": 1,
+                "attempts": [{"status": attempt_status}]})
+            self.assertEqual(NATIVE.next_action(view), "wait")
+            with self.assertRaises(NATIVE.ISOLATION.Rejected):
+                NATIVE.admission(view, self.binding, "codex", "0.160.0")
+
+    def test_unknown_or_unaccounted_attempt_stops_even_with_active_runtime(self):
+        for attempts, count in (([{"status": "unknown"}], 1),
+                                 ([{"status": "claimed"}], 2),
+                                 ([{"status": "claimed"}, {"status": "unknown"}], 2)):
+            view = dict(self.view, next_operation="owner_reconcile", progress={
+                "status": "running", "unresolved_attempts": count, "attempts": attempts})
+            self.assertEqual(NATIVE.next_action(view), "stop")
+
+    def test_saved_response_waits_but_disconnect_or_input_pause_stops(self):
+        view = dict(self.view, next_operation="owner_reconcile", exchange={"response_saved": True})
+        self.assertEqual(NATIVE.next_action(view), "wait")
+        self.assertEqual(NATIVE.next_action(dict(view, next_operation="submit")), "wait")
+        self.assertEqual(NATIVE.next_action(dict(view, connected=False)), "stop")
+        self.assertEqual(NATIVE.next_action(dict(view, progress={
+            "status": "running", "pause_reason": "needs_input"})), "stop")
+
+    def test_model_catalog_removes_host_tools_without_changing_model_prompt(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        temporary.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            path = Path(directory) / "catalog.json"
+            model = {"slug": "fixture-model", "base_instructions": "official fixture prompt",
+                     "shell_type": "shell_command", "apply_patch_tool_type": "freeform",
+                     "experimental_supported_tools": ["image_gen"]}
+            path.write_text(json.dumps({"models": [model, {"slug": "other"}]}))
+            narrowed = NATIVE.narrowed_catalog(path, "fixture-model")["models"]
+            self.assertEqual(len(narrowed), 1)
+            self.assertEqual(narrowed[0]["base_instructions"], model["base_instructions"])
+            self.assertIsNone(narrowed[0]["apply_patch_tool_type"])
+            self.assertEqual(narrowed[0]["shell_type"], "disabled")
+            self.assertEqual(narrowed[0]["experimental_supported_tools"], [])
+
+    def test_SDK_cumulative_usage_is_not_added_across_turns_or_called_billing(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            path = Path(directory) / "native-events.jsonl"
+            rows = [{"type": "result", "total_cost_usd": .2, "modelUsage": {"model": {"inputTokens": 10}}},
+                    {"type": "result", "total_cost_usd": .3, "modelUsage": {"model": {"inputTokens": 15}}}]
+            path.write_text("\n".join(json.dumps(r) for r in rows))
+            report = NATIVE.sdk_reported_usage(path, "claude-code")
+            self.assertEqual(report["SDK_cost_estimate_usd"], .3)
+            self.assertEqual(report["last_cumulative_model_usage"]["model"]["inputTokens"], 15)
+            self.assertEqual(report["account_charge_usd"], "unknown")
+            self.assertEqual(report["internal_LLM_calls"], "unknown")
+
+    def test_incomplete_SDK_stream_does_not_claim_zero_inference_cost(self):
+        report = NATIVE.sdk_reported_usage(Path("missing-SDK-fixture"), "claude-code")
+        self.assertNotIn("SDK_cost_estimate_usd", report)
+        self.assertEqual(report["account_charge_usd"], "unknown")
+
+    def test_SDK_reporting_does_not_copy_unrecognized_fields(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            path = Path(directory) / "native-events.jsonl"
+            path.write_text(json.dumps({"type": "result", "modelUsage": {
+                "model": {"inputTokens": 1, "unrecognized_private_field": "PRIVATE_CANARY"}}}))
+            report = NATIVE.sdk_reported_usage(path, "claude-code")
+            self.assertNotIn("PRIVATE_CANARY", json.dumps(report))
+
+    def test_changed_SDK_counter_shape_keeps_saved_outcome_reportable(self):
+        temporary = SKILL.parents[1] / ".tmp"
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
+            path = Path(directory) / "native-events.jsonl"
+            path.write_text(json.dumps({"type": "result", "modelUsage": None}))
+            report = NATIVE.sdk_reported_usage(path, "claude-code")
+            self.assertEqual(report["coverage"], "SDK counters unavailable")
+            self.assertEqual(report["account_charge_usd"], "unknown")
+
+    def test_coalesced_native_frames_complete_without_another_pipe_write(self):
+        reader, writer = os.pipe()
+        with os.fdopen(reader, "rb") as stream:
+            frames = NATIVE.NativeFrames(stream)
+            os.write(writer, b'{"method":"item/completed"}\n{"method":"turn/completed"}\n')
+            end = time.time() + .5
+            self.assertEqual(frames.receive(end)["method"], "item/completed")
+            self.assertEqual(frames.receive(end)["method"], "turn/completed")
+        os.close(writer)
+
+
+if __name__ == "__main__":
+    unittest.main()

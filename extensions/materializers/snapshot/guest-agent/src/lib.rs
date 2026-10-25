@@ -20,11 +20,14 @@ use std::collections::HashMap;
 use ato_ipc::binding_control::{AgentToHost, HostToAgent};
 use ato_ipc::binding_lease::{BindingLeaseId, BindingName};
 
+pub mod pixel;
 /// ato#1026: app-agnostic localhost→guest-IP TCP relay subcommand for apps
 /// that bind `127.0.0.1` inside the guest.
 pub mod relay;
 pub mod supervisor;
 pub mod terminal;
+#[cfg(target_os = "linux")]
+pub mod terminal_unix;
 pub mod terminal_vsock;
 pub mod tmpfs;
 pub mod volume_mount;

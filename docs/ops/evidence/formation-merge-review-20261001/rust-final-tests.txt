@@ -1,0 +1,656 @@
+   Compiling libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.1
+   Compiling serde_core v1.0.228
+   Compiling version_check v0.9.5
+   Compiling smallvec v1.15.1
+   Compiling serde v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling subtle v2.6.1
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.1
+   Compiling pin-project-lite v0.2.17
+   Compiling stable_deref_trait v1.2.1
+   Compiling parking_lot_core v0.9.12
+   Compiling zmij v1.0.21
+   Compiling bytes v1.11.1
+   Compiling futures-core v0.3.32
+   Compiling bitflags v2.13.0
+   Compiling serde_json v1.0.150
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling futures-sink v0.3.32
+   Compiling zeroize v1.8.2
+   Compiling thiserror v2.0.18
+   Compiling equivalent v1.0.2
+   Compiling slab v0.4.12
+   Compiling hashbrown v0.17.1
+   Compiling syn v2.0.117
+   Compiling jobserver v0.1.35
+   Compiling errno v0.3.14
+   Compiling cpufeatures v0.2.17
+   Compiling cc v1.2.63
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.4
+   Compiling mio v1.2.1
+   Compiling getrandom v0.2.17
+   Compiling indexmap v2.14.0
+   Compiling writeable v0.6.3
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling litemap v0.8.2
+   Compiling digest v0.10.7
+   Compiling tracing-core v0.1.36
+   Compiling icu_normalizer_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling sha2 v0.10.9
+   Compiling ryu-js v0.2.2
+   Compiling futures-task v0.3.32
+   Compiling icu_properties_data v2.2.0
+   Compiling rustix v1.1.4
+   Compiling futures-io v0.3.32
+   Compiling semver v1.0.28
+   Compiling http v1.4.2
+   Compiling anyhow v1.0.102
+   Compiling percent-encoding v2.3.2
+   Compiling rustls-pki-types v1.14.1
+   Compiling pkg-config v0.3.34
+   Compiling zerocopy v0.8.52
+   Compiling ring v0.17.14
+   Compiling httparse v1.10.1
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling untrusted v0.9.0
+   Compiling form_urlencoded v1.2.2
+   Compiling rustls v0.23.40
+   Compiling http-body v1.0.1
+   Compiling futures-channel v0.3.32
+   Compiling crc32fast v1.5.1
+   Compiling synstructure v0.13.2
+   Compiling zstd-safe v7.2.4
+   Compiling log v0.4.32
+   Compiling system-configuration-sys v0.6.0
+   Compiling getrandom v0.4.2
+   Compiling base64 v0.22.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling rustc_version v0.4.1
+   Compiling tower-layer v0.3.3
+   Compiling tinyvec_macros v0.1.1
+   Compiling adler2 v2.0.1
+   Compiling tower-service v0.3.3
+   Compiling toml_write v0.1.2
+   Compiling try-lock v0.2.5
+   Compiling getrandom v0.3.4
+   Compiling winnow v0.7.15
+   Compiling data-encoding v2.11.0
+   Compiling hex v0.4.3
+   Compiling fnv v1.0.7
+   Compiling atomic-waker v1.1.2
+   Compiling ipnet v2.12.0
+   Compiling simd-adler32 v0.3.10
+   Compiling miniz_oxide v0.9.1
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling thiserror-impl v2.0.18
+   Compiling tokio-macros v2.7.0
+   Compiling zerofrom v0.1.8
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.6
+   Compiling tokio v1.52.3
+   Compiling zerotrie v0.2.4
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling futures-util v0.3.32
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling tracing v0.1.44
+   Compiling rustls-webpki v0.103.13
+   Compiling ppv-lite86 v0.2.21
+   Compiling icu_provider v2.2.0
+   Compiling serde_jcs v0.1.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling want v0.3.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling tinyvec v1.11.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling core-foundation v0.9.4
+   Compiling xattr v1.6.1
+   Compiling url v2.5.8
+   Compiling webpki-roots v1.0.7
+   Compiling blake3 v1.8.5
+   Compiling filetime v0.2.29
+   Compiling option-ext v0.2.0
+   Compiling fastrand v2.4.1
+   Compiling httpdate v1.0.3
+   Compiling dirs-sys v0.4.1
+   Compiling tar v0.4.46
+   Compiling tempfile v3.27.0
+   Compiling toml v0.8.23
+   Compiling system-configuration v0.7.0
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling flate2 v1.1.10
+   Compiling h2 v0.4.14
+   Compiling arrayvec v0.7.6
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling signature v2.2.0
+   Compiling heck v0.5.0
+   Compiling ed25519 v2.2.3
+   Compiling rand_core v0.9.5
+   Compiling dirs v5.0.1
+   Compiling rand_core v0.6.4
+   Compiling thiserror v1.0.69
+   Compiling utf8parse v0.2.2
+   Compiling rand_chacha v0.3.1
+   Compiling anstyle-parse v1.0.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling ato-computation v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/lib/computation)
+   Compiling rand_chacha v0.9.0
+   Compiling thiserror-impl v1.0.69
+   Compiling http-body-util v0.1.3
+   Compiling fs2 v0.4.3
+   Compiling sync_wrapper v1.0.2
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling regex-syntax v0.8.11
+   Compiling anstyle v1.0.14
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling ato-objects v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/lib/objects)
+   Compiling hyper v1.10.1
+   Compiling tower v0.5.3
+   Compiling rand v0.9.4
+   Compiling regex-automata v0.4.14
+   Compiling rand v0.8.6
+   Compiling ato-ipc v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/lib/ipc)
+   Compiling hyper-util v0.1.20
+   Compiling enum-as-inner v0.6.1
+   Compiling async-trait v0.1.89
+   Compiling sha1 v0.10.6
+   Compiling clap_lex v1.1.0
+   Compiling lazy_static v1.5.0
+   Compiling strsim v0.11.1
+   Compiling utf-8 v0.7.6
+   Compiling ryu v1.0.23
+   Compiling linked-hash-map v0.5.6
+   Compiling serde_urlencoded v0.7.1
+   Compiling lru-cache v0.1.2
+   Compiling zstd v0.13.3
+   Compiling hyper-rustls v0.27.9
+   Compiling matchers v0.2.0
+   Compiling hickory-proto v0.24.4
+   Compiling clap_builder v4.6.0
+   Compiling ato-formation v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/lib/formation)
+   Compiling tungstenite v0.28.0
+   Compiling sharded-slab v0.1.7
+   Compiling ato-adapter-api v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/extensions/adapters/api)
+   Compiling tower-http v0.6.11
+   Compiling clap_derive v4.6.1
+   Compiling webpki-roots v0.26.11
+   Compiling unicode-normalization v0.1.25
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling resolv-conf v0.7.6
+   Compiling nu-ansi-term v0.50.3
+   Compiling hickory-resolver v0.24.4
+   Compiling ato-materializer-static-web v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/extensions/materializers/static-web)
+   Compiling tracing-subscriber v0.3.23
+   Compiling clap v4.6.1
+   Compiling tokio-tungstenite v0.28.0
+   Compiling reqwest v0.12.28
+   Compiling ato-adapter-process v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/extensions/adapters/process)
+   Compiling ato-sandbox v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/lib/sandbox)
+   Compiling ato-adapter-oci v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/extensions/adapters/oci)
+   Compiling hmac v0.12.1
+   Compiling socket2 v0.5.10
+   Compiling ato-formation-worker v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/apps/formation-worker)
+   Compiling futures-executor v0.3.32
+   Compiling netd v0.5.2 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/services/netd)
+   Compiling serial_test_derive v3.5.0
+   Compiling serial_test v3.5.0
+   Compiling ato-runtime-attempt v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/lib/runtime-attempt)
+   Compiling ato-portable-application v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/apps/portable-application)
+   Compiling ato-receipt-authority v0.1.0 (/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/merge-formation-20261001/tools/receipt-authority)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 02s
+     Running unittests src/lib.rs (.tmp/fresh-target/debug/deps/ato_formation-c6091dd1685530ae)
+
+running 118 tests
+test authoring::tests::a_route_is_a_sequence_and_keeps_its_order ... ok
+test authoring::tests::a_captured_body_digest_is_refused_rather_than_silently_dropped ... ok
+test authoring::tests::a_traversing_state_mount_is_refused ... ok
+test authoring::tests::a_contract_that_observes_nothing_is_refused ... ok
+test authoring::tests::an_observation_of_a_port_no_step_exports_is_refused ... ok
+test authoring::tests::the_order_conditions_were_typed_in_is_not_part_of_the_contract ... ok
+test browser::tests::a_missing_required_criterion_is_inconclusive_not_a_pass ... ok
+test browser::tests::a_boundary_violation_rules_out_a_pass ... ok
+test authoring::tests::a_captured_input_identity_makes_the_source_part_of_the_capsule ... ok
+test browser::tests::a_non_ascii_prompt_is_kept_byte_for_byte ... ok
+test browser::tests::a_result_about_another_contract_or_citing_nothing_is_refused ... ok
+test browser::tests::a_pass_must_cite_a_browser_snapshot ... ok
+test authoring::tests::provenance_is_outside_both_digests ... ok
+test browser::tests::empty_and_oversized_prompts_are_refused ... ok
+test authoring::tests::a_port_without_transport_metadata_keeps_its_contract_ref ... ok
+test authoring::tests::a_different_source_is_a_different_derivation_and_the_same_contract ... ok
+test browser::tests::an_unavailable_verifier_yields_an_inconclusive_receipt ... ok
+test browser::tests::unbounded_evidence_is_refused ... ok
+test browser::tests::the_prompt_is_kept_verbatim_as_one_required_criterion ... ok
+test browser::tests::unknown_evidence_and_event_kinds_are_refused ... ok
+test browser::tests::verdicts_must_be_supported_by_their_judgment ... ok
+test browser::tests::the_contract_ref_is_stable_and_depends_on_the_prompt ... ok
+test capsule_toml::tests::a_source_tree_without_a_capsule_toml_reads_as_none ... ok
+test capsule_toml::tests::a_document_declaring_neither_schema_is_refused_rather_than_guessed_at ... ok
+test browser::tests::the_effective_ref_names_the_browser_contract_only_when_there_is_one ... ok
+test browser::tests::the_wire_result_parses_strictly ... ok
+test capsule_toml::tests::a_store_submission_manifest_is_declined_by_name_not_misread ... ok
+test capsule_toml::tests::a_process_step_without_argv_is_refused_and_never_inferred ... ok
+test capsule_toml::tests::a_command_line_string_is_refused_in_favour_of_argv ... ok
+test capsule_toml::tests::parsing_records_that_a_person_wrote_this ... ok
+test capsule_toml::tests::an_effect_class_is_carried_and_never_invented ... ok
+test capsule_toml::tests::an_unknown_field_is_refused_at_every_level ... ok
+test capsule_toml::tests::an_invented_protocol_is_refused ... ok
+test containment::tests::contained_and_escaping_targets ... ok
+test capsule_toml_v2::tests::v2_never_accepts_an_unpinned_oci_image ... ok
+test capsule_toml_v2::tests::parses_a_service_group_as_one_route_with_scoped_references ... ok
+test capsule_toml_v2::tests::refuses_unknown_fields_and_duplicate_route_labels ... ok
+test capsule_toml_v2::tests::parses_multiple_routes_without_putting_labels_in_the_route_body ... ok
+test failure::tests::a_preset_mismatch_reaches_the_uploader_with_its_own_words ... ok
+test failure::tests::a_store_manifest_keeps_its_own_code_and_names_the_authoring_stage ... ok
+test failure::tests::bounding_never_splits_a_character ... ok
+test failure::tests::a_short_message_is_left_exactly_as_written ... ok
+test failure::tests::it_survives_a_trip_through_anyhow ... ok
+test failure::tests::the_message_is_bounded_and_says_that_it_was_cut ... ok
+test capsule_toml_v2::tests::couples_tcp_egress_to_an_explicit_external_effect ... ok
+test capsule_toml::tests::a_declared_optional_field_of_the_wrong_type_is_refused_not_defaulted ... ok
+test projection::tests::a_process_route_projects_onto_the_existing_override_vocabulary ... ok
+test projection::tests::the_node_static_preset_still_asks_for_its_build ... ok
+test projection::tests::a_preparation_step_before_the_serve_becomes_a_build_step ... ok
+test projection::tests::the_static_preset_projects_onto_the_same_vocabulary ... ok
+test projection::tests::a_port_with_no_declared_guest_port_is_refused ... ok
+test receipt::tests::a_receipt_about_another_assignment_is_refused ... ok
+test projection::tests::a_preparation_step_after_the_serve_is_refused_by_name ... ok
+test receipt::tests::an_issued_receipt_is_accepted_passing_or_failing ... ok
+test receipt::tests::a_receipt_round_trips_through_json ... ok
+test receipt::tests::the_observation_set_is_exactly_k ... ok
+test projection::tests::the_readiness_gate_is_built_from_the_contract_and_not_beside_it ... ok
+test receipt::tests::a_verdict_must_follow_from_its_evidence ... ok
+test retained::tests::artifact_kind_is_not_guessed_from_a_digest ... ok
+test projection::tests::a_runtime_this_build_cannot_provision_is_refused_rather_than_dropped ... ok
+test source::tests::a_chain_of_links_cannot_climb_out ... ok
+test source::tests::a_grant_url_never_reaches_a_diagnostic_intact ... ok
+test source::tests::a_closure_is_not_its_archive_digest ... ok
+test source::tests::a_gzipped_archive_measures_the_same_as_a_plain_one ... ok
+test source::tests::a_subdirectory_cannot_escape_its_repository ... ok
+test source::tests::a_contained_symlink_is_measured_under_v2_as_a_link ... ok
+test source::tests::a_real_top_level_directory_is_kept ... ok
+test source::tests::a_missing_subdirectory_is_refused_rather_than_created ... ok
+test source::tests::a_subdirectory_narrows_the_closure ... ok
+test source::tests::a_traversing_entry_is_refused ... ok
+test source::tests::a_transport_wrapper_directory_is_not_part_of_the_source ... ok
+test source::tests::a_tree_without_symlinks_keeps_its_v1_digest ... ok
+test retained::tests::changed_bytes_provenance_or_assignment_are_refused ... ok
+test source::tests::a_link_is_materialized_as_a_link ... ok
+test source::tests::a_wrapped_archive_with_links_measures_like_the_bare_tree ... ok
+test source::tests::an_empty_directory_is_part_of_the_tree ... ok
+test source::tests::contained_targets_are_accepted ... ok
+test retained::tests::descriptor_is_canonical_and_separate_from_artifact_and_capsule ... ok
+test source::tests::effective_entry_size_and_actual_bytes_share_one_file_budget ... ok
+test source::tests::different_content_is_a_different_tree ... ok
+test source::tests::field_boundaries_cannot_be_confused ... ok
+test source::tests::a_wrapped_archive_materializes_without_its_wrapper ... ok
+test source::tests::a_wrapper_listed_as_its_own_entry_is_still_stripped ... ok
+test source::tests::intact_bytes_of_the_wrong_tree_do_not_pass ... ok
+test source::tests::hard_links_devices_and_fifos_are_refused ... ok
+test source::tests::invalid_and_truncated_sizes_are_not_zero_length_files ... ok
+test source::tests::escaping_targets_are_refused ... ok
+test source::tests::limits_are_enforced_while_reading ... ok
+test source::tests::links_count_against_the_file_limit ... ok
+test source::tests::nothing_may_lie_beneath_a_symlink ... ok
+test source::tests::oversized_metadata_is_rejected_before_its_body_is_read ... ok
+test source::tests::pax_refusal_precedes_payload_or_hidden_metadata_reads ... ok
+test source::tests::ordinary_pax_preserves_identity_and_actual_expanded_bytes ... ok
+test source::tests::a_verified_archive_materializes_and_narrows ... ok
+test capsule_toml_v2::tests::refuses_service_groups_that_widen_or_drop_visibility ... ok
+test source::tests::the_resolver_contract_is_part_of_the_identity ... ok
+test source::tests::the_link_target_is_the_identity_not_the_content_behind_it ... ok
+test source::tests::file_transport_rejects_unverified_unsafe_and_oversized_sources ... ok
+test source::tests::the_expanded_bytes_are_known_and_bounded_before_expansion ... ok
+test source::tests::wrong_bytes_are_refused_before_the_tree_is_read ... ok
+test verify::tests::a_body_digest_is_never_reported_as_checked_by_something_that_did_not_read_it ... ok
+test verify::tests::a_process_observation_is_deferred_to_the_gate_that_actually_probes_it ... ok
+test verify::tests::a_source_that_is_not_the_one_the_capsule_names_fails ... ok
+test verify::tests::a_static_surface_decides_its_own_root_observation_now ... ok
+test verify::tests::an_observation_no_gate_performs_fails_closed ... ok
+test verify::tests::an_observation_of_a_port_the_candidate_does_not_export_fails ... ok
+test verify::tests::deferred_formation_is_not_interop_success ... ok
+test verify::tests::runner_group_evidence_decodes_and_round_trips ... ok
+test verify::tests::runtime_body_observation_must_match_before_interop_is_fully_satisfied ... ok
+test source::tests::the_same_tree_from_different_bytes_has_one_closure ... ok
+test verify::tests::runtime_candidate_with_the_wrong_proof_body_fails_k ... ok
+test verify::tests::runtime_receipt_uses_the_shared_schema_and_keeps_transport_hash_separate ... ok
+test verify::tests::runtime_rejects_snapshot_requirement_when_no_snapshot_was_restored ... ok
+test verify::tests::runtime_satisfies_snapshot_requirement_when_exact_snapshot_was_restored ... ok
+test source::tests::file_transport_preserves_v1_v2_closures_across_compression ... ok
+test source::tests::pax_size_cannot_bypass_expanded_cap ... ok
+test workspace::tests::proposal_d_equals_the_v2_builder_for_the_same_resolved_scope ... ok
+test source::tests::pax_size_cannot_hide_later_metadata_from_preflight ... ok
+
+test result: ok. 118 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/exploration_requirements.rs (.tmp/fresh-target/debug/deps/exploration_requirements-4ae6a07a13677b5b)
+
+running 6 tests
+test unsafe_or_ambiguous_endpoint_forms_are_not_requirements ... ok
+test approvals_and_ceiling_cannot_be_serialized_as_derivation_requirements ... ok
+test max_rounds_defaults_to_three_and_rejects_nonpositive_or_fractional_values ... ok
+test authority_ceiling_is_exact_and_phase_scoped ... ok
+test capsule_requirement_parse_and_canonical_order_agree ... ok
+test requirements_change_derivation_digest_without_changing_frozen_contract ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/exploration_search.rs (.tmp/fresh-target/debug/deps/exploration_search-43b3a38bb2003015)
+
+running 26 tests
+test ceiling_changes_are_separate_from_frozen_contract ... ok
+test bounded_inspection_is_validated_and_consumed_without_authorizing_a_d ... ok
+test a_process_plan_without_an_explicit_guest_port_is_rejected ... ok
+test an_out_of_ceiling_requirement_is_saved_as_a_specific_rejection ... ok
+test configured_one_round_keeps_its_effective_limit_after_serialization ... ok
+test legacy_catalog_empty_does_not_prevent_a_typed_execution_plan ... ok
+test default_three_failed_provider_rounds_exhaust_without_reset_on_restart ... ok
+test bindings_change_d_without_changing_k_and_never_carry_values ... ok
+test a_generated_d_waits_for_placement_without_spending_another_round_after_restart ... ok
+test module_state_and_public_environment_are_canonical_and_source_bound ... ok
+test independent_provider_cap_stops_before_receiver_refuses_another_round ... ok
+test public_catalog_is_bounded_and_does_not_export_the_path_map ... ok
+test reasoning_limits_are_positive_bounded_and_frozen ... ok
+test generated_static_build_lowers_to_existing_browser_adapter_with_same_k ... ok
+test omitted_unknowns_diagnostic_does_not_change_canonical_execution_or_requirements ... ok
+test repeated_empty_declines_stop_without_using_the_third_round ... ok
+test shared_decline_after_inspection_stops_without_another_round ... ok
+test shared_provider_infrastructure_failure_preserves_one_round_on_restart ... ok
+test python_source_requirements_resolve_hash_and_install_offline_without_changing_k ... ok
+test stale_source_digest_is_not_lowered_to_a_process ... ok
+test source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan ... ok
+test reusable_static_preset_authoring_roundtrips_without_changing_d_or_k ... ok
+test unsupported_reason_is_bounded_and_legacy_declines_still_parse ... ok
+test unsupported_toolchain_is_a_validator_diagnostic ... ok
+test shared_inspection_and_generated_d_share_one_frozen_round ... ok
+test state_cannot_mask_shim_system_or_policy_and_env_cannot_inject_into_owner ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (.tmp/fresh-target/debug/deps/ato_formation_worker-c682a35398e02bb9)
+
+running 57 tests
+test runtime_network::exploration::tests::actual_gate_refusal_is_reported_only_for_its_phase_without_external_dns ... ok
+test runtime_network::deadline_tests::frozen_deadline_caps_source_and_status_timeouts_and_never_expands ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::explicit_python_import_exposes_only_module_or_initializer ... ok
+test operations::tests::preserves_declaration_and_modules_without_loading_large_assets ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::explicit_workspace_globs_are_bounded_and_recursive_refs_are_reported ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::lowering_capabilities_are_source_independent_and_toolchain_scoped ... ok
+test metered_decision::tests::singleton_bypasses_credential_and_reservation ... ok
+test operations::tests::incomplete_explicit_source_fails_without_discovery_fallback ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::relative_js_imports_use_exact_bounded_files_and_reject_ambiguity ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::root_scope_requires_an_acquired_reference_and_preserves_its_digest ... ok
+test metered_decision::tests::crash_after_reservation_is_charged_and_never_sent_again ... ok
+test runtime_network::proposal::tests::completed_batch_recompiles_idempotently_but_is_not_a_pass ... ok
+test runtime_network::proposal::tests::auto_plan_inventory_comes_from_verified_source_and_excludes_credentials ... ok
+test runtime_network::proposal::tests::general::d3_peak_reservation_rounds_each_side_up_and_bounds_total ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::exchange_call_bound_is_frozen_separately_from_rounds ... ok
+test runtime_network::proposal::tests::auto_source_priority_subset_is_valid_canonical_provider_context ... ok
+test runtime_network::proposal::tests::general::d3_unresolved_reservation_blocks_next_cell_without_refund ... ok
+test runtime_network::deadline_tests::expired_operation_does_not_dispatch_and_slow_http_read_stops_at_deadline ... ok
+test runtime_network::proposal::tests::general::historical_cell_response_journal_remains_readable ... ok
+test runtime_network::proposal::tests::general::general_claim_loss_never_calls_or_reclaims ... ok
+test runtime_network::proposal::tests::general::general_error_timeout_durable_evidence_without_k_evidence ... ok
+test runtime_network::proposal::tests::corruption_is_rejected_before_any_receipt_or_recipe_admission ... ok
+test runtime_network::proposal::tests::general::production_endpoint_and_mock_credentials_are_separate ... ok
+test runtime_network::proposal::tests::general::preregistration_uses_exact_frozen_source_without_provider_or_status ... ok
+test runtime_network::proposal::tests::general::m13_completion_loss_get_recompile_and_restart_do_not_reinvoke ... ok
+test runtime_network::proposal::tests::general::r2_same_final_request_has_same_hash ... ok
+test runtime_network::proposal::tests::general::r1_dynamic_final_timeout_changes_request_hash ... ok
+test runtime_network::proposal::tests::general::r3_exact_received_http_body_matches_durable_hash ... ok
+test runtime_network::proposal::tests::general::r6_response_requires_request_and_is_write_once ... ok
+test runtime_network::proposal::tests::general::r5_duplicate_request_and_legacy_request_mix_reject ... ok
+test runtime_network::proposal::tests::general::general_provenance_and_raw_mismatch_fail_before_admission ... ok
+test runtime_network::proposal::tests::general::r7_crash_reopen_preserves_request_and_consumes_reservation ... ok
+test runtime_network::proposal::tests::general::r4_evidence_write_failure_reads_no_credential_and_sends_no_http ... ok
+test runtime_network::proposal::tests::general::r9_source_bodies_are_not_stored_in_request_journal ... ok
+test runtime_network::proposal::tests::general::r8_provider_body_never_contains_auth_header_or_key ... ok
+test runtime_network::proposal::tests::general::shared_api_uses_exact_input_and_distinct_inspection_call_keys ... ok
+test runtime_network::proposal::tests::general::shared_authentication_failure_is_infrastructure_and_is_not_retried ... ok
+test runtime_network::proposal::tests::general::source_module_utf8_binary_bounds_and_immutable_hash ... ok
+test runtime_network::proposal::reasoning::autonomous_tests::operation_retries_are_initial_plus_three_and_survive_restart ... ok
+test runtime_network::proposal::tests::general::source_v2_uses_frozen_opt_in_and_never_private_inventory ... ok
+test runtime_network::proposal::tests::general::d3_finish_model_and_usage_fail_closed_and_halt_across_restart ... ok
+test runtime_network::proposal::tests::prompt_v1_bytes_stay_pinned_and_v2_names_the_workspace_operation ... ok
+test runtime_network::proposal::tests::general::spend_journal_bounds_restart_concurrency_and_no_second_http ... ok
+test runtime_network::proposal::tests::policy_cannot_bypass_enablement_or_change_after_source_verification ... ok
+test runtime_network::proposal::tests::request_projection_contains_no_private_paths_source_or_receipts ... ok
+test runtime_network::proposal::tests::general::transmitted_context_evidence_matches_actual_http_projection_without_text_or_secrets ... ok
+test runtime_network::proposal::tests::source_refs_cannot_be_replaced_by_receiver_syntax ... ok
+test runtime_network::proposal::tests::source_inventory_ignores_later_original_writes ... ok
+test runtime_network::proposal::tests::module_requires_frozen_files_and_package_parents ... ok
+test runtime_network::proposal::tests::zero_d_has_no_preset_and_source_is_independent ... ok
+test runtime_network::proposal::tests::symlink_file_and_directory_never_authorize_entrypoint ... ok
+test runtime_network::proposal::tests::workspace_domain_must_equal_the_frozen_source_inventory ... ok
+test runtime_network::proposal::tests::raw_provenance_scope_and_member_count_corruption_fail_closed ... ok
+test runtime_network::proposal::tests::session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer ... ok
+test runtime_network::proposal::tests::general::m0_through_m12_exact_raw_transport_and_validator_authority ... ok
+test runtime_network::delivery::tests::lost_runtime_dispatch_stays_the_same_operation_after_restart ... ok
+test runtime_network::proposal::tests::general::shared_transient_calls_are_separate_charged_reservations_and_restart_cannot_reset_retry_three ... ok
+
+test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.17s
+
+     Running tests/exploration_containment.rs (.tmp/fresh-target/debug/deps/exploration_containment-ba9561877c3da199)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (.tmp/fresh-target/debug/deps/ato_receipt_authority-27c03b5a91ae880b)
+
+running 7 tests
+test generation_tests::compile_abi_reports_duplicates_and_rejects_arbitrary_drafts_without_leaking_them ... ok
+test exploration_submission_tests::same_k_fresh_receipt_submission_has_no_normal_authorization ... ok
+test proposal_tests::base_free_abi_needs_initial_source_but_no_known_d_or_base_recipe ... ok
+test proposal_tests::missing_policy_or_unknown_abi_field_rejects_without_echoing_input ... ok
+test generation_tests::compile_abi_returns_canonical_d_without_accepting_a_route ... ok
+test exploration_submission_tests::unverified_reduced_or_stale_receipt_is_never_submitted ... ok
+test proposal_tests::shared_rust_abi_validates_mixed_batch_without_becoming_receipt_authority ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (.tmp/fresh-target/debug/deps/ato_runtime_attempt-6aa7c216abfa71c3)
+
+running 68 tests
+test attempt::tests::a_hand_off_never_stops_and_is_not_a_cleanup_failure ... ok
+test admission::tests::a_started_run_authorizes_running_its_derivation_and_nothing_more ... ok
+test attempt::tests::a_cleanup_failure_does_not_unverify_what_was_verified ... ok
+test attempt::tests::a_refusal_at_admission_reports_that_the_attempt_never_started ... ok
+test attempt::tests::an_attempt_whose_finish_is_not_durable_reports_started_unfinished ... ok
+test attempt::tests::a_restarted_or_redelivered_attempt_is_never_realized_twice ... ok
+test attempt::tests::old_start_precedes_new_admission_refusal ... ok
+test attempt::tests::an_attempt_that_ran_and_failed_its_contract_reports_a_finished_record ... ok
+test attempt::tests::a_verified_attempt_reports_a_finished_record ... ok
+test attempt::tests::observation_failure_keeps_unconfirmed_cleanup_without_realization_evidence ... ok
+test build::tests::a_networkless_step_does_not_consult_another_phases_refusal ... ok
+test attempt::tests::passing_k_survives_unconfirmed_stop_through_run_attempt ... ok
+test build::tests::a_step_that_leaves_nothing_behind_returns_at_once ... ok
+test attempt::tests::run_attempt_and_an_outside_observer_reach_the_same_verification_point ... ok
+test build::tests::a_typed_failure_after_megabytes_is_still_typed ... ok
+test build::tests::both_streams_at_once_do_not_block_the_step ... ok
+test build::tests::a_failure_after_megabytes_keeps_its_last_words ... ok
+test cached_toolchain::tests::authored_and_dependency_steps_are_never_reclassified ... ok
+test cached_toolchain::tests::cached_python_uses_only_offline_read_only_exact_version_check ... ok
+test cached_toolchain::tests::missing_python_keeps_network_prerequisite ... ok
+test ephemeral::tests::endpoint_names_follow_the_runtime_abi ... ok
+test exploration_realizer::tests::generated_scoped_plan_requires_explicit_bind_while_legacy_uses_its_declared_port ... ok
+test build::tests::megabytes_on_stderr_do_not_block_the_step ... ok
+test journal::tests::a_new_start_write_failure_is_distinct_from_unreadable_history ... ok
+test journal::tests::a_finished_attempt_lets_the_request_continue_and_is_never_rerun ... ok
+test journal::tests::an_unfinished_attempt_stops_every_later_attempt_of_its_request ... ok
+test journal::tests::an_unreadable_record_is_not_read_as_nothing_started ... ok
+test journal::tests::an_unwritable_journal_starts_nothing ... ok
+test launch::oci::tests::a_stop_is_confirmed_only_when_every_container_is ... ok
+kill: -39544: No such process
+test launch::process_executor::tests::a_read_only_attachment_is_never_committed ... ok
+test launch::oci::tests::the_hosted_portable_projection_reaches_the_adapter_with_its_working_dir ... ok
+test launch::process_executor::tests::an_oci_realization_is_refused_by_name ... ok
+test launch::process_executor::tests::an_oci_spec_is_refused_before_anything_is_spawned ... ok
+test build::tests::megabytes_on_stdout_do_not_block_the_step ... ok
+test launch::process_executor::tests::a_workload_that_never_reports_ready_fails_rather_than_hangs ... ok
+test launch::process_executor::tests::missing_python_requirement_fails_admission_with_a_reason ... ok
+test launch::process_executor::tests::readiness_names_an_endpoint_that_must_be_allocated ... ok
+test launch::process_executor::tests::secrets_reach_the_spawn_environment_and_nothing_else ... ok
+test launch::process_executor::tests::mismatched_python_version_fails_admission_with_a_reason ... ok
+test launch::process_executor::tests::the_workload_learns_its_state_path_by_name ... ok
+test launch::resolved::tests::a_resolved_cwd_outside_the_workspace_is_refused ... ok
+test launch::resolved::tests::debug_redacts_secret_values_and_host_paths ... ok
+test launch::resolved::tests::observed_state_reports_identity_without_location ... ok
+test launch::resolved::tests::secrets_reach_only_the_spawn_boundary ... ok
+test launch::sandbox::tests::a_symlinked_cwd_that_leaves_the_workspace_is_refused ... ok
+test launch::sandbox::tests::an_escaping_cwd_is_refused_before_it_reaches_the_sandbox ... ok
+test launch::sandbox::tests::the_sandbox_changes_into_the_guest_cwd ... ok
+test launch::sandbox::tests::the_workload_starts_at_its_cwd_under_the_guest_root ... ok
+test realize::tests::a_stop_error_that_cannot_say_what_happened_is_unconfirmed ... ok
+test static_lane::tests::static_lane_selects_then_extracts_then_instruments_then_produces ... ok
+test variables::tests::process_artifact_secret_is_refused_across_chunk_boundary ... ok
+test variables::tests::public_configuration_embedding_requires_explicit_permission ... ok
+test variables::tests::redeemed_values_are_not_debuggable_and_output_redaction_is_exact ... ok
+test verification::tests::a_different_or_absent_snapshot_fails_the_snapshot_observation ... ok
+test verification::tests::a_different_workspace_fails_input_identity ... ok
+test verification::tests::a_failed_http_status_fails_that_observation_only ... ok
+test verification::tests::a_wrong_body_fails_its_digest ... ok
+test verification::tests::an_observation_that_was_not_made_fails_closed ... ok
+test verification::tests::every_observation_satisfied_is_a_fully_satisfied_receipt ... ok
+test verification::tests::only_get_observations_on_exported_ports_are_required ... ok
+test verification::tests::the_context_names_the_run_and_the_dependency_profile ... ok
+test launch::process_executor::tests::drop_stops_a_group_which_ignores_term_without_touching_another_run ... ok
+test launch::process_executor::tests::stopping_a_term_resistant_group_confirms_forced_cessation ... ok
+test build::tests::a_descendant_that_lets_go_of_the_pipes_but_keeps_writing_is_stopped ... ok
+kill: -39614: Operation not permitted
+test build::tests::positive_phase_gate_refusal_stops_a_waiting_step_and_retains_execution_facts ... ok
+kill: -39569: Operation not permitted
+test build::tests::a_step_that_never_ends_is_stopped_with_everything_it_started ... ok
+kill: -39518: No such process
+kill: -39524: No such process
+test build::tests::a_failing_step_with_a_descendant_still_fails_with_its_reason_and_leaves_nothing ... ok
+test build::tests::a_descendant_holding_the_pipes_is_stopped_before_the_step_returns ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.85s
+
+     Running unittests src/lib.rs (.tmp/fresh-target/debug/deps/netd-55da9e2d61ee6a4b)
+
+running 71 tests
+test egress::handler::tests::nxdomain_returns_502 ... ok
+test egress::handler::tests::dns_rebinding_cidr_deny ... ok
+test egress::handler::tests::ip_literal_does_not_bypass_allowlist ... ok
+test egress::handler::tests::hostname_deny_short_circuits_dns ... ok
+test egress::handler::tests::oversized_connect_line_is_rejected ... ok
+test egress::handler::tests::allowlisted_ip_literal_connects ... ok
+test egress::handler::tests::connect_allow_returns_200_and_receipt ... ok
+test egress::handler::tests::parse_authority_ipv6_literal ... ok
+test egress::handler::tests::parse_authority_normalises_hostname ... ok
+test egress::policy::tests::a_transfer_budget_is_exhausted_once_crossed ... ok
+test egress::policy::tests::allowlist_blocks_unlisted_hosts ... ok
+test egress::policy::tests::allowlist_blocks_unlisted_ip_literals ... ok
+test egress::handler::tests::read_header_line_enforces_budget_during_read ... ok
+test egress::policy::tests::allowlisted_ip_literal_is_allowed ... ok
+test egress::policy::tests::cidr_deny_blocks_matching_ip ... ok
+test egress::handler::tests::port_outside_the_allowlist_is_refused_before_dns ... ok
+test egress::policy::tests::deny_wins_over_allow ... ok
+test egress::policy::tests::hostname_deny_blocks ... ok
+test egress::policy::tests::hostname_normalization_case_and_trailing_dot ... ok
+test egress::policy::tests::permissive_allows_any_hostname ... ok
+test egress::policy::tests::ip_literal_normalization_matches_textual_variants ... ok
+test egress::policy::tests::permissive_allows_any_ip ... ok
+test egress::handler::tests::tcp_connect_failure_returns_502 ... ok
+test egress::policy::tests::port_allowlist_blocks_unlisted_ports ... ok
+test egress::handler::tests::pipelined_bytes_forwarded_after_connect ... ok
+test identity::tests::generate_produces_valid_uuid_format ... ok
+test identity::tests::generate_produces_64_char_hex_token ... ok
+test identity::tests::two_identities_are_distinct ... ok
+test egress::handler::tests::the_transfer_budget_cuts_the_tunnel_and_refuses_new_connects ... ok
+test identity::tests::load_or_create_persists_and_reloads ... ok
+test identity::tests::load_or_create_round_trips_through_json ... ok
+test ingress::allocator::tests::ephemeral_release_after_assign_removes_key_from_active_map ... ok
+test ingress::allocator::tests::ephemeral_released_port_not_immediately_reused ... ok
+test ingress::allocator::tests::ephemeral_same_key_is_idempotent ... ok
+test ingress::allocator::tests::ephemeral_stable_and_ephemeral_ports_do_not_collide ... ok
+test egress::gate::tests::only_listed_hosts_and_ports_pass_and_private_addresses_never_do ... ok
+test ingress::allocator::tests::ephemeral_two_keys_get_different_ports ... ok
+test ingress::allocator::tests::different_keys_get_different_ports ... ok
+test ingress::allocator::tests::port_persists_across_reload ... ok
+test ingress::allocator::tests::persisted_port_taken_error_on_corrupt_file ... ok
+test ingress::hop_by_hop::tests::removes_dynamic_connection_tokens ... ok
+test ingress::hop_by_hop::tests::removes_standard_hop_by_hop ... ok
+test ingress::hop_by_hop::tests::ws_scrub_preserves_upgrade_and_connection ... ok
+test pixel_authorization::tests::accepts_valid_authenticated_assertion ... ok
+test pixel_authorization::tests::accepts_valid_guest_assertion ... ok
+test pixel_authorization::tests::keyring_rejects_empty_and_weak_keys_without_exposing_secrets ... ok
+test ingress::allocator::tests::ephemeral_avoids_stable_occupied_ports ... ok
+test ingress::allocator::tests::same_key_returns_same_port ... ok
+test pixel_gateway::tests::config_rejects_lookalike_origins_and_public_rfb_addresses ... ok
+test pixel_authorization::tests::readiness_assertion_uses_the_normal_hmac_scope_and_is_not_debuggable ... ok
+test pixel_authorization::tests::rejects_signature_scope_and_expiry_failures ... ok
+test ingress::allocator::tests::remove_releases_key ... ok
+test pixel_gateway::tests::gateway_rejects_missing_assertion ... ok
+test pixel_gateway::tests::gateway_rejects_unlisted_origin ... ok
+test pixel_gateway::tests::gateway_stop_is_idempotent_and_closes_listener ... ok
+test pixel_gateway::tests::input_tracker_counts_pointer_and_keyboard_but_not_frame_requests ... ok
+test pixel_gateway::tests::gateway_consumes_each_grant_once ... ok
+test rfb_probe::tests::public_probe_url_is_token_free_and_secure_except_on_loopback ... ok
+test rfb_probe::tests::authenticated_gateway_probe_failure_stops_listener_and_prevents_ready ... ok
+test rfb_probe::tests::rejects_password_only_private_endpoints ... ok
+test rfb_probe::tests::waits_for_a_complete_raw_frame ... ok
+test ingress::allocator::tests::ephemeral_falls_back_to_oldest_freed_port_when_range_tight ... ok
+test rfb_probe::tests::authenticated_gateway_probe_proves_input_then_first_frame ... ok
+test state::tests::wait_for_shutdown_returns_immediately_if_signal_already_fired ... ok
+test terminal_gateway::tests::gateway_authenticates_and_relays_only_the_terminal_vsock_protocol ... FAILED
+test terminal_gateway::tests::gateway_requires_the_terminal_subprotocol_before_guest_connect ... FAILED
+test pixel_gateway::tests::gateway_relays_binary_rfb_bytes_after_authorization ... ok
+test state::tests::wait_for_shutdown_observes_signal_after_subscribe ... ok
+test ingress::allocator::tests::ephemeral_cooldown_evicts_oldest_entry_when_full ... ok
+test rfb_probe::tests::authenticated_gateway_probe_retries_until_private_rfb_starts ... ok
+test ingress::allocator::tests::ephemeral_many_start_stop_cycles_do_not_exhaust_range ... ok
+
+failures:
+
+---- terminal_gateway::tests::gateway_authenticates_and_relays_only_the_terminal_vsock_protocol stdout ----
+
+thread 'terminal_gateway::tests::gateway_authenticates_and_relays_only_the_terminal_vsock_protocol' (33724492) panicked at services/netd/src/terminal_gateway.rs:518:54:
+called `Result::unwrap()` on an `Err` value: Error { kind: InvalidInput, message: "path must be shorter than SUN_LEN" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- terminal_gateway::tests::gateway_requires_the_terminal_subprotocol_before_guest_connect stdout ----
+
+thread 'terminal_gateway::tests::gateway_requires_the_terminal_subprotocol_before_guest_connect' (33724493) panicked at services/netd/src/terminal_gateway.rs:624:54:
+called `Result::unwrap()` on an `Err` value: Error { kind: InvalidInput, message: "path must be shorter than SUN_LEN" }
+
+
+failures:
+    terminal_gateway::tests::gateway_authenticates_and_relays_only_the_terminal_vsock_protocol
+    terminal_gateway::tests::gateway_requires_the_terminal_subprotocol_before_guest_connect
+
+test result: FAILED. 69 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+error: test failed, to rerun pass `-p netd --lib`

@@ -1,0 +1,71 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Stalwart and Missive staging mail"
+surface_path = "/health"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[binding]]
+id = "smtp_egress"
+protocol = "ato.tcp-egress@1"
+required = true
+
+[[binding]]
+id = "relay_auth"
+protocol = "ato.secret@1"
+required = true
+
+[[state]]
+id = "mail_data"
+use = "ato.state.filesystem@1"
+mount = "/var/lib/stalwart"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "missive-live"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+status = 200
+
+[[derivation]]
+id = "oci-service-group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "stalwart"
+runtimes = { "oci.image" = "ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7ab2749baa5bcd15a56b51f90ba99aea0c3256ce04d4f7e5e3076e8e0", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "1073741824", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+argv = ["--config", "/app/stalwart-config.json"]
+env = { STALWART_PUBLIC_URL = "http://stalwart:8080" }
+ports = [
+  { id = "stalwart.jmap", guest_port = 8080 },
+  { id = "stalwart.imaps", guest_port = 993 },
+  { id = "stalwart.submissions", guest_port = 465 },
+]
+state = ["mail_data"]
+bindings = ["relay_auth"]
+
+[[derivation.service]]
+id = "relay"
+runtimes = { "oci.image" = "ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:868ae56c18a004e7e4cc0e8d0707364b9d28242b914ec25f18f3fe1ca3a6aabf", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "134217728", "oci.cpu_limit_millis" = "250", "oci.pids_limit" = "64" }
+argv = ["serve"]
+env = { SMTP_RELAY_TARGET = "208.111.34.11:10000", SMTP_RELAY_TLS_SERVER_NAME = "oci-linux-test.tail934987.ts.net", SMTP_RELAY_CA_PEM = "/app/ca/fixture-ca.pem", ADAPTER_MAX_CONNECTIONS = "16", ADAPTER_CONNECT_TIMEOUT_SECS = "10", ADAPTER_IDLE_TIMEOUT_SECS = "60" }
+ports = [{ id = "relay.smtp", guest_port = 2525 }]
+bindings = ["smtp_egress"]
+
+[[derivation.service]]
+id = "missive"
+runtimes = { "oci.image" = "ghcr.io/koh0920/govcraft-missive@sha256:f2dd0d893a3fbf83812e35df3510d3fbc9846e9dd31a8a84899cf5fa818682fe", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "128" }
+argv = ["serve", "--config", "/app/missive-config.toml"]
+ports = [{ id = "app.http", guest_port = 8080 }]
+
+[effects]
+default = "requires-confirmation"

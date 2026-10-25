@@ -1,0 +1,53 @@
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "python"
+version = "3.12.7"
+
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "/app/app.py"]
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8000
+
+[[contract.require]]
+id = "health"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "page"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+
+[contract.require.expect]
+digest = "capture"
+
+[effects]
+default = "non-repeatable"

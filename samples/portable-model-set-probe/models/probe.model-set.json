@@ -1,0 +1,1 @@
+{"objects":[{"bytes":1048576,"digest":"sha256:fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83","path":"probe/a.bin"},{"bytes":20,"digest":"sha256:46ee2890dd6a5275066f376b03511a0f7de3bfd618d9dfc174aa65bc835a9725","path":"probe/b.txt"}],"schema":"ato.model-set/1"}

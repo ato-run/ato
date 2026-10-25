@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId};
+use ato_computation::{ComputationRef, ContentRef, OperationId, PortId, ProtocolId};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -68,6 +68,151 @@ pub struct RecordId {
     pub seq: u64,
 }
 
+/// Content identity of one operation-based Record.
+///
+/// This identity belongs only to the Record. It is never interpreted as a
+/// [`ComputationRef`] or a [`RecordFrontier`](crate::RecordFrontier).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RecordIdV2(ContentRef);
+
+impl RecordIdV2 {
+    pub fn parse(value: impl Into<String>) -> Result<Self, RepositoryError> {
+        let reference = ContentRef::parse(value.into())
+            .map_err(|error| RepositoryError::InvalidReference(error.to_string()))?;
+        if reference.algorithm() != "blake3" {
+            return Err(RepositoryError::InvalidReference(
+                "record ids must use blake3".to_owned(),
+            ));
+        }
+        Ok(Self(reference))
+    }
+
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RecordIdV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Canonical operation data from which a [`RecordEnvelopeV2`] is sealed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordBodyV2 {
+    pub protocol_id: ProtocolId,
+    pub operation_id: OperationId,
+    pub port_id: PortId,
+    pub payload_ref: ContentRef,
+    pub payload_version: u32,
+    pub required_features: BTreeSet<String>,
+    pub recorded_by: Option<String>,
+    pub stream: String,
+    pub local_seq: u64,
+    pub writer_order: u64,
+    pub caused_by: Vec<RecordIdV2>,
+    pub observed_at: String,
+}
+
+/// Unpersisted operation emitted by a Stylus.
+///
+/// Payload bytes stay in memory until a Record Writer validates and stores
+/// them. In particular, constructing this value performs no CAS or filesystem
+/// I/O and cannot update a ComputationRef.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordCandidate {
+    pub protocol_id: ProtocolId,
+    pub operation_id: OperationId,
+    pub port_id: PortId,
+    pub payload: Vec<u8>,
+    pub payload_version: u32,
+    pub required_features: BTreeSet<String>,
+    pub recorded_by: Option<String>,
+    pub stream: String,
+    pub local_seq: u64,
+    pub caused_by: Vec<RecordIdV2>,
+    pub observed_at: String,
+}
+
+impl RecordCandidate {
+    pub fn validate(&self) -> Result<(), RepositoryError> {
+        validate_name("record stream", &self.stream)?;
+        if self.local_seq == 0 || self.payload_version == 0 {
+            return Err(RepositoryError::InvalidRecordV2Position);
+        }
+        for feature in &self.required_features {
+            validate_name("required feature", feature)?;
+        }
+        if let Some(recorded_by) = &self.recorded_by {
+            validate_name("recording implementation id", recorded_by)?;
+        }
+        Ok(())
+    }
+}
+
+/// Portable semantic operation that an Actuator can apply to another
+/// Realization.
+///
+/// Computation heads and semantic-frontier hashes are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordEnvelopeV2 {
+    pub id: RecordIdV2,
+    pub protocol_id: ProtocolId,
+    pub operation_id: OperationId,
+    pub port_id: PortId,
+    pub payload_ref: ContentRef,
+    pub payload_version: u32,
+    pub required_features: BTreeSet<String>,
+    pub recorded_by: Option<String>,
+    pub stream: String,
+    pub local_seq: u64,
+    pub writer_order: u64,
+    pub caused_by: Vec<RecordIdV2>,
+    pub observed_at: String,
+}
+
+impl RecordEnvelopeV2 {
+    /// Seals one Record identity without deriving or updating a Computation.
+    pub fn seal(body: RecordBodyV2) -> Result<Self, RepositoryError> {
+        validate_record_v2_body(&body)?;
+        let identity = RecordIdentityWire::from(&body);
+        let id = RecordIdV2(crate::blake3_reference(&serde_jcs::to_vec(&identity)?));
+        Ok(Self {
+            id,
+            protocol_id: body.protocol_id,
+            operation_id: body.operation_id,
+            port_id: body.port_id,
+            payload_ref: body.payload_ref,
+            payload_version: body.payload_version,
+            required_features: body.required_features,
+            recorded_by: body.recorded_by,
+            stream: body.stream,
+            local_seq: body.local_seq,
+            writer_order: body.writer_order,
+            caused_by: body.caused_by,
+            observed_at: body.observed_at,
+        })
+    }
+
+    fn body(&self) -> RecordBodyV2 {
+        RecordBodyV2 {
+            protocol_id: self.protocol_id.clone(),
+            operation_id: self.operation_id.clone(),
+            port_id: self.port_id.clone(),
+            payload_ref: self.payload_ref.clone(),
+            payload_version: self.payload_version,
+            required_features: self.required_features.clone(),
+            recorded_by: self.recorded_by.clone(),
+            stream: self.stream.clone(),
+            local_seq: self.local_seq,
+            writer_order: self.writer_order,
+            caused_by: self.caused_by.clone(),
+            observed_at: self.observed_at.clone(),
+        }
+    }
+}
+
 impl RecordId {
     pub fn new(stream: impl Into<String>, seq: u64) -> Self {
         Self {
@@ -118,6 +263,153 @@ struct RecordWire {
     head_after: String,
     caused_by: Vec<RecordId>,
     observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordWireV2 {
+    version: u32,
+    id: String,
+    protocol_id: String,
+    operation_id: String,
+    port_id: String,
+    payload_ref: String,
+    payload_version: u32,
+    required_features: BTreeSet<String>,
+    recorded_by: Option<String>,
+    stream: String,
+    local_seq: u64,
+    writer_order: u64,
+    caused_by: Vec<String>,
+    observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RecordIdentityWire {
+    version: u32,
+    protocol_id: String,
+    operation_id: String,
+    port_id: String,
+    payload_ref: String,
+    payload_version: u32,
+    required_features: BTreeSet<String>,
+    recorded_by: Option<String>,
+    stream: String,
+    local_seq: u64,
+    writer_order: u64,
+    caused_by: Vec<String>,
+    observed_at: String,
+}
+
+impl From<&RecordBodyV2> for RecordIdentityWire {
+    fn from(value: &RecordBodyV2) -> Self {
+        Self {
+            version: 2,
+            protocol_id: value.protocol_id.to_string(),
+            operation_id: value.operation_id.to_string(),
+            port_id: value.port_id.to_string(),
+            payload_ref: value.payload_ref.to_string(),
+            payload_version: value.payload_version,
+            required_features: value.required_features.clone(),
+            recorded_by: value.recorded_by.clone(),
+            stream: value.stream.clone(),
+            local_seq: value.local_seq,
+            writer_order: value.writer_order,
+            caused_by: value.caused_by.iter().map(ToString::to_string).collect(),
+            observed_at: value.observed_at.clone(),
+        }
+    }
+}
+
+impl From<&RecordEnvelopeV2> for RecordWireV2 {
+    fn from(value: &RecordEnvelopeV2) -> Self {
+        let identity = RecordIdentityWire::from(&value.body());
+        Self {
+            version: identity.version,
+            id: value.id.to_string(),
+            protocol_id: identity.protocol_id,
+            operation_id: identity.operation_id,
+            port_id: identity.port_id,
+            payload_ref: identity.payload_ref,
+            payload_version: identity.payload_version,
+            required_features: identity.required_features,
+            recorded_by: identity.recorded_by,
+            stream: identity.stream,
+            local_seq: identity.local_seq,
+            writer_order: identity.writer_order,
+            caused_by: identity.caused_by,
+            observed_at: identity.observed_at,
+        }
+    }
+}
+
+/// Returns the canonical v2 Record encoding used by segment writers.
+pub fn encode_record_v2(record: &RecordEnvelopeV2) -> Result<Vec<u8>, RepositoryError> {
+    verify_record_v2_identity(record)?;
+    Ok(serde_jcs::to_vec(&RecordWireV2::from(record))?)
+}
+
+/// Decodes and verifies a canonical operation-based Record.
+pub fn decode_record_v2(bytes: &[u8]) -> Result<RecordEnvelopeV2, RepositoryError> {
+    let wire: RecordWireV2 = serde_json::from_slice(bytes)?;
+    if wire.version != 2 || serde_jcs::to_vec(&wire)? != bytes {
+        return Err(RepositoryError::NonCanonicalRecordV2);
+    }
+    let body = RecordBodyV2 {
+        protocol_id: ProtocolId::parse(wire.protocol_id)
+            .map_err(|error| RepositoryError::InvalidReference(error.to_string()))?,
+        operation_id: OperationId::parse(wire.operation_id)
+            .map_err(|error| RepositoryError::InvalidReference(error.to_string()))?,
+        port_id: PortId::parse(wire.port_id)
+            .map_err(|error| RepositoryError::InvalidReference(error.to_string()))?,
+        payload_ref: ContentRef::parse(wire.payload_ref)
+            .map_err(|error| RepositoryError::InvalidReference(error.to_string()))?,
+        payload_version: wire.payload_version,
+        required_features: wire.required_features,
+        recorded_by: wire.recorded_by,
+        stream: wire.stream,
+        local_seq: wire.local_seq,
+        writer_order: wire.writer_order,
+        caused_by: wire
+            .caused_by
+            .into_iter()
+            .map(RecordIdV2::parse)
+            .collect::<Result<_, _>>()?,
+        observed_at: wire.observed_at,
+    };
+    let record = RecordEnvelopeV2::seal(body)?;
+    if record.id.to_string() != wire.id {
+        return Err(RepositoryError::RecordV2IdentityMismatch {
+            expected: record.id.to_string(),
+            actual: wire.id,
+        });
+    }
+    Ok(record)
+}
+
+fn validate_record_v2_body(body: &RecordBodyV2) -> Result<(), RepositoryError> {
+    validate_name("record stream", &body.stream)?;
+    if body.local_seq == 0 || body.writer_order == 0 || body.payload_version == 0 {
+        return Err(RepositoryError::InvalidRecordV2Position);
+    }
+    for feature in &body.required_features {
+        validate_name("required feature", feature)?;
+    }
+    if let Some(recorded_by) = &body.recorded_by {
+        validate_name("recording implementation id", recorded_by)?;
+    }
+    Ok(())
+}
+
+fn verify_record_v2_identity(record: &RecordEnvelopeV2) -> Result<(), RepositoryError> {
+    let expected = RecordEnvelopeV2::seal(record.body())?.id;
+    if expected != record.id {
+        return Err(RepositoryError::RecordV2IdentityMismatch {
+            expected: expected.to_string(),
+            actual: record.id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,6 +819,18 @@ impl LocalCapsuleRepository {
 
     pub fn activate_run(&self, token: &str, run: &ActiveRun) -> Result<(), RepositoryError> {
         let _transaction = self.lock_transaction()?;
+        let claimed_bytes = match fs::read(self.root.join("runs/active.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RepositoryError::ActiveRunConflict {
+                    token: token.to_owned(),
+                    status: "missing".to_owned(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let claimed_at_start: ActiveRun =
+            serde_json::from_slice::<ActiveRunWire>(&claimed_bytes)?.try_into()?;
         let claimed = self
             .active_run()?
             .ok_or_else(|| RepositoryError::ActiveRunConflict {
@@ -539,15 +843,30 @@ impl LocalCapsuleRepository {
                 status: claimed.status,
             });
         }
+        let supplied_head_is_in_claimed_history = if run.record_seq == claimed_at_start.record_seq {
+            run.head == claimed_at_start.head
+        } else if run.record_seq == claimed.record_seq {
+            run.head == claimed.head
+        } else if run.record_seq < claimed.record_seq {
+            self.records_for_stream(&run.branch, None)?
+                .iter()
+                .find(|record| record.id.seq == run.record_seq)
+                .is_some_and(|record| record.head_after == run.head)
+        } else {
+            false
+        };
         if run.token != token
             || run.status != "active"
+            || run.branch != claimed.branch
             || run.branch_base != claimed.branch_base
-            || run.head != claimed.head
-            || run.record_seq != claimed.record_seq
+            || !supplied_head_is_in_claimed_history
         {
             return Err(RepositoryError::InvalidRunStatus(run.status.clone()));
         }
-        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(run))?;
+        let mut activated = run.clone();
+        activated.head = claimed.head;
+        activated.record_seq = claimed.record_seq;
+        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(&activated))?;
         atomic_write(&self.root.join("runs/active.json"), &bytes)
     }
 
@@ -807,6 +1126,12 @@ pub enum RepositoryError {
         expected: RecordId,
         actual: RecordId,
     },
+    #[error("operation-based Record is non-canonical or has an unsupported version")]
+    NonCanonicalRecordV2,
+    #[error("operation-based Record identity mismatch (expected {expected}, actual {actual})")]
+    RecordV2IdentityMismatch { expected: String, actual: String },
+    #[error("operation-based Record positions and payload version must be positive")]
+    InvalidRecordV2Position,
     #[error("repository path has no parent")]
     MissingParent,
 }
@@ -838,6 +1163,68 @@ mod tests {
             caused_by: Vec::new(),
             observed_at: "2030-01-01T00:00:00Z".to_owned(),
         }
+    }
+
+    fn operation_record() -> RecordEnvelopeV2 {
+        RecordEnvelopeV2::seal(RecordBodyV2 {
+            protocol_id: ProtocolId::parse("ato.workspace@1").unwrap(),
+            operation_id: OperationId::parse("put").unwrap(),
+            port_id: PortId::parse("workspace.main").unwrap(),
+            payload_ref: ContentRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap(),
+            payload_version: 1,
+            required_features: BTreeSet::from(["atomic-write".to_owned()]),
+            recorded_by: Some("ato.workspace.local@1".to_owned()),
+            stream: "main".to_owned(),
+            local_seq: 7,
+            writer_order: 11,
+            caused_by: Vec::new(),
+            observed_at: "2030-01-01T00:00:00Z".to_owned(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn record_candidate_validation_does_not_persist_or_assign_global_order() {
+        let candidate = RecordCandidate {
+            protocol_id: ProtocolId::parse("ato.pty@1").unwrap(),
+            operation_id: OperationId::parse("input").unwrap(),
+            port_id: PortId::parse("terminal.main").unwrap(),
+            payload: b"input".to_vec(),
+            payload_version: 1,
+            required_features: BTreeSet::new(),
+            recorded_by: Some("ato.pty.local@1".to_owned()),
+            stream: "main".to_owned(),
+            local_seq: 1,
+            caused_by: Vec::new(),
+            observed_at: "2030-01-01T00:00:00Z".to_owned(),
+        };
+
+        assert!(candidate.validate().is_ok());
+    }
+
+    #[test]
+    fn operation_record_roundtrip_has_no_computation_identity_fields() {
+        let record = operation_record();
+        let bytes = encode_record_v2(&record).unwrap();
+
+        assert_eq!(decode_record_v2(&bytes).unwrap(), record);
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.get("head_before").is_none());
+        assert!(json.get("head_after").is_none());
+        assert!(json.get("semantic_frontier").is_none());
+    }
+
+    #[test]
+    fn operation_record_rejects_an_identity_from_different_record_bytes() {
+        let record = operation_record();
+        let mut json = serde_json::to_value(RecordWireV2::from(&record)).unwrap();
+        json["operation_id"] = serde_json::Value::String("delete".to_owned());
+        let bytes = serde_jcs::to_vec(&json).unwrap();
+
+        assert!(matches!(
+            decode_record_v2(&bytes),
+            Err(RepositoryError::RecordV2IdentityMismatch { .. })
+        ));
     }
 
     #[test]
@@ -1021,5 +1408,51 @@ mod tests {
         let recovered = repository.active_run().unwrap().unwrap();
         assert_eq!(recovered.head, c1);
         assert_eq!(recovered.record_seq, 1);
+    }
+
+    #[test]
+    fn activation_catches_up_observations_recorded_while_starting() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = LocalCapsuleRepository::open(directory.path()).unwrap();
+        let c0 = reference("a");
+        let c1 = reference("b");
+        repository.create_branch("main", &c0, None).unwrap();
+        repository
+            .claim_active_run(&ActiveRun {
+                token: "test-token".to_owned(),
+                branch: "main".to_owned(),
+                branch_base: c0.clone(),
+                head: c0.clone(),
+                record_seq: 0,
+                pid: 0,
+                process_start_time: String::new(),
+                process_group: 0,
+                boot_session: String::new(),
+                status: "starting".to_owned(),
+            })
+            .unwrap();
+        let activation = ActiveRun {
+            token: "test-token".to_owned(),
+            branch: "main".to_owned(),
+            branch_base: c0.clone(),
+            head: c0.clone(),
+            record_seq: 0,
+            pid: 42,
+            process_start_time: "start".to_owned(),
+            process_group: 42,
+            boot_session: "boot".to_owned(),
+            status: "active".to_owned(),
+        };
+        repository
+            .append_record(evidence("main", &c0, &c1))
+            .unwrap();
+
+        repository.activate_run("test-token", &activation).unwrap();
+
+        let active = repository.active_run().unwrap().unwrap();
+        assert_eq!(active.status, "active");
+        assert_eq!(active.head, c1);
+        assert_eq!(active.record_seq, 1);
+        assert_eq!(active.pid, 42);
     }
 }

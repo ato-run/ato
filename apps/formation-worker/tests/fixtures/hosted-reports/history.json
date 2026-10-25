@@ -1,0 +1,8 @@
+{
+  "attempt_record": "started_unfinished",
+  "code": "attempt_already_started",
+  "outcomes": null,
+  "reason": "Hosted attempt stopped at record (attempt_already_started)",
+  "receipt": null,
+  "stage": "record"
+}

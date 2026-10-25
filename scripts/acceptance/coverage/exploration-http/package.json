@@ -1,0 +1,10 @@
+{
+  "name": "ato-exploration-http-acceptance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "cookie": "0.7.2"
+  }
+}

@@ -1,0 +1,274 @@
+{
+  "schema": "ato.formation-native-source-acceptance/1",
+  "measurement_id": "formation-native-source-20261004-codex-svg",
+  "agent": {
+    "kind": "codex",
+    "version": "0.160.0",
+    "model": "gpt-6.1-sol"
+  },
+  "search_id": "search_202ed4c74582245677d09adf837ab58c",
+  "native_launch_pin": "754bdb575c3379c37c0cdc356256b0e105879d83",
+  "Rust_binary_source_pin": "5cc4e1b8f037db7f8f5e69b635b5204861e8fe10",
+  "API_source_pin": "353c06fef9fd945e0286b686670e253a9f04c243",
+  "known_D_seed": false,
+  "Source_programs_started_on_agent_host": false,
+  "frozen_status": {
+    "configuration_ref": "sha256:7ec7d073a43388bfaa420ca8db6cdb797249b73fb418feaf1707b505558fbf2f",
+    "connected": false,
+    "cost": "unknown",
+    "deadline_ms": 1791051491642,
+    "exchange": null,
+    "exchanges_remaining": 3,
+    "exchanges_used": 3,
+    "input": null,
+    "input_projection_schema": "ato.formation-session-public-input/1",
+    "input_sha256_scope": "owner_saved_input",
+    "inspection_elapsed_ms": 0,
+    "inspection_exchanges_completed": 0,
+    "internal_LLM_calls": "unknown",
+    "next_operation": "owner_reconcile_or_assess",
+    "observed_at_ms": 1791049929587,
+    "progress": {
+      "ACK": "unknown; reconcile the owner and Runtime evidence",
+      "approval": "not_assessed",
+      "attempts": [
+        {
+          "attempt_id": "01M41E5Z0YSDWX7ZJYR6WJ1M02",
+          "candidate_stop": null,
+          "cleanup_state": "not_applicable",
+          "derivation_ref": "sha256:6d2a0bd5ee4d3820d71c0a4a75a2ae621cc658d5b5fbec920dfc42afbf1c9ded",
+          "execution_started": true,
+          "finished_at": "2026-10-03T17:50:05.377Z",
+          "status": "fail"
+        },
+        {
+          "attempt_id": "01M41E99A7KR07KPM36474ZB92",
+          "candidate_stop": "confirmed",
+          "cleanup_state": "succeeded",
+          "derivation_ref": "sha256:fae255ddb3921696fbf80dba4fadffe4226c6b8851f9f529ca6f25a6642927f0",
+          "execution_started": true,
+          "finished_at": "2026-10-03T17:52:06.914Z",
+          "status": "pass"
+        }
+      ],
+      "cleanup": "not_confirmed",
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "deployed": false,
+      "execution_pin": {
+        "git_commit": "693bb45be4a394878be3a9af205ce32e5d239a46",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "execution_stop_confirmed": null,
+      "input_cleanup": null,
+      "input_requirements": [],
+      "pause_reason": null,
+      "receipt": {
+        "attempt_id": "01M41E99A7KR07KPM36474ZB92",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation_ref": "sha256:fae255ddb3921696fbf80dba4fadffe4226c6b8851f9f529ca6f25a6642927f0",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:48000ca4ca53996dcb35cf6cd542a510e349265c7db1800ffc3cb2a4bf5d7947",
+        "status": "k_reached_awaiting_assessment"
+      },
+      "rounds_consumed": 2,
+      "search_budget": {
+        "attempts": {
+          "max": 2,
+          "remaining": 0,
+          "reserved": 0,
+          "used": 2
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "remaining": 2142624598,
+          "reserved": 0,
+          "used": 4859050
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "remaining": 1072943104,
+          "reserved": 0,
+          "used": 798720
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "remaining": 1068703744,
+          "reserved": 0,
+          "used": 5038080
+        }
+      },
+      "status": "satisfied",
+      "termination_reason": "submitted",
+      "unresolved_attempts": 0
+    },
+    "responses_reconciled_after_deadline": 0,
+    "schema": "ato.formation-session-view/1",
+    "search_elapsed_ms": 237925,
+    "search_id": "search_202ed4c74582245677d09adf837ab58c",
+    "source_identity": {
+      "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+      "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c"
+    },
+    "token_usage": "unknown",
+    "waiting_reason": "coordinator_wait_or_terminal"
+  },
+  "launch": {
+    "schema": "ato.formation-native-session-launch/1",
+    "agent": "codex",
+    "version": "0.160.0",
+    "search_id": "search_202ed4c74582245677d09adf837ab58c",
+    "configuration_ref": "sha256:7ec7d073a43388bfaa420ca8db6cdb797249b73fb418feaf1707b505558fbf2f",
+    "deadline_ms": 1791051491642,
+    "binaries": {
+      "agent": {
+        "sha256": "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b"
+      },
+      "mcp": {
+        "sha256": "b3b9a651581f997b649d6231e4b9256118019948762cdfa86fcc9b32816138a2"
+      },
+      "code_mode_host": {
+        "sha256": "679eedaea70529aa1cffc9bc0a0788c186412663544fa76c09d63b57f383a65a"
+      }
+    },
+    "Ato_direct_LLM_calls": 0,
+    "internal_LLM_calls": "unknown",
+    "token_usage": "unknown",
+    "cost": "unknown",
+    "ordinary_Run_authorized": false,
+    "Search_cancelled_by_launcher": false,
+    "native_account_available": true,
+    "saved_status": {
+      "configuration_ref": "sha256:7ec7d073a43388bfaa420ca8db6cdb797249b73fb418feaf1707b505558fbf2f",
+      "connected": true,
+      "cost": "unknown",
+      "deadline_ms": 1791051491642,
+      "exchange": null,
+      "exchanges_remaining": 3,
+      "exchanges_used": 3,
+      "input": null,
+      "input_projection_schema": "ato.formation-session-public-input/1",
+      "input_sha256_scope": "owner_saved_input",
+      "inspection_elapsed_ms": 0,
+      "inspection_exchanges_completed": 0,
+      "internal_LLM_calls": "unknown",
+      "next_operation": "owner_reconcile_or_assess",
+      "progress": {
+        "approval": "not_assessed",
+        "attempts": [
+          {
+            "attempt_id": "01M41E5Z0YSDWX7ZJYR6WJ1M02",
+            "candidate_stop": null,
+            "cleanup_state": "not_applicable",
+            "derivation_ref": "sha256:6d2a0bd5ee4d3820d71c0a4a75a2ae621cc658d5b5fbec920dfc42afbf1c9ded",
+            "execution_started": true,
+            "finished_at": "2026-10-03T17:50:05.377Z",
+            "status": "fail"
+          },
+          {
+            "attempt_id": "01M41E99A7KR07KPM36474ZB92",
+            "candidate_stop": "confirmed",
+            "cleanup_state": "succeeded",
+            "derivation_ref": "sha256:fae255ddb3921696fbf80dba4fadffe4226c6b8851f9f529ca6f25a6642927f0",
+            "execution_started": true,
+            "finished_at": "2026-10-03T17:52:06.914Z",
+            "status": "pass"
+          }
+        ],
+        "cleanup": "not_confirmed",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "deployed": false,
+        "execution_stop_confirmed": null,
+        "input_cleanup": null,
+        "input_requirements": [],
+        "pause_reason": null,
+        "rounds_consumed": 2,
+        "search_budget": {
+          "attempts": {
+            "max": 2,
+            "remaining": 0,
+            "reserved": 0,
+            "used": 2
+          },
+          "expanded_bytes": {
+            "max": 2147483648,
+            "remaining": 2142624598,
+            "reserved": 0,
+            "used": 4859050
+          },
+          "stored_bytes": {
+            "max": 1073741824,
+            "remaining": 1072943104,
+            "reserved": 0,
+            "used": 798720
+          },
+          "transfer_bytes": {
+            "max": 1073741824,
+            "remaining": 1068703744,
+            "reserved": 0,
+            "used": 5038080
+          }
+        },
+        "status": "satisfied",
+        "termination_reason": "submitted",
+        "unresolved_attempts": 0
+      },
+      "responses_reconciled_after_deadline": 0,
+      "schema": "ato.formation-session-view/1",
+      "search_elapsed_ms": 237835,
+      "search_id": "search_202ed4c74582245677d09adf837ab58c",
+      "source_identity": {
+        "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+        "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c"
+      },
+      "token_usage": "unknown",
+      "waiting_reason": "coordinator_wait_or_terminal"
+    },
+    "native_turns_completed": 3,
+    "native_turn_completed": true
+  },
+  "leak_scan": {
+    "schema": "ato.formation-agent-output-leak-scan/1",
+    "canary_count": 2,
+    "records": [
+      {
+        "transcript": "native-events.jsonl",
+        "bytes": 534925,
+        "sha256": "58fa8e07fc14d6b30ddc06998bec0a82a67eba811c36a0befb89e3a93e6afda6",
+        "private_value_detected": false
+      }
+    ],
+    "leak_detected": false,
+    "scope": "supplied private canaries; not proof of every possible secret",
+    "private_values_or_paths_reported": false
+  },
+  "internal_provider_calls": "unknown",
+  "native_inference_cost": "unknown",
+  "functional_UI": "unmeasured",
+  "Runtime_ACK": [
+    {
+      "attempt_id": "01M41E5Z0YSDWX7ZJYR6WJ1M02",
+      "ACK_accepted": true,
+      "result_ACK_saved": true,
+      "delivery_closed": true,
+      "max_retries": 1,
+      "result_dispatches": 1
+    },
+    {
+      "attempt_id": "01M41E99A7KR07KPM36474ZB92",
+      "ACK_accepted": true,
+      "result_ACK_saved": true,
+      "delivery_closed": true,
+      "max_retries": 1,
+      "result_dispatches": 1
+    }
+  ],
+  "ordinary_Run_grant": false,
+  "deployment": false,
+  "post_execution_helper_change": {
+    "head": "c7814a1a8",
+    "change": "Stored native model binding validation added; recorded Rust and native Source execution pins are unchanged",
+    "native_Source_rerun": false
+  }
+}

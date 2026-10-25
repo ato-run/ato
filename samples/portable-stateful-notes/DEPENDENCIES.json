@@ -1,0 +1,9 @@
+{
+  "application": "Portable Notes interoperability fixture",
+  "python_requirement": "3.12",
+  "oci_image": "docker.io/library/python@sha256:1c44018d7eb40488f29e7c6ad4991d3200507e14dca71b94fe61011815e98155",
+  "oci_platform": "linux/amd64",
+  "oci_release": "3.12.7-slim-bookworm",
+  "oci_source_commit": "37a6827e0b7a9ef099cfdec5de305e3d4cea7331",
+  "external_python_packages": []
+}

@@ -1,0 +1,5 @@
+
+> ato-api@0.1.0 schema:check /Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato-api/.tmp/merge-formation-20261001
+> node scripts/generate-schema-bootstrap.mjs --check
+
+verified schema/schema.sql at 0314_formation_provider_transport.sql

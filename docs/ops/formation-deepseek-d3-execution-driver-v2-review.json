@@ -1,0 +1,1013 @@
+{
+  "schema": "ato.formation-deepseek-d3-execution-driver-review/2",
+  "historical_v1_review": "formation-deepseek-d3-execution-driver-review.json",
+  "preregistration_merge": "d19be91e5b953ebc12f4f744931989cad384fe36",
+  "controller_base": "d19be91e5b953ebc12f4f744931989cad384fe36",
+  "controller_tested_head": "bf887f230b53db6f53004b9759b78d1bbce0d261",
+  "controller_files_sha256": {
+    "scripts/acceptance/proposal/deepseek-driver-mock.py": "7f54640d09bef16a60bb77c38b1feed99cdc594802c62a00d6b951d537df0ade",
+    "scripts/acceptance/proposal/deepseek-execute.py": "d91c3a5c92b4707a127ae2b764606d38ee612d5b05afffc5e31d856d444a0641",
+    "scripts/acceptance/proposal/execution/__init__.py": "7586c84a9d30920b56d713b0590263edd8a01d34acb57277ddf71a79a8abf743",
+    "scripts/acceptance/proposal/execution/build.py": "e6239e0f24891346235e106845b464333d5dac97ab23d399e423706a230db0bb",
+    "scripts/acceptance/proposal/execution/gates.py": "accedcf13e59e7d30cd30fc106aa0690dd38772419f9fdaeedd9e624139bf220",
+    "scripts/acceptance/proposal/execution/preflight.py": "8f2ee8875bd702d0f52705459be2706139f88b585ddbc1e602b8082ca3f1d2d7",
+    "scripts/acceptance/proposal/execution/project.rs": "5a672150ee72d45b557882c4fad3a96ff5355ffe3c40d504f3b3351d0b4817ad",
+    "scripts/acceptance/proposal/execution/proxy.py": "c239186d31d15379c627b421fb199eabba6cfdb6d1711e93912d30a421add790",
+    "scripts/acceptance/proposal/execution/runner.py": "bd6c917987ca9e004c8f3f75fd25940a5e42d62cbe5b4a35e8e71da07095ced4",
+    "scripts/acceptance/proposal/requester-credential-channel.py": "9a463bef97a2d61067f4c547f6c2b2294c160dfbb2ea4787e72b740e2eaab01c",
+    "scripts/acceptance/proposal/requester-credential-exec.py": "e41aa8682f763a14b949024c068e5985f554fad3373b2effd3b3af605b3540d3",
+    "scripts/acceptance/proposal/test_deepseek_execute.py": "acefc1169bdef2cc9c5197b8cae2398765d9b102f91b64a487d29f158dbaa7be",
+    "scripts/acceptance/proposal/test_requester_credential.py": "5e657421907828525ead54808d436f4ced718405af496bba6513dd8a1284707b"
+  },
+  "controller_bundle_sha256": "46ff144606c311e721e8e4accd0ed60f21848d7abcc2421bf599050236249f1a",
+  "plan_sha256": "a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249",
+  "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+  "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+  "wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+  "preflight": {
+    "trace": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H",
+      "I",
+      "J",
+      "K",
+      "L",
+      "M"
+    ],
+    "plan_sha256": "a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249",
+    "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+    "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+    "wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+    "pricing": {
+      "fetch_timestamp_utc": "2026-09-28T23:56:46.661435+00:00",
+      "final_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "response_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "model_version": "DeepSeek-V4.1-Flash",
+      "checked_at": "2026-09-28T23:56:46.661435+00:00",
+      "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "document_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "input_basis": "peak_cache_miss",
+      "input_usd_per_million": "0.3",
+      "output_usd_per_million": "1.2",
+      "input_price_usd_micros_per_million": 300000,
+      "output_price_usd_micros_per_million": 1200000
+    },
+    "reservation": {
+      "per_call": 81102,
+      "total": 486612
+    },
+    "binaries": {
+      "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+      "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+      "controller_helpers": {
+        "project.rs": "5a672150ee72d45b557882c4fad3a96ff5355ffe3c40d504f3b3351d0b4817ad"
+      },
+      "execution_lock_sha256": "f5671828404b0e2beec5f9f16dfef6afd383491f1c075e176b26c1618d77608d",
+      "helper_lock_sha256": "7d3eb3a30f9dfc3242e4636a841edda069493a6e2355401a7494f9771c5ec915",
+      "binaries": {
+        "requester": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_search",
+          "sha256": "0d3bea384951de91ce656158c8e5bef16a9439b0f1233e3da5658cad16021a33"
+        },
+        "runtime": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_runtime",
+          "sha256": "ffc1d86cef3ca064249553aa63daa2d0275c8f658df68330e35d51a0b29df743"
+        },
+        "worker": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/ato-formation-worker",
+          "sha256": "ae602ae9878b067e0824d9bc2c53fa36baccff767429dd6c1f684d17547f1d54"
+        },
+        "budget": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_budget",
+          "sha256": "df8299d69eb06949cb6267460e0660887a880280f6c76828f7a365ab31eaa692"
+        },
+        "project": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/proposal-project",
+          "sha256": "b65337001851d9306f863bde43245fc86de045d593764c5dd5376b76c57ad6c5"
+        }
+      },
+      "credential_wrapper": {
+        "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-final/scripts/acceptance/proposal/requester-credential-exec.py",
+        "sha256": "e41aa8682f763a14b949024c068e5985f554fad3373b2effd3b3af605b3540d3"
+      }
+    },
+    "live_calls": 0,
+    "controller_key_read": false,
+    "execution_ready": true,
+    "request_evidence_contract": {
+      "proposal_request_sha256": "required_runtime_observation",
+      "provider_body_sha256": "required_runtime_observation",
+      "capture_point": "after_final_timeout_before_credential_read",
+      "durable_before_send": true,
+      "hash_algorithm": "SHA-256_lowercase_sha256_prefix",
+      "proposal_serialization": "serde_jcs::to_string(ProposalRequestV2)_UTF8",
+      "provider_serialization": "serde_json::to_vec(body)_once_same_Vec_to_reqwest_body",
+      "journal_event": {
+        "request": {
+          "cell": "string",
+          "proposal_request_sha256": "sha256",
+          "provider_body_sha256": "sha256",
+          "timeout_ms": "u64",
+          "proposal_request_bytes": "u64_length_only",
+          "provider_body_bytes": "u64_length_only"
+        }
+      },
+      "reservation": "one_Request_event_append_fsync_before_credential_read_no_refund",
+      "timeout_formula": {
+        "remaining_round_ms": "expires_at_ms.saturating_sub(now_ms_after_claim)",
+        "request_timeout_ms": "min(remaining_round_ms, owner_policy_timeout_ms) - completion_reserve_ms",
+        "completion_reserve_ms": 500,
+        "require": "min(remaining_round_ms, owner_policy_timeout_ms) > completion_reserve_ms",
+        "http_timeout_ms": "min(adapter_config_timeout_ms, request_timeout_ms)",
+        "observation": "request.remaining_budget.timeout_ms",
+        "bounds_ms": [
+          1,
+          30000
+        ],
+        "registered_equivalence": "round<=30000; owner_policy=adapter_config=30000; request=http=remaining_round_ms-500"
+      },
+      "inspection": "proposal_budget inspect-request <BudgetPlan.json> <journal> <search_id>",
+      "no_body_persistence": true,
+      "credential_headers_excluded": true,
+      "implementation_files": {
+        "capture": {
+          "path": "apps/formation-worker/src/runtime_network/proposal/deepseek.rs",
+          "sha256": "e8a20d880e54769a34c4e5c45456d07a52b355b5458b0014c4b84756ca073486"
+        },
+        "journal": {
+          "path": "apps/formation-worker/src/runtime_network/proposal/budget.rs",
+          "sha256": "1cf08fabe87123484595f7f623301ae640794dd70324079e705cf6f3d94eb361"
+        },
+        "timeout": {
+          "path": "apps/formation-worker/src/runtime_network/proposal.rs",
+          "sha256": "10512e91ee0a403f0cb856708a416ee3ef3ea6966822b10395045a9bc4ed228f"
+        },
+        "helper": {
+          "path": "apps/formation-worker/examples/proposal_budget.rs",
+          "sha256": "fb72a852e86d85bff20c56cfb62cd1079ef2089e85f48e07ee349be79e5e7edb"
+        }
+      }
+    }
+  },
+  "E0_E19": {
+    "E0": "PASS (offline)",
+    "E1": "PASS (offline)",
+    "E2": "PASS (offline)",
+    "E3": "PASS (offline)",
+    "E4": "PASS (offline)",
+    "E5": "PASS (offline)",
+    "E6": "PASS (offline)",
+    "E7": "PASS (offline)",
+    "E8": "PASS (offline)",
+    "E9": "PASS (offline)",
+    "E10": "PASS (offline)",
+    "E11": "PASS (offline)",
+    "E12": "PASS (offline)",
+    "E13": "PASS (offline)",
+    "E14": "PASS (offline)",
+    "E15": "PASS (offline)",
+    "E16": "PASS (offline)",
+    "E17": "PASS (offline)",
+    "E18": "PASS (offline)",
+    "E19": "PASS (offline)"
+  },
+  "offline_regressions": {
+    "driver_tests": 22,
+    "prereg_v1_unchanged": 8,
+    "prereg_v2": 7,
+    "credential_confinement_linux": 7,
+    "unique_tests_passed": 44,
+    "failed": 0
+  },
+  "runtime_verifier_integration": {
+    "mode": "synthetic_loopback_controller_integration",
+    "results": [
+      {
+        "cell": "G0",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "0c8ebfe9f31304a574be9091d7c0395d64ffd1f5f96bfbc57ea157bdab525c91",
+        "raw_assistant_text": "{\"schema\": \"ato.formation-proposal/1\", \"proposals\": [{\"kind\": \"propose_derivation\", \"operations\": [{\"operation\": \"python_http_process@1\", \"entrypoint_id\": \"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 245,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:3427aaf7a5ccec47f99004215ccdf6898e0125cc4106c0c28e508488b975ff01",
+                "closure_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e"
+        ],
+        "attempt_ids": [
+          "01M3N76WB44BRS1VMK3S99240C"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N76WB44BRS1VMK3S99240C",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N76VEBXWA1KEPSXE2MED3E"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G0_40be84df05189deb"
+        ],
+        "reservation_index": 1,
+        "request_evidence": {
+          "cell": "formation_d3_g0_v1",
+          "proposal_request_sha256": "sha256:f9178b0e3b515e5fc3b176a4120033e080f57c3ed3787ad54bff16f7dfbeb4d5",
+          "provider_body_sha256": "sha256:3c9f83db9a3890b92e7e1a83b54805d2fd18df9a8c16151284326fd3e87e1887",
+          "timeout_ms": 28840,
+          "proposal_request_bytes": 1436,
+          "provider_body_bytes": 3153,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:f9178b0e3b515e5fc3b176a4120033e080f57c3ed3787ad54bff16f7dfbeb4d5",
+        "provider_body_sha256": "sha256:3c9f83db9a3890b92e7e1a83b54805d2fd18df9a8c16151284326fd3e87e1887",
+        "proposal_request_bytes": 1436,
+        "provider_body_bytes": 3153,
+        "actual_timeout_ms": 28840,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:cb63ed5daf77b7b156278f65f9d01da6ab48369e3a0821bdb897bfeb4e197e42",
+        "known_derivations": []
+      },
+      {
+        "cell": "G1",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "0c8ebfe9f31304a574be9091d7c0395d64ffd1f5f96bfbc57ea157bdab525c91",
+        "raw_assistant_text": "{\"schema\": \"ato.formation-proposal/1\", \"proposals\": [{\"kind\": \"propose_derivation\", \"operations\": [{\"operation\": \"python_http_process@1\", \"entrypoint_id\": \"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 245,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:3427aaf7a5ccec47f99004215ccdf6898e0125cc4106c0c28e508488b975ff01",
+                "closure_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e"
+        ],
+        "attempt_ids": [
+          "01M3N7717B2ZPBSJJJVZARC989"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N7717B2ZPBSJJJVZARC989",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N770BZQ6DHFBHNXW0QP58M"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G1_bc478c947368cda2"
+        ],
+        "reservation_index": 2,
+        "request_evidence": {
+          "cell": "formation_d3_g1_v1",
+          "proposal_request_sha256": "sha256:ddd55b05c98fc1f1fab6294b9a033bddc4d2804e9e2eb4b1f4657d529fc06823",
+          "provider_body_sha256": "sha256:8c0cbef18d7150232716c2e8e7f9b9f68e84a7d583f313215fe000c6b4bb1e10",
+          "timeout_ms": 28896,
+          "proposal_request_bytes": 2040,
+          "provider_body_bytes": 3814,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:ddd55b05c98fc1f1fab6294b9a033bddc4d2804e9e2eb4b1f4657d529fc06823",
+        "provider_body_sha256": "sha256:8c0cbef18d7150232716c2e8e7f9b9f68e84a7d583f313215fe000c6b4bb1e10",
+        "proposal_request_bytes": 2040,
+        "provider_body_bytes": 3814,
+        "actual_timeout_ms": 28896,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+        "known_derivations": []
+      },
+      {
+        "cell": "G2",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "0c8ebfe9f31304a574be9091d7c0395d64ffd1f5f96bfbc57ea157bdab525c91",
+        "raw_assistant_text": "{\"schema\": \"ato.formation-proposal/1\", \"proposals\": [{\"kind\": \"propose_derivation\", \"operations\": [{\"operation\": \"python_http_process@1\", \"entrypoint_id\": \"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 245,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:1c7f9611ee20b6e260b5fd40833663d9d7701e610c2e98705672990e5b2bba2d",
+                "closure_ref": "sha256:4dd272eee9683d0bd2dad8cdc54a898046b95c5e6ac5490c95eb30e5dc0bc5b3",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:4dd272eee9683d0bd2dad8cdc54a898046b95c5e6ac5490c95eb30e5dc0bc5b3",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117"
+        ],
+        "attempt_ids": [
+          "01M3N775FCWPFEGE5V9Q7CGMQQ",
+          "01M3N776P9S6BV7BA2JC8G4ZGP"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+            "execution": {
+              "attempt_id": "01M3N776P9S6BV7BA2JC8G4ZGP",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N775CMR9STWN43GJVRPEXT"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G2_8d2f66034c23ec86"
+        ],
+        "reservation_index": 3,
+        "request_evidence": {
+          "cell": "formation_d3_g2_v1",
+          "proposal_request_sha256": "sha256:b61ed0380f5f636b0dbee34a472d923f34f2f69defad31075406697d181bfe18",
+          "provider_body_sha256": "sha256:fd4bab4c523b776927dba5f719d728e87ce8056e5effa2d144145d02b0be454a",
+          "timeout_ms": 28856,
+          "proposal_request_bytes": 2160,
+          "provider_body_bytes": 3944,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:b61ed0380f5f636b0dbee34a472d923f34f2f69defad31075406697d181bfe18",
+        "provider_body_sha256": "sha256:fd4bab4c523b776927dba5f719d728e87ce8056e5effa2d144145d02b0be454a",
+        "proposal_request_bytes": 2160,
+        "provider_body_bytes": 3944,
+        "actual_timeout_ms": 28856,
+        "failure_evidence": [
+          {
+            "code": "http_status_mismatch",
+            "status": "fail"
+          }
+        ],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+        "known_derivations": [
+          "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc"
+        ]
+      },
+      {
+        "cell": "G3",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "c5dd35a9832c8dd44afb1d64e250743ccb0f98403d77f77a884913545f7b06c1",
+        "raw_assistant_text": "{\"schema\": \"ato.formation-proposal/1\", \"proposals\": [{\"kind\": \"propose_derivation\", \"operations\": [{\"operation\": \"shell\", \"argv\": [\"escape\"]}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 245,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "code": "proposal_schema",
+            "status": "rejected"
+          }
+        ],
+        "generated_derivation_refs": [],
+        "attempt_ids": [],
+        "receipts": [],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [],
+        "reservation_index": 4,
+        "request_evidence": {
+          "cell": "formation_d3_g3_v1",
+          "proposal_request_sha256": "sha256:327b1c69a8047f73f2d63c2039b0dc2c1275c77d428ea200059e76987c0ac860",
+          "provider_body_sha256": "sha256:fcc6705a0ccee40c4400b806f6f28e5df21356083e7a03883500a42bc9b2261c",
+          "timeout_ms": 28907,
+          "proposal_request_bytes": 1436,
+          "provider_body_bytes": 3127,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:327b1c69a8047f73f2d63c2039b0dc2c1275c77d428ea200059e76987c0ac860",
+        "provider_body_sha256": "sha256:fcc6705a0ccee40c4400b806f6f28e5df21356083e7a03883500a42bc9b2261c",
+        "proposal_request_bytes": 1436,
+        "provider_body_bytes": 3127,
+        "actual_timeout_ms": 28907,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:0c282a337ce2a672b684408145618333f22dcc4a021bb66f3414a14a93034738",
+        "known_derivations": []
+      },
+      {
+        "cell": "G4",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "5081ba7aad5300d5efee38718f25ad1047cef253bb4062d87cf23f254b023cac",
+        "raw_assistant_text": "{\"schema\": \"ato.formation-proposal/1\", \"proposals\": [{\"kind\": \"unsupported\"}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 245,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "status": "unsupported"
+          }
+        ],
+        "generated_derivation_refs": [],
+        "attempt_ids": [],
+        "receipts": [],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [],
+        "reservation_index": 5,
+        "request_evidence": {
+          "cell": "formation_d3_g4_v1",
+          "proposal_request_sha256": "sha256:6fa915747452ae2d7635ddc8556c1be9552e6496cbe41612288178a8f2ed1156",
+          "provider_body_sha256": "sha256:a91e030724846eee593b2ba05573e77332dcc1d2ec020c08a1e31c8a7184ac25",
+          "timeout_ms": 28904,
+          "proposal_request_bytes": 1105,
+          "provider_body_bytes": 2791,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:6fa915747452ae2d7635ddc8556c1be9552e6496cbe41612288178a8f2ed1156",
+        "provider_body_sha256": "sha256:a91e030724846eee593b2ba05573e77332dcc1d2ec020c08a1e31c8a7184ac25",
+        "proposal_request_bytes": 1105,
+        "provider_body_bytes": 2791,
+        "actual_timeout_ms": 28904,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:b8e7d89eaa04a37e5160639685020f6b357c83b49c3b08c84964ab2641da7433",
+        "known_derivations": []
+      },
+      {
+        "cell": "G5",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "0c8ebfe9f31304a574be9091d7c0395d64ffd1f5f96bfbc57ea157bdab525c91",
+        "raw_assistant_text": "{\"schema\": \"ato.formation-proposal/1\", \"proposals\": [{\"kind\": \"propose_derivation\", \"operations\": [{\"operation\": \"python_http_process@1\", \"entrypoint_id\": \"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 245,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 321,
+              "output_tokens": 123
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:3427aaf7a5ccec47f99004215ccdf6898e0125cc4106c0c28e508488b975ff01",
+                "closure_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e"
+        ],
+        "attempt_ids": [
+          "01M3N77JVX4D4M9S5KV75TQY3A"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N77JVX4D4M9S5KV75TQY3A",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N77J0JGP5CSD8H7G2DXNRK"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G5_9f9f56766d48dc3b"
+        ],
+        "reservation_index": 6,
+        "request_evidence": {
+          "cell": "formation_d3_g5_v1",
+          "proposal_request_sha256": "sha256:6643a020e9c5316d76e2c706b34d97484a6847811617385aed76c21d3e81e910",
+          "provider_body_sha256": "sha256:a684dc9207ab82724000e81241c006ea8d4758e82b3e869dcf8d672ec16a05f1",
+          "timeout_ms": 28899,
+          "proposal_request_bytes": 2040,
+          "provider_body_bytes": 3814,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:6643a020e9c5316d76e2c706b34d97484a6847811617385aed76c21d3e81e910",
+        "provider_body_sha256": "sha256:a684dc9207ab82724000e81241c006ea8d4758e82b3e869dcf8d672ec16a05f1",
+        "proposal_request_bytes": 2040,
+        "provider_body_bytes": 3814,
+        "actual_timeout_ms": 28899,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+        "known_derivations": []
+      }
+    ],
+    "stopped": false,
+    "partial_cell": null,
+    "model_http_calls": 6,
+    "live_calls": 0,
+    "key_read": false
+  },
+  "G2_actual_known_failure": {
+    "attempt_id": "01M3N775FCWPFEGE5V9Q7CGMQQ",
+    "derivation_ref": "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc",
+    "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+    "receipt": {
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "derivation_ref": "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc",
+      "execution": {
+        "attempt_id": "01M3N775FCWPFEGE5V9Q7CGMQQ",
+        "endpoint": "http://127.0.0.1:8000/",
+        "platform": "linux/aarch64",
+        "realization": "process",
+        "request_id": "01M3N775CMR9STWN43GJVRPEXT"
+      },
+      "fully_satisfied": false,
+      "observations": [
+        {
+          "evidence": {
+            "body_sha256": "sha256:c96cf8ce66abd86013abd1e0052663681b6d57a5b0920274cea85b3060759aaa",
+            "method": "GET",
+            "path": "/health",
+            "status": 404
+          },
+          "failure": "http_status_mismatch: GET /health on app.http returned 404; expected 200",
+          "id": "health",
+          "outcome": "failed"
+        }
+      ],
+      "schema": "ato.contract-verification-receipt/1",
+      "target": {
+        "kind": "formation-runtime"
+      }
+    }
+  },
+  "helper_clippy": "PASS",
+  "helper_rustfmt": "PASS",
+  "diff_check": "PASS",
+  "fixed_core_regressions": "668 passed / 0 failed / 1 existing ignored at unchanged d1dde execution pin; see formation-deepseek-d3-v2-verification.json",
+  "credential_path": {
+    "authorization": "user explicitly authorized post-preflight limited injection",
+    "preflight_before_input": true,
+    "input_transport": "separate injector stdin after A-M; no .dev.vars read in controller",
+    "storage": "sealed anonymous Linux memory only; no credential file",
+    "controller_receives": "socket pathname only; neither credential bytes nor fd nor environment value",
+    "requester_receives": "SCM_RIGHTS fd directly from injector; wrapper env for pinned Rust only",
+    "runtime_coordinator_helpers_receive": "no provider credential or fd; explicit PATH/HOME/TMPDIR map",
+    "pinned_Rust_reservation_before_env_read_and_send": "unchanged",
+    "tests": "synthetic public canary only"
+  },
+  "corrected_controller_defects": [
+    "source archive PUT forwarding missing",
+    "C1 wire deadline is proposal_point.expires_at, not proposal_round.expires_at_ms",
+    "controller must not inherit provider credentials or credential descriptors"
+  ],
+  "CI": {
+    "implementation_run": "https://github.com/ato-run/ato/actions/runs/36498753745",
+    "base_run": "https://github.com/ato-run/ato/actions/runs/36497345650",
+    "baseline_matched": [
+      "Windows browser_sandbox Unix API",
+      "macOS portable process ownership",
+      "macOS hosted candidate-never-listened",
+      "Ubuntu hosted Python/Node runtime"
+    ],
+    "not_baseline": "Ubuntu browser-host CDP timeout at 4a65: not reproduced on base; source untouched, tracked separately as unrelated/unclassified timing failure",
+    "final_head_status": "consult current GitHub checks; not represented as green by this ledger"
+  },
+  "live_calls": 0,
+  "spend_usd_micros": 0,
+  "DEEPSEEK_API_KEY_read": false,
+  "key_existence_checked": false,
+  "live_journal_created": false,
+  "plan_changed": false,
+  "core_or_receiver_semantics_changed": false,
+  "implemented": true,
+  "locally_verified": true,
+  "integration_verified": "actual Runtime/Verifier with loopback synthetic model; NOT live DeepSeek",
+  "merged": false,
+  "deployed": false,
+  "remote_migration": false,
+  "pr1421": "untouched"
+}

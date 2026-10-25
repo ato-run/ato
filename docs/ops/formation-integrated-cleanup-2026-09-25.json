@@ -1,0 +1,43 @@
+{
+  "owned_workload_processes": [],
+  "scratch_files": {
+    "2e-base/scratch": 0,
+    "2e-branch/scratch": 0,
+    "3c-branch/scratch": 0
+  },
+  "runtime_work_files": {
+    "3c-branch/acceptance/static-16/runtime-work": 0,
+    "3c-branch/acceptance/single-file-64/runtime-work": 0,
+    "3c-branch/acceptance/publication-failure/runtime-work": 0,
+    "3c-branch/acceptance/api-memory-16/runtime-work": 0,
+    "3c-branch/acceptance/p0-node-red/runtime-work": 0,
+    "3c-branch/acceptance/api-memory-128/runtime-work": 0,
+    "3c-branch/acceptance/node-allowed/runtime-work": 0,
+    "3c-branch/acceptance/node/runtime-work": 0,
+    "3c-branch/acceptance/single-file-128/runtime-work": 0,
+    "3c-branch/acceptance/python/runtime-work": 0,
+    "3c-branch/acceptance/rebased-api-64/runtime-work": 0,
+    "3c-branch/acceptance/static-128/runtime-work": 0,
+    "3c-branch/acceptance/api-memory-64/runtime-work": 0,
+    "3c-branch/acceptance/python-allowed/runtime-work": 0,
+    "3c-branch/acceptance/static-64/runtime-work": 0
+  },
+  "request_work_files": {
+    "acceptance/static-16/request-work": 0,
+    "acceptance/single-file-64/request-work": 0,
+    "acceptance/publication-failure/request-work": 0,
+    "acceptance/api-memory-16/request-work": 0,
+    "acceptance/p0-node-red/request-work": 0,
+    "acceptance/api-memory-128/request-work": 0,
+    "acceptance/node-allowed/request-work": 0,
+    "acceptance/node/request-work": 0,
+    "acceptance/single-file-128/request-work": 0,
+    "acceptance/python/request-work": 0,
+    "acceptance/rebased-api-64/request-work": 0,
+    "acceptance/static-128/request-work": 0,
+    "acceptance/api-memory-64/request-work": 0,
+    "acceptance/python-allowed/request-work": 0,
+    "acceptance/static-64/request-work": 0
+  },
+  "dedicated_token_removed": true
+}

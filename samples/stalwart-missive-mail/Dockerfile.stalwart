@@ -1,0 +1,14 @@
+# The staging Runner drops every Linux capability and sets no-new-privileges.
+# Stalwart's upstream binary carries cap_net_bind_service, which the kernel
+# refuses to exec across that boundary. Copying it without xattrs preserves the
+# pinned executable bytes while removing that capability: Docker's network
+# namespace permits the configured listener ports without it.
+FROM docker.io/stalwartlabs/stalwart@sha256:d898e81b67b9f0f989b2aaec05f4c36fe9faa18fd570f8303ccef05c6127cdfe
+USER root
+RUN cp --no-preserve=xattr /usr/local/bin/stalwart /usr/local/bin/stalwart.no-cap \
+    && mv /usr/local/bin/stalwart.no-cap /usr/local/bin/stalwart \
+    && test -z "$(getcap /usr/local/bin/stalwart)"
+
+# The staging Runner expands a state seed as its host uid and currently offers
+# no OCI id-mapped state mount, so this thin image selects that same uid.
+USER 1000:1000

@@ -1,0 +1,284 @@
+{
+  "schema": "ato.formation-native-source-acceptance/1",
+  "measurement_id": "formation-native-source-20261004-claude-svg",
+  "agent": {
+    "kind": "claude_code",
+    "version": "2.1.288",
+    "model": "claude-opus-5-5"
+  },
+  "search_id": "search_075722c5457a16152d500b77fdfdb5de",
+  "native_launch_pin": "e021eecb287165bdd25ff75d08115f7e27197345",
+  "native_launcher_blob": "9e2153d9d9045e3d26c22c6f8281832020217a19",
+  "Rust_binary_source_pin": "5cc4e1b8f037db7f8f5e69b635b5204861e8fe10",
+  "API_source_pin": "353c06fef9fd945e0286b686670e253a9f04c243",
+  "config_file_sha256": "49296aa11c6ea16b79e0d35a53598796dc14510478d62566f8993f3d63b90dd0",
+  "known_D_seed": false,
+  "same_Source_K_initial_info_limits_as_Codex_source_04": true,
+  "fresh_native_contexts": [
+    "initial_source",
+    "same_Search_recovery"
+  ],
+  "Source_programs_started_on_agent_host": false,
+  "source_closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+  "source_archive_sha256": "28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+  "frozen_status": {
+    "configuration_ref": "sha256:14f3448dfb7c7c42b9b0c8fb9ef102e0076a2b0e2e2c154d2bdfa11daf9a97b1",
+    "connected": false,
+    "cost": "unknown",
+    "deadline_ms": 1791057018157,
+    "exchange": null,
+    "exchanges_remaining": 3,
+    "exchanges_used": 3,
+    "input": null,
+    "input_projection_schema": "ato.formation-session-public-input/1",
+    "input_sha256_scope": "owner_saved_input",
+    "inspection_elapsed_ms": 0,
+    "inspection_exchanges_completed": 0,
+    "internal_LLM_calls": "unknown",
+    "next_operation": "owner_reconcile_or_assess",
+    "observed_at_ms": 1791055411234,
+    "progress": {
+      "ACK": "unknown; reconcile the owner and Runtime evidence",
+      "approval": "not_assessed",
+      "attempts": [
+        {
+          "attempt_id": "01M41KCRFM01FEMFPK501KDM78",
+          "candidate_stop": null,
+          "cleanup_state": "not_applicable",
+          "derivation_ref": "sha256:6d2a0bd5ee4d3820d71c0a4a75a2ae621cc658d5b5fbec920dfc42afbf1c9ded",
+          "execution_started": true,
+          "finished_at": "2026-10-03T19:21:11.637Z",
+          "status": "fail"
+        },
+        {
+          "attempt_id": "01M41KGJ9RM4BRRQB1B4M9YF21",
+          "candidate_stop": "confirmed",
+          "cleanup_state": "succeeded",
+          "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+          "execution_started": true,
+          "finished_at": "2026-10-03T19:23:28.971Z",
+          "status": "pass"
+        }
+      ],
+      "cleanup": "not_confirmed",
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "deployed": false,
+      "execution_pin": {
+        "git_commit": "693bb45be4a394878be3a9af205ce32e5d239a46",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "execution_stop_confirmed": null,
+      "input_cleanup": null,
+      "input_requirements": [],
+      "pause_reason": null,
+      "receipt": {
+        "attempt_id": "01M41KGJ9RM4BRRQB1B4M9YF21",
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:5f0f2a228852d16091222c1632b7c45959c3061d1ce6e071dbc868b209b682fd",
+        "status": "k_reached_awaiting_assessment"
+      },
+      "rounds_consumed": 2,
+      "search_budget": {
+        "attempts": {
+          "max": 2,
+          "remaining": 0,
+          "reserved": 0,
+          "used": 2
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "remaining": 2142624598,
+          "reserved": 0,
+          "used": 4859050
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "remaining": 1072943104,
+          "reserved": 0,
+          "used": 798720
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "remaining": 1068703744,
+          "reserved": 0,
+          "used": 5038080
+        }
+      },
+      "status": "satisfied",
+      "termination_reason": "submitted",
+      "unresolved_attempts": 0
+    },
+    "responses_reconciled_after_deadline": 0,
+    "schema": "ato.formation-session-view/1",
+    "search_elapsed_ms": 193054,
+    "search_id": "search_075722c5457a16152d500b77fdfdb5de",
+    "source_identity": {
+      "archive_digest": "sha256:28152bb7f8a668847cf735ae7ce994c641c66f6a990b68d386e0d4d124114be7",
+      "closure_ref": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c"
+    },
+    "token_usage": "unknown",
+    "waiting_reason": "coordinator_wait_or_terminal"
+  },
+  "fresh_receipt": {
+    "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+    "derivation_ref": "sha256:fe4eb03ac49e1c1feb7675e3288dd86e5137865ec50a6b9c684b420759215c6e",
+    "execution": {
+      "attempt_id": "01M41KGJ9RM4BRRQB1B4M9YF21",
+      "endpoint": "http://127.0.0.1:39293/",
+      "platform": "linux/aarch64",
+      "realization": "static_web",
+      "request_id": "01M41KBK664ZCWAXSBAB99NF9M"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:189d8ea09123aefea62af9acd955bf3147858e5e1eb76bede398cf2b7c3d31bf",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "digest": "sha256:f259299562bb6ae802c07948dc4c8e364a77b3149ae85704e95ecdc39ad2901c",
+          "input": "workspace"
+        },
+        "id": "source-identity",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "fresh_receipt_sha256": "sha256:5f0f2a228852d16091222c1632b7c45959c3061d1ce6e071dbc868b209b682fd",
+  "actual_Runtime_ACK": [
+    {
+      "attempt_id": "01M41KCRFM01FEMFPK501KDM78",
+      "ACK_accepted": true,
+      "delivery_closed": true,
+      "closed_value": true,
+      "result_ACK_saved": true,
+      "max_retries": 1,
+      "result_dispatches": 1,
+      "result_response_sha256": "11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878"
+    },
+    {
+      "attempt_id": "01M41KGJ9RM4BRRQB1B4M9YF21",
+      "ACK_accepted": true,
+      "delivery_closed": true,
+      "closed_value": true,
+      "result_ACK_saved": true,
+      "max_retries": 1,
+      "result_dispatches": 1,
+      "result_response_sha256": "11a49f853eb8befe94fef278d487125cd20930b9e41c4c0934394443e7f00878"
+    }
+  ],
+  "owner_input_cleanup": {
+    "Search": "search_075722c5457a16152d500b77fdfdb5de",
+    "scoped_assignments": 0,
+    "scoped_metadata": 0,
+    "scoped_encrypted_values": 0,
+    "variable_request_rows": 0,
+    "no_variable_inputs_required": true,
+    "cleanup": "not_applicable_without_variable_inputs"
+  },
+  "cut_and_conflict": {
+    "schema": "ato.native-live-response-conflict-cut/1",
+    "agent": "claude-code",
+    "new_Search_created_by_test": false,
+    "new_inference_for_saved_response": false,
+    "exchange_id": "search_075722c5457a16152d500b77fdfdb5de_r1_s1",
+    "input_sha256": "sha256:c79f6e8569f65587a5e38571a9deac598eae299e83f0ba9d3a7f85a8a4498dd5",
+    "response_sha256": "6c7af93444ef1af7f526c1fd39c14adbc0f9678eb917df82b62656cbaa9b7716",
+    "exact_replay_accepted": true,
+    "changed_response_rejected": true,
+    "stale_digest_rejected": true,
+    "unknown_exchange_rejected": true,
+    "saved_response_bytes_unchanged": true,
+    "cut_after_save_at_ms": 1791055257735,
+    "launcher_exit_code": -2,
+    "saved_response_cut_exercised": true
+  },
+  "saved_response_reinferred_or_reexecuted": false,
+  "first_Runtime_attempts_at_reconnect": 1,
+  "remaining_Runtime_attempts_at_reconnect": 1,
+  "original_deadline_and_limits_preserved": true,
+  "canary_scan": {
+    "schema": "ato.formation-agent-output-leak-scan/1",
+    "canary_count": 3,
+    "records": [
+      {
+        "transcript": "native-events.jsonl",
+        "bytes": 170317,
+        "sha256": "f0e8a96c4fad7e99b33f077db159f1d9bde7b55a32cad8b5a8990321195b668e",
+        "private_value_detected": false
+      },
+      {
+        "transcript": "claude.stderr",
+        "bytes": 206,
+        "sha256": "de8f61180dfd6b00ad02c9688d8fbe00b27cad193f4531c9e2017688bbeca57d",
+        "private_value_detected": false
+      },
+      {
+        "transcript": "broker.stderr",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "private_value_detected": false
+      },
+      {
+        "transcript": "native-events.jsonl",
+        "bytes": 397835,
+        "sha256": "d05810630bdce3c89aacb0fce1ab2badc7a280a8aea50decf077c44a575b2b8a",
+        "private_value_detected": false
+      },
+      {
+        "transcript": "claude.stderr",
+        "bytes": 206,
+        "sha256": "de8f61180dfd6b00ad02c9688d8fbe00b27cad193f4531c9e2017688bbeca57d",
+        "private_value_detected": false
+      },
+      {
+        "transcript": "broker.stderr",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "private_value_detected": false
+      }
+    ],
+    "leak_detected": false,
+    "scope": "supplied private canaries; not proof of every possible secret",
+    "private_values_or_paths_reported": false,
+    "cells": [
+      "initial",
+      "same_Search_recovery"
+    ],
+    "generated_private_email": true,
+    "native_provider_credential_canary_RAM_only": true
+  },
+  "success_kind": "failed_D_then_repair_PASS",
+  "initial_D_failure": "npm_lifecycle_plan_required",
+  "same_round_validation_repair": "native_toolchain_unavailable",
+  "additional_rounds_for_validation": 0,
+  "SDK_completed_turns_initial": 0,
+  "SDK_completed_turns_recovery": 2,
+  "Agent_exchanges": 3,
+  "D_rounds": 2,
+  "Runtime_attempts": 2,
+  "inspection_exchanges": 0,
+  "Ato_direct_LLM_calls": 0,
+  "internal_LLM_calls": "unknown",
+  "token_usage": "unknown",
+  "cost": "unknown",
+  "ordinary_Run_authorized": false,
+  "deployments": 0,
+  "remote_migrations": 0,
+  "old_quota_Search_reopened": false
+}

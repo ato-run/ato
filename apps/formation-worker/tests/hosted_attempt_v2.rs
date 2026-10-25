@@ -1,0 +1,839 @@
+//! Real Hosted job, common executor and HTTP observation; simulated artifact API.
+use anyhow::Result;
+use ato_formation::source::SourceLimits;
+use ato_formation_worker::{
+    api::FormationApi,
+    build::BuildAttempt,
+    job::{JobContext, SourceFetcher, TreePacker, run_claimed_job},
+    sandbox::BuildLimits,
+};
+use serde_json::{Value, json};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+struct Fetcher {
+    bytes: Vec<u8>,
+    calls: AtomicUsize,
+}
+impl SourceFetcher for Fetcher {
+    fn fetch(&self, _: &str, _: &Value) -> Result<Vec<u8>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.bytes.clone())
+    }
+}
+struct Packer;
+impl TreePacker for Packer {
+    fn pack(&self, root: &Path) -> Result<Vec<u8>> {
+        ato_formation_worker::pack::pack_tree(root)
+    }
+}
+struct ApiFixture {
+    url: String,
+    result: Arc<Mutex<Option<Value>>>,
+    report: Arc<Mutex<Option<Value>>>,
+    stopped: Arc<AtomicBool>,
+    task: Option<thread::JoinHandle<()>>,
+}
+impl ApiFixture {
+    fn new(fail_upload: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let result = Arc::new(Mutex::new(None));
+        let captured = result.clone();
+        let report = Arc::new(Mutex::new(None));
+        let reported = report.clone();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
+        let task = thread::spawn(move || {
+            'accept: while !stop.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 4096];
+                let end = loop {
+                    let count = match stream.read(&mut chunk) {
+                        Ok(0) => continue 'accept,
+                        Ok(count) => count,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            continue 'accept;
+                        }
+                        Err(error) => panic!("fixture read: {error}"),
+                    };
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if let Some(pos) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let header = String::from_utf8_lossy(&bytes[..end]).to_string();
+                let len = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|n| n.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < end + len {
+                    let count = stream.read(&mut chunk).unwrap();
+                    assert_ne!(count, 0);
+                    bytes.extend_from_slice(&chunk[..count]);
+                }
+                let is_result = header.starts_with("POST /v1/internal/formation/results ");
+                if is_result {
+                    *captured.lock().unwrap() = Some(
+                        serde_json::from_slice::<Value>(&bytes[end..end + len]).unwrap()["result"]
+                            .clone(),
+                    );
+                }
+                let is_report = header.contains("/outcome HTTP/");
+                if is_report {
+                    *reported.lock().unwrap() =
+                        Some(serde_json::from_slice::<Value>(&bytes[end..end + len]).unwrap());
+                }
+                let status = if fail_upload && !is_result && !is_report {
+                    "503 Unavailable"
+                } else {
+                    "200 OK"
+                };
+                let body = if header.starts_with("POST /v1/internal/workspaces ") {
+                    r#"{"materialization_ref":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#
+                } else {
+                    r#"{"compute_schema_id":"schema_fixture"}"#
+                };
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        Self {
+            url,
+            result,
+            report,
+            stopped,
+            task: Some(task),
+        }
+    }
+}
+impl Drop for ApiFixture {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.task.take().unwrap().join().unwrap();
+    }
+}
+
+fn scratch_dir() -> tempfile::TempDir {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/hosted-attempt-tests");
+    std::fs::create_dir_all(&root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
+
+/// What one hosted run produced: the durable outcome record, and the published
+/// result when the run published one.
+struct Hosted {
+    record: Value,
+    result: Option<Value>,
+}
+
+fn hosted(fail_upload: bool, wrong_status: bool, process: Option<&str>) -> Hosted {
+    hosted_with_fault(fail_upload, wrong_status, process, None)
+}
+fn hosted_with_fault(
+    fail_upload: bool,
+    wrong_status: bool,
+    process: Option<&str>,
+    fault: Option<&str>,
+) -> Hosted {
+    let source = scratch_dir();
+    std::fs::write(
+        source.path().join("index.html"),
+        "<h1>Hosted common attempt</h1>",
+    )
+    .unwrap();
+    if wrong_status || fault == Some("effect") {
+        std::fs::write(
+            source.path().join("capsule.toml"),
+            r#"
+schema = "ato.capsule/1"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[[derive.step]]
+id = "web"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+entry = "index.html"
+[[port]]
+id = "web.http"
+use = "ato.http@1"
+from = "web"
+[[contract.require]]
+id = "page"
+use = "ato.contract.http@1"
+port = "web.http"
+path = "/"
+method = "GET"
+[contract.require.expect]
+status = 201
+"#,
+        )
+        .unwrap();
+    }
+    if let Some(runtime) = process {
+        let (version, binary, filename, source_code) = if runtime == "node" {
+            (
+                "22.23.4",
+                "node",
+                "server.js",
+                r#"require('http').createServer((req,res)=>{res.writeHead(process.version === 'v22.23.4' ? 200 : 500); res.end('node hosted');}).listen(Number(process.env.ATO_ENDPOINT_APP_HTTP_PORT),'127.0.0.1');"#,
+            )
+        } else {
+            (
+                "3.12.7",
+                "python3",
+                "server.py",
+                r#"import os,sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+ def do_GET(self):
+  self.send_response(200 if sys.version_info[:3] == (3,12,7) else 500)
+  self.end_headers()
+  self.wfile.write(b'python hosted')
+HTTPServer(('127.0.0.1',int(os.environ['ATO_ENDPOINT_APP_HTTP_PORT'])),H).serve_forever()
+"#,
+            )
+        };
+        let manifest = format!(
+            r#"
+schema = "ato.capsule/1"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[[runtime]]
+name = "{runtime}"
+version = "{version}"
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = ["/opt/ato/toolchains/{runtime}/{version}/bin/{binary}", "/app/{filename}"]
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8000
+[[contract.require]]
+id = "health"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+[contract.require.expect]
+status = 200
+"#
+        );
+        std::fs::write(source.path().join("capsule.toml"), manifest).unwrap();
+        std::fs::write(source.path().join(filename), source_code).unwrap();
+    }
+    if fault == Some("effect") {
+        let path = source.path().join("capsule.toml");
+        let manifest = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("status = 201", "status = 200");
+        std::fs::write(
+            path,
+            format!("{manifest}\n[effects]\ndefault = \"non-repeatable\"\n"),
+        )
+        .unwrap();
+    }
+    let subdirectory = if fault == Some("selected-source") {
+        std::fs::create_dir(source.path().join("site")).unwrap();
+        std::fs::rename(
+            source.path().join("index.html"),
+            source.path().join("site/index.html"),
+        )
+        .unwrap();
+        std::fs::write(source.path().join("README"), "outside selected app").unwrap();
+        "site"
+    } else {
+        ""
+    };
+    let fetcher = Fetcher {
+        bytes: ato_formation_worker::pack::pack_tree(source.path()).unwrap(),
+        calls: AtomicUsize::new(0),
+    };
+    let scratch = scratch_dir();
+    let server = ApiFixture::new(fail_upload);
+    let api = FormationApi::new(
+        reqwest::blocking::Client::new(),
+        server.url.clone(),
+        "synthetic-test-token".into(),
+    );
+    let context = JobContext {
+        api: &api,
+        fetcher: &fetcher,
+        packer: &Packer,
+        work_root: scratch.path(),
+        shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+        worker_id: "hosted_test",
+        limits: BuildLimits::default(),
+        source_limits: SourceLimits::default(),
+    };
+    let attempt = BuildAttempt {
+        job_id: "hosted_job".into(),
+        attempt_id: "hosted_attempt".into(),
+        attempt_fence: 1,
+    };
+    let job = json!({"job_id":"hosted_job", "source":{"kind":"git_hub", "owner":"ato-run", "repository":"verified-source-fixture", "resolved_commit_sha":"a".repeat(40), "subdirectory":subdirectory}, "target":{"triple":if process.is_some() {"aarch64-linux-gnu"} else {"wasm32-browser"}, "workspace_guest_root":"/app"}, "policy":{"network":if process.is_some() {"dependency_resolution"} else {"denied"}}});
+    use ato_runtime_attempt::journal::{AttemptJournal, AttemptLedger};
+    let journal = AttemptJournal::new(scratch.path().join("attempt-records"));
+    if fault == Some("history") {
+        let mut permit = journal.acquire("hosted_job", "hosted_attempt").unwrap();
+        drop(
+            permit
+                .start(ato_runtime_attempt::journal::StartIdentity {
+                    contract_ref: "K".into(),
+                    derivation_ref: "D".into(),
+                    runtime_id: "old".into(),
+                    effects: "pure".into(),
+                    network: "denied".into(),
+                    authorization: "unattended".into(),
+                })
+                .unwrap(),
+        );
+    }
+    let failing = FinishFails(AttemptJournal::new(scratch.path().join("attempt-records")));
+    let unreadable = Unreadable;
+    let ledger: &dyn AttemptLedger = match fault {
+        Some("finish") => &failing,
+        Some("unreadable") => &unreadable,
+        _ => &journal,
+    };
+    let outcome = ato_formation_worker::job::run_claimed_job_with_ledger(
+        &context,
+        &attempt,
+        &job,
+        "compute_test",
+        "revision_test",
+        false,
+        ledger,
+    );
+    if let Err(error) = &outcome {
+        let report = ato_formation_worker::api::classify_failure(error);
+        api.report_failure(&attempt.attempt_id, &report).unwrap();
+        let report = server
+            .report
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("typed outcome endpoint");
+        let name = if fail_upload {
+            "upload"
+        } else if wrong_status {
+            "verification"
+        } else {
+            fault.unwrap_or("unexpected")
+        };
+        if let Ok(dir) = std::env::var("HOSTED_REPORT_FIXTURES") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                Path::new(&dir).join(format!("{name}.json")),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .unwrap();
+        }
+        match name {
+            "effect" => {
+                assert_eq!(report["code"], "effect_policy");
+                assert_eq!(report["attempt_record"], "not_started");
+            }
+            "verification" => {
+                assert_eq!(report["stage"], "verification");
+                assert_eq!(report["receipt"]["fully_satisfied"], false);
+            }
+            "upload" => {
+                assert_eq!(report["code"], "artifact_store_failed");
+                assert_eq!(
+                    report["outcomes"]["runtime_verification"]["state"],
+                    "succeeded"
+                );
+            }
+            "finish" | "history" => assert_eq!(report["attempt_record"], "started_unfinished"),
+            "unreadable" => assert_eq!(report["attempt_record"], "history_unavailable"),
+            _ => panic!("{error:#}"),
+        }
+        if fault.is_some() {
+            if name != "unreadable" {
+                assert!(
+                    run_claimed_job(
+                        &context,
+                        &attempt,
+                        &job,
+                        "compute_test",
+                        "revision_test",
+                        false
+                    )
+                    .is_err()
+                );
+            }
+            return Hosted {
+                record: report,
+                result: None,
+            };
+        }
+    }
+    let path = scratch.path().join("hosted_attempt/hosted-outcome.json");
+    assert!(path.exists(), "outcome missing: {outcome:?}");
+    let record: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let endpoint = record["attempt"]["receipt"]["execution"]["endpoint"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reqwest::blocking::get(endpoint).is_err(),
+        "candidate still answering after Stop: {endpoint}"
+    );
+    let mut published = None;
+    if fail_upload || wrong_status {
+        assert!(outcome.is_err());
+        assert!(server.result.lock().unwrap().is_none());
+    } else {
+        assert!(outcome.is_ok(), "{outcome:?}");
+        let result = server.result.lock().unwrap().clone().unwrap();
+        published = Some(result.clone());
+        let archive_digest = ato_formation_worker::job::digest(&fetcher.bytes);
+        let verified = ato_formation::source::DownloadedArchive::new(fetcher.bytes.clone())
+            .verify_archive_digest(&archive_digest)
+            .unwrap()
+            .verify_tree_digest(None, SourceLimits::default())
+            .unwrap();
+        assert_eq!(
+            result["source_evidence"],
+            json!({
+                "archive_digest": archive_digest,
+                "tree_digest": verified.tree_digest(),
+                "resolver_contract_version": verified.resolver_contract(),
+                "subdirectory": subdirectory,
+                "observed_file_count": verified.expanded_file_count(),
+                "observed_uncompressed_bytes": verified.expanded_bytes(),
+            })
+        );
+        assert_ne!(
+            result["source_evidence"]["resolver_contract_version"],
+            "ato.capsule-program-source-projection/v1"
+        );
+        assert_eq!(
+            result["source_closure_ref"],
+            verified.closure_ref(subdirectory).unwrap().as_str()
+        );
+        assert_eq!(result["job_id"], job["job_id"]);
+        assert_eq!(result["job_id"], attempt.job_id);
+        assert_eq!(result["attempt_id"], attempt.attempt_id);
+        assert_eq!(result["attempt_fence"], attempt.attempt_fence);
+        assert_eq!(
+            result["verification_receipt"]["execution"]["request_id"],
+            attempt.job_id
+        );
+        assert_eq!(
+            result["verification_receipt"]["execution"]["attempt_id"],
+            attempt.attempt_id
+        );
+        if subdirectory == "site" {
+            assert_eq!(result["source_evidence"]["observed_file_count"], 2);
+            assert!(
+                verified.expanded_bytes()
+                    > std::fs::metadata(source.path().join("site/index.html"))
+                        .unwrap()
+                        .len()
+            );
+        }
+        assert_eq!(result["protocol"], "ato.formation-result.v2");
+        assert!(result.get("program_intent_ref").is_none());
+        assert!(result.get("effective_build_plan_ref").is_none());
+        assert!(
+            result["formation_key"]
+                .as_str()
+                .unwrap()
+                .starts_with("v2:sha256:")
+        );
+        assert_eq!(result["verification_receipt"], record["attempt"]["receipt"]);
+        if let Ok(dir) = std::env::var("HOSTED_RESULT_FIXTURES") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                Path::new(&dir).join(format!("{}-result.json", process.unwrap_or("static"))),
+                serde_json::to_vec_pretty(&result).unwrap(),
+            )
+            .unwrap();
+        }
+        // Test-only export: the shared golden originates from a real observation.
+        if process.is_none()
+            && let Ok(path) = std::env::var("HOSTED_V2_GOLDEN_OUTPUT")
+        {
+            std::fs::write(path, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        }
+    }
+    let again = run_claimed_job(
+        &context,
+        &attempt,
+        &job,
+        "compute_test",
+        "revision_test",
+        false,
+    );
+    assert!(again.is_err());
+    assert_eq!(
+        fetcher.calls.load(Ordering::SeqCst),
+        1,
+        "redelivery must stop before fetching or execution"
+    );
+    Hosted {
+        record,
+        result: published,
+    }
+}
+#[test]
+fn hosted_static_is_observed_then_published() {
+    let hosted = hosted(false, false, None);
+    let r = &hosted.record;
+    assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], true);
+    for name in ["seal", "runtime_verification", "cleanup", "publication"] {
+        assert_eq!(r["outcomes"][name]["state"], "succeeded");
+    }
+    // The observed Contract still has its HTTP evidence (the receipt above),
+    // but the published result cannot name a port a Static Web lane does not
+    // export — the control plane refuses exactly that.
+    let result = hosted
+        .result
+        .as_ref()
+        .expect("a successful hosted static run publishes a result");
+    assert_eq!(result["exported_ports"], json!([]));
+    assert_eq!(
+        result["readiness_contracts"],
+        json!([]),
+        "a Static Web result must not claim a readiness port it never exports"
+    );
+    assert_eq!(
+        result["contract_verification"]["observations"][0]["id"],
+        "root"
+    );
+}
+#[test]
+fn selected_app_keeps_full_archive_source_measurements_and_its_distinct_closure() {
+    let r = hosted_with_fault(false, false, None, Some("selected-source"));
+    assert_eq!(r.record["attempt"]["receipt"]["fully_satisfied"], true);
+    let result = r
+        .result
+        .as_ref()
+        .expect("a successful source-archive run publishes its result");
+    assert!(
+        result["source_evidence"].is_object(),
+        "the full-archive source measurements travel with the result: {result}"
+    );
+}
+
+#[test]
+fn mismatched_job_assignment_refuses_before_acquisition_or_publication() {
+    let scratch = scratch_dir();
+    let fetcher = Fetcher {
+        bytes: Vec::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let server = ApiFixture::new(false);
+    let api = FormationApi::new(
+        reqwest::blocking::Client::new(),
+        server.url.clone(),
+        "test".into(),
+    );
+    let context = JobContext {
+        api: &api,
+        fetcher: &fetcher,
+        packer: &Packer,
+        work_root: scratch.path(),
+        shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+        worker_id: "test",
+        limits: BuildLimits::default(),
+        source_limits: SourceLimits::default(),
+    };
+    let attempt = BuildAttempt {
+        job_id: "assigned".into(),
+        attempt_id: "attempt".into(),
+        attempt_fence: 7,
+    };
+    let error = run_claimed_job(
+        &context,
+        &attempt,
+        &json!({"job_id":"different", "source":{"subdirectory":""}}),
+        "compute",
+        "revision",
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("formation_source_assignment_mismatch")
+    );
+    assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0);
+    assert!(server.result.lock().unwrap().is_none());
+}
+
+#[test]
+fn declared_archive_tree_and_selection_mismatches_cannot_emit_source_evidence_or_publish() {
+    let input = scratch_dir();
+    std::fs::write(input.path().join("index.html"), "verified input").unwrap();
+    let bytes = ato_formation_worker::pack::pack_tree(input.path()).unwrap();
+    for mismatch in ["archive", "tree", "selection"] {
+        let scratch = scratch_dir();
+        let fetcher = Fetcher {
+            bytes: bytes.clone(),
+            calls: AtomicUsize::new(0),
+        };
+        let server = ApiFixture::new(false);
+        let api = FormationApi::new(
+            reqwest::blocking::Client::new(),
+            server.url.clone(),
+            "test".into(),
+        );
+        let context = JobContext {
+            api: &api,
+            fetcher: &fetcher,
+            packer: &Packer,
+            work_root: scratch.path(),
+            shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+            worker_id: "test",
+            limits: BuildLimits::default(),
+            source_limits: SourceLimits::default(),
+        };
+        let attempt = BuildAttempt {
+            job_id: "assigned".into(),
+            attempt_id: "attempt".into(),
+            attempt_fence: 9,
+        };
+        let mut source = json!({"kind":"uploaded_archive", "subdirectory":""});
+        let expected = match mismatch {
+            "archive" => {
+                source["expected_archive_digest"] = format!("sha256:{}", "0".repeat(64)).into();
+                "source_archive_digest_mismatch"
+            }
+            "tree" => {
+                source["expected_source_tree_digest"] = format!("sha256:{}", "0".repeat(64)).into();
+                "source_tree_digest_mismatch"
+            }
+            _ => {
+                source["subdirectory"] = "missing".into();
+                "source_subdirectory_missing"
+            }
+        };
+        let error = run_claimed_job(
+            &context,
+            &attempt,
+            &json!({"job_id":"assigned", "source":source}),
+            "compute",
+            "revision",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<ato_formation::source::SourceError>()
+                .unwrap()
+                .code(),
+            expected
+        );
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+        assert!(server.result.lock().unwrap().is_none());
+        assert!(
+            !scratch
+                .path()
+                .join("attempt/formation-result-v2.json")
+                .exists()
+        );
+    }
+}
+#[test]
+fn publication_failure_keeps_the_satisfied_receipt() {
+    let hosted = hosted(true, false, None);
+    let r = &hosted.record;
+    assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], true);
+    assert_eq!(r["outcomes"]["runtime_verification"]["state"], "succeeded");
+    assert_eq!(r["outcomes"]["cleanup"]["state"], "succeeded");
+    assert_eq!(r["outcomes"]["publication"]["state"], "failed");
+}
+#[test]
+fn a_failed_http_contract_is_not_published() {
+    let hosted = hosted(false, true, None);
+    let r = &hosted.record;
+    assert_eq!(r["attempt"]["receipt"]["fully_satisfied"], false);
+    assert_eq!(r["outcomes"]["runtime_verification"]["state"], "failed");
+    assert_eq!(r["outcomes"]["cleanup"]["state"], "succeeded");
+    assert_ne!(r["outcomes"]["publication"]["state"], "succeeded");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hosted_python_and_node_use_the_common_process_runtime() {
+    for runtime in ["python", "node"] {
+        let hosted = hosted(false, false, Some(runtime));
+        let record = &hosted.record;
+        assert_eq!(
+            record["attempt"]["receipt"]["fully_satisfied"], true,
+            "{runtime}: {record}"
+        );
+        assert_eq!(record["outcomes"]["cleanup"]["state"], "succeeded");
+        // A process lane exports the serving port, so its readiness contract
+        // must name one of the ports the result actually exports.
+        let result = hosted
+            .result
+            .as_ref()
+            .expect("a successful hosted process run publishes a result");
+        let exported = result["exported_ports"]
+            .as_array()
+            .expect("exported_ports is a list");
+        assert!(!exported.is_empty(), "{runtime}: {result}");
+        let readiness = result["readiness_contracts"]
+            .as_array()
+            .expect("readiness_contracts is a list");
+        assert_eq!(readiness.len(), 1, "{runtime}: {result}");
+        let port_name = readiness[0]["port_name"]
+            .as_str()
+            .expect("readiness names a port");
+        assert!(
+            exported
+                .iter()
+                .any(|port| port["name"].as_str() == Some(port_name)),
+            "{runtime}: readiness names {port_name:?}, not exported: {exported:?}"
+        );
+    }
+}
+
+#[test]
+fn hosted_v2_golden_is_shared_with_the_receiver() {
+    let result: Value =
+        serde_json::from_str(include_str!("fixtures/formation-v2/static-result.json")).unwrap();
+    let expected: Value =
+        serde_json::from_str(include_str!("fixtures/formation-v2/expected-digests.json")).unwrap();
+    assert_eq!(
+        ato_formation_worker::job::digest(&serde_jcs::to_vec(&result).unwrap()),
+        expected["static-result"]
+    );
+    let receipt: ato_formation::verify::ContractVerificationReceipt =
+        serde_json::from_value(result["verification_receipt"].clone()).unwrap();
+    assert!(receipt.fully_satisfied);
+    assert_eq!(receipt.contract_ref, result["contract_ref"]);
+    assert_eq!(receipt.derivation_ref, result["derivation_ref"]);
+    let execution = receipt.execution.unwrap();
+    assert_eq!(execution.request_id.as_deref(), result["job_id"].as_str());
+    assert_eq!(
+        execution.attempt_id.as_deref(),
+        result["attempt_id"].as_str()
+    );
+}
+
+use ato_runtime_attempt::journal::{
+    AttemptJournal, AttemptLedger, AttemptPermit, BeginRefusal, StartIdentity, StartedRecord,
+};
+struct FinishFails(AttemptJournal);
+struct FinishFailsPermit(Box<dyn AttemptPermit>);
+struct Unfinishable;
+impl StartedRecord for Unfinishable {
+    fn finish(self: Box<Self>, _: &str) -> Result<()> {
+        anyhow::bail!("injected finish storage failure")
+    }
+}
+impl AttemptPermit for FinishFailsPermit {
+    fn start(
+        &mut self,
+        id: StartIdentity,
+    ) -> std::result::Result<Box<dyn StartedRecord>, BeginRefusal> {
+        drop(self.0.start(id)?);
+        Ok(Box::new(Unfinishable))
+    }
+}
+impl AttemptLedger for FinishFails {
+    fn acquire(
+        &self,
+        request: &str,
+        attempt: &str,
+    ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal> {
+        self.0
+            .acquire(request, attempt)
+            .map(|p| Box::new(FinishFailsPermit(p)) as Box<dyn AttemptPermit>)
+    }
+}
+struct Unreadable;
+impl AttemptLedger for Unreadable {
+    fn acquire(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal> {
+        Err(BeginRefusal::HistoryUnavailable {
+            reason: "injected unreadable journal".into(),
+        })
+    }
+}
+#[test]
+fn hosted_report_preserves_admission_and_journal_uncertainty() {
+    for fault in ["effect", "finish", "history", "unreadable"] {
+        hosted_with_fault(false, false, None, Some(fault));
+    }
+}
+
+#[test]
+fn source_only_policy_cannot_enter_normal_execution_even_with_application_output() {
+    let root = scratch_dir();
+    let fetcher = Fetcher {
+        bytes: Vec::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let server = ApiFixture::new(false);
+    let api = FormationApi::new(
+        reqwest::blocking::Client::new(),
+        server.url.clone(),
+        "test".into(),
+    );
+    let context = JobContext {
+        api: &api,
+        fetcher: &fetcher,
+        packer: &Packer,
+        work_root: root.path(),
+        shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+        worker_id: "test",
+        limits: BuildLimits::default(),
+        source_limits: SourceLimits::default(),
+    };
+    let attempt = BuildAttempt {
+        job_id: "job".into(),
+        attempt_id: "attempt".into(),
+        attempt_fence: 7,
+    };
+    let error=run_claimed_job(&context,&attempt,&json!({"job_id":"job","requested_outputs":["static_web"],"policy":{"policy_version":"formation-source-archive-v1"}}),"compute","revision",false).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source_archive_requires_source_only_executor")
+    );
+    assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0);
+    assert!(!root.path().join("attempt-records").exists());
+    assert!(server.result.lock().unwrap().is_none());
+}

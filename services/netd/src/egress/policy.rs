@@ -11,8 +11,51 @@
 //!   strip a trailing dot so `EXAMPLE.COM.` matches `example.com`.
 
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ipnet::IpNet;
+
+/// Bytes relayed through every tunnel of one policy, in both directions.
+/// Once the limit is crossed the budget is exhausted: open tunnels are cut
+/// and new CONNECTs are refused.
+#[derive(Debug)]
+pub struct TransferBudget {
+    limit: u64,
+    used: AtomicU64,
+    exhausted: AtomicBool,
+}
+
+impl TransferBudget {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            used: AtomicU64::new(0),
+            exhausted: AtomicBool::new(false),
+        }
+    }
+
+    /// Account `bytes`; false once the total would exceed the limit.
+    pub fn consume(&self, bytes: u64) -> bool {
+        let total = self.used.fetch_add(bytes, Ordering::AcqRel) + bytes;
+        if total > self.limit {
+            self.exhausted.store(true, Ordering::Release);
+        }
+        !self.exhausted()
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Acquire)
+    }
+
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.exhausted.load(Ordering::Acquire)
+    }
+}
 
 /// The outcome of an egress policy check at one stage of the pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +81,10 @@ pub struct EgressPolicy {
     hostname_allow: Vec<String>,
     /// CIDR ranges that are denied after DNS resolution.
     cidr_deny: Vec<IpNet>,
+    /// If non-empty, only these destination ports are allowed.
+    port_allow: Vec<u16>,
+    /// Optional limit on the bytes relayed through all tunnels.
+    transfer_budget: Option<Arc<TransferBudget>>,
 }
 
 impl EgressPolicy {
@@ -65,6 +112,27 @@ impl EgressPolicy {
     pub fn with_cidr_deny(mut self, cidr: IpNet) -> Self {
         self.cidr_deny.push(cidr);
         self
+    }
+
+    /// Builder: allow only the listed destination ports.
+    pub fn with_port_allow(mut self, port: u16) -> Self {
+        self.port_allow.push(port);
+        self
+    }
+
+    /// Builder: share one transfer budget across every tunnel.
+    pub fn with_transfer_budget(mut self, budget: Arc<TransferBudget>) -> Self {
+        self.transfer_budget = Some(budget);
+        self
+    }
+
+    /// Whether `port` passes a non-empty port allow list.
+    pub fn check_port(&self, port: u16) -> bool {
+        self.port_allow.is_empty() || self.port_allow.contains(&port)
+    }
+
+    pub fn transfer_budget(&self) -> Option<&Arc<TransferBudget>> {
+        self.transfer_budget.as_ref()
     }
 
     /// Evaluate the hostname *before* DNS resolution.
@@ -195,6 +263,26 @@ mod tests {
         let public: IpAddr = "8.8.8.8".parse().unwrap();
         assert_eq!(p.check_addr(private), PolicyDecision::DenyCidr);
         assert_eq!(p.check_addr(public), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn port_allowlist_blocks_unlisted_ports() {
+        let p = EgressPolicy::permissive();
+        assert!(p.check_port(22));
+        let p = p.with_port_allow(443).with_port_allow(80);
+        assert!(p.check_port(443) && p.check_port(80));
+        assert!(!p.check_port(22));
+    }
+
+    #[test]
+    fn a_transfer_budget_is_exhausted_once_crossed() {
+        let budget = TransferBudget::new(10);
+        assert!(budget.consume(6));
+        assert!(budget.consume(4));
+        assert!(!budget.exhausted());
+        assert!(!budget.consume(1));
+        assert!(budget.exhausted());
+        assert_eq!(budget.used(), 11);
     }
 
     #[test]

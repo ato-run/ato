@@ -1,0 +1,19 @@
+{
+  "exact_base": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+  "head": "b7cd0d66a448b6233c546ad4ab54d07e62459b85",
+  "Desktop_code_dependency_lock_and_workflow_byte_identical": true,
+  "first_head_DMGBundle": "FAIL",
+  "head_test_pass_count": 24,
+  "compile_succeeded": true,
+  "exact_base_workflow": "PASS",
+  "head_failed_log_sha256": "b2a22fb6754b01636a5ff795a948f593915452be3ad499e4d925054ac75d4e47",
+  "base_log_sha256": "a6e3b763c2a8af46e20b108d034293bf6aa97fd47c30456548fa02fa44be8738",
+  "same_head_failed_job_rerun_dispatched": true,
+  "rerun_result": "PASS",
+  "root_cause": "unknown",
+  "environment_equivalence_proven": false,
+  "rerun_job_id": 112034714002,
+  "rerun_log_sha256": "35381ade02e84506300bfc13e483da85c0675bcb3f3781af609af58ffb5d82af",
+  "rerun_dispatched_count": 1,
+  "historical_failure_preserved": true
+}

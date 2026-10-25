@@ -1,0 +1,49 @@
+{
+  "schema": "ato.formation-coverage-append/1",
+  "appends_to": "docs/ops/formation-coverage-50.json (unchanged; this file only adds later evidence)",
+  "path": "source -> OCI (6b-D2 and its online follow-up)",
+  "entries": [
+    {
+      "name": "WBO",
+      "repo": "https://github.com/lovasoa/whitebophir",
+      "ref": "06e675c5cd8a25900f0b7aa771933e29f551f96a",
+      "archive_sha256": "sha256:8af51caaa6b8434a06e7a41753ae54381ba1595c362050e8c1d1836dfd604d65",
+      "layers": {
+        "A_image_build": "pass (run 3; isolated online build, 12,340,498 build egress bytes)",
+        "verified_oci_artifact": "pass (387,392,512 bytes)",
+        "B_container_start": "typed terminal: runtime_policy_capability_required (exit 126; node carries file capability cap_net_bind_service=eip, refused under cap-drop ALL + no-new-privileges)",
+        "C_receipt": "not reached",
+        "D_functional": "not reached",
+        "E_retention": "not reached"
+      },
+      "functional_success": 0,
+      "decision": "closed under the current security profile; no capability added; source and Dockerfile unchanged",
+      "preregistration_deviation": "the experiment-wide 'one online build / 500 MiB' condition is not established (run 2 also built; its build egress was not recorded)",
+      "evidence": "docs/ops/formation-wbo-online.md (ato#1448)"
+    },
+    {
+      "name": "Vikunja",
+      "repo": "https://github.com/go-vikunja/vikunja",
+      "ref": "7b2dddd9133a27539d7e782b795b5e9752040a70",
+      "archive_sha256": "sha256:ca94ccdd17d2acf552a878d317ff88fc4d3265d4277a7027e422a7b3126e826b",
+      "layers": {
+        "A_image_build": "not executed: typed blockers found before execution",
+        "B_container_start": "not reached",
+        "C_receipt": "not reached",
+        "D_functional": "not reached",
+        "E_retention": "not reached"
+      },
+      "blockers": [
+        "base_acquisition_bound (ghcr.io xgo linux/amd64 = 4,161,691,592 compressed bytes)",
+        "base_registry_unapproved (ghcr.io, pkg-containers.githubusercontent.com)",
+        "external_frontend_image (# syntax=docker/dockerfile:1@sha256:ecfaec9e...)",
+        "build_egress_unapproved (Go module proxy; mage@latest unpinned)",
+        "build_arg_required (RELEASE_VERSION or git describe)",
+        "profile_argv_required (ENTRYPOINT only)",
+        "state_not_declared (/db and files are not image VOLUMEs)"
+      ],
+      "functional_success": 0,
+      "evidence": "docs/ops/formation-vikunja-prereg.json"
+    }
+  ]
+}

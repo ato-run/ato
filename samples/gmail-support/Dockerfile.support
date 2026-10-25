@@ -1,0 +1,33 @@
+FROM docker.io/chatwoot/chatwoot:v4.18.0@sha256:03a03a85a00f1d119367deb0d090a56e553468d0aa5e9194a57eba7c61deb7de
+
+USER root
+RUN apk add --no-cache \
+      python3 py3-pip py3-virtualenv su-exec \
+      postgresql17 postgresql17-contrib postgresql-pgvector \
+    && addgroup -g 1000 ato \
+    && adduser -D -u 1000 -G ato ato \
+    && python3 -m venv /opt/gmail-support/venv
+
+COPY bridge/requirements.txt /opt/gmail-support/requirements.txt
+RUN /opt/gmail-support/venv/bin/pip install --no-cache-dir \
+      --requirement /opt/gmail-support/requirements.txt
+
+COPY bridge/gmail_support /opt/gmail-support/gmail_support
+COPY support/supervise.sh /usr/local/bin/ato-support-supervise
+COPY support/bootstrap_chatwoot.rb /opt/gmail-support/bootstrap_chatwoot.rb
+COPY support/ato_loopback_webhook.rb /app/config/initializers/ato_loopback_webhook.rb
+
+RUN chmod 0755 /usr/local/bin/ato-support-supervise \
+    && rm -rf /app/enterprise \
+    && rm -rf /app/storage \
+    && ln -s /var/lib/ato-support/storage /app/storage \
+    && mkdir -p /var/lib/ato-support /app/tmp /app/log /run/ato-support /run/postgresql \
+    && chown -R 1000:1000 /var/lib/ato-support /app/tmp /app/log /run/ato-support /run/postgresql /opt/gmail-support
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/gmail-support
+
+USER root
+WORKDIR /app
+ENTRYPOINT ["/usr/local/bin/ato-support-supervise"]

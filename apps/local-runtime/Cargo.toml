@@ -1,0 +1,43 @@
+[package]
+name = "ato-local-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Loopback process boundary around Ato's local execution library"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+# A transport, not an engine. Everything about HOW a Computation executes lives
+# in ato-local-execution; this binary exists so a consumer can reach that
+# library across a process boundary instead of linking it.
+#
+# It registers no VM Snapshot materializer: this host has no hypervisor backend,
+# so it advertises and realizes only what it can — source/replay. That is the
+# same boundary the CLI expresses by adding VM Snapshot to the shared core.
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[[bin]]
+name = "ato-local-runtime"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-local-execution = { path = "../../lib/local-execution", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SIGTERM handling with a safe API, so this crate keeps `forbid(unsafe_code)`.
+# Only the iterator feature: the flag and the wake-up are ours, and this is
+# used purely to learn that a signal arrived.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
+
+[dev-dependencies]
+tempfile = "3"

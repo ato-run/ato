@@ -1,0 +1,1007 @@
+{
+  "schema": "ato.formation-final-source-regression-proof/1",
+  "application": "Kutt",
+  "code_pin": "da7c452c1dcd6011399d2e12c7cb47e653e40ccd",
+  "API_pin": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+  "receipt_authority_pin": "da7c452c1dcd6011399d2e12c7cb47e653e40ccd",
+  "authority_WASM_sha256": "7306e3c1cf5efc3459abab449c78bd2a6d003862718fcd84a733377adf661462",
+  "Source": {
+    "archive_digest": "sha256:c8ddd7b0f20391df0b18a1dbb2b2352a6a6c3b14c5f8eaf1a5bc8a1bbb15d182",
+    "closure_ref": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145"
+  },
+  "K": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+  "D": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+  "search_id": "search_8bcf155bb690432792c7a631806cbe4a",
+  "satisfy_id": "01M400RFP3JZ5Q5K0PSDSFH9VF",
+  "known_D_seed": false,
+  "API_seed_D": false,
+  "source_context_seeded_from_prior_D": false,
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-03T04:36:04.881Z",
+    "deadline_at": "2026-10-03T05:06:04.881Z",
+    "attempts": {
+      "max": 4,
+      "used": 2,
+      "reserved": 0,
+      "remaining": 2
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 2590720,
+      "reserved": 0,
+      "remaining": 1071151104
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 2197754,
+      "reserved": 0,
+      "remaining": 2145285894
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 67475730,
+      "reserved": 0,
+      "remaining": 1006266094
+    }
+  },
+  "budget_counters": {
+    "attempts_reserved": 0,
+    "attempts_used": 2,
+    "expanded_reserved": 0,
+    "expanded_used": 2197754,
+    "network_transfer_used": 268435456,
+    "stored_reserved": 0,
+    "stored_used": 67475730,
+    "transfer_reserved": 0,
+    "transfer_used": 2590720
+  },
+  "stop": {
+    "reason": "submitted",
+    "status": "k_reached_awaiting_assessment",
+    "stopped_at": "2026-10-03T04:48:50.866Z"
+  },
+  "summary": {
+    "index": 28,
+    "name": "Kutt",
+    "provider": "codex_session",
+    "known_D": false,
+    "typed_K_pass": true,
+    "rounds_consumed": 3,
+    "reasoning_accounting": {
+      "API_calls": 0,
+      "actual_provider_calls": null,
+      "call_count": 7,
+      "calls": [
+        {
+          "call_id": "search_8bcf155bb690432792c7a631806cbe4a_r1_s1",
+          "input_file": "r001_s001.input.json",
+          "input_sha256": "sha256:d895a8c5df56d502f1394de5da815d19381ac8eb698f92ce5b3f44789d18c75f",
+          "inspection_error": null,
+          "inspection_ms": 4,
+          "inspection_refs": [
+            {
+              "digest": "sha256:7f6566c435b5f82df074c49dbb103e00811547ddcd0c7cbd3674749dab75b55e",
+              "file_id": "f_8cf1ffe3788af12776874870"
+            }
+          ],
+          "latency_ms": 36241,
+          "output_file": "r001_s001.record.json",
+          "output_sha256": "sha256:de845409b89be4f903aef60e090d86417fab1ea5d296dc512f39c3f97b174adb",
+          "provider_call": null,
+          "reasoning_ms": 36236,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_8bcf155bb690432792c7a631806cbe4a_r1_s2",
+          "input_file": "r001_s002.input.json",
+          "input_sha256": "sha256:ee0c37ab36c05cfe5d8eb46bfb7c32556d74efcd60d58b039ce194790c69d441",
+          "inspection_error": null,
+          "inspection_ms": 13,
+          "inspection_refs": [
+            {
+              "digest": "sha256:b9475499cf6a817cad288e84a0d5cf87ce58b5f50f3533a93172e71e07727917",
+              "file_id": "f_48f45d0d664e4c43393cd149"
+            },
+            {
+              "digest": "sha256:49844a5d9a9e0ef8ab03555b658e6db6ebb1ee8a3f87a174dc18a7f827983f09",
+              "file_id": "f_a0c44c845cca5f0a517f30c8"
+            },
+            {
+              "digest": "sha256:e8873143b82fade05b2a64ce302d233e08b3e6b07eee3cb4b05449182fd117f7",
+              "file_id": "f_d347091b60673886a3f7f9f7"
+            }
+          ],
+          "latency_ms": 26438,
+          "output_file": "r001_s002.record.json",
+          "output_sha256": "sha256:e9ce82c2f7b16e5fd94a314808b8e9a04bfea08ef261ae5db851ddb52e87ba1c",
+          "provider_call": null,
+          "reasoning_ms": 26425,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_8bcf155bb690432792c7a631806cbe4a_r1_s3",
+          "input_file": "r001_s003.input.json",
+          "input_sha256": "sha256:277294f9ff9d3402cab1312ac5bb363489b8ca88f68c9505701f03adeda08c84",
+          "inspection_error": null,
+          "inspection_ms": 25,
+          "inspection_refs": [
+            {
+              "digest": "sha256:f070df97327c9a41396d5b7bc2d05f69f597141cdbef88642d65fa71f227c9b4",
+              "file_id": "f_69b68e42f73675f03d90c02f"
+            },
+            {
+              "digest": "sha256:2a8b2d19e1abf407d82777900059184919cdf11e421f6bf1762095cebf2cf740",
+              "file_id": "f_1b72e82b9fc5dc41b4a713c2"
+            },
+            {
+              "digest": "sha256:808add91af312dff4a268d08c94aefba0b25073bd8bf7c0a4f23325a43f18070",
+              "file_id": "f_502e2d7ea4ff25ce384b7e00"
+            }
+          ],
+          "latency_ms": 34159,
+          "output_file": "r001_s003.record.json",
+          "output_sha256": "sha256:d56a80db3269e193196a7516b5c53730da1d41f869e7f45ac588afc545a4bb9c",
+          "provider_call": null,
+          "reasoning_ms": 34133,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_8bcf155bb690432792c7a631806cbe4a_r1_s4",
+          "input_file": "r001_s004.input.json",
+          "input_sha256": "sha256:9f9897f2d83d203b6568db46ca2b59bd1d629d9120cc50c84914a9683f9535c3",
+          "inspection_error": null,
+          "inspection_ms": 4,
+          "inspection_refs": [
+            {
+              "digest": "sha256:01b91f20d4ac73d9ad3460de366e82bd509ae25d8074b878c8edfd55acf14e08",
+              "file_id": "f_43592be6401a86c31d18482b"
+            }
+          ],
+          "latency_ms": 158958,
+          "output_file": "r001_s004.record.json",
+          "output_sha256": "sha256:c966546bce0c94b7a58512d5d02592ca380c3aa4397b3f6077d9da2c498c846f",
+          "provider_call": null,
+          "reasoning_ms": 158953,
+          "validation_ms": 0
+        },
+        {
+          "call_id": "search_8bcf155bb690432792c7a631806cbe4a_r1_s5",
+          "input_file": "r001_s005.input.json",
+          "input_sha256": "sha256:4e30986e825fd69d855eac0e052daaaae526835de37a2bcd8c6a3f2d7846f9f6",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 37377,
+          "output_file": "r001_s005.record.json",
+          "output_sha256": "sha256:1a5a51d3f7d350cdbdfffbd4e5ff6d15d2d30e7d2e3995cb987352dac50eb858",
+          "provider_call": null,
+          "reasoning_ms": 37337,
+          "validation_ms": 39
+        },
+        {
+          "call_id": "search_8bcf155bb690432792c7a631806cbe4a_r2_s1",
+          "input_file": "r002_s001.input.json",
+          "input_sha256": "sha256:55ab0dd4197a89484f0c1156fb8dad08858d6ec9af82694fa3c0b360cbb06720",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 14656,
+          "output_file": "r002_s001.record.json",
+          "output_sha256": "sha256:4ab3495119d4ade9e7a0bce3c1ce2ac8ecc8aba430b4b5d8bb5bf6b9b152e80b",
+          "provider_call": null,
+          "reasoning_ms": 14615,
+          "validation_ms": 40
+        },
+        {
+          "call_id": "search_8bcf155bb690432792c7a631806cbe4a_r3_s1",
+          "input_file": "r003_s001.input.json",
+          "input_sha256": "sha256:d671499c2e66ba479492dd572d37e0d7481fe0d51b5b27aa2bb5da8264e7ea5d",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 176991,
+          "output_file": "r003_s001.record.json",
+          "output_sha256": "sha256:3d627f5ba982c8510fdf0bbdeed328b184a1930e67114037f8f0d64265dc69dc",
+          "provider_call": null,
+          "reasoning_ms": 176984,
+          "validation_ms": 7
+        }
+      ],
+      "configuration_ref": "sha256:9ea53a2748dd6e02f046c8e0def41f5b02bdf9dce846a2fc7b7642c6ac729167",
+      "provider": "codex_session",
+      "provider_transport": null,
+      "schema": "ato.formation-reasoning-accounting/1",
+      "session_cost": "not_exposed",
+      "session_token_usage": "not_exposed; no fabricated usage"
+    },
+    "terminal_origin": "requester_verified",
+    "coordinator_status": "satisfied",
+    "automatic_retry": false,
+    "input_requirements": [],
+    "search_budget": null,
+    "result": "cells/028/requester.stdout.log",
+    "result_sha256": "9182a27b7d64c9b56f05eceec9fe6831e877d69287890633d68c1a068db3a5ba",
+    "exit_code": 0,
+    "elapsed_seconds": 769.653,
+    "functional_acceptance": "not_measured",
+    "deployed": false
+  },
+  "fresh_receipt": {
+    "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+    "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+    "execution": {
+      "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+      "endpoint": "http://127.0.0.1:3000/",
+      "platform": "linux/aarch64",
+      "realization": "process",
+      "request_id": "01M400RFP3JZ5Q5K0PSDSFH9VF"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:78ec720b8f886971540591901954e1cf7b58b593e0d876745ded438178e932ac",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+          "input": "workspace"
+        },
+        "id": "source-identity",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "attempts": [
+    {
+      "attempt_id": "01M4011G45MCC1PGPXYCJ71X51",
+      "derivation_ref": "sha256:4078c4798c81a70a363d802a19839279415fcc55f51bd56e6a615d723956567d",
+      "status": "fail",
+      "failure": {
+        "code": "npm_lifecycle_plan_required",
+        "stage": "build",
+        "message": "{\"packages\":[\"msgpackr-extract\"],\"root_lifecycle\":[]}"
+      },
+      "formation_attempt": {
+        "attempt_id": "01M4011G45MCC1PGPXYCJ71X51",
+        "candidate": "authored",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:4078c4798c81a70a363d802a19839279415fcc55f51bd56e6a615d723956567d",
+        "failure": {
+          "code": "npm_lifecycle_plan_required",
+          "message": "{\"packages\":[\"msgpackr-extract\"],\"root_lifecycle\":[]}",
+          "stage": "build"
+        },
+        "outcomes": {
+          "cleanup": {
+            "reason": "no candidate was realized",
+            "state": "not_applicable"
+          },
+          "publication": {
+            "reason": "npm_lifecycle_plan_required",
+            "state": "not_attempted"
+          },
+          "runtime_verification": {
+            "reason": "npm_lifecycle_plan_required",
+            "state": "not_attempted"
+          },
+          "seal": {
+            "reason": "npm_lifecycle_plan_required",
+            "state": "not_attempted"
+          }
+        },
+        "runtime_id": "local",
+        "status": "failed"
+      },
+      "metadata_mismatch": [],
+      "resource_charged": {
+        "transfer_bytes": 1295360,
+        "expanded_bytes": 1098877,
+        "stored_bytes": 0
+      },
+      "claimed_at": "2026-10-03T04:41:01.643Z",
+      "finished_at": "2026-10-03T04:41:14.515Z"
+    },
+    {
+      "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+      "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+      "status": "pass",
+      "failure": null,
+      "formation_attempt": {
+        "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+        "candidate": "authored",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+        "outcomes": {
+          "cleanup": {
+            "state": "succeeded"
+          },
+          "publication": {
+            "state": "succeeded"
+          },
+          "runtime_verification": {
+            "state": "succeeded"
+          },
+          "seal": {
+            "state": "succeeded"
+          }
+        },
+        "realization": {
+          "build_network": "phase-scoped-connect",
+          "candidate_network": "isolated namespace; declared ingress; phase-scoped HTTPS egress broker",
+          "containment": "bwrap+landlock",
+          "destroyed": true,
+          "endpoints": {
+            "app.http": "guest 3000 -> host 3000"
+          },
+          "executor": "runtime-process",
+          "port_operations": [
+            {
+              "guard": true,
+              "observation": {
+                "kind": "request_template",
+                "template": {
+                  "json_bindings": {},
+                  "method": "GET",
+                  "path": "/"
+                }
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": true,
+              "observation": {
+                "kind": "response_status",
+                "status": 302
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "request_template",
+                "template": {
+                  "json_bindings": {
+                    "email": "OWNER_EMAIL",
+                    "password": "OWNER_PASSWORD"
+                  },
+                  "method": "POST",
+                  "path": "/api/v2/auth/create-admin"
+                }
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            },
+            {
+              "guard": false,
+              "observation": {
+                "kind": "response_status",
+                "status": 201
+              },
+              "operation_index": 0,
+              "port": "app.http"
+            }
+          ],
+          "workspace": "disposable-copy, read-only at /app; /tmp is tmpfs"
+        },
+        "receipt": {
+          "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+          "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+          "execution": {
+            "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+            "endpoint": "http://127.0.0.1:3000/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M400RFP3JZ5Q5K0PSDSFH9VF"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:78ec720b8f886971540591901954e1cf7b58b593e0d876745ded438178e932ac",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "runtime_id": "local",
+        "status": "verified",
+        "verification": {
+          "verdicts": [
+            {
+              "id": "root",
+              "outcome": {
+                "result": "satisfied"
+              }
+            },
+            {
+              "id": "source-identity",
+              "outcome": {
+                "result": "satisfied"
+              }
+            }
+          ]
+        }
+      },
+      "metadata_mismatch": [],
+      "resource_charged": {
+        "transfer_bytes": 1295360,
+        "expanded_bytes": 1098877,
+        "stored_bytes": 67475730
+      },
+      "claimed_at": "2026-10-03T04:41:31.490Z",
+      "finished_at": "2026-10-03T04:45:50.285Z"
+    }
+  ],
+  "ACK": [
+    {
+      "attempt_id": "01M4011G45MCC1PGPXYCJ71X51",
+      "fence": 1,
+      "closed": true,
+      "result_ACK": true,
+      "transport_policies": {
+        "claim.policy.json": {
+          "max_retries": 3
+        },
+        "input.policy.json": {
+          "max_retries": 3
+        },
+        "result.policy.json": {
+          "max_retries": 3
+        }
+      },
+      "resource_usage": {
+        "expanded_bytes": 1098877,
+        "stored_bytes": 0
+      },
+      "retained_ref": null,
+      "attestation": {
+        "agent_version": "0.1.0",
+        "attempt_record": "finished",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:4078c4798c81a70a363d802a19839279415fcc55f51bd56e6a615d723956567d",
+        "effects": "pure",
+        "environment_id": "native",
+        "execution_started": true,
+        "provisions": [
+          "toolchain.node.22.14.0"
+        ],
+        "requirements": [
+          {
+            "fact": "runtime.process",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "containment",
+            "one_of": [
+              "bwrap+landlock"
+            ]
+          },
+          {
+            "fact": "toolchain.root"
+          },
+          {
+            "fact": "formation.http_port.operations.v1",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "toolchain.gcc.13.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.make.4.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.python.3.12.7",
+            "one_of": [
+              "present"
+            ]
+          }
+        ]
+      },
+      "execution_evidence": [
+        {
+          "kind": "exploration_network_evidence",
+          "reports": [
+            {
+              "phase": "dependencies",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "registry.npmjs.org"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [
+                  {
+                    "count": 15,
+                    "port": 443,
+                    "stage": "connect",
+                    "target": "registry.npmjs.org"
+                  }
+                ],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 45981831
+              }
+            },
+            {
+              "phase": "build",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 45981831
+              }
+            },
+            {
+              "phase": "runtime",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 45981831
+              }
+            }
+          ]
+        },
+        {
+          "facts": [
+            {
+              "exit_code": 0,
+              "log_tail": "[check-toolchain] v22.14.0 \n",
+              "signal": null,
+              "stage": "build",
+              "step": "check-toolchain"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[native-1] {\"schema\":\"ato.npm-native-plan/1\",\"operation\":\"initialize\"} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-1"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[dependencies-2] \nadded 245 packages in 11s \nnpm warn EBADENGINE Unsupported engine { \nnpm warn EBADENGINE package: 'geoip-lite@2.0.2', \nnpm warn EBADENGINE required: { node: '>=24.0.0' }, \nnpm warn EBADENGINE current: { node: 'v22.14.0', npm: '10.9.2' } \nnpm warn EBADENGINE } \nnpm warn deprecated uuid@8.3.2: uuid@10 and below is no longer supported. For ESM codebases, update to uuid@latest. For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028). \n",
+              "signal": null,
+              "stage": "build",
+              "step": "dependencies-2"
+            },
+            {
+              "exit_code": 1,
+              "log_tail": "[native-3] ATO_FORMATION_FAILURE {\"code\":\"npm_lifecycle_plan_required\",\"message\":\"{\\\"packages\\\":[\\\"msgpackr-extract\\\"],\\\"root_lifecycle\\\":[]}\"} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-3"
+            }
+          ],
+          "kind": "exploration_execution_facts"
+        },
+        {
+          "kind": "exploration_phase_timings",
+          "phases": [
+            {
+              "elapsed_ms": 86,
+              "phase": "source",
+              "started_at_ms": 1791002461680
+            },
+            {
+              "elapsed_ms": 298,
+              "phase": "source",
+              "started_at_ms": 1791002461767
+            },
+            {
+              "elapsed_ms": 8,
+              "phase": "source",
+              "started_at_ms": 1791002462497
+            },
+            {
+              "elapsed_ms": 36,
+              "phase": "build",
+              "started_at_ms": 1791002462506
+            },
+            {
+              "elapsed_ms": 15,
+              "phase": "dependencies",
+              "started_at_ms": 1791002462543
+            },
+            {
+              "elapsed_ms": 242,
+              "phase": "build",
+              "started_at_ms": 1791002462559
+            },
+            {
+              "elapsed_ms": 10909,
+              "phase": "dependencies",
+              "started_at_ms": 1791002462801
+            },
+            {
+              "elapsed_ms": 288,
+              "phase": "build",
+              "started_at_ms": 1791002473711
+            },
+            {
+              "elapsed_ms": 427,
+              "phase": "cleanup",
+              "started_at_ms": 1791002474031
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "attempt_id": "01M4012EE937EENPM82B9BJKKK",
+      "fence": 1,
+      "closed": true,
+      "result_ACK": true,
+      "transport_policies": {
+        "claim.policy.json": {
+          "max_retries": 3
+        },
+        "input.policy.json": {
+          "max_retries": 3
+        },
+        "result.policy.json": {
+          "max_retries": 3
+        }
+      },
+      "resource_usage": {
+        "expanded_bytes": 1098877,
+        "stored_bytes": 67475730
+      },
+      "retained_ref": "sha256:38fb931522ff9f1feb0f70bd93f45bbf674e93fb2f46af7bf74fc68559e868a6",
+      "attestation": {
+        "agent_version": "0.1.0",
+        "attempt_record": "finished",
+        "candidate_stop": "confirmed",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:ffcbe50c761ea05949f30dad401358913297f2cd99af142c043b0ad23c7fe9ef",
+        "effects": "pure",
+        "environment_id": "native",
+        "execution_started": true,
+        "provisions": [
+          "toolchain.node.22.14.0"
+        ],
+        "requirements": [
+          {
+            "fact": "runtime.process",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "containment",
+            "one_of": [
+              "bwrap+landlock"
+            ]
+          },
+          {
+            "fact": "toolchain.root"
+          },
+          {
+            "fact": "formation.http_port.operations.v1",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "toolchain.gcc.13.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.make.4.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.python.3.12.7",
+            "one_of": [
+              "present"
+            ]
+          }
+        ]
+      },
+      "execution_evidence": [
+        {
+          "kind": "exploration_network_evidence",
+          "reports": [
+            {
+              "phase": "dependencies",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "registry.npmjs.org"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [
+                  {
+                    "count": 15,
+                    "port": 443,
+                    "stage": "connect",
+                    "target": "registry.npmjs.org"
+                  }
+                ],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 45981681
+              }
+            },
+            {
+              "phase": "build",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 45981681
+              }
+            },
+            {
+              "phase": "runtime",
+              "report": {
+                "allowance": {
+                  "hosts": [
+                    "exploration-denied.invalid"
+                  ],
+                  "max_transfer_bytes": 134217728,
+                  "ports": [
+                    443
+                  ]
+                },
+                "allowed": [],
+                "budget_exhausted": false,
+                "refused": [],
+                "transferred_bytes": 45981681
+              }
+            }
+          ]
+        },
+        {
+          "facts": [
+            {
+              "exit_code": 0,
+              "log_tail": "[native-1] {\"schema\":\"ato.npm-native-plan/1\",\"operation\":\"initialize\"} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-1"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[dependencies-2] \nadded 245 packages in 10s \nnpm warn EBADENGINE Unsupported engine { \nnpm warn EBADENGINE package: 'geoip-lite@2.0.2', \nnpm warn EBADENGINE required: { node: '>=24.0.0' }, \nnpm warn EBADENGINE current: { node: 'v22.14.0', npm: '10.9.2' } \nnpm warn EBADENGINE } \nnpm warn deprecated uuid@8.3.2: uuid@10 and below is no longer supported. For ESM codebases, update to uuid@latest. For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028). \n",
+              "signal": null,
+              "stage": "build",
+              "step": "dependencies-2"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "gyp info using node-gyp@11.0.0 \ngyp info using node@22.14.0 | linux | arm64 \ngyp info find Python using Python version 3.12.7 found at \"/opt/ato/toolchains/python/3.12.7/bin/python3\" \ngyp info spawn /opt/ato/toolchains/python/3.12.7/bin/python3 \ngyp info spawn args [ \ngyp info spawn args '/opt/ato/toolchains/node/22.14.0/lib/node_modules/npm/node_modules/node-gyp/gyp/gyp_main.py', \ngyp info spawn args 'binding.gyp', \ngyp info spawn args '-f', \ngyp info spawn args 'make', \ngyp info spawn args '-I', \ngyp info spawn args '/app/node_modules/msgpackr-extract/build/config.gypi', \ngyp info spawn args '-I', \ngyp info spawn args '/opt/ato/toolchains/node/22.14.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi', \ngyp info spawn args '-I', \ngyp info spawn args '/opt/ato/toolchains/node/22.14.0/include/node/common.gypi', \ngyp info spawn args '-Dlibrary=shared_library', \ngyp info spawn args '-Dvisibility=default', \ngyp info spawn args '-Dnode_root_dir=/opt/ato/toolchains/node/22.14.0', \ngyp info spawn args '-Dnode_gyp_dir=/opt/ato/toolchains/node/22.14.0/lib/node_modules/npm/node_modules/node-gyp', \ngyp info spawn args '-Dnode_lib_file=/opt/ato/toolchains/node/22.14.0/$(Configuration)/node.lib', \ngyp info spawn args '-Dmodule_root_dir=/app/node_modules/msgpackr-extract', \ngyp info spawn args '-Dnode_engine=v8', \ngyp info spawn args '--depth=.', \ngyp info spawn args '--no-parallel', \ngyp info spawn args '--generator-output', \ngyp info spawn args 'build', \ngyp info spawn args '-Goutput_dir=.' \ngyp info spawn args ] \ngyp info spawn /opt/ato/toolchains/make/4.3.0/bin/make \ngyp info spawn args [ 'BUILDTYPE=Release', '-C', 'build' ] \n/bin/sh: 1: cannot create /dev/null: Permission denied \ngyp info ok \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-3"
+            },
+            {
+              "exit_code": 0,
+              "log_tail": "[native-4] {\"schema\":\"ato.npm-native-evidence/1\",\"operation\":\"audit\",\"dependency_packages\":2,\"root_lifecycle\":[]} \n",
+              "signal": null,
+              "stage": "build",
+              "step": "native-4"
+            }
+          ],
+          "kind": "exploration_execution_facts"
+        },
+        {
+          "kind": "exploration_phase_timings",
+          "phases": [
+            {
+              "elapsed_ms": 124,
+              "phase": "source",
+              "started_at_ms": 1791002491527
+            },
+            {
+              "elapsed_ms": 300,
+              "phase": "source",
+              "started_at_ms": 1791002491652
+            },
+            {
+              "elapsed_ms": 8,
+              "phase": "source",
+              "started_at_ms": 1791002492527
+            },
+            {
+              "elapsed_ms": 38,
+              "phase": "build",
+              "started_at_ms": 1791002492536
+            },
+            {
+              "elapsed_ms": 16,
+              "phase": "dependencies",
+              "started_at_ms": 1791002492574
+            },
+            {
+              "elapsed_ms": 211,
+              "phase": "build",
+              "started_at_ms": 1791002492591
+            },
+            {
+              "elapsed_ms": 10553,
+              "phase": "dependencies",
+              "started_at_ms": 1791002492802
+            },
+            {
+              "elapsed_ms": 101804,
+              "phase": "build",
+              "started_at_ms": 1791002503356
+            },
+            {
+              "elapsed_ms": 253,
+              "phase": "build",
+              "started_at_ms": 1791002605161
+            },
+            {
+              "elapsed_ms": 17508,
+              "phase": "build",
+              "started_at_ms": 1791002605414
+            },
+            {
+              "elapsed_ms": 2503,
+              "phase": "launch",
+              "started_at_ms": 1791002622922
+            },
+            {
+              "elapsed_ms": 105,
+              "phase": "verification",
+              "started_at_ms": 1791002625425
+            },
+            {
+              "elapsed_ms": 263,
+              "phase": "cleanup",
+              "started_at_ms": 1791002625531
+            },
+            {
+              "elapsed_ms": 474,
+              "phase": "cleanup",
+              "started_at_ms": 1791002748705
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "retained": [
+    {
+      "retained_ref": "sha256:38fb931522ff9f1feb0f70bd93f45bbf674e93fb2f46af7bf74fc68559e868a6",
+      "content_ref": "sha256:5a863ef985c139615a16c80df84e249150d93a8b763a6f295a035a3b547e22c2",
+      "declared_bytes": 67475730,
+      "verified_bytes": 67475730,
+      "expanded_bytes": 181518590,
+      "creation_attempt_id": "01M4012EE937EENPM82B9BJKKK",
+      "creation_fence": 1,
+      "status": "ready",
+      "build_record_ref": null
+    }
+  ],
+  "binary_hashes": {
+    "ato": {
+      "path": "/opt/ato/.tmp/fv0-source-final-da7-binaries/ato",
+      "sha256": "e0ccf4bbeee7305d518a33369cde1079207961342fbe753aa799a43d5cb2972f"
+    },
+    "worker": {
+      "path": "/opt/ato/.tmp/fv0-source-final-da7-binaries/ato-formation-worker",
+      "sha256": "d725914a43c7b5e620d2ebfce1065eb60448201087c0c78611026e2882e8227f"
+    },
+    "preflight": {
+      "path": "/opt/ato/.tmp/fv0-source-final-da7-binaries/preflight",
+      "sha256": "368ec816bbf8748ae29b1b3190c1771eeab42643fc6e821d3e1a57444af93ac5"
+    }
+  },
+  "plan_sha256": "a1ef1181a88ff4997297d61f2455a7ca9cf31ddfc7a8d831ef8f8f1f240fec5f",
+  "preregistration_sha256": "5f546d1a539bb3840537198e8e26db3e8fb83dae6e8f6c7a7c44710ec56b5f28",
+  "controller_sha256": "b87642591a532e502a9ca72776200248c15ca6ca84a4657b405965d796de2a13",
+  "owner_input_proof": {
+    "schema": "ato.formation-owned-local-owner-input/1",
+    "public_password_occurrences": 0,
+    "public_files_checked": 882,
+    "external_account": false,
+    "paid_API_calls": 0
+  },
+  "owner_input_cleanup": {
+    "reusable_owner_values_revoked": 2,
+    "remaining_encrypted_values": 0,
+    "Requester_restarted": false,
+    "budget_reset": false
+  },
+  "input_projection_proof": {
+    "producer_input_email_occurrences": 0,
+    "public_email_occurrences": 0,
+    "producer_input_files_checked": 7,
+    "orchestration_limitation": "Nonsecret local verification email was a literal in inspected controller source; these zero counts apply to producer frames and public measurement JSON/logs, not all orchestration tool output. No external credential was used. A future unexecuted controller template generates the owner email privately."
+  },
+  "preserved_prior_Searches": [
+    "search_9a1e27fd1a9d5102a86620b2d61e7b93",
+    "search_7affee8b7cbcdcf409cda689d853d763"
+  ],
+  "old_Search_resumed_or_budget_reset": false,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "paid_API_calls": 0,
+  "actual_Codex_provider_calls": null,
+  "new_unique_OSS_app_successes": 0,
+  "independent_API_acceptance": false,
+  "functional_acceptance": "Separate prior 3bb / API02a fixed-artifact native/migration/owner/API/state/restart evidence; not rerun and not counted as Source or API success",
+  "deployment_remote_migration_feature_flags_ordinary_Run_permission": false
+}

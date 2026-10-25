@@ -1,0 +1,236 @@
+//! Linux Landlock LSM Sandbox Implementation
+//!
+//! Implements process sandboxing using Linux Landlock (available since kernel 5.13).
+//! Landlock allows unprivileged processes to restrict their own filesystem access.
+//!
+//! ## Features
+//! - File system access control (read, write, execute)
+//! - No root privileges required
+//! - Graceful degradation on older kernels
+//!
+//! ## References
+//! - https://landlock.io/
+//! - https://docs.rs/landlock/
+
+use super::{SandboxPolicy, SandboxResult};
+use anyhow::{Context, Result};
+use landlock::{
+    ABI, Access, AccessFs, AccessNet, NetPort, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus, path_beneath_rules,
+};
+use std::path::Path;
+use tracing::{debug, info, warn};
+
+/// Check if Landlock is supported on this system
+pub fn is_landlock_supported() -> bool {
+    // Try to create a minimal ruleset to check support
+    Ruleset::default()
+        .handle_access(AccessFs::from_all(ABI::V1))
+        .is_ok()
+}
+
+/// Apply Landlock sandbox to the current process
+///
+/// This function should be called in a pre_exec hook before executing
+/// the child process. It restricts file system access according to the policy.
+///
+/// # Arguments
+/// * `policy` - Sandbox policy defining allowed paths
+///
+/// # Returns
+/// * `Ok(SandboxResult)` - Sandbox applied (fully or partially)
+/// * `Err` - Failed to apply sandbox
+pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
+    // Network port rules were added in ABI V4. A restricted-network policy
+    // requests that ABI so lack of kernel support is observable as partial
+    // enforcement instead of silently leaving egress open.
+    let abi = if policy.allow_network {
+        ABI::V3
+    } else {
+        ABI::V4
+    };
+
+    debug!("Applying Landlock sandbox with ABI {:?}", abi);
+
+    // Create ruleset handling all file system access rights
+    let mut ruleset = Ruleset::default()
+        .handle_access(AccessFs::from_all(abi))
+        .context("Failed to create Landlock ruleset")?;
+    if !policy.allow_network {
+        ruleset = ruleset
+            .handle_access(AccessNet::from_all(abi))
+            .context("Failed to request Landlock TCP restrictions")?;
+    }
+
+    // Create the ruleset
+    let mut created_ruleset = ruleset
+        .create()
+        .context("Failed to create Landlock ruleset")?;
+
+    // Add read-write paths
+    for path in &policy.read_write_paths {
+        if path.exists() {
+            debug!("Adding read-write access to: {:?}", path);
+            created_ruleset = add_path_rules(created_ruleset, path, AccessFs::from_all(abi))
+                .with_context(|| format!("Failed to add read-write rule for {:?}", path))?;
+        } else {
+            debug!("Skipping non-existent read-write path: {:?}", path);
+        }
+    }
+
+    // Add read-only paths
+    for path in &policy.read_only_paths {
+        if path.exists() {
+            debug!("Adding read-only access to: {:?}", path);
+            created_ruleset = add_path_rules(created_ruleset, path, AccessFs::from_read(abi))
+                .with_context(|| format!("Failed to add read-only rule for {:?}", path))?;
+        } else {
+            debug!("Skipping non-existent read-only path: {:?}", path);
+        }
+    }
+
+    // Existing-file writes are deliberately distinct from full read-write:
+    // CUDA names descendant threads through procfs, but needs no ability to
+    // create/remove files or execute them. Its O_TRUNC open also needs the
+    // separate Truncate right on ABI 3 and later.
+    for path in &policy.file_write_paths {
+        anyhow::ensure!(
+            path.exists(),
+            "required file-write path is absent: {}",
+            path.display()
+        );
+        for rule in path_beneath_rules([path], AccessFs::WriteFile | AccessFs::Truncate) {
+            created_ruleset = created_ruleset
+                .add_rule(rule.with_context(|| {
+                    format!("Cannot open required existing-file-write path {path:?}")
+                })?)
+                .with_context(|| format!("Cannot install existing-file-write rule for {path:?}"))?;
+        }
+        info!(path = %path.display(), access = "write_file,truncate", "explicit existing-file-write sandbox rule");
+    }
+
+    // Add IPC socket paths (injected by ato-cli IPC Broker)
+    for path in &policy.ipc_socket_paths {
+        if path.exists() || path.parent().is_some_and(|p| p.exists()) {
+            debug!("Adding IPC socket read-write access to: {:?}", path);
+            // IPC sockets need full read-write access
+            let target = if path.exists() {
+                path.as_path()
+            } else {
+                path.parent().unwrap()
+            };
+            created_ruleset = add_path_rules(created_ruleset, target, AccessFs::from_all(abi))
+                .with_context(|| format!("Failed to add IPC socket rule for {:?}", path))?;
+        } else {
+            debug!("Skipping non-existent IPC socket path: {:?}", path);
+        }
+    }
+
+    if !policy.allow_network {
+        for port in &policy.allowed_bind_tcp_ports {
+            created_ruleset = created_ruleset
+                .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+                .with_context(|| format!("Failed to allow TCP bind port {port}"))?;
+        }
+        for port in &policy.allowed_connect_tcp_ports {
+            created_ruleset = created_ruleset
+                .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+                .with_context(|| format!("Failed to allow TCP connect port {port}"))?;
+        }
+    }
+
+    // Restrict the current thread
+    let status = created_ruleset
+        .restrict_self()
+        .context("Failed to restrict process with Landlock")?;
+
+    // Report status
+    match status.ruleset {
+        RulesetStatus::FullyEnforced => {
+            info!("Landlock sandbox fully enforced");
+            Ok(SandboxResult::fully_enforced())
+        }
+        RulesetStatus::PartiallyEnforced => {
+            let msg = "Landlock sandbox partially enforced (some rules unavailable on this kernel)";
+            warn!("{}", msg);
+            Ok(SandboxResult::partially_enforced(msg))
+        }
+        RulesetStatus::NotEnforced => {
+            let msg = "Landlock sandbox not enforced (kernel too old or Landlock disabled)";
+            warn!("{}", msg);
+            Ok(SandboxResult::not_enforced(msg))
+        }
+    }
+}
+
+/// Add path rules to the ruleset
+fn add_path_rules(
+    ruleset: landlock::RulesetCreated,
+    path: &Path,
+    access: impl Into<landlock::BitFlags<AccessFs>>,
+) -> Result<landlock::RulesetCreated> {
+    let access = access.into();
+
+    // Use path_beneath_rules helper for easy rule creation
+    let paths = [path];
+    let rules = path_beneath_rules(&paths, access);
+
+    let mut ruleset = ruleset;
+
+    for rule_result in rules {
+        match rule_result {
+            Ok(rule) => {
+                ruleset = ruleset.add_rule(rule)?;
+            }
+            Err(e) => {
+                // Log but don't fail - path might not be accessible
+                debug!("Skipping rule for {:?}: {}", path, e);
+            }
+        }
+    }
+
+    Ok(ruleset)
+}
+
+/// Create a minimal sandbox for testing
+///
+/// This is useful for verifying Landlock is working without
+/// being too restrictive.
+#[allow(dead_code)]
+pub fn apply_minimal_sandbox() -> Result<SandboxResult> {
+    let policy = SandboxPolicy::new()
+        .allow_read_write([
+            std::env::current_dir().unwrap_or_default(),
+            std::path::PathBuf::from("/tmp"),
+        ])
+        .allow_read_only([
+            std::path::PathBuf::from("/usr"),
+            std::path::PathBuf::from("/lib"),
+            std::path::PathBuf::from("/lib64"),
+            std::path::PathBuf::from("/etc"),
+            std::path::PathBuf::from("/dev"),
+            std::path::PathBuf::from("/proc"),
+            std::path::PathBuf::from("/sys"),
+        ]);
+
+    apply_landlock_sandbox(&policy)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_landlock_support_check() {
+        // This test just checks if the support check doesn't panic
+        let supported = is_landlock_supported();
+        println!("Landlock supported: {}", supported);
+    }
+
+    // Note: Full sandbox tests should only run on Linux with Landlock support
+    // and in a controlled environment (e.g., in a forked process)
+}

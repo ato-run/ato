@@ -1,0 +1,53 @@
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "python"
+version = "3.12"
+
+[[derive.step]]
+id = "process-site"
+use = "ato.process@1"
+op = "serve"
+argv = ["python3", "-m", "http.server", "8000", "--bind", "0.0.0.0", "--directory", "."]
+cwd = "."
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "process-site"
+guest_port = 8000
+bind = "0.0.0.0"
+
+[[contract.require]]
+id = "app-root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "app-proof"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/proof.txt"
+
+[contract.require.expect]
+status = 200
+body_digest = "sha256:0facb416176b5bebf18f709cef9fbc062b1378fdde7675a8bca946e93c9f34d8"
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+
+[contract.require.expect]
+digest = "capture"

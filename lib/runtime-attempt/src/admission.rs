@@ -1,0 +1,534 @@
+//! The gates every attempt passes before anything of it runs, whoever
+//! realizes the candidate: the effect authorization, the platform, and a
+//! browser Contract's verifier. What a particular executor can contain
+//! (bwrap, toolchains, a build network) is that executor's
+//! [`crate::realize::CandidateRealizer::admit`].
+//!
+//! Capability match is not success: it only decides whether executing is
+//! worth anything. Everything here is a fact about the Runtime, the
+//! Derivation or the request's authorization, never a guess about the
+//! outcome, and every refusal happens before anything of the candidate runs.
+
+use ato_formation::authoring::EffectClass;
+use ato_formation::request::AttemptFailure;
+use ato_formation::requirements::ExecutionRequirements;
+
+use crate::browser_verify::BrowserVerification;
+use crate::spec::{AttemptSpec, CandidateShape};
+
+/// The route states a host condition this runtime cannot be admitted against.
+/// The route stays unverified; it is not a failure of the route.
+pub const COMPATIBLE_RUNTIME_UNAVAILABLE: &str = "compatible_runtime_unavailable";
+
+/// The route consumes a Model Set and this runtime has no data plane to
+/// deliver it from. Running it without its weights is never an option.
+pub const MODEL_SET_UNAVAILABLE: &str = "model_set_unavailable";
+
+/// Effect classes a Runtime executes without a confirmed authorization: an
+/// attempt of one of these can fail and be retried without anything leaking
+/// out of it.
+pub fn is_disposable(effects: EffectClass) -> bool {
+    matches!(
+        effects,
+        EffectClass::Pure | EffectClass::Idempotent | EffectClass::RecordSubstitutable
+    )
+}
+
+pub fn effects_name(effects: EffectClass) -> String {
+    serde_json::to_value(effects)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{effects:?}"))
+}
+
+/// Who authorized this attempt's effects, stated by the caller — never
+/// inferred, and never a flag that widens what may run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectAuthorization<'a> {
+    /// Nobody is present: a Formation attempt, a Runtime Network ticket, a
+    /// hosted job. Only disposable effect classes run.
+    Unattended,
+    /// A person started a Run of exactly this Derivation in the foreground
+    /// (`ato run <capsule>`). It authorizes running that D; it is not a
+    /// confirmation of effects the D declares beyond the disposable ones,
+    /// which still need a confirmation this request does not carry.
+    UserInvoked { derivation_ref: &'a str },
+    /// Search-scoped grant issued from an external frozen ceiling. It is not
+    /// a user Run authorization and cannot be carried by a retained artifact.
+    Exploration {
+        derivation_ref: &'a str,
+        grant: &'a ExecutionRequirements,
+    },
+    /// Separately owner-authorized functional verification of a fixed D on a
+    /// scoped Run. It confers no ordinary Run or exploration assessment grant.
+    FunctionalVerification {
+        derivation_ref: &'a str,
+        grant: &'a ExecutionRequirements,
+    },
+}
+
+impl EffectAuthorization<'_> {
+    /// How the start record names it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Unattended => "unattended",
+            Self::UserInvoked { .. } => "user_invoked",
+            Self::Exploration { .. } => "exploration",
+            Self::FunctionalVerification { .. } => "functional_verification",
+        }
+    }
+}
+
+fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
+    Some(AttemptFailure {
+        code: code.to_owned(),
+        stage: "admission".to_owned(),
+        message: message.into(),
+    })
+}
+
+/// `None` when the attempt may proceed to the executor's own admission.
+pub fn admit(
+    spec: &AttemptSpec<'_>,
+    authorization: EffectAuthorization<'_>,
+    browser: Option<&BrowserVerification>,
+) -> Option<AttemptFailure> {
+    admit_with_model_delivery(spec, authorization, browser, false)
+}
+
+pub(crate) fn admit_with_model_delivery(
+    spec: &AttemptSpec<'_>,
+    authorization: EffectAuthorization<'_>,
+    browser: Option<&BrowserVerification>,
+    delivers_model_sets: bool,
+) -> Option<AttemptFailure> {
+    if spec.derivation.native_surface.is_some() {
+        return refused(
+            "native_surface_unavailable",
+            "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
+        );
+    }
+    // No entry into this attempt path measures its host against a route's
+    // host condition, so none may run such a route. The route is not wrong;
+    // it is unverified here, and only a Runner admitted against the condition
+    // runs it. Before authority, so an exploration grant cannot bypass it.
+    if spec.derivation.requirements.host.is_some() {
+        return refused(
+            COMPATIBLE_RUNTIME_UNAVAILABLE,
+            "D states a host condition this runtime does not admit against",
+        );
+    }
+    if !delivers_model_sets
+        && spec
+            .derivation
+            .inputs
+            .iter()
+            .any(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+    {
+        return refused(
+            MODEL_SET_UNAVAILABLE,
+            "D consumes a Model Set and this runtime has no data plane to deliver it",
+        );
+    }
+    match authorization {
+        EffectAuthorization::Exploration {
+            derivation_ref,
+            grant,
+        }
+        | EffectAuthorization::FunctionalVerification {
+            derivation_ref,
+            grant,
+        } => {
+            if derivation_ref != spec.derivation_ref {
+                return refused(
+                    "authorization_mismatch",
+                    "exploration grant names another D",
+                );
+            }
+            if let Err(error) = spec.derivation.requirements.within(grant) {
+                return refused(
+                    error.0,
+                    "D requires conditions outside its search-scoped grant",
+                );
+            }
+        }
+        _ if !spec.derivation.requirements.is_empty() => {
+            return refused(
+                "execution_authority_required",
+                "requirements in D do not grant normal execution; risk assessment and authorization for this D digest are required",
+            );
+        }
+        _ => {}
+    }
+    if let EffectAuthorization::UserInvoked { derivation_ref } = authorization
+        && derivation_ref != spec.derivation_ref
+    {
+        return refused(
+            "authorization_mismatch",
+            format!(
+                "the Run was started for {derivation_ref}; this attempt is {}",
+                spec.derivation_ref
+            ),
+        );
+    }
+    // A declared effect is a request, not an authorization. Neither an
+    // unattended attempt nor a started Run confirms an effect that may leave
+    // something behind, so such a route is not executed by any entry.
+    let effects = spec.derivation.effects;
+    if !is_disposable(effects) {
+        return refused(
+            "effect_policy",
+            format!(
+                "the route's effect class is {}; this request carries no confirmed \
+                 authorization for it ({}), so only pure, idempotent or record-substitutable \
+                 routes are executed",
+                effects_name(effects),
+                authorization.name()
+            ),
+        );
+    }
+    // The route's own platform statement is part of D, so it binds every
+    // Runtime that is asked to run it — whatever a scheduler believed.
+    let platforms = &spec.derivation.platforms;
+    if !platforms.is_empty()
+        && !platforms.iter().any(|platform| {
+            platform.os == std::env::consts::OS && platform.arch == std::env::consts::ARCH
+        })
+    {
+        return refused(
+            "platform_unsupported",
+            format!(
+                "this route runs on {}; this Runtime is {}/{}; it was not attempted",
+                platforms
+                    .iter()
+                    .map(|platform| format!("{}/{}", platform.os, platform.arch))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+        );
+    }
+    // A sealed Derivation keeps the runtime it pinned; nothing re-resolves it.
+    // So the runtime catalog that governed authoring must be stated again here,
+    // as an execution input: refusing an affected Node is not a request-level
+    // policy a grant can widen, and it must hold for every entry into
+    // `run_attempt` — a CLI Run, a hosted Formation, a retained replay.
+    if let Err(refusal) = ato_formation::runtime_policy::derivation_runtime_policy(spec.derivation)
+    {
+        return refused(refusal.code, refusal.message);
+    }
+    if browser.is_some() && spec.shape != CandidateShape::Process {
+        // Browser verification has not moved onto the common observation
+        // path for every shape; a request it cannot decide is refused rather
+        // than decided some other way.
+        return refused(
+            "browser_contract_needs_realization",
+            "a browser Contract is verified against a running process candidate; this \
+             candidate's lane is not browser-verified on this Runtime",
+        );
+    }
+    if let Some(browser) = browser {
+        match &browser.verifier {
+            None => {
+                return refused(
+                    "browser_verifier_unavailable",
+                    "the request carries a browser Contract and this Runtime has no browser \
+                     verifier; it was not attempted",
+                );
+            }
+            // Never verified outside the verifier sandbox unless a developer
+            // chose an uncontained verifier explicitly.
+            Some(verifier) if !verifier.usable() => {
+                return refused(
+                    "browser_verifier_containment_unavailable",
+                    "the request carries a browser Contract and this Runtime cannot run its \
+                     browser verifier contained (bubblewrap); it was not attempted",
+                );
+            }
+            Some(_) => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use ato_formation::authoring::{BoundContract, BoundDerivation};
+
+    use super::*;
+
+    fn derivation(effects: EffectClass) -> BoundDerivation {
+        let mut derivation: BoundDerivation = serde_json::from_value(serde_json::json!({
+            "schema": "ato.derivation/1",
+            "inputs": [], "runtimes": {}, "steps": [], "ports": [], "state": [],
+            "effects": "pure"
+        }))
+        .expect("a minimal derivation");
+        derivation.effects = effects;
+        derivation
+    }
+
+    fn check(effects: EffectClass, authorization: EffectAuthorization<'_>) -> Option<String> {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let derivation = derivation(effects);
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        admit(&spec, authorization, None).map(|failure| failure.code)
+    }
+
+    /// The policy gate in front of every entry, as an attempt would see it.
+    fn check_derivation(derivation: &BoundDerivation) -> Option<String> {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        admit(&spec, EffectAuthorization::Unattended, None).map(|failure| failure.code)
+    }
+
+    fn node_step(version: &str) -> ato_formation::authoring::BoundStep {
+        ato_formation::authoring::BoundStep {
+            id: "build".to_owned(),
+            protocol: "ato.process@1".to_owned(),
+            op: "exec".to_owned(),
+            argv: vec!["node".to_owned(), "build.js".to_owned()],
+            cwd: String::new(),
+            env: Default::default(),
+            source: None,
+            root: None,
+            entry: None,
+            spa_fallback: None,
+            network: Default::default(),
+            runtimes: [("node".to_owned(), version.to_owned())].into(),
+            state: Vec::new(),
+            bindings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_sealed_route_pinned_to_an_affected_node_is_refused_before_it_starts() {
+        let mut route = derivation(EffectClass::Pure);
+        for version in ["18.20.4", "20.20.2", "22.14.0", "24.18.0"] {
+            route.runtimes.insert("node".to_owned(), version.to_owned());
+            assert_eq!(
+                check_derivation(&route).as_deref(),
+                Some("runtime_version_not_patched"),
+                "{version} must be refused"
+            );
+        }
+        // A patched pin is execution's business as usual.
+        route
+            .runtimes
+            .insert("node".to_owned(), "22.23.4".to_owned());
+        assert_eq!(check_derivation(&route), None);
+        // A declaration this build cannot classify fails closed, with its own
+        // code so reporting never calls it patched or an unknown failure.
+        route.runtimes.insert("node".to_owned(), ">=22".to_owned());
+        assert_eq!(
+            check_derivation(&route).as_deref(),
+            Some("runtime_version_unverifiable")
+        );
+        // An exploration grant covers requirements, not this policy.
+        route
+            .runtimes
+            .insert("node".to_owned(), "22.14.0".to_owned());
+        route.requirements = serde_json::from_value(serde_json::json!({
+            "network": [{ "phase": "runtime", "host": "example.com", "port": 443 }]
+        }))
+        .expect("a network requirement");
+        let grant = route.requirements.clone();
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &route,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        assert_eq!(
+            admit(
+                &spec,
+                EffectAuthorization::Exploration {
+                    derivation_ref: "sha256:d",
+                    grant: &grant,
+                },
+                None
+            )
+            .map(|failure| failure.code)
+            .as_deref(),
+            Some("runtime_version_not_patched")
+        );
+    }
+
+    #[test]
+    fn a_step_scoped_affected_node_is_refused_too() {
+        let mut route = derivation(EffectClass::Pure);
+        route.steps.push(node_step("24.18.0"));
+        assert_eq!(
+            check_derivation(&route).as_deref(),
+            Some("runtime_version_not_patched")
+        );
+
+        route.steps.clear();
+        route.steps.push(node_step("24.22.1"));
+        assert_eq!(check_derivation(&route), None);
+    }
+
+    #[test]
+    fn a_route_without_node_is_not_affected_by_this_policy() {
+        let mut route = derivation(EffectClass::Pure);
+        route
+            .runtimes
+            .insert("python".to_owned(), "3.12.7".to_owned());
+        assert_eq!(check_derivation(&route), None);
+    }
+
+    #[test]
+    fn a_started_run_authorizes_running_its_derivation_and_nothing_more() {
+        let user = EffectAuthorization::UserInvoked {
+            derivation_ref: "sha256:d",
+        };
+        for effects in [
+            EffectClass::Pure,
+            EffectClass::Idempotent,
+            EffectClass::RecordSubstitutable,
+        ] {
+            assert_eq!(check(effects, EffectAuthorization::Unattended), None);
+            assert_eq!(check(effects, user), None);
+        }
+        // Starting a Run is not a confirmation of what it may leave behind.
+        for effects in [
+            EffectClass::RequiresConfirmation,
+            EffectClass::NonRepeatable,
+        ] {
+            assert_eq!(
+                check(effects, EffectAuthorization::Unattended).as_deref(),
+                Some("effect_policy")
+            );
+            assert_eq!(check(effects, user).as_deref(), Some("effect_policy"));
+        }
+        // A Run started for another Derivation authorizes nothing here.
+        let other = EffectAuthorization::UserInvoked {
+            derivation_ref: "sha256:other",
+        };
+        assert_eq!(
+            check(EffectClass::Pure, other).as_deref(),
+            Some("authorization_mismatch")
+        );
+    }
+
+    #[test]
+    fn a_route_consuming_a_model_set_is_refused_where_nothing_can_deliver_it() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let mut derivation = derivation(EffectClass::Pure);
+        derivation
+            .inputs
+            .push(ato_formation::authoring::BoundInput {
+                id: "models".to_owned(),
+                protocol: ato_formation::model_set::MODEL_SET_PROTOCOL.to_owned(),
+                content_ref: format!("sha256:{}", "a".repeat(64)),
+            });
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        for authorization in [
+            EffectAuthorization::Unattended,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+        ] {
+            assert_eq!(
+                admit(&spec, authorization, None).map(|f| f.code).as_deref(),
+                Some(MODEL_SET_UNAVAILABLE)
+            );
+            assert!(admit_with_model_delivery(&spec, authorization, None, true).is_none());
+        }
+    }
+
+    #[test]
+    fn a_host_condition_is_refused_by_every_entry_before_authority() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let mut derivation = derivation(EffectClass::Pure);
+        derivation.requirements = serde_json::from_value(serde_json::json!({
+            "host": {
+                "os": "linux", "arch": "x86_64",
+                "accelerators": [{ "vendor": "nvidia", "count": 1, "min_vram_mib": 16000 }]
+            }
+        }))
+        .expect("a host condition");
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        // A grant that would cover the route's authority does not admit it:
+        // the host condition is not authority and no grant satisfies it.
+        let grant = derivation.requirements.clone();
+        for authorization in [
+            EffectAuthorization::Unattended,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+            EffectAuthorization::Exploration {
+                derivation_ref: "sha256:d",
+                grant: &grant,
+            },
+        ] {
+            assert_eq!(
+                admit(&spec, authorization, None).map(|f| f.code).as_deref(),
+                Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
+            );
+            assert_eq!(
+                admit_with_model_delivery(&spec, authorization, None, true)
+                    .map(|f| f.code)
+                    .as_deref(),
+                Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
+            );
+        }
+    }
+}

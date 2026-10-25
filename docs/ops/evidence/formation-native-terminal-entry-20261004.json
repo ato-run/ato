@@ -1,0 +1,38 @@
+{
+  "schema": "ato.formation-native-terminal-entry-proof/1",
+  "results": [
+    {
+      "agent": "codex",
+      "version": "0.160.0",
+      "Search": "search_202ed4c74582245677d09adf837ab58c",
+      "guard_result": {
+        "error": "owner_reconciliation_required",
+        "next_operation": "owner_reconcile",
+        "Search_reset": false
+      },
+      "exit_code": 1,
+      "all_saved_json_journals_unchanged": true,
+      "fresh_native_context_created": false,
+      "new_inference_or_execution": false
+    },
+    {
+      "agent": "claude-code",
+      "version": "2.1.288",
+      "Search": "search_200f876a9d93025c55e8bf49fddcc3d3",
+      "guard_result": {
+        "error": "owner_reconciliation_required",
+        "next_operation": "owner_reconcile",
+        "Search_reset": false
+      },
+      "exit_code": 1,
+      "all_saved_json_journals_unchanged": true,
+      "fresh_native_context_created": false,
+      "new_inference_or_execution": false
+    }
+  ],
+  "new_Searches": 0,
+  "new_exchanges": 0,
+  "new_Runtime_attempts": 0,
+  "Ato_direct_LLM_calls": 0,
+  "scope": "Actual Native entry admission against saved terminal Session snapshots; not new agent inference or needs_input/UNKNOWN acceptance"
+}

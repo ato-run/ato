@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qwen Chat</title>
+<style>
+body{font:16px/1.6 system-ui,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem;color:#202020;background:#faf9f6}
+header,form{display:flex;gap:.75rem;align-items:center}h1{font-size:1.3rem;margin-right:auto}button,textarea{font:inherit;border:1px solid #bcb9b2;border-radius:.5rem;padding:.55rem .85rem;background:white}
+textarea{flex:1;resize:vertical;min-height:3rem}button:not(:disabled){cursor:pointer}button:disabled{opacity:.5}article{padding:1rem 0;border-bottom:1px solid #ddd}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}#status{min-height:1.6rem;color:#555}#history{margin:1.5rem 0}
+</style>
+<header><h1>Qwen Chat</h1><button id="export">Export history</button></header>
+<p id="status" role="status" aria-live="polite">Preparing GPU</p>
+<div id="history" aria-live="polite"></div>
+<form><textarea id="prompt" aria-label="Message" maxlength="4096" required></textarea><button id="send" disabled>Send</button><button type="button" id="cancel" disabled>Cancel</button></form>
+<script>
+const history=document.querySelector('#history'),status=document.querySelector('#status'),prompt=document.querySelector('#prompt'),send=document.querySelector('#send'),cancel=document.querySelector('#cancel');
+let active=null,events=null,ready=false,pending=null;
+function render(job){let row=document.getElementById(job.request_id);if(!row){row=document.createElement('article');row.id=job.request_id;row.append(document.createElement('strong'),document.createElement('pre'),document.createElement('small'));history.append(row)}
+row.children[0].textContent=job.prompt;row.children[1].textContent=job.text;row.children[2].textContent=job.error||job.phase;
+if(['completed','cancelled','failed','interrupted'].includes(job.phase)&&active===job.request_id){active=null;events?.close();send.disabled=!ready;cancel.disabled=true}}
+function watch(id){active=id;send.disabled=true;cancel.disabled=false;events?.close();events=new EventSource('/api/events/'+id);events.onmessage=e=>render(JSON.parse(e.data));events.onerror=()=>{status.textContent='Reconnecting to generation'}}
+async function post(path,value){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)});const v=await r.json();if(!r.ok){const error=Error(v.error);error.status=r.status;throw error}return v}
+document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabled=true;pending??={request_id:crypto.randomUUID(),prompt:prompt.value};prompt.disabled=true;try{const job=await post('/api/chat',pending);pending=null;prompt.value='';prompt.disabled=false;send.textContent='Send';render(job);watch(job.request_id)}catch(e){status.textContent=e.message;if(e.status>=400&&e.status<500&&e.message==='invalid_prompt'){pending=null;prompt.disabled=false}send.textContent=pending?'Retry send':'Send';send.disabled=!ready}};
+cancel.onclick=async()=>{cancel.disabled=true;try{await post('/api/cancel',{request_id:active})}catch(e){status.textContent=e.message;cancel.disabled=false}};
+document.querySelector('#export').onclick=async()=>{try{const r=await fetch('/api/history');if(!r.ok)throw Error('History export failed');const url=URL.createObjectURL(new Blob([JSON.stringify(await r.json())],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='chat-history.json';a.click();URL.revokeObjectURL(url)}catch(e){status.textContent=e.message}};
+async function refresh(){try{const r=await fetch('/api/status');if(!r.ok)throw Error('Status unavailable');const s=await r.json();ready=s.phase==='ready';status.textContent=s.error||(ready?'GPU ready':s.phase);send.disabled=!ready||active!==null}catch(e){status.textContent=e.message;ready=false;send.disabled=true}}
+fetch('/api/history').then(r=>{if(!r.ok)throw Error('History unavailable');return r.json()}).then(s=>{s.jobs.forEach(render);const running=s.jobs.find(j=>['generating','cancelling'].includes(j.phase));if(running)watch(running.request_id)}).catch(e=>status.textContent=e.message);
+refresh();setInterval(refresh,2000);
+</script>
+</html>

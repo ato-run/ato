@@ -1,0 +1,203 @@
+{
+  "schema": "ato.formation-product-input-runtime-acceptance/1",
+  "measurement_id": "formation-product-input-runtime-20261004",
+  "scope": "Actual PWA/full API/contained Runtime; synthetic local owner session and controlled Source, not Kutt or native agent exploration",
+  "search_id": "search_5610c94d271e006e544d531b4caf21e6",
+  "pins": {
+    "ato": "e021eecb287165bdd25ff75d08115f7e27197345",
+    "api": "353c06fef9fd945e0286b686670e253a9f04c243",
+    "pwa": "b4e2c3bfbcf19f1e2334d5f427ce081af768b882"
+  },
+  "final_pwa_head": "3c8ec7aa1091ffdd20d310731b66a9edf64a6ceb",
+  "final_pwa_delta": "Only harness diagnostic sanitization changed after measured b4e2c3b; product input component unchanged",
+  "Runtime_source_pin": "5cc4e1b8f037db7f8f5e69b635b5204861e8fe10",
+  "API_worker_sha256": "0682913a1d3c4f5af9d8733830371c0d3c6d8ac83a35f446a64b59948434aec7",
+  "public_browser_evidence": {
+    "schema": "ato.formation-input-acceptance/1",
+    "measurement_id": "formation-input-real-pwa-20261004-03",
+    "search_id": "search_5610c94d271e006e544d531b4caf21e6",
+    "source_closure_ref": "sha256:65fe30ae9092f17e971793dee33191a9b71e3abadf0765460a8f6c989fec69a2",
+    "contract_ref": "sha256:6b627cd1a213a3459ee586251eb0ed2c8c04355af07bb8cfd70e605d59a109b7",
+    "pins": {
+      "ato": "e021eecb287165bdd25ff75d08115f7e27197345",
+      "api": "353c06fef9fd945e0286b686670e253a9f04c243",
+      "pwa": "b4e2c3bfbcf19f1e2334d5f427ce081af768b882"
+    },
+    "deadline_at_ms": 1791051965148,
+    "plan_sha256": "16c39f52ec615dc9676ecb71dccfe29f948bf62924ed7e92d319f26a3ffaf019",
+    "status": "passed_input_only",
+    "checks": {
+      "before": true,
+      "after_registration": true,
+      "after_reconnect": true,
+      "private_value_absent": true,
+      "page_errors": 0,
+      "console_errors": 0
+    },
+    "requests": {
+      "input_posts": 1,
+      "cleanup_deletes": 1,
+      "blocked": 2
+    },
+    "cleanup": "revoked",
+    "real_runtime_resume": "unmeasured",
+    "agent_calls": "not_dispatched",
+    "response_scan_cancellations": [],
+    "font_console_errors": 2,
+    "blocked_requests": [
+      {
+        "origin": "https://fonts.googleapis.com",
+        "path": "/css2",
+        "method": "GET"
+      },
+      {
+        "origin": "https://fonts.googleapis.com",
+        "path": "/css2",
+        "method": "GET"
+      }
+    ],
+    "input_request_id": "8ffb73f9-c3f5-4df0-af4f-baad5592c3ba",
+    "registered_input_id": "input_18ba89bff9f344ef9739f4296a61097633cbed8ae49698424829a8ac385f2650"
+  },
+  "source_closure_ref": "sha256:65fe30ae9092f17e971793dee33191a9b71e3abadf0765460a8f6c989fec69a2",
+  "permission_change_reasons": [
+    "revoked"
+  ],
+  "original_search_deadline_ms": 1791053165148,
+  "effective_round_deadline_ms": 1791051965148,
+  "original_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-03T18:16:05.148Z",
+    "deadline_at": "2026-10-03T18:46:05.148Z",
+    "attempts": {
+      "max": 1,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 0
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 3584,
+      "reserved": 0,
+      "remaining": 1073738240
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 0,
+      "reserved": 536870912,
+      "remaining": 1610612736
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 0,
+      "reserved": 536870912,
+      "remaining": 536870912
+    }
+  },
+  "final_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-03T18:16:05.148Z",
+    "deadline_at": "2026-10-03T18:46:05.148Z",
+    "attempts": {
+      "max": 1,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 0
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 3584,
+      "reserved": 0,
+      "remaining": 1073738240
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 407,
+      "reserved": 0,
+      "remaining": 2147483241
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 3072,
+      "reserved": 0,
+      "remaining": 1073738752
+    }
+  },
+  "fresh_receipt": {
+    "contract_ref": "sha256:6b627cd1a213a3459ee586251eb0ed2c8c04355af07bb8cfd70e605d59a109b7",
+    "derivation_ref": "sha256:1f4ccaa1a31b1074a7150dcdd3e17a2130b4ceca65da2f245d6df00946347060",
+    "execution": {
+      "attempt_id": "01M41FPT80P1EA34PYDP7PCXY5",
+      "endpoint": "http://127.0.0.1:8080/",
+      "platform": "linux/aarch64",
+      "realization": "process",
+      "request_id": "01M41FNYSRKQNX5WREGZZ8XREW"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:b133ba3a643efe8d97d59510544b4110aab4149d9f7a2a161725e69be3505c89",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "digest": "sha256:65fe30ae9092f17e971793dee33191a9b71e3abadf0765460a8f6c989fec69a2",
+          "input": "workspace"
+        },
+        "id": "source-identity",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "stop": "confirmed",
+  "outcomes": {
+    "cleanup": {
+      "state": "succeeded"
+    },
+    "publication": {
+      "state": "succeeded"
+    },
+    "runtime_verification": {
+      "state": "succeeded"
+    },
+    "seal": {
+      "state": "succeeded"
+    }
+  },
+  "Runtime_ACK": {
+    "attempt_id": "01M41FPT80P1EA34PYDP7PCXY5",
+    "accepted": true,
+    "closed": true,
+    "max_retries": 1,
+    "dispatches": 1
+  },
+  "cleanup": {
+    "value_count": 0,
+    "active_count": 0
+  },
+  "original_attempt_reused": true,
+  "new_inference_or_D_or_execution_attempt": false,
+  "normal_Run_authorized": false,
+  "unique_OSS_apps_counted": 0,
+  "paid_API_calls": 0,
+  "remote_migration": false,
+  "deployed": false,
+  "canary_scan_scope": "Generated private field value in DOM, console/errors, storage, URLs/request metadata and API response bodies; historical limitations preserved",
+  "owner_evidence_hashes": {
+    "final-result.json": "95cf88cbc7477d87d89869d0ce697fb237e7fc0be22701cc6c2a4e898f8e443a",
+    "after-permission-change.json": "65a52640cceba5fb63efedc06315177fed9f942cc238dbc33e809420de3ff501",
+    "input-view.json": "8356e4ce140dc546c840f45ae0851115657bc87fd31ea64fb6db59a759d06d20"
+  }
+}

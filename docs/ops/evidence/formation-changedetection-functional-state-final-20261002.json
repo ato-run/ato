@@ -1,0 +1,379 @@
+{
+  "schema": "ato.formation-changedetection-functional-state-proof/1",
+  "preregistration": {
+    "at": "2026-10-02T08:52:51.560718+00:00",
+    "common_Runtime_code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+    "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+    "K": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+    "D": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+    "artifact": {
+      "retained_ref": "sha256:107fe3c36a5d0ef84dc9c9e0767cd4547906ebc0abc957c8dcf9aa417f6d478a",
+      "artifact_ref": "sha256:4c77709a20aeea1cbc1b0f96156b3afa43f10234edab19bbf07a568d61b3f3d6",
+      "artifact_bytes": 167289522,
+      "K": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+      "D": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+      "source_Search_id": "search_6eb04bad8d5678c5d01b4990e3faa338",
+      "source_creation_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+      "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+      "owner_storage_read": true,
+      "purpose": "separate functional/state acceptance",
+      "ordinary_Run_permission": false,
+      "independent_API_Source_seed": false
+    },
+    "helper_sha256": "d6204a72e76ce4009c641b3888ea9a8c76bdd1cd9f2ecaadb49a5dcdb4de180c",
+    "shim_sha256": "bad2737892da0d76fa17eef1ab0a017b8d2a368ce8baea75d753d3e1048e6b9b",
+    "receiver_hashes": {
+      "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
+      "schema.sql": "02f9f80aab2ac45a57c24148359939abf1eb90e4471768d54caa0146f7375aa6",
+      "receipt_authority.wasm": "9420802a52f32a021fb0839ef64d46f63299a8b5db59ed92c9522c483217987b",
+      "worker.js": "7b8838e9fa8e0446d8e71eb2a0996157f494b5de2e13dc7dc6de0935ff05c1c6",
+      "receiver-pin.json": "90b665738aaf08445a159dd1e352397cdf256ac8ba951927a85b5d1989621519",
+      "entry.ts": "5d711d4249426b994b14f1f5a0f68926532232377ced332487d77e3ac775492d",
+      "schema-baseline.sql": "db9814fa1346e691a649afb7577fcfe7948326de64bb3bdd0a0c4ef8f1eaaa13",
+      "authority-provenance.json": "d257456845b532c14b00353455d06e1fa06ea902ba2d79e94e1178e161042082",
+      "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
+      "schema-baseline.json": "951cc3186a3d8e91ba35b824bfd30ec9cdbc52a1412ce2ce176ba2d0f16ebe3e"
+    },
+    "functional_only": true,
+    "source_Search_restarted": false,
+    "independent_API_Source_arm_seeded": false,
+    "deadline_seconds_per_separate_functional_Run": 300,
+    "ordinary_Run_permission": false,
+    "deployment": false,
+    "remote_migration": false,
+    "old_WBO_UNKNOWN_rerun": false,
+    "paid_API_calls": 0
+  },
+  "results": [
+    {
+      "generation": 1,
+      "ready": {
+        "API_calls": 0,
+        "Coordinator_assignment_verified": true,
+        "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+        "derivation_ref": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+        "endpoint": "http://127.0.0.1:3000/",
+        "fresh_attempt_id": "functional-state-state_verify_1",
+        "lease_id": "lease_state_verify_1",
+        "normal_run_authorized": false,
+        "state_attachment": {
+          "access": "read_write",
+          "mount_target": "/data",
+          "revision_ref": null,
+          "state_key": "app_data",
+          "writer_fence": 1
+        }
+      },
+      "fresh_receipt": {
+        "schema": "ato.contract-verification-receipt/1",
+        "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+        "derivation_ref": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+        "target": {
+          "kind": "formation-runtime"
+        },
+        "execution": {
+          "realization": "process",
+          "platform": "linux/aarch64",
+          "endpoint": "http://127.0.0.1:3000/",
+          "attempt_id": "functional-state-state_verify_1",
+          "request_id": "state_verify_1"
+        },
+        "observations": [
+          {
+            "id": "root",
+            "outcome": "satisfied",
+            "evidence": {
+              "method": "GET",
+              "path": "/",
+              "status": 200,
+              "body_sha256": "sha256:5c331d58be31307daf181e2ef1e34aa36442bd7144035ffb3b1fad47470d9cce"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": "satisfied",
+            "evidence": {
+              "input": "workspace",
+              "digest": "sha256:5dcc9e34548a7c53e369ef5f0911f46ce3414a93aa1404d32e5e04955de11431"
+            }
+          }
+        ],
+        "fully_satisfied": true
+      },
+      "state_outcomes": [
+        {
+          "parent_revision_ref": null,
+          "revision_ref": "isrev_01M3XX7R8X44PAKN3NEJ5Z57M6",
+          "state_key": "app_data",
+          "writer_fence": 1
+        }
+      ],
+      "network": {
+        "allowance": {
+          "hosts": [
+            "exploration-denied.invalid"
+          ],
+          "ports": [
+            443
+          ],
+          "max_transfer_bytes": 1
+        },
+        "transferred_bytes": 0,
+        "budget_exhausted": false,
+        "allowed": [],
+        "refused": [
+          {
+            "target": "acceptance.invalid",
+            "port": 443,
+            "stage": "hostname",
+            "count": 4
+          },
+          {
+            "target": "changedetection.io",
+            "port": 443,
+            "stage": "hostname",
+            "count": 5
+          },
+          {
+            "target": "news.ycombinator.com",
+            "port": 443,
+            "stage": "hostname",
+            "count": 4
+          }
+        ]
+      },
+      "confirmed_stop": {
+        "stopped": true,
+        "API_calls": 0
+      },
+      "browser": {
+        "schema": "ato.formation-functional-observation/1",
+        "mode": "create",
+        "pass": true,
+        "code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+        "browser_version": "149.0.7827.0",
+        "typed_K_changed": false,
+        "Coordinator_assignment_verified": true,
+        "assignment_measurement": "authenticated Coordinator lease-state transport in owned local instance",
+        "external_fetch_verified": false,
+        "blocked_host_counts": {},
+        "state_persistence_after_confirmed_stop": false,
+        "normal_Run_permission": false,
+        "deployed": false,
+        "API_calls": 0
+      }
+    },
+    {
+      "generation": 2,
+      "ready": {
+        "API_calls": 0,
+        "Coordinator_assignment_verified": true,
+        "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+        "derivation_ref": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+        "endpoint": "http://127.0.0.1:3000/",
+        "fresh_attempt_id": "functional-state-state_verify_2",
+        "lease_id": "lease_state_verify_2",
+        "normal_run_authorized": false,
+        "state_attachment": {
+          "access": "read_write",
+          "mount_target": "/data",
+          "revision_ref": "isrev_01M3XX7R8X44PAKN3NEJ5Z57M6",
+          "state_key": "app_data",
+          "writer_fence": 2
+        }
+      },
+      "fresh_receipt": {
+        "schema": "ato.contract-verification-receipt/1",
+        "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+        "derivation_ref": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+        "target": {
+          "kind": "formation-runtime"
+        },
+        "execution": {
+          "realization": "process",
+          "platform": "linux/aarch64",
+          "endpoint": "http://127.0.0.1:3000/",
+          "attempt_id": "functional-state-state_verify_2",
+          "request_id": "state_verify_2"
+        },
+        "observations": [
+          {
+            "id": "root",
+            "outcome": "satisfied",
+            "evidence": {
+              "method": "GET",
+              "path": "/",
+              "status": 200,
+              "body_sha256": "sha256:cfa1d5333194c6d95b04771018412c70c3272296c7570ffa360852741e6de03b"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": "satisfied",
+            "evidence": {
+              "input": "workspace",
+              "digest": "sha256:5dcc9e34548a7c53e369ef5f0911f46ce3414a93aa1404d32e5e04955de11431"
+            }
+          }
+        ],
+        "fully_satisfied": true
+      },
+      "state_outcomes": [
+        {
+          "parent_revision_ref": "isrev_01M3XX7R8X44PAKN3NEJ5Z57M6",
+          "revision_ref": "isrev_01M3XXD0KF5M448XN0FXRV0KE4",
+          "state_key": "app_data",
+          "writer_fence": 2
+        }
+      ],
+      "network": {
+        "allowance": {
+          "hosts": [
+            "exploration-denied.invalid"
+          ],
+          "ports": [
+            443
+          ],
+          "max_transfer_bytes": 1
+        },
+        "transferred_bytes": 0,
+        "budget_exhausted": false,
+        "allowed": [],
+        "refused": [
+          {
+            "target": "changedetection.io",
+            "port": 443,
+            "stage": "hostname",
+            "count": 5
+          },
+          {
+            "target": "news.ycombinator.com",
+            "port": 443,
+            "stage": "hostname",
+            "count": 4
+          }
+        ]
+      },
+      "confirmed_stop": {
+        "stopped": true,
+        "API_calls": 0
+      },
+      "browser": {
+        "schema": "ato.formation-functional-observation/1",
+        "mode": "verify-delete",
+        "pass": true,
+        "code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+        "browser_version": "149.0.7827.0",
+        "typed_K_changed": false,
+        "Coordinator_assignment_verified": true,
+        "assignment_measurement": "authenticated Coordinator lease-state transport in owned local instance",
+        "external_fetch_verified": false,
+        "blocked_host_counts": {},
+        "state_persistence_after_confirmed_stop": true,
+        "normal_Run_permission": false,
+        "deployed": false,
+        "API_calls": 0
+      }
+    }
+  ],
+  "state_slots": [
+    {
+      "writer_epoch": 2,
+      "head_revision_id": "isrev_01M3XXD0KF5M448XN0FXRV0KE4",
+      "active_writer_run_id": null,
+      "quarantined_at": null
+    }
+  ],
+  "new_unique_OSS_apps": 0,
+  "paid_API_calls": 0,
+  "actual_provider_calls": null,
+  "Source_publication_measured": false,
+  "automatic_production_Source_state_provisioning": false,
+  "raw_completed_proof_sha256": "e3a83d79114958969f51139c37d56819b77e72f964c7b36b561e6d965cb69bbd",
+  "observer_readiness_window_seconds": 220,
+  "browser_script_sha256": "886ab0a05e6c87e2c94b7c1df2765f4f5e48069fcbf0c71862d3510cef24928e",
+  "controller_script_sha256": "ae8b4fcb8d366c05d1f8b86f39f303a6a16c27b31d392ccff91ee551d9fd1143",
+  "functional_observations": [
+    "create an owned watch using an acceptance.invalid URL",
+    "edit its title and pause it through the real browser UI",
+    "confirm workload stop and commit revision with writer fence 1",
+    "restore that exact revision under writer fence 2",
+    "verify title and paused state after restart, then delete the owned watch",
+    "confirm stop, commit the child revision and release the state writer"
+  ],
+  "prior_observer_failure": {
+    "proof_sha256": "e421f1c04eee85740875bba9d40ee4b71354c3600786b077b934d8d82972bd72",
+    "evidence": {
+      "schema": "ato.formation-preserved-functional-observer-failure/1",
+      "failure": "90-second observer readiness window ended before the common retained Runtime finished; no browser/UI was started",
+      "fresh_same_K_PASS": true,
+      "fresh_receipt": {
+        "schema": "ato.contract-verification-receipt/1",
+        "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+        "derivation_ref": "sha256:6c93495644135d090394732375230848786dfbdb0af18e604bad7e2cdd919390",
+        "target": {
+          "kind": "formation-runtime"
+        },
+        "execution": {
+          "realization": "process",
+          "platform": "linux/aarch64",
+          "endpoint": "http://127.0.0.1:3000/",
+          "attempt_id": "functional-state-state_verify_1",
+          "request_id": "state_verify_1"
+        },
+        "observations": [
+          {
+            "id": "root",
+            "outcome": "satisfied",
+            "evidence": {
+              "method": "GET",
+              "path": "/",
+              "status": 200,
+              "body_sha256": "sha256:8c61ef981d7459371218d6e26f1358b0891a98749630e6aa38fb70e0e1a9c8d1"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": "satisfied",
+            "evidence": {
+              "input": "workspace",
+              "digest": "sha256:5dcc9e34548a7c53e369ef5f0911f46ce3414a93aa1404d32e5e04955de11431"
+            }
+          }
+        ],
+        "fully_satisfied": true
+      },
+      "confirmed_cleanup": {
+        "stopped": true,
+        "API_calls": 0
+      },
+      "state_outcomes": [
+        {
+          "parent_revision_ref": null,
+          "revision_ref": "isrev_01M3XWX0526J5DJC5QB3PN54QN",
+          "state_key": "app_data",
+          "writer_fence": 1
+        }
+      ],
+      "state_slots": [
+        {
+          "writer_epoch": 1,
+          "active_writer_run_id": null,
+          "quarantined_at": null
+        }
+      ],
+      "helper_original_execution_allowance_seconds": 300,
+      "fix": "separate new functional run, observer wait bounded to 220 seconds; execution allowance remains 300 seconds",
+      "Source_Search_resumed_or_budget_reset": false,
+      "paid_API_calls": 0,
+      "old_WBO_UNKNOWN_reexecuted": false
+    }
+  },
+  "limitations": [
+    "separate fixed-artifact functional/state acceptance; not independent API exploration or an added unique app",
+    "external site fetch was blocked and is unverified",
+    "Source Search remains closed; functional allowance is separate and does not revive its clock/budget",
+    "authenticated production StateService transports are exercised, but dispatch uses a private filesystem fixture",
+    "automatic production Source state provisioning remains unimplemented"
+  ]
+}

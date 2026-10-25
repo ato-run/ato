@@ -1,0 +1,4680 @@
+{
+  "schema": "ato.formation-known-vs-exploration/1",
+  "totals": {
+    "actual_terminals": 100,
+    "baseline_typed_K_PASS": 7,
+    "current_typed_K_PASS": 7,
+    "absolute_gain": 0,
+    "new_PASS_apps": [],
+    "regressed_apps": [],
+    "candidate_producer_invoked_apps": 92,
+    "actual_LLM_call_rate": 0.92,
+    "candidate_producer_calls": 273,
+    "decision_provider_calls": 1,
+    "valid_generated_D_apps": 8,
+    "generated_D_admitted_apps": 5,
+    "generated_D_executed_apps": 5,
+    "generated_D_PASS_apps": 0,
+    "authority_recovered_to_execution_apps": 0,
+    "network_recovered_to_execution_apps": 0,
+    "dependency_recovered_to_PASS_apps": 0,
+    "baseline_permission_blocked_to_execution_apps": 1,
+    "baseline_permission_blocked_to_PASS_apps": 0,
+    "known_usage_estimated_cost_usd_micros": 683545,
+    "conservative_charged_usd_micros": 2686616,
+    "estimated_cost_per_additional_PASS_usd_micros": null,
+    "charged_cost_per_additional_PASS_usd_micros": null,
+    "calls_per_additional_PASS": null,
+    "unresolved_model_reservations": 0,
+    "new_functional_acceptance": 0,
+    "normal_verified_route_authorizations": 0,
+    "source_boundary_terminals": 1,
+    "Coordinator_search_terminals": 99,
+    "untyped_core_source_errors_explicitly_classified": 1,
+    "unexplained_untyped_failures": 0,
+    "input_tokens": 2006440,
+    "output_tokens": 68395,
+    "unknown_usage_calls": 0,
+    "tokens_per_additional_PASS": null,
+    "candidate_producer_models": {
+      "deepseek-flash": 273
+    },
+    "candidate_producer_latency_ms_recorded": 465026,
+    "candidate_producer_calls_with_recorded_latency": 273,
+    "decision_provider_models_configured": [
+      "jev-1.13.0"
+    ],
+    "candidate_producer_input_tokens": 2004531,
+    "candidate_producer_output_tokens": 68214,
+    "decision_provider_input_tokens": 1909,
+    "decision_provider_output_tokens": 181,
+    "decision_provider_latency_ms_recorded": 265,
+    "decision_provider_actual_models": {
+      "jev-1.13.0": 1
+    },
+    "requester_elapsed_seconds_sum": 5100.195,
+    "wall_elapsed_seconds_including_infrastructure_recovery": 11964.62,
+    "started_at": "2026-09-30T12:48:59.773970+00:00",
+    "completed_at": "2026-09-30T16:08:24.394228+00:00",
+    "reach_improved_apps": 81,
+    "reach_reduced_apps": 12,
+    "rounds_consumed": 274,
+    "known_attempts": 7,
+    "generated_attempts": 10
+  },
+  "applications": [
+    {
+      "index": 1,
+      "name": "Excalidraw",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:3bace44e436305e279fd23a5bfd8d25054d4a7c142e9c5f0a2f70394e5c28131",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:51:14.592Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 2,
+      "name": "WBO",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:b9426d38cc7aacd6d99dd8987b31326b652404c733bb6e61c1d6b58ab312fc20",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:b4442a76139f145603db0fc22a1fde4da8b962cd2a5062348945ab004ebd494f"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed",
+        "C_D_available",
+        "D_admitted",
+        "E_executed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "no_progress",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:51:43.761Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 2,
+      "decision_calls": 0
+    },
+    {
+      "index": 3,
+      "name": "Uptime Kuma",
+      "baseline_terminal": "fully_satisfied",
+      "baseline_PASS": true,
+      "baseline_K_refs": [
+        "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3"
+      ],
+      "baseline_D_refs": [
+        "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": true,
+        "E": true,
+        "F": true,
+        "G": true,
+        "H": true,
+        "I": false
+      },
+      "current_K_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+      "current_known_D_refs": [
+        "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520"
+      ],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_typed_K_PASS": true,
+        "H_retained": true
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T12:52:19.674Z"
+      },
+      "adaptive_PASS": true,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 4,
+      "name": "FreshRSS",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1306d610254dc3f538c93008662c571eb4d25d424856e54eb5a7217ba4d81ee3",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:53:14.603Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 5,
+      "name": "linkding",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:a8f859925fba9ad0fce1b175ba9cd1289243da0604b9e2bb20cea2c4466f5f5c"
+      ],
+      "baseline_D_refs": [
+        "sha256:c36fb518fbadc85ff0493372470bb4f2ed34dda5eec97511e1f0557a162c8b30"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:a8f859925fba9ad0fce1b175ba9cd1289243da0604b9e2bb20cea2c4466f5f5c",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:53:39.864Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 6,
+      "name": "SearXNG",
+      "baseline_terminal": "preset_node_static_needs_lockfile",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:b81c03dbc6b6b66ffae6a445983bc2d74cc48d5f29361f0de3688f7dfdc0223a",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:eb2987e9bda809d9e7e5ab04694615233c1bea308ce2de5561ea057b8acad78b"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed",
+        "C_D_available"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:54:52.160Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:ef6763b069e5b42d10619eb280f75e8896d7993539ba2ba5dce1b33fc79871d7"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed",
+        "C_D_available",
+        "D_admitted",
+        "E_executed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:56:06.762Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:e6bdfe7aba7958db748bf149f77a6b4ede56e68fbf809fa32b81043f43832bb4",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:57:09.057Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 9,
+      "name": "Miniflux",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:49778f7ac874a369430be8017c1bd4e5bdfa98845f75aa6b950a9a684a9874a6",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:57:38.287Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:f5e486c2240e869b5e3b6bf3e2f4c18fbd90210ad9ee14a30ddfb9bac4c32524",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T12:59:41.210Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 11,
+      "name": "Vikunja",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1f7a339876f45588bc373629b25861baa4a8ae411ba47e2263c80ede6b5305cb",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:01:42.398Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 12,
+      "name": "Mealie",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:a9304c1e177ba0e9bc1b5efc7e64a12f68e8381d681387e096629707c2716e9b",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:03:37.288Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:108cddf8f23291e222378ad0c18fa3e31ece9559ff49fe92ea7f4d8a85c15226",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:05:09.506Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 14,
+      "name": "Actual Budget",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:67188d19d873b1c683758755e7c59e230435addd45d36dd36778bfe8e78ae467",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:08:37.015Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:6bc754d7035b21b6d71e0420af2dd52383fc1d7079c1f502870219aa9a1f0496",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:10:56.116Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 16,
+      "name": "LibreChat",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:cf51a8d3c02b035d0bc22b2d7274a2ac3e2ad3ac73a0184e8a18076f458af69e"
+      ],
+      "baseline_D_refs": [
+        "sha256:ec2bd43cc45b787e454fe9abf2f463f0911f46574ec01dc63e468f96346573d0"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:cf51a8d3c02b035d0bc22b2d7274a2ac3e2ad3ac73a0184e8a18076f458af69e",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:13:53.164Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 17,
+      "name": "ComfyUI",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:9a699fbe9c2f690eb67192123b41ca3409e6c29e05edb2eea390f8deeae6b2a0",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:42:13.023Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 2,
+      "decision_calls": 0
+    },
+    {
+      "index": 18,
+      "name": "PdfDing",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:4a3d6d67f50bfabaaf5594814c4c83a531e3630953e2c2e0be94834e21851f29"
+      ],
+      "baseline_D_refs": [
+        "sha256:6a54c2865259e42f801f5d0a55e980e0e93ae1340df7880dcf6275ef6baf0eb5"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:4a3d6d67f50bfabaaf5594814c4c83a531e3630953e2c2e0be94834e21851f29",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:42:30.999Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 19,
+      "name": "Grist core",
+      "baseline_terminal": "preset_node_static_v2_manager_config",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:5226168e409045a9ea3be946de2e9161cc30c2e54b372dfa017098aa472f25c2",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:45:35.082Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 20,
+      "name": "File Browser",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:be0d2405d65cf6e85b3f8cac0c00c4aa8dc53a5c8933549090634053f62ec017",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:46:02.889Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 21,
+      "name": "2048",
+      "baseline_terminal": "fully_satisfied",
+      "baseline_PASS": true,
+      "baseline_K_refs": [
+        "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0"
+      ],
+      "baseline_D_refs": [
+        "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": true,
+        "E": true,
+        "F": true,
+        "G": true,
+        "H": true,
+        "I": false
+      },
+      "current_K_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+      "current_known_D_refs": [
+        "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c"
+      ],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_typed_K_PASS": true,
+        "H_retained": true
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T13:46:09.376Z"
+      },
+      "adaptive_PASS": true,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 22,
+      "name": "reveal.js",
+      "baseline_terminal": "fully_satisfied",
+      "baseline_PASS": true,
+      "baseline_K_refs": [
+        "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24"
+      ],
+      "baseline_D_refs": [
+        "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+        "sha256:5173440aff1098a28b887614ecd5b36ec529c4fc637deec39e6f6604c616e25a"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": true,
+        "E": true,
+        "F": true,
+        "G": true,
+        "H": true,
+        "I": false
+      },
+      "current_K_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+      "current_known_D_refs": [
+        "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557"
+      ],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_typed_K_PASS": true,
+        "H_retained": true
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T13:46:40.878Z"
+      },
+      "adaptive_PASS": true,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 23,
+      "name": "CyberChef",
+      "baseline_terminal": "intent_malformed",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:53b3ca69e54a3e0554590ac4340ba95c04698eacd54061a2191d3987800ef65d",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:47:43.780Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 24,
+      "name": "IT-Tools",
+      "baseline_terminal": "preset_node_static_v2_static_unproven",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:9104fc737a4a1763d642587ca3ec13612402b7894ded58670f2d3aea5bfe3edc",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:48:05.458Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 25,
+      "name": "Squoosh",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:3a2edba7530f539b5314ed145523d9e9020ef325f2a9ade28bf44a00f525694b"
+      ],
+      "baseline_D_refs": [
+        "sha256:c0c7b531005a4396f7676a8c2cd729b05c9b4afe5e60540c2016872c64ae8423"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:3a2edba7530f539b5314ed145523d9e9020ef325f2a9ade28bf44a00f525694b",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:49:30.881Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 26,
+      "name": "Hoppscotch",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:02ea2b68b87582ff8f11ba2b4d487a4efa305d7defbfdc1e94ea249693ebfaa9",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:51:34.884Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 27,
+      "name": "Wiki.js",
+      "baseline_terminal": "preset_node_static_v2_manager_config",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:cf5a5d384303ae7e5771c2759a377cdb8bbd87ac7742c4c8804b9965d950b238",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:2ffe1f5334a8284a5691848dc1abd11e7980bed950c9bf7ba601f2397ba2bbc2"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed",
+        "C_D_available"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:52:31.808Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 28,
+      "name": "Kutt",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:1b2ff0d7d9c8cea35eacd1f41d1040beab0e2a6f1950ee107b58166d2d9a0c93"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed",
+        "C_D_available",
+        "D_admitted",
+        "E_executed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:53:10.342Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 29,
+      "name": "Umami",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:0b287fd1c2c06bf666f75ac153b986248719168c81a15be68866a026332ca48e",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:54:10.337Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 30,
+      "name": "Ghost",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:77af6293b86b3f7ff0717019cf5b5588b6701c2a7cf8e366df69b4de8545e442",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:57:34.489Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 31,
+      "name": "Radicale",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:c3205bfab378e7e9e66d5dc5babe3d5e7c300423b520fbd971a0ee9b679ee8c9",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:57:53.989Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 32,
+      "name": "Calibre-Web",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:7da382d5b48fe2a18ed62cec9b8d62fb82923722fd310cd521051b0fd94c6a73",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T13:59:05.943Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 33,
+      "name": "Shynet",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:997615e255573ec9f81f6de036c5a89123264e115533a24eeaad2ce0ab4e9905",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:00:32.506Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 34,
+      "name": "text-generation-webui",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:2c9f7aa4001c614e7509386fdc2e34f27625432cc2389de9bb00210fb3da5048",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:01:37.735Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 35,
+      "name": "PrivateGPT",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:f0c204de435654804874af495e184920e092d9f897842c16d991a61f3ac90c3c",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:03:18.855Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 36,
+      "name": "Gotify",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:771bdb759ca6cba0077d6ba016ec267053dce5f2276bb6a7d57be620c64fdd4a",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:03:35.107Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 37,
+      "name": "Navidrome",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:f771521f03d92c669831f87bc08949c2e58854a21296978d2f3dbb826020fa72",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:05:18.740Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 38,
+      "name": "PocketBase",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:dfc7aa5a8c468be4746a7a2a0f2eeeff6ff302ce7a9a41983b6ffb9ae3894059",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:06:16.887Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 39,
+      "name": "Glance",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:b612b0358432f7c1b2c219a449999769afce0d57daad5c5e12fbf5b288e860db",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:06:59.420Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 40,
+      "name": "Shiori",
+      "baseline_terminal": "preset_node_static_v2_bun_deferred",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:7e4e348afc981e67acff794bf78a1c069497a8a1f4654d7e52a81f5e98a6fea9",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:07:32.284Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 41,
+      "name": "Vaultwarden",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:83ed2c78f348203967c091febf4b4e4b94669c3d4a911b4750bf7c6f380b5f10",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "exploration_authority_exceeded",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:07:52.527Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 2,
+      "decision_calls": 0
+    },
+    {
+      "index": 42,
+      "name": "Lemmy",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:22bc35b935a4d01f3737e83caafcfa739d0fd070fc562a66c6ae1b2342fdf328",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:08:48.693Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 43,
+      "name": "Paperless-ngx",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:f739337c32d17e78ddb6a854c37de5e568311948e251d1148054619e4763ca53",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:12:31.510Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 44,
+      "name": "Mastodon",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1445750f6ff2241c6b4b4af068bfea89008f85351f4dac93f76ae6c5fe31bb0d",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:15:58.289Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 45,
+      "name": "Linkwarden",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:4b554c65420f9db06717d880a5a4bc87fef8b7bc145cb81afab5d81ed471dad0",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:16:39.609Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 46,
+      "name": "NetBox",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:66f7d432bdef7af306dab490db6555e90bad56d9d53d477e2027a28331c56a51",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:19:47.432Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 47,
+      "name": "BookStack",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:f491e3e4a6e390000c80591852e6c83545ca7ecf1a589c8ba07326d9e5aeac71"
+      ],
+      "baseline_D_refs": [
+        "sha256:4b2766fcec614731d9f97339a1760bd454325f97aae84a544a9ead21b473e4d3"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:f491e3e4a6e390000c80591852e6c83545ca7ecf1a589c8ba07326d9e5aeac71",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:21:26.123Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 48,
+      "name": "Firefly III",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:df812e3a009aa0d3e1ea2ad5f688b42de144718e8d20867013512a60555a3363",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:23:15.872Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 49,
+      "name": "OpenRefine",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1d0aae0b5bd0e3926d0572c49f0ba3a3dcf36112fa0215fadb45074ddd3676ca",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:a5041bf1232090035b8bb65c0ab3b645091596810d1907431ea72811563fd0fb"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed",
+        "C_D_available"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:26:32.348Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 50,
+      "name": "Jellyfin",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:07acb2cd84b42bc3cb838b8845d6d131058c4ab2035ac0bd7515b827a53797be",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:28:17.298Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 51,
+      "name": "A Dark Room",
+      "baseline_terminal": "preset_node_static_v2_static_unproven",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:2196c81d4ec54e28ae6538073eadb11e9915e013f87731af9c591d3fbfd50078",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:28:51.673Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 52,
+      "name": "Hextris",
+      "baseline_terminal": "fully_satisfied",
+      "baseline_PASS": true,
+      "baseline_K_refs": [
+        "sha256:7e4bddf44a3edc33cc10bad17d2a1437a9984231582421e0fbabda37b77f9c31"
+      ],
+      "baseline_D_refs": [
+        "sha256:2d0c8269649935cf2642ac59a2cccecdc34b736977c6fe49d09e7f150991a111"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": true,
+        "E": true,
+        "F": true,
+        "G": true,
+        "H": true,
+        "I": false
+      },
+      "current_K_ref": "sha256:7e4bddf44a3edc33cc10bad17d2a1437a9984231582421e0fbabda37b77f9c31",
+      "current_known_D_refs": [
+        "sha256:2d0c8269649935cf2642ac59a2cccecdc34b736977c6fe49d09e7f150991a111"
+      ],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_typed_K_PASS": true,
+        "H_retained": true
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T14:29:00.599Z"
+      },
+      "adaptive_PASS": true,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 53,
+      "name": "0h h1",
+      "baseline_terminal": "fully_satisfied",
+      "baseline_PASS": true,
+      "baseline_K_refs": [
+        "sha256:35372e623b3b66a885cf50510a79e021752a3a07625503028d0eebebcdc8f8a1"
+      ],
+      "baseline_D_refs": [
+        "sha256:969778402a949bae8113775c76d56e820018ea2adbe7356d5551eebb3d7c864c"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": true,
+        "E": true,
+        "F": true,
+        "G": true,
+        "H": true,
+        "I": false
+      },
+      "current_K_ref": "sha256:35372e623b3b66a885cf50510a79e021752a3a07625503028d0eebebcdc8f8a1",
+      "current_known_D_refs": [
+        "sha256:969778402a949bae8113775c76d56e820018ea2adbe7356d5551eebb3d7c864c"
+      ],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_typed_K_PASS": true,
+        "H_retained": true
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T14:29:03.519Z"
+      },
+      "adaptive_PASS": true,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 54,
+      "name": "0h n0",
+      "baseline_terminal": "fully_satisfied",
+      "baseline_PASS": true,
+      "baseline_K_refs": [
+        "sha256:a2beb4c1ee623f27aea307e1e31e6bb1a98262cfce31346fb0e16640ce1c6e8a"
+      ],
+      "baseline_D_refs": [
+        "sha256:463a0a477c22431ad7ff31523ea8e04ec668a3b605868106d5b73fd79b592374"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": true,
+        "E": true,
+        "F": true,
+        "G": true,
+        "H": true,
+        "I": false
+      },
+      "current_K_ref": "sha256:a2beb4c1ee623f27aea307e1e31e6bb1a98262cfce31346fb0e16640ce1c6e8a",
+      "current_known_D_refs": [
+        "sha256:463a0a477c22431ad7ff31523ea8e04ec668a3b605868106d5b73fd79b592374"
+      ],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_typed_K_PASS": true,
+        "H_retained": true
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T14:29:06.643Z"
+      },
+      "adaptive_PASS": true,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 55,
+      "name": "Emoji search",
+      "baseline_terminal": "fully_satisfied",
+      "baseline_PASS": true,
+      "baseline_K_refs": [
+        "sha256:e22a831acbc9dd03a96b5b09af48c7dc7657343e61549f4e362b7429b2ce9e9e"
+      ],
+      "baseline_D_refs": [
+        "sha256:1f6b836e0374ae7f789523222005138461104f3482f6c96570787f761464b873"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": true,
+        "E": true,
+        "F": true,
+        "G": true,
+        "H": true,
+        "I": false
+      },
+      "current_K_ref": "sha256:e22a831acbc9dd03a96b5b09af48c7dc7657343e61549f4e362b7429b2ce9e9e",
+      "current_known_D_refs": [
+        "sha256:1f6b836e0374ae7f789523222005138461104f3482f6c96570787f761464b873"
+      ],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_typed_K_PASS": true,
+        "H_retained": true
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-09-30T14:29:09.436Z"
+      },
+      "adaptive_PASS": true,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 56,
+      "name": "AudioMass",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:756c12ef36abed9b72e0e1d2957bd266f54f3ba924df46a201b37aad7ae380bb",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:29:45.965Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 57,
+      "name": "SVGOMG",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1"
+      ],
+      "baseline_D_refs": [
+        "sha256:c9eac5c2e5318843a79b302966c4bfd9b53e8120e6f8a7f4792de75a27e64300"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:257d10b9e0a8643f53ed5cafed8416b1ddb77fb65e832c2433f6c9a5e5b10a29",
+        "sha256:3211a47e739a34eff15082089a9487b2ceb8a4aff9e41866dd8b8d70c4d82021",
+        "sha256:f14fad183bfedc86a0ee847a55d6ac99c2fbc9d0c49d8f0b423443f803c2ef56"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "D_admitted",
+        "E_executed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:31:22.609Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 1
+    },
+    {
+      "index": 58,
+      "name": "quiver",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:4c10efddf1f43de5a07cdd8a1e807517c1ab3b5db6df0e00cd0db523593a7c42",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:31:44.516Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 59,
+      "name": "hello wordl",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:37e24d98120dff83b08d7084ce1417d4092ee7feb889aab88cad1d0146b2554a"
+      ],
+      "baseline_D_refs": [
+        "sha256:cfd0858b3fe12b2fcbf6ec837f0b603c0fb169d6b36db33a166ef493f6298079"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:37e24d98120dff83b08d7084ce1417d4092ee7feb889aab88cad1d0146b2554a",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:32:07.116Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 60,
+      "name": "diagrams.net",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:0f9222a1b3a5713b575b7f4c8cd2f8ddb38392a7212b05fa514d825fdf97fbd0",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:51:36.044Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 61,
+      "name": "Node-RED",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:1eae35cf7fd1ad3c36aefbd6064f7cba1550d4bb9e005ddc4b02425deffca643"
+      ],
+      "baseline_D_refs": [
+        "sha256:7e006ca377e01fbcfdf339f4db6d912a85e2346e190167ea4814dd6a00046a76"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1eae35cf7fd1ad3c36aefbd6064f7cba1550d4bb9e005ddc4b02425deffca643",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:53:35.574Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 62,
+      "name": "SillyTavern",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:551c14516406660ced80cfa399c5c854e788df990745bb5396849c178586333e",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:55:46.095Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 63,
+      "name": "Dockge",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:c035383c97230304b81cd5fcb4363ee61e2d2e5eef017936a29655ff038e31c0",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T14:56:04.243Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 64,
+      "name": "Wekan",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:763475ff8d5b2be8af3a71ca8a8258e121eefc7e5951fc52affb2d5b7cb15fad",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:01:12.196Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 65,
+      "name": "Homepage",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:c6d4e30da6881cbab49a183ef0da514cc343e5d9ba9f5eb19e7664f07720c00a",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:02:40.597Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 66,
+      "name": "Audiobookshelf",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:0fc628c8ea68ab2fc15015b1b81903278fc2584e000e896c075b0dbf0dc9101b",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:03:36.893Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 67,
+      "name": "Misskey",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:01c47fe5362f4d09fe9d7b63503668fbe4342507d66240f0ac0d9de67d71171e",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:05:41.126Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 68,
+      "name": "SilverBullet",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:b916a3f940c0a9499d92fc53c3fd5b41496fe5f750f059f50aa7c67b7f05375f"
+      ],
+      "baseline_D_refs": [
+        "sha256:85e545cda7127a9fb042507483009877e1f0e27e0943badbbff606cd19dbf48d"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:b916a3f940c0a9499d92fc53c3fd5b41496fe5f750f059f50aa7c67b7f05375f",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:06:41.426Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 69,
+      "name": "copyparty",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:d3a888357b07a9a556a11311bbc9f797c0926b88450da4b047245ff964c4d96c",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:07:08.131Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 70,
+      "name": "Healthchecks",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:5dc17168a5a54fe557790e13a32ae4dd6b1d3dfde176a05c819a6ce0a2fbc1b9",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [
+        "sha256:3eb833637f4fedfab2a624a98c96ed3b9c935ddc9a8f7196674e35ae860f9768"
+      ],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed",
+        "C_D_available",
+        "D_admitted",
+        "E_executed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "no_progress",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:08:11.415Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 71,
+      "name": "ArchiveBox",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:c3998034dd3d001a149f3361659de0585445ad39ed58f33c2e5fac98dc5026f0",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:08:57.548Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 72,
+      "name": "Whoogle",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1e389fea4791dc2f0935bfeb2760ad3d4768ea98b12133e1380384c287cd8985",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:09:12.672Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 73,
+      "name": "Superset",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1271198520bd777a4d7d2578c8d9c73095a6ff7f79205eb198d2cd37fc65ecb3",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": false,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "A_source_recognized"
+      ],
+      "adaptive_terminal": {
+        "code": "source_archive_cap_exceeded",
+        "stage": "source_transport_preparation",
+        "classification_origin": "harness taxonomy of actual untyped core source error",
+        "raw_core_error_untyped": true,
+        "core_error": "source object exceeds archive cap"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 0,
+      "decision_calls": 0
+    },
+    {
+      "index": 74,
+      "name": "Datasette",
+      "baseline_terminal": "preset_node_static_needs_build_script",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:ac0008f9e5f518fa67c6289bf962f8cad0151db1e8017d4f7737f62cb2201572",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:16:10.538Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 75,
+      "name": "Home Assistant",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:fd11ebf47a213ad803489c33c039d5bf3f6b5a4a1dc41a7d49a24abec21781f0",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:22:12.071Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 76,
+      "name": "mitmproxy",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:a970675547890aa258b6b04371b3741c167dcc659774bd1803800c02c085c4a1",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:24:05.037Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 77,
+      "name": "Memos",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:f789bc2459ebd22be4c222b562e237514e54131a27a9edf9d231f6872decf6d7",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:25:08.936Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 78,
+      "name": "Gatus",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:085f168b780cbefeafe9f6221fd30f474a7d2f4257b3dece39a9d2ceeaeac46a",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:25:39.518Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 79,
+      "name": "MinIO",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:a40756c8811d957330c936c0e808f201aa919c118209b3c022cac3af6c793a0c",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:27:22.296Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 80,
+      "name": "AdGuard Home",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:77d70ae700a71f717911897100150481ea892d7cc4adb6f264f01b2587655e65",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:29:06.622Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 81,
+      "name": "Beszel",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:ea3cfeb74baf6581cc0318791890719571efee4247db33c6bf10106aadf18889",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:29:57.805Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 82,
+      "name": "Sonic",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:0fdaaa44c458d8f16dc916e4dfa7d9a9b4ff2b1600c3d62dba2ef78489183386",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:30:13.276Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 83,
+      "name": "RustDesk Server",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:93bc034e6aaa12ee9efbf1274fc722c4cb41a4f1df3779b7d4aa6882ff8bd2a8",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:30:26.117Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 84,
+      "name": "Atuin",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:208641138d7d2c69c876258fb3d58003a58cb7fdbf04a24fe682919897e68610",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:31:09.919Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 85,
+      "name": "Redlib",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:1ef557740ce39909666b7764ec101ef6bff07e53282d7ebf0aa17f1b71820c10",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:31:23.567Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 86,
+      "name": "wallabag",
+      "baseline_terminal": "preset_node_static_v2_static_unproven",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:6dab3b856691374bc206df8d39d5082d4cf63f005256bc1bdf0f7150481e46b8",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:32:00.515Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 87,
+      "name": "Lychee",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:79bb1f921d97d85b962d760c4078f79f48fdbc6690597b13ae5b7a462e13f297"
+      ],
+      "baseline_D_refs": [
+        "sha256:a44b808acdd4b4fe9e288eac1f97327bff1cc2b9a232f78c74ec2add75c95910"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:79bb1f921d97d85b962d760c4078f79f48fdbc6690597b13ae5b7a462e13f297",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:33:44.156Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 88,
+      "name": "grocy",
+      "baseline_terminal": "preset_node_static_v2_manager_config",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:854ff30d3d3b70c20eb73695ec2413c6dea99903984e38981d8695ea74ab58f1",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:34:23.468Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 89,
+      "name": "FOSSBilling",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:ecafcc25a385b941429c004873f1eb1c8abd0a57e85cde4b2363f6cdbcb37bb9"
+      ],
+      "baseline_D_refs": [
+        "sha256:9d22376804164ea60918e94fa4801254d7e8eaf64efeac816c662a9b7122e4bb"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:ecafcc25a385b941429c004873f1eb1c8abd0a57e85cde4b2363f6cdbcb37bb9",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:36:00.714Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 90,
+      "name": "Discourse",
+      "baseline_terminal": "preset_node_static_v2_workspace",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:2a5e4df8d0117cac93a0590f50312618218b8694fb6dc30f908467807314c62d",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:42:06.802Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 91,
+      "name": "Huginn",
+      "baseline_terminal": "network_denied",
+      "baseline_PASS": false,
+      "baseline_K_refs": [
+        "sha256:58bb5157233d4cf924443931907d0ec16684ecb17bfc18696484971db9f2705a"
+      ],
+      "baseline_D_refs": [
+        "sha256:37cc8274f3753ac784a405f91b75ec340118ac835ea255b77969be562427c399"
+      ],
+      "baseline_progress": {
+        "A": true,
+        "B": true,
+        "C": true,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:58bb5157233d4cf924443931907d0ec16684ecb17bfc18696484971db9f2705a",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [],
+      "reach_reduced_layers": [
+        "C_D_available"
+      ],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:42:47.023Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 92,
+      "name": "Redmine",
+      "baseline_terminal": "preset_node_static_v2_static_unproven",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:dee3d63409e9c7b1ed61630575418d111d166f6349bc99ca39794093da671486",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:44:25.960Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 93,
+      "name": "Jenkins",
+      "baseline_terminal": "preset_node_static_v2_manager_config",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:ec20d935262557a228a757f26fb5489492fa9fc1e1d08bf9a80f01c609e9642b",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:46:55.282Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 94,
+      "name": "Zeppelin",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:a1e9e8fe99bec7d5ffe7f563056aae4109331d8b8dfd48e943b1e0dd85809679",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:50:32.593Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 95,
+      "name": "NiFi",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:dd2da93736c5fa5a483192c807b890e469ef805cd623884b593ad3fefa3357a4",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:56:43.588Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 96,
+      "name": "Guacamole",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:ed7c8ab0aed5ebe279838adc48e1df09ced06d01fc0d9a67666813cd981746d9",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T15:59:09.869Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 97,
+      "name": "Kavita",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:5ad3a23f2d86d747a6ad450019a025bf7f50f5b650d93db3335a48ab4407b26f",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T16:03:29.470Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 98,
+      "name": "Jackett",
+      "baseline_terminal": "preset_no_match",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:8524a14495bb7fe842af8fc5024454f5e663590cc95f24c9d73b636f23dad368",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T16:04:33.713Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 99,
+      "name": "Radarr",
+      "baseline_terminal": "preset_node_static_v2_manager_config",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:03adac4ab0c1745182ad3f4bb794209a70992069ff16e4f9e93acc84a3fa3e56",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T16:06:23.790Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    },
+    {
+      "index": 100,
+      "name": "Sonarr",
+      "baseline_terminal": "preset_node_static_v2_manager_config",
+      "baseline_PASS": false,
+      "baseline_K_refs": [],
+      "baseline_D_refs": [],
+      "baseline_progress": {
+        "A": true,
+        "B": false,
+        "C": false,
+        "D": false,
+        "E": false,
+        "F": false,
+        "G": false,
+        "H": false,
+        "I": false
+      },
+      "current_K_ref": "sha256:5f5b95842b033ba2f9ed63efc27fdc826cc4b143f7563681d9f31fa71fcadbc4",
+      "current_known_D_refs": [],
+      "current_generated_D_refs": [],
+      "current_progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_typed_K_PASS": false,
+        "H_retained": false
+      },
+      "reach_improved_layers": [
+        "B_K_formed"
+      ],
+      "reach_reduced_layers": [],
+      "adaptive_terminal": {
+        "reason": "rounds_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-09-30T16:08:19.516Z"
+      },
+      "adaptive_PASS": false,
+      "change": "unchanged_outcome",
+      "producer_calls": 3,
+      "decision_calls": 0
+    }
+  ]
+}

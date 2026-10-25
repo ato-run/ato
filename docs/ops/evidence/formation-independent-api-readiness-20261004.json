@@ -1,0 +1,68 @@
+{
+  "schema": "ato.formation-independent-api-readiness/1",
+  "checked_at_UTC": "2026-10-03 20:13:44 UTC",
+  "readonly_check": true,
+  "new_paid_provider_calls": 0,
+  "credential": {
+    "rotation_authorized_by_user": true,
+    "successful_authenticated_provider_calls_in_prior_SVG_trial": 3,
+    "same_account_basis": "User rotation statement; provider balance endpoint does not establish account identity",
+    "value_saved_in_this_record": false
+  },
+  "ledger": {
+    "historical_journals_unchanged": true,
+    "historical_cells": 18,
+    "new_SVG_cells": 3,
+    "aggregate_used": 21,
+    "aggregate_ceiling": 41,
+    "small_used": 4,
+    "small_ceiling": 24,
+    "remaining_calls": 20,
+    "unsettled_cells": 0,
+    "conservative_remaining_usd_micros": 467188,
+    "remaining_call_worst_reservation_usd_micros": 344080,
+    "account_actual_charge": "unknown",
+    "old_UNKNOWN_reexecuted": false
+  },
+  "prepared_plans": {
+    "OCI_max_calls": 6,
+    "changedetection_max_calls": 6,
+    "Kutt_max_calls": 8,
+    "shared_account_limit_not_additive_new_budgets": true,
+    "prepared_aggregate_used": 18,
+    "prepared_ato_sha256": "e0ccf4bbeee7305d518a33369cde1079207961342fbe753aa799a43d5cb2972f",
+    "current_frozen_ato_sha256": "20eecd5f819482594bfcf7c3d9b822abb3e0493514715acdb6fc8101928b04d2",
+    "original_prepared_plans_modified": false,
+    "new_search_started": false
+  },
+  "disk": {
+    "available_bytes": 22138667008,
+    "floor_bytes": 21474836480,
+    "available_above_floor_bytes": 663830528,
+    "declared_expanded_ceiling_bytes": 2147483648,
+    "declared_stored_ceiling_bytes": 1073741824,
+    "headroom_for_expanded_plus_stored_envelope": false,
+    "old_records_or_artifacts_deleted": false
+  },
+  "runtime": {
+    "owned_native_services_stopped_after_acceptance": true,
+    "owned_native_attempt_results_accepted": 7,
+    "owned_native_delivery_journals_unclosed": 0,
+    "OCI_builder_bound": false,
+    "shared_services_changed": false
+  },
+  "decision": {
+    "status": "not_ready_no_new_provider_call",
+    "next_requirements": [
+      "Reconcile all existing account journals including the new SVG trial before preparing a fresh plan",
+      "Fix and disclose execution pins and capabilities without seeding successful Codex D",
+      "Provide sufficient disk headroom for the declared resource envelope without deleting preserved evidence",
+      "Restart only the owned local acceptance services if prerequisites become satisfied",
+      "Treat the unbound OCI builder as unavailable"
+    ],
+    "deployment": false,
+    "remote_migration": false,
+    "100_remeasurement": false,
+    "budget_or_deadline_reset": false
+  }
+}

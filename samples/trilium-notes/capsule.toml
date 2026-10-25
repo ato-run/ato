@@ -1,0 +1,66 @@
+# Trilium Notes, upstream v0.105.0, unmodified.
+#
+# The Capsule is the Contract: a Trilium server answering on its own Surface,
+# formed from the exact upstream release. Everything under `[[derivation]]` is
+# one route to reaching that, and it is the upstream image by digest — no Ato
+# fork, no patch, no rebuild.
+#
+# Trilium's own Docker start script juggles uids and then `su`s to `node`. A
+# Runner already runs the container as the owner of the writable mount, so
+# that juggling cannot run and is not needed: this declares the process that
+# script ends up exec'ing. The script would run it from the image's own
+# directory; a Runner's working directory is always inside the read-only
+# workspace mount, so the script path is absolute instead. Trilium resolves
+# its own files from the module, not the working directory.
+
+schema = "ato.capsule/2"
+
+[application]
+title = "Trilium Notes"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+# Trilium keeps its database, config, backups and attachments in one
+# directory. Without this slot it would be scratch space that disappears with
+# the Run, which is data loss wearing a friendly face.
+[[state]]
+id = "trilium_data"
+use = "ato.state.filesystem@1"
+mount = "/home/node/trilium-data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+# Deliberately weak about content. A notes app's pages change the moment
+# somebody writes a note, and observing the body would mint a new Capsule on
+# every save. What is preserved here is "Trilium is up and serving its own UI".
+# An uninitialized server answers 200 with its setup page, which is the state
+# a freshly formed Capsule is supposed to be in.
+[[contract.observation]]
+id = "trilium-serves"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["/usr/src/app/main.cjs"]
+cwd = "."
+guest_port = 8080
+runtimes = { "oci.image" = "docker.io/triliumnext/trilium@sha256:1d8492b82e461f9d8cba1acab2bf89d0182821318a1fc1277656e688a6fb4ee4", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/usr/local/bin/node", "oci.memory_bytes" = "1073741824", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+
+[derivation.env]
+TRILIUM_DATA_DIR = "/home/node/trilium-data"
+TRILIUM_HOST = "0.0.0.0"
+TRILIUM_PORT = "8080"
+
+[effects]
+default = "pure"

@@ -1,0 +1,1624 @@
+//! Scheduler/compiler tests only; real provider/Coordinator gates are separate.
+use ato_formation::{
+    authoring::{BindingContext, bind},
+    capsule_toml::parse_capsule_toml,
+    exploration::{ExplorationPolicy, FormationConfig},
+    proposal::*,
+    requirements::{ExecutionPhase, ExecutionRequirements, NetworkRequirement},
+    search::*,
+};
+use serde_json::json;
+use std::collections::BTreeMap;
+
+fn state() -> SearchStateV1 {
+    let mut s: SearchStateV1 =
+        serde_json::from_str(include_str!("fixtures/search-state/d1-failed.json")).unwrap();
+    let source = format!("sha256:{}", "a".repeat(64));
+    let (k, _) = bind(
+        &parse_capsule_toml(include_str!("fixtures/proposal-python.toml")).unwrap(),
+        &BindingContext {
+            source_closure_ref: &source,
+        },
+    )
+    .unwrap();
+    s.frozen.base_contract_ref = k.contract_ref().unwrap();
+    s.frozen.contract_ref = s.frozen.base_contract_ref.clone();
+    s.frozen.base_contract = k;
+    s.frozen.candidates.clear();
+    s.frozen.initial_source = Some(InitialSource {
+        closure_ref: source.clone(),
+        archive_digest: source,
+    });
+    s.attempts.clear();
+    s.source_archive_bytes = Some(64);
+    s.budget = BudgetCounters::default();
+    s.frozen.policy.exploration = Some(ExplorationPolicy {
+        formation: FormationConfig::default(),
+        ceiling: ExecutionRequirements::default(),
+        max_provider_calls: 3,
+        max_inspections: 3,
+        reasoning: None,
+        max_provider_cost_usd_micros: 100_000,
+        max_provider_input_tokens: 90_000,
+        max_provider_output_tokens: 6144,
+        max_network_transfer_bytes: 1048576,
+        max_network_transfer_bytes_per_attempt: 524288,
+        provider_configuration_ref: None,
+        decision_provider_configuration_ref: None,
+        provider_budget_binding_ref: None,
+    });
+    s.frozen.policy.proposal = Some(ProposalAuthorization {
+        execution_plan: Some(PlanAuthorization {
+            runtime_port_operations: false,
+            source_oci: None,
+            files: BTreeMap::from([(
+                "server".into(),
+                VerifiedSourceFile {
+                    path: "server.py".into(),
+                    digest: format!("sha256:{}", "b".repeat(64)),
+                },
+            )]),
+            toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
+        }),
+        modifiable_derivation_refs: vec![],
+        source_domain: SourceDomain {
+            entrypoints: BTreeMap::new(),
+            modules: BTreeMap::new(),
+        },
+        python_http_process: None,
+        node_static_workspace: None,
+        policy: CandidateProducerPolicy {
+            max_proposal_rounds: 1,
+            max_proposals: 1,
+            timeout_ms: 5000,
+            allow_source_text: false,
+            max_source_bytes: 0,
+        },
+    });
+    s
+}
+
+fn plan() -> serde_json::Value {
+    json!({"runtime":{"name":"python","version":"3.12.7"},
+        "entrypoint":{"file_id":"server","digest":format!("sha256:{}","b".repeat(64))},
+        "argv":[],"cwd":".","guest_port":8000,"dependencies":[],"build_scripts":[],
+        "requirements":{},"basis":[],"unknowns":[]})
+}
+
+fn compile(s: &SearchStateV1, plan: serde_json::Value) -> Vec<ProposalOutcome> {
+    let bytes = serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,"proposals":[
+        {"kind":"propose_derivation","operations":[{"operation":"execution_plan@1","plan":plan}]}]})).unwrap();
+    let outcomes = CandidateRegistry::new(&s.frozen)
+        .unwrap()
+        .validate_batch(
+            &BTreeMap::new(),
+            &ProducerOutput::new(
+                bytes,
+                ProducerProvenance {
+                    provider: "fixed".into(),
+                    model: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    for outcome in &outcomes {
+        if let ProposalOutcome::Admitted(candidate) = outcome {
+            validate_candidate_scope(&s.frozen, &[candidate.candidate().clone()]).unwrap();
+        }
+    }
+    outcomes
+}
+
+#[test]
+fn structural_candidate_scope_rejects_unbound_native_facts_and_metadata_changes() {
+    let s = state();
+    let outcomes = compile(&s, plan());
+    let ProposalOutcome::Admitted(c) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    let mut forged = c.candidate().clone();
+    forged.requirements.push(Requirement {
+        fact: "toolchain.gcc.99.0.0".into(),
+        one_of: Some(vec!["present".into()]),
+    });
+    assert!(validate_candidate_scope(&s.frozen, &[forged]).is_err());
+    let mut forged = c.candidate().clone();
+    forged.effects = "privileged".into();
+    assert!(validate_candidate_scope(&s.frozen, &[forged]).is_err());
+}
+
+#[test]
+fn legacy_catalog_empty_does_not_prevent_a_typed_execution_plan() {
+    let s = state();
+    assert!(matches!(
+        s.frozen
+            .policy
+            .proposal
+            .as_ref()
+            .unwrap()
+            .catalog()
+            .unwrap()
+            .operations[0],
+        OperationDomain::ExecutionPlan { .. }
+    ));
+    let outcomes = compile(&s, plan());
+    let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(
+        candidate.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_eq!(
+        candidate.compiled().derivation.steps[0].argv[1],
+        "--version"
+    );
+    assert_eq!(
+        candidate.compiled().derivation.steps[1].argv[1],
+        "/app/server.py"
+    );
+}
+
+#[test]
+fn unsupported_toolchain_is_a_validator_diagnostic() {
+    let mut p = plan();
+    p["runtime"]["name"] = json!("go");
+    assert!(
+        matches!(&compile(&state(),p)[0],ProposalOutcome::Rejected(e) if e.0=="unsupported_toolchain")
+    );
+}
+
+#[test]
+fn stale_source_digest_is_not_lowered_to_a_process() {
+    let mut p = plan();
+    p["entrypoint"]["digest"] = json!(format!("sha256:{}", "c".repeat(64)));
+    assert!(
+        matches!(&compile(&state(),p)[0],ProposalOutcome::Rejected(e) if e.0=="proposal_source_digest_mismatch")
+    );
+}
+
+#[test]
+fn an_out_of_ceiling_requirement_is_saved_as_a_specific_rejection() {
+    let mut p = plan();
+    p["requirements"] = json!({"network":[{"phase":"dependencies","host":"pypi.org","port":443}]});
+    assert!(
+        matches!(&compile(&state(),p)[0],ProposalOutcome::Rejected(e) if e.0=="exploration_authority_exceeded")
+    );
+}
+
+#[test]
+fn default_three_failed_provider_rounds_exhaust_without_reset_on_restart() {
+    let mut s = state();
+    let frozen = s.frozen.canonical_bytes().unwrap();
+    for round in 0..3 {
+        let now = 100 + round * 6000;
+        let SearchAction::OpenProposalRound {
+            opened_at_ms,
+            expires_at_ms,
+        } = decide_next(&s, &[], now).unwrap()
+        else {
+            panic!("round {round}")
+        };
+        if let Some(previous) = s.proposal_round.take() {
+            s.proposal_history.push(previous);
+        }
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms,
+            expires_at_ms,
+            outcome: Some(ProposalRoundOutcome::ProviderError),
+            candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
+            inspection_requests: vec![],
+        });
+        s = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+        assert_eq!(s.frozen.canonical_bytes().unwrap(), frozen);
+    }
+    assert_eq!(
+        decide_next(&s, &[], 19_000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::RoundsExhausted
+        }
+    );
+    assert_eq!(s.proposal_history.len(), 2);
+}
+
+#[test]
+fn configured_one_round_keeps_its_effective_limit_after_serialization() {
+    let mut s = state();
+    s.frozen
+        .policy
+        .exploration
+        .as_mut()
+        .unwrap()
+        .formation
+        .max_rounds = std::num::NonZeroU32::MIN;
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 100,
+        expires_at_ms: 5100,
+        outcome: Some(ProposalRoundOutcome::Timeout),
+        candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec![],
+        inspection_requests: vec![],
+    });
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&restored, &[], 6000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::RoundsExhausted
+        }
+    );
+}
+
+#[test]
+fn independent_provider_cap_stops_before_receiver_refuses_another_round() {
+    let mut s = state();
+    let policy = s.frozen.policy.exploration.as_mut().unwrap();
+    policy.formation.max_rounds = std::num::NonZeroU32::new(5).unwrap();
+    policy.max_provider_calls = 4;
+    for index in 0..4 {
+        let now = 100 + index * 6000;
+        let SearchAction::OpenProposalRound {
+            opened_at_ms,
+            expires_at_ms,
+        } = decide_next(&s, &[], now).unwrap()
+        else {
+            panic!("{index}")
+        };
+        if let Some(previous) = s.proposal_round.take() {
+            s.proposal_history.push(previous);
+        }
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms,
+            expires_at_ms,
+            outcome: None,
+            candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
+            inspection_requests: vec![],
+        });
+        assert!(matches!(
+            decide_next(&s, &[], now + 1).unwrap(),
+            SearchAction::WaitForProposalRound { .. }
+        ));
+        s.proposal_round.as_mut().unwrap().outcome = Some(ProposalRoundOutcome::ProviderError);
+        s = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    }
+    assert_eq!(
+        decide_next(&s, &[], 25000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::BudgetExhausted
+        }
+    );
+    assert_eq!(s.proposal_history.len() + 1, 4);
+    assert_eq!(
+        s.frozen
+            .policy
+            .exploration
+            .unwrap()
+            .formation
+            .max_rounds
+            .get(),
+        5
+    );
+}
+
+#[test]
+fn ceiling_changes_are_separate_from_frozen_contract() {
+    let mut s = state();
+    let before = s.frozen.canonical_bytes().unwrap();
+    let k = s.frozen.contract_ref.clone();
+    s.frozen
+        .policy
+        .exploration
+        .as_mut()
+        .unwrap()
+        .ceiling
+        .network
+        .push(NetworkRequirement {
+            phase: ExecutionPhase::Dependencies,
+            host: "pypi.org".into(),
+            port: 443,
+        });
+    assert_ne!(s.frozen.canonical_bytes().unwrap(), before);
+    assert_eq!(s.frozen.contract_ref, k);
+}
+
+#[test]
+fn module_state_and_public_environment_are_canonical_and_source_bound() {
+    let mut s = state();
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .files
+        .get_mut("server")
+        .unwrap()
+        .path = "demo/__main__.py".into();
+    let mut p = plan();
+    p["module"] = json!("demo");
+    p["environment"] = json!({"HOME":"/data"});
+    p["state"] = json!([{"id":"app.data","mount":"/data","access":"read-write"}]);
+    let out = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(candidate) = &out[0] else {
+        panic!("{out:?}");
+    };
+    assert_eq!(candidate.compiled().derivation.state[0].mount, "/data");
+    assert_eq!(
+        candidate.compiled().derivation.steps.last().unwrap().argv[1..],
+        ["-m", "demo"]
+    );
+    p["module"] = json!("other");
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("proposal_module_source_mismatch"))
+    ));
+}
+
+#[test]
+fn state_cannot_mask_shim_system_or_policy_and_env_cannot_inject_into_owner() {
+    let s = state();
+    for path in [
+        "/",
+        "/app",
+        "/.ato/ingress",
+        "/etc",
+        "/opt/ato/toolchains",
+        "/data/../etc",
+    ] {
+        let mut p = plan();
+        p["state"] = json!([{"id":"app.data","mount":path,"access":"read-write"}]);
+        assert!(matches!(
+            &compile(&s, p)[0],
+            ProposalOutcome::Rejected(ProposalError("execution_plan_bounds"))
+        ));
+    }
+    for key in [
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "ATO_RUN_TOKEN",
+        "HTTP_PROXY",
+        "API_SECRET",
+        "NODE_OPTIONS",
+    ] {
+        let mut p = plan();
+        p["environment"] = json!({key: "ignored"});
+        assert!(matches!(
+            &compile(&s, p)[0],
+            ProposalOutcome::Rejected(ProposalError("execution_plan_bounds"))
+        ));
+    }
+}
+
+#[test]
+fn bounded_inspection_is_validated_and_consumed_without_authorizing_a_d() {
+    let mut s = state();
+    let policy = &mut s.frozen.policy.proposal.as_mut().unwrap().policy;
+    policy.allow_source_text = true;
+    policy.max_source_bytes = 16384;
+    let source = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
+    let batch = serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,"proposals":[{"kind":"inspect_source","sources":[source]}]})).unwrap();
+    let output = ProducerOutput::new(
+        batch,
+        ProducerProvenance {
+            provider: "fixed".into(),
+            model: None,
+        },
+    )
+    .unwrap();
+    let mut registry = CandidateRegistry::new(&s.frozen)
+        .unwrap()
+        .with_inspection_budget(1)
+        .unwrap();
+    assert!(
+        matches!(&registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0], ProposalOutcome::InspectionRequested(sources) if sources.len() == 1)
+    );
+    assert!(registry.generated().is_empty());
+    assert!(matches!(
+        &registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0],
+        ProposalOutcome::Rejected(ProposalError("inspection_budget_exhausted"))
+    ));
+}
+
+#[test]
+fn public_catalog_is_bounded_and_does_not_export_the_path_map() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    for n in 0..100 {
+        auth.files.insert(
+            format!("file{n}"),
+            VerifiedSourceFile {
+                path: format!("nested/path/{n}.py"),
+                digest: format!("sha256:{}", "b".repeat(64)),
+            },
+        );
+    }
+    let catalog = s
+        .frozen
+        .policy
+        .proposal
+        .as_ref()
+        .unwrap()
+        .catalog()
+        .unwrap();
+    let OperationDomain::ExecutionPlan { sources, .. } = &catalog.operations[0] else {
+        panic!()
+    };
+    assert_eq!(sources.len(), 32);
+    assert_eq!(sources[0].reference.file_id, "server");
+    let bytes = serde_json::to_string(&catalog).unwrap();
+    assert!(!bytes.contains("nested/path"));
+    assert!(!bytes.contains("server.py"));
+    let restored: OperationCatalog = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(restored, catalog);
+}
+
+#[test]
+fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.get_mut("server").unwrap().path = "Dockerfile".into();
+    auth.toolchains.insert("oci".into(), "1.0.0".into());
+    auth.source_oci=Some(serde_json::from_value(json!({"schema":"ato.source-oci-recipe/1","dockerfile":"Dockerfile","platform":"linux/arm64","base_images":[],
+        "build":{"memory_bytes":536870912,"cpu_limit_millis":1000,"pids_limit":128},"build_disk_bytes":536870912,
+        "runtime":{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":128},"build_timeout_seconds":60,"max_archive_bytes":1048576})).unwrap());
+    let mut p = plan();
+    p["runtime"] = json!({"name":"oci","version":"1.0.0"});
+    let outcomes = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(c) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(c.compiled().derivation.steps.len(), 1);
+    assert!(c.compiled().derivation.steps[0].argv.is_empty());
+    assert!(c.compiled().derivation.source_oci.is_some());
+    assert_eq!(c.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let binding = json!({"name":"JWT_SECRET","kind":"signing_secret","purpose":"Sign local sessions","resource":"session.signing","operation":"execute","phase":"runtime","secret":true,"temporary":true});
+    let mut bound = p.clone();
+    bound["variable_bindings"] = json!([binding]);
+    let admitted = compile(&s, bound.clone());
+    let ProposalOutcome::Admitted(variable_d) = &admitted[0] else {
+        panic!("{admitted:?}")
+    };
+    assert_eq!(
+        variable_d.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_eq!(variable_d.compiled().derivation.variable_bindings.len(), 1);
+    bound["variable_bindings"][0]["phase"] = json!("build");
+    assert!(matches!(
+        &compile(&s, bound)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_source_oci_variable_phase"))
+    ));
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .files
+        .get_mut("server")
+        .unwrap()
+        .path = "container/Dockerfile".into();
+    let selected = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(selected) = &selected[0] else {
+        panic!("{selected:?}")
+    };
+    assert_eq!(
+        selected
+            .compiled()
+            .derivation
+            .source_oci
+            .as_ref()
+            .unwrap()
+            .dockerfile,
+        "container/Dockerfile"
+    );
+    assert_eq!(
+        selected.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_ne!(
+        selected.compiled().derivation_ref,
+        c.compiled().derivation_ref
+    );
+    s.frozen.policy.proposal.as_mut().unwrap().execution_plan.as_mut().unwrap().source_oci.as_mut().unwrap().base_images=vec![serde_json::from_value(json!({"reference":"example/service:1","pinned_digest":format!("sha256:{}","e".repeat(64))})).unwrap()];
+    p["oci_image"] = json!(format!("example/service:1@sha256:{}", "e".repeat(64)));
+    let image = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(image) = &image[0] else {
+        panic!("{image:?}")
+    };
+    assert_eq!(
+        image.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert!(image.compiled().derivation.source_oci.is_none());
+    assert_eq!(
+        image.compiled().derivation.runtimes["oci.image"],
+        p["oci_image"].as_str().unwrap()
+    );
+    assert_eq!(
+        image
+            .candidate()
+            .requirements
+            .iter()
+            .map(|r| r.fact.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            "runtime.oci".to_owned(),
+            format!("formation.oci.image.{}", "e".repeat(64))
+        ]
+    );
+    p["oci_image"] = json!("example/service:latest");
+    assert!(matches!(
+        compile(&s, p.clone())[0],
+        ProposalOutcome::Rejected(_)
+    ));
+    p["argv"] = json!(["sh", "-c", "echo arbitrary"]);
+    assert!(matches!(compile(&s, p)[0], ProposalOutcome::Rejected(_)));
+}
+
+#[test]
+fn reusable_static_preset_authoring_roundtrips_without_changing_d_or_k() {
+    use ato_formation::{
+        capsule_toml::render_capsule_toml,
+        preset::{AppPreset, synthesize_authoring},
+    };
+    let closure = format!("sha256:{}", "a".repeat(64));
+    for preset in [AppPreset::StaticFiles, AppPreset::SingleHtml] {
+        let before = synthesize_authoring(preset);
+        let rendered = render_capsule_toml(&before).unwrap();
+        let restored = parse_capsule_toml(&rendered).unwrap();
+        assert_eq!(
+            bind(
+                &before,
+                &BindingContext {
+                    source_closure_ref: &closure
+                }
+            )
+            .unwrap(),
+            bind(
+                &restored,
+                &BindingContext {
+                    source_closure_ref: &closure
+                }
+            )
+            .unwrap()
+        );
+    }
+    assert!(render_capsule_toml(&synthesize_authoring(AppPreset::NodeStatic)).is_err());
+}
+
+#[test]
+fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
+    let mut s = state();
+    let domain = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    domain.toolchains = BTreeMap::from([
+        ("node".into(), "22.23.4".into()),
+        ("npm".into(), "10.9.2".into()),
+    ]);
+    domain.files.get_mut("server").unwrap().path = "package.json".into();
+    let mut p = plan();
+    p["runtime"] = json!({"name":"node","version":"22.23.4"});
+    p["static_output"] = json!("build");
+    let outcomes = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(
+        candidate.compiled().base_contract_ref,
+        s.frozen.contract_ref
+    );
+    let d = &candidate.compiled().derivation;
+    assert_eq!(d.steps.last().unwrap().protocol, "ato.browser@1");
+    assert_eq!(d.steps.last().unwrap().root.as_deref(), Some("build"));
+    assert!(d.steps.last().unwrap().argv.is_empty());
+    assert_eq!(d.ports[0].guest_port, None);
+    assert_eq!(
+        candidate.candidate().requirements,
+        execution_requirements(false, true)
+    );
+    let expected_d = candidate.compiled().derivation_ref.clone();
+    let mut configured = p.clone();
+    configured["variable_bindings"] = json!([{"name":"CLIENT_ORIGIN","kind":"configuration","purpose":"Public client build configuration","resource":"client.configuration","operation":"read","phase":"build","secret":false,"artifact_embedding":true}]);
+    let binding = compile(&s, configured.clone());
+    let ProposalOutcome::Admitted(binding) = &binding[0] else {
+        panic!("{binding:?}")
+    };
+    assert_eq!(binding.compiled().base_contract_ref, s.frozen.contract_ref);
+    configured["variable_bindings"][0]["phase"] = json!("runtime");
+    assert!(matches!(
+        &compile(&s, configured)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
+    ));
+    p.as_object_mut().unwrap().remove("guest_port");
+    let without_port = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(no_port) = &without_port[0] else {
+        panic!("{without_port:?}")
+    };
+    assert_eq!(no_port.compiled().derivation_ref, expected_d);
+    for invalid in ["/etc", "../outside", "/app/build"] {
+        p["static_output"] = json!(invalid);
+        assert!(matches!(
+            compile(&s, p.clone())[0],
+            ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
+        ));
+    }
+    p["static_output"] = json!("build");
+    p["argv"] = json!(["--arbitrary"]);
+    assert!(matches!(
+        compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
+    ));
+}
+
+#[test]
+fn a_process_plan_without_an_explicit_guest_port_is_rejected() {
+    let mut p = plan();
+    p.as_object_mut().unwrap().remove("guest_port");
+    assert!(
+        matches!(&compile(&state(),p)[0],ProposalOutcome::Rejected(e) if e.0=="execution_plan_bounds")
+    );
+}
+
+#[test]
+fn omitted_unknowns_diagnostic_does_not_change_canonical_execution_or_requirements() {
+    let s = state();
+    let mut p = plan();
+    let original = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(before) = &original[0] else {
+        panic!()
+    };
+    p.as_object_mut().unwrap().remove("unknowns");
+    let normalized = compile(&s, p);
+    let ProposalOutcome::Admitted(after) = &normalized[0] else {
+        panic!("{normalized:?}")
+    };
+    assert_eq!(before.compiled().derivation, after.compiled().derivation);
+    assert_eq!(
+        before.compiled().base_contract_ref,
+        after.compiled().base_contract_ref
+    );
+}
+
+#[test]
+fn unsupported_reason_is_bounded_and_legacy_declines_still_parse() {
+    let s = state();
+    for (reason, rejected) in [
+        (None, false),
+        (Some("unsupported_toolchain"), false),
+        (Some("free form secret"), true),
+    ] {
+        let mut proposal = json!({"kind":"unsupported"});
+        if let Some(reason) = reason {
+            proposal["reason"] = json!(reason);
+        }
+        let raw =
+            serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,"proposals":[proposal]})).unwrap();
+        let output = ProducerOutput::new(
+            raw,
+            ProducerProvenance {
+                provider: "fixed".into(),
+                model: None,
+            },
+        )
+        .unwrap();
+        let outcomes = CandidateRegistry::new(&s.frozen)
+            .unwrap()
+            .validate_batch(&BTreeMap::new(), &output)
+            .unwrap();
+        assert_eq!(
+            matches!(outcomes[0], ProposalOutcome::Rejected(_)),
+            rejected
+        );
+    }
+}
+
+#[test]
+fn repeated_empty_declines_stop_without_using_the_third_round() {
+    let mut s = state();
+    for round in 0..2 {
+        let SearchAction::OpenProposalRound {
+            opened_at_ms,
+            expires_at_ms,
+        } = decide_next(&s, &[], 100 + round * 6000).unwrap()
+        else {
+            panic!("unexpected action")
+        };
+        if let Some(old) = s.proposal_round.take() {
+            s.proposal_history.push(old);
+        }
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms,
+            expires_at_ms,
+            outcome: Some(ProposalRoundOutcome::Completed),
+            candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
+            inspection_requests: vec![],
+        });
+    }
+    let resumed: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&resumed, &[], 13000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::NoProgress
+        }
+    );
+    assert_eq!(
+        resumed
+            .frozen
+            .policy
+            .exploration
+            .unwrap()
+            .formation
+            .max_rounds
+            .get(),
+        3
+    );
+}
+
+#[test]
+fn a_generated_d_waits_for_placement_without_spending_another_round_after_restart() {
+    let mut s = state();
+    let outcomes = compile(&s, plan());
+    let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
+        panic!()
+    };
+    let d = candidate.candidate().derivation_ref.clone();
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 100,
+        expires_at_ms: 5100,
+        outcome: Some(ProposalRoundOutcome::Completed),
+        candidates: vec![candidate.candidate().clone()],
+        derivations: vec![candidate.compiled().derivation.clone()],
+        diagnostics: vec![],
+        inspection_requests: vec![],
+    });
+    let frozen = s.frozen.canonical_bytes().unwrap();
+    let resumed: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&resumed, &[], 6000).unwrap(),
+        SearchAction::WaitForRuntime {
+            derivation_ref: d.clone()
+        }
+    );
+    assert_eq!(resumed.frozen.canonical_bytes().unwrap(), frozen);
+    let placement = Placement {
+        candidate_id: "candidate".into(),
+        derivation_ref: d.clone(),
+        runtime_id: "runtime".into(),
+        environment_id: "native".into(),
+        admissible: true,
+        transfer_bytes: 64,
+    };
+    assert!(matches!(
+        decide_next(&resumed, std::slice::from_ref(&placement), 7000).unwrap(),
+        SearchAction::IssueAttempt { .. }
+    ));
+    let refused = Placement {
+        admissible: false,
+        ..placement
+    };
+    assert!(matches!(
+        decide_next(&resumed, &[refused], 7000).unwrap(),
+        SearchAction::OpenProposalRound { .. }
+    ));
+    assert_eq!(
+        resumed.proposal_history.len() + usize::from(resumed.proposal_round.is_some()),
+        1
+    );
+}
+
+#[test]
+fn shared_inspection_and_generated_d_share_one_frozen_round() {
+    use ato_formation::exploration::ReasoningLimits;
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(ReasoningLimits {
+        goal: None,
+        round_timeout_ms: 60_000,
+        inspection_timeout_ms: 20_000,
+        inspection_source_bytes: 16384,
+    });
+    let auth = s.frozen.policy.proposal.as_mut().unwrap();
+    auth.policy.allow_source_text = true;
+    auth.policy.max_source_bytes = 16384;
+    let reference = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
+    let bytes=serde_json::to_vec(&json!({"schema":REASONING_BATCH_SCHEMA,"inspection_history":[reference],
+        "proposals":[{"kind":"propose_derivation","operations":[{"operation":"execution_plan@1","plan":plan()}]}]})).unwrap();
+    let output = ProducerOutput::new(
+        bytes,
+        ProducerProvenance {
+            provider: "fixed".into(),
+            model: None,
+        },
+    )
+    .unwrap();
+    let outcomes = CandidateRegistry::new(&s.frozen)
+        .unwrap()
+        .validate_batch(&BTreeMap::new(), &output)
+        .unwrap();
+    assert!(matches!(&outcomes[0],ProposalOutcome::InspectionRequested(refs) if refs.len()==1));
+    let ProposalOutcome::Admitted(d) = &outcomes[1] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.contract_ref);
+    let SearchAction::OpenProposalRound {
+        opened_at_ms,
+        expires_at_ms,
+    } = decide_next(&s, &[], 100).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(expires_at_ms, (opened_at_ms + 60_000).min(s.deadline_ms));
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms,
+        expires_at_ms,
+        outcome: Some(ProposalRoundOutcome::Completed),
+        candidates: vec![d.candidate().clone()],
+        derivations: vec![d.compiled().derivation.clone()],
+        diagnostics: vec![],
+        inspection_requests: vec![serde_json::from_value(reference).unwrap()],
+    });
+    s.validate().unwrap();
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(restored.proposal_history.len(), 0);
+    assert_eq!(restored.proposal_round, s.proposal_round);
+    assert_eq!(
+        restored
+            .frozen
+            .policy
+            .exploration
+            .unwrap()
+            .formation
+            .max_rounds
+            .get(),
+        3
+    );
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = None;
+    assert!(
+        CandidateRegistry::new(&s.frozen)
+            .unwrap()
+            .validate_batch(&BTreeMap::new(), &output)
+            .is_err()
+    );
+}
+
+#[test]
+fn reasoning_limits_are_positive_bounded_and_frozen() {
+    use ato_formation::exploration::ReasoningLimits;
+    let mut p = state().frozen.policy.exploration.unwrap();
+    for (round, inspection, bytes) in [
+        (0, 1, 1),
+        (900001, 1, 1),
+        (100, 101, 1),
+        (100, 1, 0),
+        (100, 1, 65537),
+    ] {
+        p.reasoning = Some(ReasoningLimits {
+            goal: None,
+            round_timeout_ms: round,
+            inspection_timeout_ms: inspection,
+            inspection_source_bytes: bytes,
+        });
+        assert_eq!(p.validate().unwrap_err().0, "reasoning_budget_invalid");
+    }
+    p.reasoning = None;
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(!json.contains("reasoning"));
+}
+
+#[test]
+fn shared_decline_after_inspection_stops_without_another_round() {
+    use ato_formation::exploration::ReasoningLimits;
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(ReasoningLimits {
+        goal: None,
+        round_timeout_ms: 600_000,
+        inspection_timeout_ms: 300_000,
+        inspection_source_bytes: 32768,
+    });
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 0,
+        expires_at_ms: s.deadline_ms,
+        outcome: Some(ProposalRoundOutcome::Completed),
+        candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec!["source_inspection_requested".into()],
+        inspection_requests: vec![SourceReference {
+            file_id: "server".into(),
+            digest: format!("sha256:{}", "b".repeat(64)),
+        }],
+    });
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .policy
+        .allow_source_text = true;
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .policy
+        .max_source_bytes = 16384;
+    assert!(matches!(
+        decide_next(&s, &[], 1).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::NoProgress,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn python_source_requirements_resolve_hash_and_install_offline_without_changing_k() {
+    let mut s = state();
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .files
+        .insert(
+            "requirements".into(),
+            VerifiedSourceFile {
+                path: "requirements.txt".into(),
+                digest: format!("sha256:{}", "c".repeat(64)),
+            },
+        );
+    let mut p = plan();
+    p["dependencies"] = json!([{"kind":"python_resolve_requirements", "requirements":{
+        "file_id":"requirements", "digest":format!("sha256:{}", "c".repeat(64))}}]);
+    let outcome = compile(&s, p);
+    let ProposalOutcome::Admitted(d) = &outcome[0] else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.contract_ref);
+    let steps = &d.compiled().derivation.steps;
+    assert_eq!(steps.len(), 5);
+    assert!(steps[1].argv.contains(&"download".into()));
+    assert_eq!(
+        steps[1].network,
+        ato_formation::authoring::StepNetwork::ScopedDependencies
+    );
+    assert!(
+        steps[2]
+            .argv
+            .iter()
+            .any(|a| a.contains("hashlib.file_digest"))
+    );
+    assert!(steps[3].argv.contains(&"--require-hashes".into()));
+    assert!(steps[3].argv.contains(&"--no-index".into()));
+    assert!(steps[2].network.is_denied() && steps[3].network.is_denied());
+    let config: FormationConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(config.max_rounds.get(), 3);
+    assert_eq!(config.max_retries, 3);
+}
+
+#[test]
+fn sdist_build_keeps_k_and_requires_frozen_build_inputs_and_toolchains() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.insert(
+        "requirements".into(),
+        VerifiedSourceFile {
+            path: "requirements.txt".into(),
+            digest: format!("sha256:{}", "c".repeat(64)),
+        },
+    );
+    auth.toolchains.insert("gcc".into(), "13.3.0".into());
+    let mut p = plan();
+    p["dependencies"] = json!([{"kind":"python_build_requirements","requirements":{"file_id":"requirements","digest":format!("sha256:{}","c".repeat(64))},
+        "build_dependencies":[{"name":"setuptools","version":"75.1.0"},{"name":"wheel","version":"0.44.0"}],
+        "toolchains":[{"name":"gcc","version":"13.3.0"}],"network":"denied"}]);
+    let result = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &result[0] else {
+        panic!("{result:?}")
+    };
+    let roots = python_build_outputs(&d.compiled().derivation).unwrap();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(
+        roots[0].requirements_ref,
+        format!("sha256:{}", "c".repeat(64))
+    );
+    use ato_formation::build_record::*;
+    let reference = ato_formation::retained::content_ref(b"lineage");
+    let manifest = BuildRecordManifest {
+        schema: BUILD_RECORD_SCHEMA.into(),
+        creation_attempt_id: "record-attempt".into(),
+        contract_ref: s.frozen.contract_ref.clone(),
+        derivation_ref: d.compiled().derivation.derivation_ref().unwrap(),
+        source_closure_ref: s
+            .frozen
+            .initial_source
+            .as_ref()
+            .unwrap()
+            .closure_ref
+            .clone(),
+        roots: vec![EvidenceRoot {
+            path: roots[0].root.clone(),
+            requirements_ref: roots[0].requirements_ref.clone(),
+            plan_ref: roots[0].plan_ref.clone(),
+            provenance_ref: reference.clone(),
+        }],
+        files: vec![EvidenceFile {
+            path: format!("{}/provenance.json", roots[0].root),
+            content_ref: reference.clone(),
+            bytes: 7,
+            chunks: vec![EvidenceChunk {
+                content_ref: reference,
+                bytes: 7,
+            }],
+            package: None,
+            version: None,
+        }],
+    };
+    manifest
+        .match_assignment(
+            &s.frozen.contract_ref,
+            &d.compiled().derivation,
+            &manifest.source_closure_ref,
+            "record-attempt",
+        )
+        .unwrap();
+    assert!(
+        manifest
+            .match_assignment(
+                &s.frozen.contract_ref,
+                &d.compiled().derivation,
+                &manifest.source_closure_ref,
+                "another-attempt"
+            )
+            .is_err()
+    );
+    let mut changed = d.compiled().derivation.clone();
+    changed
+        .steps
+        .retain(|step| !step.argv.iter().any(|arg| arg == "cleanup"));
+    assert!(python_build_outputs(&changed).is_err());
+    assert!(d.compiled().capsule_toml.len() <= 65_536);
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let steps = &d.compiled().derivation.steps;
+    assert_eq!(steps.len(), 10);
+    let build = steps
+        .iter()
+        .find(|s| s.argv.iter().any(|a| a == "build"))
+        .unwrap();
+    assert!(build.network.is_denied());
+    assert!(
+        steps[7].argv.contains(&"--no-index".into())
+            && steps[7].argv.contains(&"--require-hashes".into())
+    );
+    assert!(
+        d.candidate()
+            .requirements
+            .iter()
+            .any(|r| r.fact == "toolchain.gcc.13.3.0")
+    );
+    let current = native_runtime_requirements(&d.compiled().derivation);
+    assert_eq!(
+        current.len(),
+        1,
+        "isolated Python still claims its compiler"
+    );
+    assert_eq!(current[0].one_of, Some(vec!["present".into()]));
+    let mut legacy = d.compiled().derivation.clone();
+    let mut isolated_steps = 0;
+    for step in &mut legacy.steps {
+        if step.argv.get(1).is_some_and(|arg| arg == "-I")
+            && step.argv.get(2).is_some_and(|arg| arg == "-c")
+        {
+            isolated_steps += 1;
+            step.argv.remove(1);
+        }
+    }
+    assert_eq!(isolated_steps, 7);
+    assert_eq!(native_runtime_requirements(&legacy), current);
+    let mut oversized = p.clone();
+    oversized["dependencies"] = json!(vec![p["dependencies"][0].clone(); 4]);
+    assert!(matches!(
+        &compile(&s, oversized)[0],
+        ProposalOutcome::Rejected(ProposalError("proposal_recipe_byte_limit"))
+    ));
+    p["dependencies"][0]["toolchains"][0]["version"] = json!("14.1.0");
+    assert!(matches!(
+        &compile(&s, p.clone())[0],
+        ProposalOutcome::Rejected(ProposalError("native_toolchain_unavailable"))
+    ));
+    p["dependencies"][0]["toolchains"] = json!([]);
+    p["dependencies"][0]["build_dependencies"][0]["version"] = json!("latest");
+    // Python versions use PEP 440 rather than semver, but must remain exact.
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("python_build_dependencies_invalid"))
+    ));
+}
+
+#[test]
+fn source_owned_startup_script_keeps_k_and_cannot_select_an_unbound_manifest() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.insert(
+        "manifest".into(),
+        VerifiedSourceFile {
+            path: "package.json".into(),
+            digest: format!("sha256:{}", "c".repeat(64)),
+        },
+    );
+    auth.toolchains.insert("node".into(), "22.23.4".into());
+    auth.toolchains.insert("npm".into(), "10.9.2".into());
+    let mut p = plan();
+    p["runtime"] = json!({"name":"node","version":"22.23.4"});
+    p["entrypoint"] = json!({"file_id":"manifest","digest":format!("sha256:{}","c".repeat(64))});
+    p["launch_script"] = json!("start");
+    p["argv"] = json!(["--port", "8000"]);
+    let outcome = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &outcome[0] else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.contract_ref);
+    let steps = &d.compiled().derivation.steps;
+    let guard = steps
+        .iter()
+        .find(|s| s.id == "check-launch-script")
+        .unwrap();
+    assert!(guard.network.is_denied());
+    assert!(
+        guard
+            .argv
+            .iter()
+            .any(|a| a.contains("source_launch_manifest_changed"))
+    );
+    assert_eq!(
+        steps.last().unwrap().argv,
+        [
+            "/opt/ato/toolchains/node/22.23.4/bin/npm",
+            "run",
+            "start",
+            "--",
+            "--port",
+            "8000"
+        ]
+    );
+    let mut empty_setup = p.clone();
+    empty_setup["setup_scripts"] = json!([]);
+    let empty = compile(&s, empty_setup);
+    let ProposalOutcome::Admitted(empty) = &empty[0] else {
+        panic!("{empty:?}")
+    };
+    assert_eq!(empty.compiled(), d.compiled());
+
+    let mut prepared = p.clone();
+    prepared["setup_scripts"] = json!(["initialize"]);
+    let compiled = compile(&s, prepared.clone());
+    let ProposalOutcome::Admitted(prepared_d) = &compiled[0] else {
+        panic!("{compiled:?}")
+    };
+    assert_eq!(
+        prepared_d.compiled().base_contract_ref,
+        s.frozen.contract_ref
+    );
+    let serve = prepared_d.compiled().derivation.steps.last().unwrap();
+    assert_eq!(serve.argv.len(), 4);
+    assert!(serve.argv[2].contains("source_runtime_setup_failed"));
+    let spec: serde_json::Value = serde_json::from_str(&serve.argv[3]).unwrap();
+    assert_eq!(spec["setup_scripts"], json!(["initialize"]));
+    assert_eq!(spec["argv"], p["argv"]);
+    assert!(
+        !prepared_d
+            .compiled()
+            .derivation
+            .steps
+            .iter()
+            .any(|step| step.id.starts_with("setup-") || step.id == "check-launch-script")
+    );
+    for names in [
+        json!(["initialize", "initialize"]),
+        json!(["run; shell"]),
+        json!(["a", "b", "c", "d", "e"]),
+    ] {
+        prepared["setup_scripts"] = names;
+        assert!(matches!(
+            &compile(&s, prepared.clone())[0],
+            ProposalOutcome::Rejected(ProposalError("unsupported_setup_scripts"))
+        ));
+    }
+    prepared["setup_scripts"] = json!(["initialize"]);
+    prepared.as_object_mut().unwrap().remove("launch_script");
+    assert!(matches!(
+        &compile(&s, prepared)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_setup_scripts"))
+    ));
+    p["entrypoint"] = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_launch_script"))
+    ));
+}
+
+#[test]
+fn npm_acquisition_is_audited_and_rebuild_requires_a_preceding_frozen_lock() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.get_mut("server").unwrap().path = "server.js".into();
+    for (id, path) in [
+        ("manifest", "package.json"),
+        ("lockfile", "package-lock.json"),
+    ] {
+        auth.files.insert(
+            id.into(),
+            VerifiedSourceFile {
+                path: path.into(),
+                digest: format!("sha256:{}", "c".repeat(64)),
+            },
+        );
+    }
+    auth.toolchains.insert("node".into(), "22.23.4".into());
+    auth.toolchains.insert("npm".into(), "10.9.2".into());
+    auth.toolchains.insert("gcc".into(), "13.3.0".into());
+    auth.toolchains.insert("make".into(), "4.3.0".into());
+    let reference = |id| json!({"file_id":id,"digest":format!("sha256:{}","c".repeat(64))});
+    let mut p = plan();
+    p["runtime"] = json!({"name":"node","version":"22.23.4"});
+    let ci =
+        json!({"kind":"npm_ci","manifest":reference("manifest"),"lockfile":reference("lockfile")});
+    let rebuild = json!({"kind":"npm_rebuild","manifest":reference("manifest"),"lockfile":reference("lockfile"),
+        "packages":["native-dependency"],"root_lifecycle":[],"toolchains":[{"name":"gcc","version":"13.3.0"},{"name":"make","version":"4.3.0"}],"network":"denied"});
+    p["dependencies"] = json!([ci.clone()]);
+    let result = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &result[0] else {
+        panic!("{result:?}")
+    };
+    assert!(
+        d.compiled()
+            .derivation
+            .steps
+            .iter()
+            .any(|s| s.argv.get(3).is_some_and(|a| a == "audit"))
+    );
+    assert!(
+        d.compiled()
+            .derivation
+            .steps
+            .iter()
+            .any(|s| s.argv.contains(&"--ignore-scripts".into()))
+    );
+    p["dependencies"] = json!([ci.clone(), rebuild.clone()]);
+    let result = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(d) = &result[0] else {
+        panic!("{result:?}")
+    };
+    assert_eq!(d.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    let tools = native_runtime_requirements(&d.compiled().derivation);
+    assert_eq!(
+        tools.iter().map(|r| r.fact.as_str()).collect::<Vec<_>>(),
+        ["toolchain.gcc.13.3.0", "toolchain.make.4.3.0"]
+    );
+    let mut expected = execution_requirements(true, true);
+    expected.extend(tools);
+    assert_eq!(d.candidate().requirements, expected);
+    p["dependencies"] = json!([rebuild, ci]);
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("npm_lifecycle_plan_invalid"))
+    ));
+}
+
+#[test]
+fn bindings_change_d_without_changing_k_and_never_carry_values() {
+    let r = serde_json::json!({"name":"JWT_SECRET","kind":"signing_secret","purpose":"Sign local sessions","resource":"session.signing","operation":"execute","phase":"runtime","secret":true,"temporary":true});
+    let req: ato_formation::variables::VariableRequirement =
+        serde_json::from_value(r.clone()).unwrap();
+    assert!(ato_formation::variables::validate(std::slice::from_ref(&req)).is_ok());
+    assert!(
+        ato_formation::variables::validate(&[ato_formation::variables::VariableRequirement {
+            service: Some("external".into()),
+            ..req.clone()
+        }])
+        .is_err()
+    );
+    let source=ato_formation::capsule_toml::parse_capsule_toml("schema='ato.capsule/1'\n[[input]]\nid='workspace'\nuse='ato.workspace@1'\npath='.'\n[[derive.step]]\nid='app'\nuse='ato.process@1'\nop='serve'\nargv=['python','app.py']\n[[port]]\nid='app.http'\nuse='ato.http@1'\nfrom='app'\nguest_port=8080\n[[contract.require]]\nid='health'\nuse='ato.contract.http@1'\nport='app.http'\nmethod='GET'\npath='/'\n[contract.require.expect]\nstatus=200").unwrap();
+    let context = ato_formation::authoring::BindingContext {
+        source_closure_ref: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    };
+    let (k, d) = ato_formation::authoring::bind(&source, &context).unwrap();
+    let mut bound = source.clone();
+    bound.derivation.variable_bindings.push(req);
+    let rendered = ato_formation::capsule_toml::render_capsule_toml(&bound).unwrap();
+    assert_eq!(
+        ato_formation::capsule_toml::parse_capsule_toml(&rendered).unwrap(),
+        bound
+    );
+    let (same_k, new_d) = ato_formation::authoring::bind(&bound, &context).unwrap();
+    assert_eq!(k, same_k);
+    assert_ne!(d.derivation_ref().unwrap(), new_d.derivation_ref().unwrap());
+    assert!(!serde_json::to_string(&new_d).unwrap().contains("value"));
+}
+
+#[test]
+fn shared_provider_infrastructure_failure_preserves_one_round_on_restart() {
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(serde_json::from_value(json!({"round_timeout_ms":600000,"inspection_timeout_ms":30000,"inspection_source_bytes":32768})).unwrap());
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 100,
+        expires_at_ms: 60000,
+        outcome: Some(ProposalRoundOutcome::ProviderError),
+        candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec![],
+        inspection_requests: vec![],
+    });
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&restored, &[], 6000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::InfrastructureFailure
+        }
+    );
+    assert!(restored.proposal_history.is_empty());
+}
+
+#[test]
+fn pre_dispatch_call_exhaustion_is_budget_terminal_and_keeps_the_original_clock() {
+    let mut s = state();
+    s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(
+        serde_json::from_value(json!({
+            "round_timeout_ms":600000,"inspection_timeout_ms":30000,"inspection_source_bytes":32768
+        }))
+        .unwrap(),
+    );
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 100,
+        expires_at_ms: 60000,
+        outcome: Some(ProposalRoundOutcome::ProviderError),
+        candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec!["reasoning_call_budget_exhausted".into()],
+        inspection_requests: vec![],
+    });
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    for now in [6000, 6001] {
+        assert_eq!(
+            decide_next(&restored, &[], now).unwrap(),
+            SearchAction::Finish {
+                reason: Termination::BudgetExhausted
+            }
+        );
+    }
+    assert_eq!(restored.budget, s.budget);
+    assert_eq!(restored.deadline_ms, s.deadline_ms);
+    assert!(restored.proposal_history.is_empty());
+    assert_eq!(
+        decide_next(&restored, &[], 60000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::DeadlineExceeded
+        }
+    );
+}
+
+#[test]
+fn validated_declines_have_distinct_terminal_reasons_without_changing_outcome_rows() {
+    use ato_formation::exploration::ReasoningLimits;
+    for (reason, terminal, evidence) in [
+        (
+            "unsupported_toolchain",
+            Termination::UnsupportedCapability,
+            json!([]),
+        ),
+        ("needs_input", Termination::NeedsInput, json!([])),
+        (
+            "runtime_unavailable",
+            Termination::InfrastructureFailure,
+            json!([]),
+        ),
+        (
+            "source_broken",
+            Termination::SourceBroken,
+            json!([{"code":"source_change_required","detail":"the referenced entrypoint is missing"}]),
+        ),
+        ("no_progress", Termination::NoProgress, json!([])),
+    ] {
+        let mut s = state();
+        s.frozen.policy.exploration.as_mut().unwrap().reasoning = Some(ReasoningLimits {
+            goal: None,
+            round_timeout_ms: 600000,
+            inspection_timeout_ms: 30000,
+            inspection_source_bytes: 32768,
+        });
+        let output = ProducerOutput::new(
+            serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,
+            "proposals":[{"kind":"unsupported","reason":reason,"evidence":evidence}]}))
+            .unwrap(),
+            ProducerProvenance {
+                provider: "fixed".into(),
+                model: None,
+            },
+        )
+        .unwrap();
+        let mut registry = CandidateRegistry::new(&s.frozen).unwrap();
+        assert!(matches!(
+            registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0],
+            ProposalOutcome::Unsupported
+        ));
+        let diagnostics = registry
+            .decline_reasons()
+            .iter()
+            .map(|r| format!("decline_{r}"))
+            .collect();
+        drop(registry);
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms: 100,
+            expires_at_ms: 60000,
+            outcome: Some(ProposalRoundOutcome::Completed),
+            candidates: vec![],
+            derivations: vec![],
+            diagnostics,
+            inspection_requests: vec![],
+        });
+        let restored: SearchStateV1 =
+            serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+        assert_eq!(
+            decide_next(&restored, &[], 6000).unwrap(),
+            SearchAction::Finish { reason: terminal }
+        );
+    }
+}
+
+#[test]
+fn deadline_is_distinct_from_budget_and_never_extends_on_resume() {
+    let s = state();
+    let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&restored, &[], s.deadline_ms).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::DeadlineExceeded
+        }
+    );
+    assert_eq!(restored.deadline_ms, s.deadline_ms);
+    let mut exhausted = state();
+    exhausted.budget.attempts_used = exhausted.frozen.policy.budget.max_attempts;
+    assert_eq!(
+        decide_next(&exhausted, &[], 100).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::BudgetExhausted
+        }
+    );
+}
+
+#[test]
+fn invalid_source_broken_evidence_cannot_set_a_decline_reason() {
+    let s = state();
+    let output = ProducerOutput::new(
+        serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,
+        "proposals":[{"kind":"unsupported","reason":"source_broken"}]}))
+        .unwrap(),
+        ProducerProvenance {
+            provider: "fixed".into(),
+            model: None,
+        },
+    )
+    .unwrap();
+    let mut registry = CandidateRegistry::new(&s.frozen).unwrap();
+    assert!(matches!(
+        registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0],
+        ProposalOutcome::Rejected(_)
+    ));
+    assert!(registry.decline_reasons().is_empty());
+}
+
+#[test]
+fn runtime_port_proposal_requires_bound_catalog_source_grants_and_adds_only_d() {
+    let mut s = state();
+    let mut p = plan();
+    let reference = p["entrypoint"].clone();
+    p["variable_bindings"] = json!([{"name":"OWNER_INPUT","kind":"configuration","purpose":"source-declared local input",
+        "resource":"app.http","operation":"execute","phase":"runtime","secret":false,"artifact_embedding":false}]);
+    p["runtime_port_operations"] = json!([{"operation":{"port":"app.http","request":{"method":"POST","path":"/source/owner","json_bindings":{"password":"OWNER_INPUT"}},
+        "accepted_statuses":[201],"when":{"path":"/","statuses":[302]}},"basis":reference}]);
+    p["requirements"] = json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"bind"},
+        {"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"execute"}]});
+    p["basis"] = json!([{"source":p["entrypoint"],"reason":"source-declared local interaction"}]);
+    s.frozen.policy.exploration.as_mut().unwrap().ceiling =
+        serde_json::from_value(p["requirements"].clone()).unwrap();
+    assert!(
+        matches!(&compile(&s,p.clone())[0],ProposalOutcome::Rejected(e) if e.0=="runtime_port_operations_unbound")
+    );
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .runtime_port_operations = true;
+    let outcomes = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(
+        candidate.compiled().base_contract_ref,
+        s.frozen.base_contract_ref
+    );
+    assert_eq!(
+        candidate
+            .compiled()
+            .derivation
+            .runtime_port_operations
+            .len(),
+        1
+    );
+    assert!(candidate.candidate().requirements.iter().any(|r| r.fact
+        == ato_formation::port_operations::RUNTIME_CAPABILITY
+        && r.one_of == Some(vec!["true".into()])));
+    p["runtime_port_operations"][0]["basis"]["file_id"] = json!("never-inspected");
+    assert!(
+        matches!(&compile(&s,p.clone())[0],ProposalOutcome::Rejected(e)if e.0=="source_inspection_required")
+    );
+    p["runtime_port_operations"][0]["basis"] = p["entrypoint"].clone();
+    p["variable_bindings"][0]["artifact_embedding"] = json!(true);
+    assert!(
+        matches!(&compile(&s,p)[0],ProposalOutcome::Rejected(e)if e.0=="proposal_compilation_failed")
+    );
+}

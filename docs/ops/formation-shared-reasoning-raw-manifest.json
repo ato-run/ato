@@ -1,0 +1,323 @@
+{
+  "schema": "ato.formation-shared-reasoning-raw-manifest/1",
+  "storage": "/home/ubuntu/formation-foundation/.tmp/formation-codex-build/evidence-20261001",
+  "files": [
+    {
+      "path": "codex/cells/007/producer.reasoning/r001_s001.input.json",
+      "bytes": 20140,
+      "sha256": "f55ad3128794b34edeef41290f13b3407c51e2d34579e8e5cd8197fa0d85b568"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r001_s001.record.json",
+      "bytes": 1156,
+      "sha256": "2ab6327ec92ae9c775a71597225fcda5daa55c917d768e8cf402d400fdca70ba"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r001_s001.response.json",
+      "bytes": 482,
+      "sha256": "ef0c219c0b937b4f8bb680cdcad53d5748ef2a541bf23dc3eb926732294b7a3d"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r001_s002.input.json",
+      "bytes": 19942,
+      "sha256": "dc424ac16dd65cfa7f8b9e9a910f9fd7bbe57d0b6771907bb5f9e39bcd0e07c0"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r001_s002.record.json",
+      "bytes": 614,
+      "sha256": "0eff076145df6967e14fc4a9af470b5257a9ddc380ba4805d3e12bc227bc70aa"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r001_s002.response.json",
+      "bytes": 263,
+      "sha256": "77fc4b036ce65b7d14bddff47f2f30b747f21be35cf6657d4befefe6b1bd0536"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r002_s001.input.json",
+      "bytes": 19971,
+      "sha256": "d80edf7a5428de32f65512591731db4aa5f4f50da7e0ccdb49faca1cf826865a"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r002_s001.record.json",
+      "bytes": 614,
+      "sha256": "07a74be3af6a01a26dc953e2d8f0a906f8c9e4e0aa9f6e7f0f54f09ce0d77ef1"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r002_s001.response.json",
+      "bytes": 263,
+      "sha256": "cdaf5d19ec12cd2fc3430e5aefab93f16c7e603a1d272c42e32ea68456d1b43b"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r003_s001.input.json",
+      "bytes": 19971,
+      "sha256": "fe686982cde4533153dcf66b447bbcc158a5b93d76024fcabea282c2a4904f98"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r003_s001.record.json",
+      "bytes": 614,
+      "sha256": "3f6a78dab1cb7f5b4393274f08e01e4400206740da09d114df8ef07d3e411c0b"
+    },
+    {
+      "path": "codex/cells/007/producer.reasoning/r003_s001.response.json",
+      "bytes": 263,
+      "sha256": "56e847b54785606153a4d9d3ccdf6fb52129badffc04fcc1a3b9f3570ab3189c"
+    },
+    {
+      "path": "codex/cells/007/requester.stdout.log",
+      "bytes": 7812,
+      "sha256": "f63feb60d62ac1b881e47eb371387936161b7c31a3146dc4f0219f54586ef348"
+    },
+    {
+      "path": "codex/cells/007/summary.json",
+      "bytes": 3251,
+      "sha256": "00b7621ec385886ff92957e2af23ad42d7d22f5ce273a1dfa242b81f47c0ce2d"
+    },
+    {
+      "path": "codex/cells/057/producer.reasoning/r001_s001.input.json",
+      "bytes": 20000,
+      "sha256": "c101a255894c6cb42fa745319ea93a9abf47bbaaf9dd9266f904fe337162d873"
+    },
+    {
+      "path": "codex/cells/057/producer.reasoning/r001_s001.response.json",
+      "bytes": 482,
+      "sha256": "8900a610a00320b96b8d72d2a8c5d5149e3b9bd64f5c574b76708a3a96194efe"
+    },
+    {
+      "path": "codex/cells/057/producer.reasoning/r002_s001.input.json",
+      "bytes": 20000,
+      "sha256": "032cfe7c053d176f76b039c6a6b577f5af655469b6a1454b8112d92f8aa7845b"
+    },
+    {
+      "path": "codex/cells/057/producer.reasoning/r002_s001.response.json",
+      "bytes": 482,
+      "sha256": "91cc88ad0e89e38abc7e2fb63708668f3c35336ee7eaf1577312f32f206a534c"
+    },
+    {
+      "path": "codex/cells/057/producer.reasoning/r003_s001.input.json",
+      "bytes": 19125,
+      "sha256": "1dbc5a6ba1b986be800a1613422498b428d3d71aa0c01b2c2be0f3a95b8b09e9"
+    },
+    {
+      "path": "codex/cells/057/requester.generation1.stdout.log",
+      "bytes": 3165,
+      "sha256": "1ce2403199ea43a8f53f98f3fafb1f2f3a2aab47b94696da1b084fee878eb72c"
+    },
+    {
+      "path": "codex/cells/057/requester.stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "codex/cells/057/summary.generation1.json",
+      "bytes": 877,
+      "sha256": "3af3ce7d8f841a4dd5296681e0e09d51890b45f8c2614d4529fbf7a4882eebf3"
+    },
+    {
+      "path": "codex/cells/057/summary.json",
+      "bytes": 556,
+      "sha256": "684ccd92e34a4fd60cbeb7bf94776f659fd24253816fc56b72fed916f1b407c6"
+    },
+    {
+      "path": "offline-review/compile-review.rs",
+      "bytes": 2540,
+      "sha256": "6c713ebb989786233809102017d4e6b60b5af0f36a1d055c26a89c5b7abc51fe"
+    },
+    {
+      "path": "offline-review/python-decline-rationale.json",
+      "bytes": 977,
+      "sha256": "886d36426c02276d539e7b096df9e286eaf0703d38192c4e44bf01abad46f1fd"
+    },
+    {
+      "path": "offline-review/retained-replay.log",
+      "bytes": 749,
+      "sha256": "3d2209d08f869f050a452e1c3ff5bc8116245ff0f4146389e58c32b436d2b604"
+    },
+    {
+      "path": "offline-review/svgomg-offline-canonical.json",
+      "bytes": 5591,
+      "sha256": "6171b02823f5e83358951cfdb9a12fae09708a8ad874db5acbdd8d9ad7bc14c6"
+    },
+    {
+      "path": "offline-review/svgomg-review-proposal.json",
+      "bytes": 2825,
+      "sha256": "c79929825b01c95627f6e3e236e992def24be1816cd25a710fdab54bcd964f6f"
+    },
+    {
+      "path": "plans/api-fixed-plan.json",
+      "bytes": 15103,
+      "sha256": "3428b1c130e8485cab8980b8270b3194fd624fd6e315a70b70df27842b273e77"
+    },
+    {
+      "path": "plans/api-plan.json",
+      "bytes": 14700,
+      "sha256": "72399e38c8daab1a1ae8d1e5849c842f1cdbb6bef9a7ea93bf6732b02524a862"
+    },
+    {
+      "path": "plans/codex-fixed-plan.json",
+      "bytes": 14884,
+      "sha256": "5ea43a2bee963e026a6a0af0a1857f7a274cfac4e0cfeafeeaba90ab313641c8"
+    },
+    {
+      "path": "plans/codex-plan.json",
+      "bytes": 14481,
+      "sha256": "7de7d9c0ad73a08d7d246bb3e133f9d69ac8e8189d0a97f35b709e217d264853"
+    },
+    {
+      "path": "resource.json",
+      "bytes": 90,
+      "sha256": "5c4a761424afdcfffa6adb542b6c9cf0b9f75821c31ec30e3f816c7bbcf46f42"
+    }
+  ],
+  "owner_only_retained": [
+    {
+      "path": "cells/007/preflight.json",
+      "bytes": 573437,
+      "sha256": "d22f511fc61d3879c446a9d9741c67c57a8381837c0794409dd8633acf274db2",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/007/status.json",
+      "bytes": 283872,
+      "sha256": "ed8e61d2c8b90b6f32f1cc9a2f5c33e725fa46cd4af43f54357dd844dc05fc70",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/007/producer.search.json",
+      "bytes": 2854,
+      "sha256": "0dfd8da4105366f7a173fbb883507bec338522d255f9a7a22f843420daa358b0",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/007/config.json",
+      "bytes": 4704,
+      "sha256": "f5ee3f82ad8f27f66685dc208072693fbfd0656cbcec2d8f53687cf209d84728",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/007/preflight-config.json",
+      "bytes": 3994,
+      "sha256": "1eea5fb884852a41023ba69f2853ff06ba6381a83218c9e139f9a19d843bbea7",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/007/producer.reasoning/r001.claim.json",
+      "bytes": 221,
+      "sha256": "801293c911e7dcd6565dc285420278abf9e5aa8f71478b9060ef8ad816a21baa",
+      "retained": true,
+      "public_export": false,
+      "reason": "claim/fence is not inference context"
+    },
+    {
+      "path": "cells/007/producer.reasoning/r002.claim.json",
+      "bytes": 221,
+      "sha256": "1bebd944f9b7fc2cb43cd1af78cde38491162c5768b22331204c119309836dcc",
+      "retained": true,
+      "public_export": false,
+      "reason": "claim/fence is not inference context"
+    },
+    {
+      "path": "cells/007/producer.reasoning/r003.claim.json",
+      "bytes": 221,
+      "sha256": "675969a49ca68d60533e001a003ac94db0602226e828f4a86e865eb5e4fa4b05",
+      "retained": true,
+      "public_export": false,
+      "reason": "claim/fence is not inference context"
+    },
+    {
+      "path": "cells/057/preflight.json",
+      "bytes": 73549,
+      "sha256": "d12a8217df377060c412c0620fdd9997a0e7a2b46d5145c9a92c770115bb75f0",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/057/status.generation1.json",
+      "bytes": 31907,
+      "sha256": "c230dd009ed6c5a1b864dc0fb4d8b5fe8bd704ae1b5c5b87ff1aab92209af46d",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/057/status.json",
+      "bytes": 31473,
+      "sha256": "ab1023403a134de2369a1df9073a801c48a7c83dbb2206c8ba3df1a372b947b4",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/057/producer.search.json",
+      "bytes": 2854,
+      "sha256": "b50a525bc79f3e5009bd123ae45edce73278042db200e7aab7ee03b3d110fc61",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/057/config.json",
+      "bytes": 4704,
+      "sha256": "f3dffb4838a94435ce05353120174f63ac8c907110efe47f396e50d80365b2c3",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/057/preflight-config.json",
+      "bytes": 3994,
+      "sha256": "1eea5fb884852a41023ba69f2853ff06ba6381a83218c9e139f9a19d843bbea7",
+      "retained": true,
+      "public_export": false,
+      "reason": "owner-only state may contain private authorization, physical paths or fences"
+    },
+    {
+      "path": "cells/057/producer.reasoning/r001.claim.json",
+      "bytes": 221,
+      "sha256": "de1c82d0f9ec4d46e5c6da8572214e1b466864be5bc3d1f65febb62c20c80c92",
+      "retained": true,
+      "public_export": false,
+      "reason": "claim/fence is not inference context"
+    },
+    {
+      "path": "cells/057/producer.reasoning/r002.claim.json",
+      "bytes": 221,
+      "sha256": "d18eae015a23f25239e2a0806cf9c292b08885352214c73579226f43632e27cb",
+      "retained": true,
+      "public_export": false,
+      "reason": "claim/fence is not inference context"
+    },
+    {
+      "path": "cells/057/producer.reasoning/r003.claim.json",
+      "bytes": 221,
+      "sha256": "cde81cb26d845c502f51cd1b8eddd0e84058fa3c2b6bb397369e228dcec29396",
+      "retained": true,
+      "public_export": false,
+      "reason": "claim/fence is not inference context"
+    }
+  ],
+  "credential_files_exported": false,
+  "excluded": [
+    "coordinator-token",
+    "Coordinator database and logs",
+    "claim value bytes",
+    "expanded source",
+    "private binding/config bytes"
+  ],
+  "preserved": [
+    "all original source archives",
+    "Search state/database and fences",
+    "original and restarted requester evidence",
+    "historical WBO UNKNOWN state"
+  ]
+}

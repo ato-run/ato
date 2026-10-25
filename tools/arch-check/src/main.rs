@@ -107,12 +107,36 @@ fn allowed(source: &str, target: &str) -> bool {
         "ipc" => target == "computation",
         "adapter-api" => matches!(target, "computation" | "objects"),
         "materializer-api" => matches!(target, "adapter-api" | "computation" | "objects"),
-        "adapter" => matches!(target, "adapter-api" | "computation" | "objects" | "ipc"),
+        "player" => matches!(target, "adapter-api" | "objects"),
+        "adapter" => matches!(
+            target,
+            "adapter-api" | "computation" | "objects" | "ipc" | "record-writer"
+        ),
         "materializer" => matches!(
             target,
             "adapter-api" | "materializer-api" | "computation" | "objects"
         ),
+        "record-writer" => matches!(target, "adapter-api" | "computation" | "objects"),
+        "contract-verifier" => matches!(target, "materializer-api" | "computation" | "objects"),
+        "planner" => matches!(
+            target,
+            "adapter-api" | "materializer-api" | "player" | "computation" | "objects"
+        ),
         "service" => matches!(target, "computation" | "objects" | "ipc"),
+        // The Runtime's shared attempt (admission, launch, observation,
+        // receipt): used by every app that executes a Derivation, so it may
+        // use the layers below it and never an app.
+        "runtime" => matches!(
+            target,
+            "lib"
+                | "ipc"
+                | "computation"
+                | "objects"
+                | "adapter"
+                | "adapter-api"
+                | "materializer"
+                | "materializer-api"
+        ),
         "app" | "tool" => true,
         _ => false,
     }

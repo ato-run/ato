@@ -1,0 +1,96 @@
+# Isolated Tauri desktop shell build gate.
+#
+# The Tauri shell lives in apps/desktop-tauri and is excluded from the root
+# Cargo workspace, so the workspace-level `rust-ci.yml` gate never compiles it.
+# This workflow is the dedicated gate for that crate plus the two things a
+# Tauri change can break indirectly:
+#   - the root workspace (path deps into lib/ipc and lib/host-control, and the
+#     root Cargo.toml `exclude` list) — gated by `rust-ci.yml` on the same
+#     branches/PRs, so it is intentionally not duplicated here;
+#   - the legacy apps/desktop launcher shim, which shares lib/ipc and is also
+#     excluded from the workspace, so nothing else compiles it. Gated below.
+#
+# The real-macOS smoke evidence in PR #1287's Definition of Done is a manual
+# checklist, not a CI job; the `tauri` job below is the automated compile/test
+# gate that must pass before that smoke run.
+
+name: desktop-tauri-ci
+
+on:
+  push:
+    branches: [main, dev, nightly]
+  pull_request:
+    branches: [main, dev, nightly]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  legacy-desktop-shim:
+    name: legacy apps/desktop shim compiles (macOS)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: current-desktop-${{ runner.os }}
+      # apps/desktop is a three-file launcher shim over the ato CLI, not the
+      # GPUI + Wry shell this job was originally named for — that shell was
+      # dismantled. The job is kept because the crate is workspace-excluded and
+      # would otherwise never be compiled by CI at all.
+      - name: Test legacy desktop shim
+        working-directory: apps/desktop
+        run: cargo test
+
+  tauri:
+    name: tauri shell (macOS)
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tauri-${{ runner.os }}
+
+      # The Tauri shell bundles the CLI as a sidecar (tauri.conf.json
+      # `bundle.externalBin`): the root release `ato` binary is staged by
+      # apps/desktop-tauri/build.rs into `bin/ato-<target-triple>`, which
+      # tauri-build then places next to the shell executable inside the .app.
+      # The release build hard-fails without it, so build the CLI first.
+      - name: Build ato CLI (release)
+        run: cargo build --release -p ato-cli
+
+      # Pin the exact tauri-cli version used to verify the build locally.
+      # A bare `--version 2` is not a valid cargo install requirement.
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version 2.5.0 --locked
+
+      - name: Format check
+        working-directory: apps/desktop-tauri
+        run: cargo fmt -- --check
+
+      - name: Test
+        working-directory: apps/desktop-tauri
+        run: cargo test --all-features
+
+      - name: Clippy
+        working-directory: apps/desktop-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build bundle
+        working-directory: apps/desktop-tauri
+        run: cargo tauri build

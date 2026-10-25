@@ -1,0 +1,93 @@
+{
+  "evidence_id": "formation-windows-attempt-journal-local-20261003-01",
+  "code_pin": "478ab4857dcaad91ddb090c3b30b4c38c87b675e",
+  "code_pin_timing": "Focused commands ran before the logical commit; tested source bytes are unchanged in this commit. No post-commit execution is claimed.",
+  "base_pin": "5798e23d28aaebd4fabd6d44cecef51ab869c717",
+  "comparison_pin": "31a6d6b4d6df03a7463058ea38f87b7ff1e525a3",
+  "journal_blobs": {
+    "comparison": "7df4be70e8d82b006f5a40ff466b1709e64bfb94",
+    "base": "7df4be70e8d82b006f5a40ff466b1709e64bfb94",
+    "fixed": "f0e022c4ad4448e8f9352f0ef4eed068706841cd"
+  },
+  "native_actions_observation": {
+    "run_id": 37109321016,
+    "head": "5798e23d28aaebd4fabd6d44cecef51ab869c717",
+    "windows_portable": {
+      "passed": 7,
+      "failed": 8,
+      "failure": "attempt directory open/sync reports Access denied (os error 5) before execution"
+    },
+    "windows_configured_toolchain": "stable rustc 1.99.0 (b940084d7 2026-09-28)",
+    "incremental": false,
+    "exact_base_windows_execution": "not performed in this measurement",
+    "windows_api_failure_site": "directory open/sync sequence; individual Win32 call trace not captured"
+  },
+  "local_target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci/windows-target",
+  "local_toolchain": "1.96.0-aarch64-apple-darwin",
+  "local_environment": {
+    "CARGO_INCREMENTAL": "0",
+    "TMPDIR": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-windows-durability/.tmp"
+  },
+  "invalidation": {
+    "command": "cargo clean --target-dir <recorded local target> --target x86_64-pc-windows-gnu -p ato-runtime-attempt -p ato-formation -p ato-adapter-http",
+    "removed_files": 196,
+    "removed_bytes_approx": "457.8 MiB",
+    "reason": "Changed Runtime package and Formation/HTTP path dependencies from prior worktree source; verbose logs confirm recompile from this worktree."
+  },
+  "focused_native_test": {
+    "command": "cargo test --locked -p ato-runtime-attempt --lib journal::tests --verbose",
+    "passed": 7,
+    "failed": 0,
+    "filtered": 90,
+    "platform": "aarch64-apple-darwin",
+    "exit_code": 0
+  },
+  "windows_cross_clippy": {
+    "command": "cargo clippy --locked -p ato-runtime-attempt --all-targets --target x86_64-pc-windows-gnu --verbose -- -D warnings",
+    "exit_code": 0,
+    "native_execution": false
+  },
+  "format": {
+    "changed_journal_rustfmt": "PASS",
+    "diff_check": "PASS",
+    "whole_workspace_check": "FAIL: unchanged reasoning.rs formatting at base/head; not edited in this scoped fix"
+  },
+  "native_windows_followup": {
+    "command": "cargo test -p ato-runtime-attempt --lib journal::tests -- --test-threads=1",
+    "expected_tests": 8,
+    "status": "not yet executed; added to existing Windows CLI CI"
+  },
+  "fix": {
+    "windows_publish": "synced temporary + MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH), same parent, no copy/delayed fallback; OS failures propagated",
+    "windows_lock": "File::lock on existing read/write request lock until permit drop",
+    "unix": "existing rename and directory sync preserved",
+    "wire_schema": "unchanged"
+  },
+  "limits": {
+    "power_loss_experiment": false,
+    "arbitrary_filesystem_durability_claim": false,
+    "actual_native_agents": 0,
+    "actual_oss_acceptance_runs": 0,
+    "direct_paid_llm_api_calls": 0,
+    "source_contract_receipt_history_edits": false,
+    "remote_deployment_or_migration": false
+  },
+  "logs": [
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-windows-durability/.tmp/journal-native-final.log",
+      "sha256": "fd7a7d5489771841f500f27e70991644de0f7dc617bd1eaab5c8939f4fb7330a"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-windows-durability/.tmp/windows-changed-package-invalidation.log",
+      "sha256": "20aac7a5fdbe413d90151fec69197d39d702e0f7d508ac723bf71600ac2616e5"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-windows-durability/.tmp/journal-windows-clippy-final.log",
+      "sha256": "0851ae0f9c2597cae2c5d8c2d2533b31f1178f053c75515fd408d4c16475f1e5"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci-current/ato-ci-37109321016-failed.log",
+      "sha256": "73109cb2343b53f2f612c2f7230989bab487fe2d1767f99e294b6f42abd5c6d8"
+    }
+  ]
+}

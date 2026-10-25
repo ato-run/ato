@@ -1,0 +1,3918 @@
+{
+ "2": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "mcr.microsoft.com/devcontainers/javascript-node:24-trixie"
+     ],
+     "copy_sources_sample": [
+      "package-lock.json",
+      "package.json"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "mcr.microsoft.com/devcontainers/javascript-node:24-trixie",
+      "healthcheck": false,
+      "user": "node",
+      "volume": [],
+      "workdir": "/workspace/whitebophir"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:24-alpine"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "package-lock.json",
+      "package.json"
+     ],
+     "final": {
+      "cmd": "[\"/usr/local/bin/node\", \"server/server.mjs\"]",
+      "entrypoint": null,
+      "expose": [
+       "80"
+      ],
+      "from": "node:24-alpine",
+      "healthcheck": false,
+      "user": "1000:1000",
+      "volume": [
+       "/opt/app/server-data"
+      ],
+      "workdir": "/opt/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 4,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "4": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "alpine:3.24"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [
+       "8080"
+      ],
+      "from": "alpine:3.24",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "debian:13-slim"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Docker/*.Apache.conf"
+     ],
+     "final": {
+      "cmd": "([ -z \"$CRON_MIN\" ] || cron) &&  . /etc/apache2/envvars &&  exec apache2 -D FOREGROUND $([ -n \"$OIDC_ENABLED\" ] && [ \"$OIDC_ENABLED\" -ne 0 ] && echo \"-D OIDC_ENABLED\")",
+      "entrypoint": "[\"./Docker/entrypoint.sh\"]",
+      "expose": [
+       "80"
+      ],
+      "from": "debian:13-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/var/www/FreshRSS"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Docker/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "alpine:3.24"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Docker/*.Apache.conf"
+     ],
+     "final": {
+      "cmd": "([ -z \"$CRON_MIN\" ] || crond -d 6) &&  exec httpd -D FOREGROUND $([ -n \"$OIDC_ENABLED\" ] && [ \"$OIDC_ENABLED\" -ne 0 ] && echo \"-D OIDC_ENABLED\")",
+      "entrypoint": "[\"./Docker/entrypoint.sh\"]",
+      "expose": [
+       "80"
+      ],
+      "from": "alpine:3.24",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/var/www/FreshRSS"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Docker/Dockerfile-Alpine"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "archlinux"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Docker/*.Apache.conf"
+     ],
+     "final": {
+      "cmd": "([ -z \"$CRON_MIN\" ] || crond) &&  exec httpd -D FOREGROUND",
+      "entrypoint": "[\"./Docker/entrypoint.sh\"]",
+      "expose": [
+       "80"
+      ],
+      "from": "archlinux",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/var/www/FreshRSS"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Docker/Dockerfile-Arch"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "alpine:edge"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Docker/*.Apache.conf"
+     ],
+     "final": {
+      "cmd": "([ -z \"$CRON_MIN\" ] || crond -d 6) &&  exec httpd -D FOREGROUND $([ -n \"$OIDC_ENABLED\" ] && [ \"$OIDC_ENABLED\" -ne 0 ] && echo \"-D OIDC_ENABLED\")",
+      "entrypoint": "[\"./Docker/entrypoint.sh\"]",
+      "expose": [
+       "80"
+      ],
+      "from": "alpine:edge",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/var/www/FreshRSS"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Docker/Dockerfile-Newest"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "alpine:3.16"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Docker/*.Apache.conf"
+     ],
+     "final": {
+      "cmd": "([ -z \"$CRON_MIN\" ] || crond -d 6) &&  exec httpd -D FOREGROUND $([ -n \"$OIDC_ENABLED\" ] && [ \"$OIDC_ENABLED\" -ne 0 ] && echo \"-D OIDC_ENABLED\")",
+      "entrypoint": "[\"./Docker/entrypoint.sh\"]",
+      "expose": [
+       "80"
+      ],
+      "from": "alpine:3.16",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/var/www/FreshRSS"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Docker/Dockerfile-Oldest"
+   }
+  ],
+  "root_default": false
+ },
+ "5": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:22-alpine",
+      "python:3.13.7-alpine3.22",
+      "build-deps",
+      "python:3.13.7-alpine3.22",
+      "node:22-alpine",
+      "linkding"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/etc/linkding/.venv",
+      "/etc/linkding/bookmarks/static",
+      "/etc/linkding/libicu.so",
+      "/etc/linkding/uBOLite.chromium.mv3",
+      "bookmarks/frontend",
+      "bookmarks/styles",
+      "https://astral.sh/uv/0.8.13/install.sh",
+      "package-lock.json",
+      "package.json",
+      "pyproject.toml",
+      "scripts/setup-ublock.sh"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "linkding",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [
+      "https://astral.sh/uv/0.8.13/install.sh /uv-installer.sh"
+     ],
+     "run_network": 10,
+     "run_total": 14,
+     "stage_aliases": [
+      "node-build",
+      "build-deps",
+      "compile-icu",
+      "linkding",
+      "ublock-build",
+      "linkding-plus"
+     ],
+     "stages": 6
+    },
+    "path": "docker/alpine.Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:22-alpine",
+      "python:3.13.7-slim-trixie",
+      "build-deps",
+      "python:3.13.7-slim-trixie",
+      "node:22-alpine",
+      "linkding"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/etc/linkding/.venv",
+      "/etc/linkding/bookmarks/static",
+      "/etc/linkding/libicu.so",
+      "/etc/linkding/uBOLite.chromium.mv3",
+      "bookmarks/frontend",
+      "bookmarks/styles",
+      "https://astral.sh/uv/0.8.13/install.sh",
+      "package-lock.json",
+      "package.json",
+      "pyproject.toml",
+      "scripts/setup-ublock.sh"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "linkding",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [
+      "https://astral.sh/uv/0.8.13/install.sh /uv-installer.sh"
+     ],
+     "run_network": 11,
+     "run_total": 14,
+     "stage_aliases": [
+      "node-build",
+      "build-deps",
+      "compile-icu",
+      "linkding",
+      "ublock-build",
+      "linkding-plus"
+     ],
+     "stages": 6
+    },
+    "path": "docker/default.Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "6": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "mcr.microsoft.com/devcontainers/base:$DEBIAN_CODENAME"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "mcr.microsoft.com/devcontainers/base:$DEBIAN_CODENAME",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "DEBIAN_CODENAME=\"bookworm\""
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/searxng/base:searxng-builder"
+     ],
+     "copy_sources_sample": [
+      "./requirements-server.txt",
+      "./requirements.txt",
+      "./searx/"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "docker.io/searxng/base:searxng-builder",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 2,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 1
+    },
+    "path": "container/builder.dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "localhost/searxng/searxng:builder",
+      "docker.io/searxng/base:searxng"
+     ],
+     "copy_sources_sample": [
+      "./container/",
+      "./searx/version_frozen.py",
+      "/usr/local/searxng/.venv/",
+      "/usr/local/searxng/searx/"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/usr/local/searxng/entrypoint.sh\"]",
+      "expose": [
+       "8080"
+      ],
+      "from": "docker.io/searxng/base:searxng",
+      "healthcheck": false,
+      "user": null,
+      "volume": [
+       "$__SEARXNG_CONFIG_PATH",
+       "$__SEARXNG_DATA_PATH"
+      ],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 0,
+     "stage_aliases": [
+      "builder",
+      "dist"
+     ],
+     "stages": 2
+    },
+    "path": "container/dist.dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "7": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ghcr.io/linuxserver/baseimage-alpine:3.22"
+     ],
+     "copy_sources_sample": [
+      "requirements.txt"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "ghcr.io/linuxserver/baseimage-alpine:3.22",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".github/test/Dockerfile-alpine"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "python:${PYTHON_VERSION}-slim-bookworm",
+      "python:${PYTHON_VERSION}-slim-bookworm"
+     ],
+     "copy_sources_sample": [
+      "/dependencies",
+      "changedetection.py",
+      "changedetectionio",
+      "docker-entrypoint.sh",
+      "docs/api-spec.yaml",
+      "requirements.txt"
+     ],
+     "final": {
+      "cmd": "[\"python\", \"./changedetection.py\", \"-d\", \"/datastore\"]",
+      "entrypoint": "[\"/docker-entrypoint.sh\"]",
+      "expose": [
+       "5000"
+      ],
+      "from": "python:${PYTHON_VERSION}-slim-bookworm",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [
+      "PYTHON_VERSION=3.11"
+     ],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 5,
+     "run_total": 12,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 2
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "8": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "node:24-alpine",
+      "node:24-alpine",
+      "build",
+      "build",
+      "build_${BUILD_ENV}",
+      "build_${BUILD_ENV}"
+     ],
+     "copy_sources_sample": [
+      "${SETTINGS}",
+      ".",
+      "./bin",
+      "./local_plugin[s]",
+      "./package.json",
+      "./pnpm-workspace.yaml",
+      "./src",
+      "./src/",
+      "./var",
+      "/opt/etherpad-lite/src/static/oidc",
+      "/opt/etherpad-lite/src/templates/admin"
+     ],
+     "final": {
+      "cmd": "[\"sh\", \"-c\", \"cd src && exec node --require tsx/cjs node/server.ts\"]",
+      "entrypoint": null,
+      "expose": [
+       "9001"
+      ],
+      "from": "build_${BUILD_ENV}",
+      "healthcheck": true,
+      "user": "etherpad",
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "BUILD_ENV=git",
+      "PnpmVersion=12.4.2"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 9,
+     "run_total": 15,
+     "stage_aliases": [
+      "adminbuild",
+      "build",
+      "build_git",
+      "build_copy",
+      "development",
+      "production"
+     ],
+     "stages": 6
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:latest"
+     ],
+     "copy_sources_sample": [
+      "./src/tests/ratelimit/send_changesets.mjs"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "node:latest",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/tmp"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "src/tests/ratelimit/Dockerfile.anotherip"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "nginx"
+     ],
+     "copy_sources_sample": [
+      "./src/tests/ratelimit/nginx.conf"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "nginx",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 0,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "src/tests/ratelimit/Dockerfile.nginx"
+   }
+  ],
+  "root_default": true
+ },
+ "9": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/golang:1-trixie"
+     ],
+     "copy_sources_sample": [
+      "."
+     ],
+     "final": {
+      "cmd": "[\"/src/packaging/debian/build.sh\"]",
+      "entrypoint": null,
+      "expose": [],
+      "from": "docker.io/golang:1-trixie",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [
+      "build"
+     ],
+     "stages": 1
+    },
+    "path": "packaging/debian/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/library/golang:alpine3.23",
+      "docker.io/library/alpine:3.24"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/go/src/app/miniflux"
+     ],
+     "final": {
+      "cmd": "[\"/usr/bin/miniflux\"]",
+      "entrypoint": null,
+      "expose": [
+       "8080"
+      ],
+      "from": "docker.io/library/alpine:3.24",
+      "healthcheck": false,
+      "user": "65534",
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [
+      "build"
+     ],
+     "stages": 2
+    },
+    "path": "packaging/docker/alpine/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/library/golang:trixie",
+      "gcr.io/distroless/base-debian13:nonroot"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/go/src/app/miniflux"
+     ],
+     "final": {
+      "cmd": "[\"/usr/bin/miniflux\"]",
+      "entrypoint": null,
+      "expose": [
+       "8080"
+      ],
+      "from": "gcr.io/distroless/base-debian13:nonroot",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 1,
+     "stage_aliases": [
+      "build"
+     ],
+     "stages": 2
+    },
+    "path": "packaging/docker/distroless/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "golang:1",
+      "rockylinux:9"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/go/src/app/LICENSE",
+      "/go/src/app/miniflux",
+      "/go/src/app/miniflux.1",
+      "/go/src/app/packaging/miniflux.conf",
+      "/go/src/app/packaging/rpm/miniflux.spec",
+      "/go/src/app/packaging/systemd/miniflux.service"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "rockylinux:9",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 4,
+     "stage_aliases": [
+      "build"
+     ],
+     "stages": 2
+    },
+    "path": "packaging/rpm/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "10": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/library/golang:1.27-alpine3.24",
+      "docker.io/library/golang:1.27-alpine3.24",
+      "docker.io/library/alpine:3.24"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/go/src/gitea.dev/gitea",
+      "/src/public/assets",
+      "/tmp/local",
+      "docker/root",
+      "go.mod",
+      "go.sum",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml"
+     ],
+     "final": {
+      "cmd": "[\"/usr/bin/s6-svscan\", \"/etc/s6\"]",
+      "entrypoint": "[\"/usr/bin/entrypoint\"]",
+      "expose": [
+       "22",
+       "3000"
+      ],
+      "from": "docker.io/library/alpine:3.24",
+      "healthcheck": false,
+      "user": null,
+      "volume": [
+       "[\"/data\"]"
+      ],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [
+      "bind",
+      "cache"
+     ],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 5,
+     "run_total": 9,
+     "stage_aliases": [
+      "frontend-build",
+      "build-env",
+      "gitea"
+     ],
+     "stages": 3
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/library/golang:1.27-alpine3.24",
+      "docker.io/library/golang:1.27-alpine3.24",
+      "docker.io/library/alpine:3.24"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/go/src/gitea.dev/gitea",
+      "/src/public/assets",
+      "/tmp/local",
+      "docker/rootless",
+      "go.mod",
+      "go.sum",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml"
+     ],
+     "final": {
+      "cmd": "[]",
+      "entrypoint": "[\"/usr/bin/dumb-init\", \"--\", \"/usr/local/bin/docker-entrypoint.sh\"]",
+      "expose": [
+       "2222",
+       "3000"
+      ],
+      "from": "docker.io/library/alpine:3.24",
+      "healthcheck": false,
+      "user": "1000:1000",
+      "volume": [
+       "[\"/var/lib/gitea\", \"/etc/gitea\"]"
+      ],
+      "workdir": "/var/lib/gitea"
+     },
+     "global_args": [],
+     "mounts": [
+      "bind",
+      "cache"
+     ],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 5,
+     "run_total": 11,
+     "stage_aliases": [
+      "frontend-build",
+      "build-env",
+      "gitea-rootless"
+     ],
+     "stages": 3
+    },
+    "path": "Dockerfile.rootless"
+   }
+  ],
+  "root_default": true
+ },
+ "11": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": true,
+     "arg_in_from": false,
+     "bases": [
+      "node:24.21.0-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1",
+      "ghcr.io/techknowlogick/xgo:go-1.27.x@sha256:8cc742b41f043a4fd45d2f63f1fcd12cb27949342df09efb5561f2aadfbe6da3",
+      "scratch"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/build/dist",
+      "/build/vikunja-*",
+      "/etc/ssl/certs/ca-certificates.crt",
+      "/tmp",
+      "frontend/",
+      "frontend/package.json",
+      "frontend/pnpm-lock.yaml",
+      "frontend/pnpm-workspace.yaml"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[ \"/app/vikunja/vikunja\" ]",
+      "expose": [
+       "3456"
+      ],
+      "from": "scratch",
+      "healthcheck": false,
+      "user": "1000",
+      "volume": [],
+      "workdir": "/app/vikunja"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 3,
+     "run_total": 5,
+     "stage_aliases": [
+      "frontendbuilder",
+      "apibuilder"
+     ],
+     "stages": 3
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "12": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "mcr.microsoft.com/devcontainers/python:${VARIANT}"
+     ],
+     "copy_sources_sample": [
+      "/uv"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "mcr.microsoft.com/devcontainers/python:${VARIANT}",
+      "healthcheck": false,
+      "user": "vscode",
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "VARIANT=\"3.14-trixie\""
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": true,
+     "arg_in_from": false,
+     "bases": [
+      "node:24@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4",
+      "python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2",
+      "python-base",
+      "scratch",
+      "python-base",
+      "venv-builder-base",
+      "python-base"
+     ],
+     "copy_sources_sample": [
+      "$VENV_PATH",
+      "*",
+      "./docker/entry.sh",
+      "./docker/healthcheck.sh",
+      "./docker/setup_nltk_data.sh",
+      "/frontend/dist",
+      "/mealie/dist",
+      "dependencies.txt",
+      "frontend",
+      "mealie",
+      "mealie/repos/seed/resources/units/locales",
+      "pyproject.toml"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/app/run.sh\"]",
+      "expose": [
+       "${APP_PORT}",
+       "${APP_PORT}"
+      ],
+      "from": "python-base",
+      "healthcheck": true,
+      "user": null,
+      "volume": [
+       "[ \"$MEALIE_HOME/data/\" ]"
+      ],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 11,
+     "run_total": 17,
+     "stage_aliases": [
+      "frontend-builder",
+      "python-base",
+      "backend-builder",
+      "packages",
+      "venv-builder-base",
+      "venv-builder",
+      "production"
+     ],
+     "stages": 7
+    },
+    "path": "docker/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "13": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": true,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/node:24.20.0-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf",
+      "base",
+      "code-with-deps",
+      "code-with-deps",
+      "base"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/usr/src/app/backend/dist/package.json",
+      "/usr/src/app/backend/dist/src",
+      "/usr/src/app/backend/node_modules",
+      "/usr/src/app/commons/dist",
+      "/usr/src/app/commons/node_modules",
+      "/usr/src/app/database/dist",
+      "/usr/src/app/node_modules",
+      "backend/package.json",
+      "backend/public",
+      "commons/package.json",
+      "database/package.json"
+     ],
+     "final": {
+      "cmd": "[\"node\", \"dist/main.js\"]",
+      "entrypoint": null,
+      "expose": [
+       "3000/tcp"
+      ],
+      "from": "base",
+      "healthcheck": false,
+      "user": "node",
+      "volume": [],
+      "workdir": "/usr/src/app/backend"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 6,
+     "run_total": 6,
+     "stage_aliases": [
+      "base",
+      "code-with-deps",
+      "builder",
+      "prod-dependencies",
+      "prod"
+     ],
+     "stages": 5
+    },
+    "path": "backend/docker/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": true,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/node:24.20.0-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf",
+      "base",
+      "base"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/usr/src/app/frontend/dist"
+     ],
+     "final": {
+      "cmd": "[\"node\", \"server.js\"]",
+      "entrypoint": null,
+      "expose": [
+       "3001/tcp"
+      ],
+      "from": "base",
+      "healthcheck": false,
+      "user": "node",
+      "volume": [],
+      "workdir": "/usr/src/app/frontend"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 5,
+     "run_total": 5,
+     "stage_aliases": [
+      "base",
+      "builder"
+     ],
+     "stages": 3
+    },
+    "path": "frontend/docker/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "15": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "mambaorg/micromamba:1.5.5-jammy",
+      "base"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "LICENSE",
+      "README.md",
+      "jupyterlab/_version.py",
+      "pyproject.toml"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "base",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/$MAMBA_USER/jupyterlab"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [
+      "linux/amd64"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 4,
+     "run_total": 8,
+     "stage_aliases": [
+      "base",
+      "dev"
+     ],
+     "stages": 2
+    },
+    "path": "docker/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "16": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:24.16.0-bullseye"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "node:24.16.0-bullseye",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/workspaces"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:24.16.0-alpine"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/usr/local/bin/uv",
+      "/usr/local/bin/uvx",
+      "api/package.json",
+      "client/package.json",
+      "package-lock.json",
+      "package.json",
+      "packages/api/package.json",
+      "packages/data-provider/package.json",
+      "packages/data-schemas/package.json"
+     ],
+     "final": {
+      "cmd": "[\"npm\", \"run\", \"backend\"]",
+      "entrypoint": null,
+      "expose": [
+       "3080"
+      ],
+      "from": "node:24.16.0-alpine",
+      "healthcheck": false,
+      "user": "node",
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 4,
+     "run_total": 7,
+     "stage_aliases": [
+      "node"
+     ],
+     "stages": 1
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:24.16.0-alpine",
+      "base-min",
+      "base",
+      "base",
+      "base",
+      "base",
+      "base",
+      "base-min"
+     ],
+     "copy_sources_sample": [
+      "/app/client/dist",
+      "/app/packages/api/dist",
+      "/app/packages/client/dist",
+      "/app/packages/client/src",
+      "/app/packages/client/tailwind.preset.cjs",
+      "/app/packages/data-provider/dist",
+      "/app/packages/data-schemas/dist",
+      "/uv",
+      "/uvx",
+      "api",
+      "api/package*.json",
+      "client"
+     ],
+     "final": {
+      "cmd": "[\"node\", \"server/index.js\"]",
+      "entrypoint": null,
+      "expose": [
+       "3080"
+      ],
+      "from": "base-min",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/app/api"
+     },
+     "global_args": [
+      "NODE_MAX_OLD_SPACE_SIZE=6144",
+      "BUILD_COMMIT=",
+      "BUILD_BRANCH=",
+      "BUILD_DATE="
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 12,
+     "run_total": 13,
+     "stage_aliases": [
+      "base-min",
+      "base",
+      "data-provider-build",
+      "data-schemas-build",
+      "api-package-build",
+      "client-package-build",
+      "client-build",
+      "api-build"
+     ],
+     "stages": 8
+    },
+    "path": "Dockerfile.multi"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "golang:1.25-alpine",
+      "alpine:3.22"
+     ],
+     "copy_sources_sample": [
+      "/out/langfuse-fanout",
+      "otel/langfuse-fanout/",
+      "otel/langfuse-fanout/go.mod",
+      "otel/langfuse-fanout/go.sum*"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/usr/local/bin/langfuse-fanout\"]",
+      "expose": [
+       "4318"
+      ],
+      "from": "alpine:3.22",
+      "healthcheck": false,
+      "user": "app",
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 2
+    },
+    "path": "otel/langfuse-fanout/Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "17": {
+  "dockerfiles": [],
+  "root_default": false
+ },
+ "18": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "python:3.12.14-alpine",
+      "node:24.20.0-trixie-slim",
+      "python-base",
+      "python-base"
+     ],
+     "copy_sources_sample": [
+      "/app/.venv",
+      "/app/pdfding",
+      "/build/pdfding",
+      "entrypoint.sh",
+      "package-lock.json",
+      "package.json",
+      "pdfding",
+      "poetry.lock",
+      "pyproject.toml"
+     ],
+     "final": {
+      "cmd": "[\"./entrypoint.sh\"]",
+      "entrypoint": null,
+      "expose": [],
+      "from": "python-base",
+      "healthcheck": false,
+      "user": "$USERNAME",
+      "volume": [],
+      "workdir": "/home/$USERNAME"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 9,
+     "run_total": 16,
+     "stage_aliases": [
+      "python-base",
+      "npm-build",
+      "python-build",
+      "runtime"
+     ],
+     "stages": 4
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "19": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "scratch",
+      "node:22-trixie",
+      "prod-builder",
+      "python:3.11-slim-trixie",
+      "docker.io/gristlabs/gvisor-unprivileged:buster",
+      "node:22-trixie-slim"
+     ],
+     "copy_sources_sample": [
+      "/",
+      "/grist/_build",
+      "/grist/app/cli.sh",
+      "/grist/ext/asset[s]",
+      "/grist/node_modules",
+      "/grist/sandbox/pyodide",
+      "/grist/static",
+      "/node_modules",
+      "/runsc",
+      "/usr/local/bin/python3.11",
+      "/usr/local/lib/libpython3.11.*",
+      "/usr/local/lib/python3.11"
+     ],
+     "final": {
+      "cmd": "[\"./sandbox/run.sh\"]",
+      "entrypoint": "[\"./sandbox/docker_entrypoint.sh\"]",
+      "expose": [
+       "8484"
+      ],
+      "from": "node:22-trixie-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/grist"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 6,
+     "run_total": 12,
+     "stage_aliases": [
+      "ext",
+      "prod-builder",
+      "builder",
+      "collector-py3",
+      "sandbox"
+     ],
+     "stages": 6
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "python:3.11"
+     ],
+     "copy_sources_sample": [
+      "requirements.txt"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "python:3.11",
+      "healthcheck": false,
+      "user": "sandbox",
+      "volume": [],
+      "workdir": "/"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "sandbox/docker/Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "20": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "alpine:3.23",
+      "busybox:1.37.0-musl"
+     ],
+     "copy_sources_sample": [
+      "/JSON.sh",
+      "/etc/ca-certificates",
+      "/etc/ca-certificates.conf",
+      "/etc/mime.types",
+      "/etc/ssl",
+      "/sbin/tini-static",
+      "docker/alpine/",
+      "docker/common/",
+      "filebrowser"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[ \"tini\", \"--\", \"/init.sh\" ]",
+      "expose": [
+       "80"
+      ],
+      "from": "busybox:1.37.0-musl",
+      "healthcheck": true,
+      "user": "user",
+      "volume": [
+       "/srv /config /database"
+      ],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 3,
+     "stage_aliases": [
+      "fetcher"
+     ],
+     "stages": 2
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ghcr.io/linuxserver/baseimage-alpine:3.23"
+     ],
+     "copy_sources_sample": [
+      "docker/common/",
+      "docker/s6/",
+      "filebrowser"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [
+       "80"
+      ],
+      "from": "ghcr.io/linuxserver/baseimage-alpine:3.23",
+      "healthcheck": true,
+      "user": null,
+      "volume": [
+       "/srv /config /database"
+      ],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile.s6"
+   }
+  ],
+  "root_default": true
+ },
+ "27": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:24-alpine",
+      "node:24-alpine"
+     ],
+     "copy_sources_sample": [
+      "./LICENSE",
+      "./build/assets",
+      "./build/package.json",
+      "./build/server/views",
+      "./dev/build/config.yml",
+      "./package.json",
+      "./patches",
+      "./server",
+      "/wiki/node_modules"
+     ],
+     "final": {
+      "cmd": "[\"node\", \"server\"]",
+      "entrypoint": null,
+      "expose": [
+       "3000",
+       "3443"
+      ],
+      "from": "node:24-alpine",
+      "healthcheck": false,
+      "user": "node",
+      "volume": [
+       "[\"/wiki/data/content\"]"
+      ],
+      "workdir": "/wiki"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 4,
+     "run_total": 4,
+     "stage_aliases": [
+      "build"
+     ],
+     "stages": 2
+    },
+    "path": "dev/build-arm/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:24-alpine",
+      "node:24-alpine"
+     ],
+     "copy_sources_sample": [
+      "./.babelrc",
+      "./.eslintignore",
+      "./.eslintrc.yml",
+      "./LICENSE",
+      "./client",
+      "./dev",
+      "./dev/build/config.yml",
+      "./package.json",
+      "./patches",
+      "./server",
+      "/wiki/assets",
+      "/wiki/node_modules"
+     ],
+     "final": {
+      "cmd": "[\"node\", \"--no-deprecation\", \"server\"]",
+      "entrypoint": null,
+      "expose": [
+       "3000",
+       "3443"
+      ],
+      "from": "node:24-alpine",
+      "healthcheck": false,
+      "user": "node",
+      "volume": [
+       "[\"/wiki/data/content\"]"
+      ],
+      "workdir": "/wiki"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 7,
+     "run_total": 8,
+     "stage_aliases": [
+      "assets"
+     ],
+     "stages": 2
+    },
+    "path": "dev/build/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:24"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": "[\"tail\", \"-f\", \"/dev/null\"]",
+      "entrypoint": null,
+      "expose": [
+       "3000"
+      ],
+      "from": "node:24",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/wiki"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "dev/containers/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "requarks/wiki:2"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "requarks/wiki:2",
+      "healthcheck": false,
+      "user": "1001",
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 1,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "dev/openshift/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "28": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "node:22-alpine"
+     ],
+     "copy_sources_sample": [
+      "."
+     ],
+     "final": {
+      "cmd": "npm run migrate && npm start",
+      "entrypoint": null,
+      "expose": [
+       "3000"
+      ],
+      "from": "node:22-alpine",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/kutt"
+     },
+     "global_args": [],
+     "mounts": [
+      "bind",
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "29": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "node:${NODE_IMAGE_VERSION}",
+      "node:${NODE_IMAGE_VERSION}",
+      "node:${NODE_IMAGE_VERSION}"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/app/.next/standalone",
+      "/app/.next/static",
+      "/app/generated",
+      "/app/node_modules",
+      "/app/packages/api-client/node_modules",
+      "/app/packages/mcp/node_modules",
+      "/app/prisma",
+      "/app/prisma.config.ts",
+      "/app/public",
+      "/app/scripts",
+      "docker/proxy.ts"
+     ],
+     "final": {
+      "cmd": "[\"sh\", \"scripts/start-docker.sh\"]",
+      "entrypoint": null,
+      "expose": [
+       "3000"
+      ],
+      "from": "node:${NODE_IMAGE_VERSION}",
+      "healthcheck": false,
+      "user": "nextjs",
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [
+      "NODE_IMAGE_VERSION=\"22-alpine\"",
+      "PNPM_VERSION=\"12.3.4\"",
+      "PRISMA_VERSION=\"7.10.0\""
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 10,
+     "run_total": 13,
+     "stage_aliases": [
+      "deps",
+      "builder",
+      "runner"
+     ],
+     "stages": 3
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "30": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "node:$NODE_VERSION-bookworm-slim",
+      "scratch",
+      "node:$NODE_VERSION-bookworm-slim",
+      "core"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/home/ghost",
+      "/image-report.json",
+      "ghost/core/core/built/admin",
+      "ghost/core/core/built/embed-renderer"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "core",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "NODE_VERSION=22.23.3"
+     ],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 5,
+     "run_total": 8,
+     "stage_aliases": [
+      "deploy",
+      "report",
+      "core",
+      "full"
+     ],
+     "stages": 4
+    },
+    "path": "Dockerfile.production"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": true,
+     "arg_in_from": false,
+     "bases": [
+      "caddy:2.11.4-builder-alpine@sha256:0aa610043dab5da82ad0a0268e46bb852785e6f5160f12f1c6fe3f42903d7e1b",
+      "caddy:2-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b"
+     ],
+     "copy_sources_sample": [
+      "/usr/bin/caddy",
+      "Caddyfile"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [
+       "80",
+       "2368"
+      ],
+      "from": "caddy:2-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 1,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 2
+    },
+    "path": "docker/dev-gateway/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "node:$NODE_VERSION-bookworm-slim"
+     ],
+     "copy_sources_sample": [
+      ".github/hooks",
+      ".pnpmfile.mjs",
+      "apps/*/package.json",
+      "configs/*/package.json",
+      "docker/fake-mailgun/entrypoint.sh",
+      "e2e/helpers/services/fake-server.ts",
+      "e2e/helpers/services/mailgun/fake-mailgun-server.ts",
+      "e2e/package.json",
+      "e2e/tsconfig.json",
+      "ghost/*/package.json",
+      "koenig/*/package.json",
+      "package.json"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/usr/local/bin/fake-mailgun\"]",
+      "expose": [],
+      "from": "node:$NODE_VERSION-bookworm-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/ghost/e2e"
+     },
+     "global_args": [
+      "NODE_VERSION=22.23.3"
+     ],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/fake-mailgun/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "node:$NODE_VERSION-bookworm-slim"
+     ],
+     "copy_sources_sample": [
+      ".github/hooks",
+      ".pnpmfile.mjs",
+      "configs/*/package.json",
+      "docker/ghost-dev/entrypoint.sh",
+      "ghost/*/package.json",
+      "koenig/*/package.json",
+      "package.json",
+      "packages/**/package.json",
+      "patches",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "scripts/enforce-package-manager.js"
+     ],
+     "final": {
+      "cmd": "[\"pnpm\", \"dev\"]",
+      "entrypoint": "[\"/home/ghost/entrypoint.sh\"]",
+      "expose": [],
+      "from": "node:$NODE_VERSION-bookworm-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/ghost/ghost/core"
+     },
+     "global_args": [
+      "NODE_VERSION=22.23.3"
+     ],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 3,
+     "run_total": 4,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/ghost-dev/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": true,
+     "arg_in_from": false,
+     "bases": [
+      "python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b"
+     ],
+     "copy_sources_sample": [
+      "/uv",
+      "/uvx",
+      "docker/tb-cli/entrypoint.sh"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/usr/local/bin/entrypoint.sh\"]",
+      "expose": [],
+      "from": "python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/tinybird"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/tb-cli/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "${TINYBIRD_LOCAL_REF}",
+      "scratch"
+     ],
+     "copy_sources_sample": [
+      "/",
+      "docker/tinybird-local-slim/cleanup.sh"
+     ],
+     "final": {
+      "cmd": "[\"/usr/bin/supervisord\"]",
+      "entrypoint": null,
+      "expose": [
+       "7181",
+       "7182"
+      ],
+      "from": "scratch",
+      "healthcheck": true,
+      "user": null,
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [
+      "TINYBIRD_LOCAL_REF"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 1,
+     "stage_aliases": [
+      "pruned"
+     ],
+     "stages": 2
+    },
+    "path": "docker/tinybird-local-slim/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "$GHOST_IMAGE"
+     ],
+     "copy_sources_sample": [
+      "apps/announcement-bar/umd",
+      "apps/comments-ui/umd",
+      "apps/portal/umd",
+      "apps/signup-form/umd",
+      "apps/sodo-search/umd"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "$GHOST_IMAGE",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "GHOST_IMAGE=ghost-monorepo:latest"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 0,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "e2e/Dockerfile.e2e"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "node:${NODE_VERSION}-slim"
+     ],
+     "copy_sources_sample": [
+      "package.json"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "node:${NODE_VERSION}-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "NODE_VERSION=22.23.3"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "e2e/Dockerfile.runner"
+   }
+  ],
+  "root_default": false
+ },
+ "31": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "python:3-alpine",
+      "python:3-alpine"
+     ],
+     "copy_sources_sample": [
+      "/app/venv"
+     ],
+     "final": {
+      "cmd": "[\"--hosts\", \"0.0.0.0:5232,[::]:5232\"]",
+      "entrypoint": "[ \"/app/bin/python\", \"/app/bin/radicale\"]",
+      "expose": [],
+      "from": "python:3-alpine",
+      "healthcheck": false,
+      "user": "radicale",
+      "volume": [
+       "/var/lib/radicale"
+      ],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 2
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "python:3-alpine",
+      "python:3-alpine"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/app/venv"
+     ],
+     "final": {
+      "cmd": "[\"--hosts\", \"0.0.0.0:5232\"]",
+      "entrypoint": "[ \"/app/bin/python\", \"/app/bin/radicale\"]",
+      "expose": [
+       "5232"
+      ],
+      "from": "python:3-alpine",
+      "healthcheck": false,
+      "user": "radicale",
+      "volume": [
+       "/var/lib/radicale"
+      ],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 2
+    },
+    "path": "Dockerfile.dev"
+   }
+  ],
+  "root_default": true
+ },
+ "32": {
+  "dockerfiles": [],
+  "root_default": false
+ },
+ "33": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "mcr.microsoft.com/devcontainers/python:1-3.11-bullseye"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "mcr.microsoft.com/devcontainers/python:1-3.11-bullseye",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 0,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "python:alpine3.14"
+     ],
+     "copy_sources_sample": [
+      "assets/GeoLite2-ASN_20191224.tar.gz",
+      "assets/GeoLite2-City_20191224.tar.gz",
+      "package-lock.json",
+      "package.json",
+      "poetry.lock",
+      "pyproject.toml",
+      "shynet"
+     ],
+     "final": {
+      "cmd": "[ \"./entrypoint.sh\" ]",
+      "entrypoint": null,
+      "expose": [
+       "8080"
+      ],
+      "from": "python:alpine3.14",
+      "healthcheck": true,
+      "user": "appuser",
+      "volume": [],
+      "workdir": "/usr/src/shynet"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 3,
+     "run_total": 6,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "34": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "nvidia/cuda:13.0.1-cudnn-runtime-ubuntu24.04"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": "[\"python3\", \"server.py\", \"--api\", \"--listen\"]",
+      "entrypoint": null,
+      "expose": [
+       "7860",
+       "5000"
+      ],
+      "from": "nvidia/cuda:13.0.1-cudnn-runtime-ubuntu24.04",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/app/textgen"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 4,
+     "run_total": 4,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/TensorRT-LLM/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ubuntu:22.04"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+      "entrypoint": null,
+      "expose": [
+       "${CONTAINER_PORT:-7860}",
+       "${CONTAINER_API_PORT:-5000}"
+      ],
+      "from": "ubuntu:22.04",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/app/textgen"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/amd/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ubuntu:22.04"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+      "entrypoint": null,
+      "expose": [
+       "${CONTAINER_PORT:-7860}",
+       "${CONTAINER_API_PORT:-5000}"
+      ],
+      "from": "ubuntu:22.04",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/app/textgen"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/cpu/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ubuntu:22.04"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+      "entrypoint": null,
+      "expose": [
+       "${CONTAINER_PORT:-7860}",
+       "${CONTAINER_API_PORT:-5000}"
+      ],
+      "from": "ubuntu:22.04",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/app/textgen"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/intel/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ubuntu:22.04"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+      "entrypoint": null,
+      "expose": [
+       "${CONTAINER_PORT:-7860}",
+       "${CONTAINER_API_PORT:-5000}"
+      ],
+      "from": "ubuntu:22.04",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/app/textgen"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "docker/nvidia/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "35": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "python:3.11.10-slim-bookworm",
+      "base",
+      "base",
+      "base",
+      "base",
+      "os-deps"
+     ],
+     "copy_sources_sample": [
+      "/home/worker/app/",
+      "/home/worker/app/.local-browsers/",
+      "/home/worker/app/.venv/",
+      "/home/worker/app/encodings/",
+      "/home/worker/app/models/nltk_cache/",
+      "/home/worker/app/pyproject.toml",
+      "/home/worker/app/tiktoken_cache/",
+      "/home/worker/app/uv.lock",
+      "/uv",
+      "private_gpt/",
+      "pyproject.toml",
+      "scripts/worker_entrypoint"
+     ],
+     "final": {
+      "cmd": "[\"serve\"]",
+      "entrypoint": "[\"private-gpt\"]",
+      "expose": [
+       "8080"
+      ],
+      "from": "os-deps",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/home/worker/app"
+     },
+     "global_args": [
+      "EXTRAS=\"core\"",
+      "PLAYWRIGHT_VERSION=\"1.60.0\""
+     ],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 7,
+     "run_total": 11,
+     "stage_aliases": [
+      "base",
+      "os-deps",
+      "dependencies",
+      "build",
+      "downloads",
+      "final"
+     ],
+     "stages": 6
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "36": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "node:24",
+      "gotify/build:${GO_VERSION}-${__TARGETPLATFORM_GO_NOTATION}",
+      "debian:${DEBIAN}"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Makefile",
+      "./ui",
+      "/src/gotify/ui/build",
+      "/target"
+     ],
+     "final": {
+      "cmd": "[\"serve\"]",
+      "entrypoint": "[\"./gotify-app\"]",
+      "expose": [
+       "$GOTIFY_SERVER_EXPOSE"
+      ],
+      "from": "debian:${DEBIAN}",
+      "healthcheck": true,
+      "user": null,
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [
+      "BUILDKIT_SBOM_SCAN_CONTEXT=true",
+      "GO_VERSION=PLEASE_PROVIDE_GO_VERSION",
+      "DEBIAN=sid-slim",
+      "__TARGETPLATFORM_DASHES=${TARGETPLATFORM/\\//-}",
+      "__TARGETPLATFORM_GO_NOTATION=${__TARGETPLATFORM_DASHES/arm\\/v7/arm-7}"
+     ],
+     "mounts": [],
+     "platforms": [
+      "${BUILDPLATFORM}"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 3,
+     "run_total": 5,
+     "stage_aliases": [
+      "js-builder",
+      "builder"
+     ],
+     "stages": 3
+    },
+    "path": "docker/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "37": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "mcr.microsoft.com/vscode/devcontainers/go:${VARIANT}"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "mcr.microsoft.com/vscode/devcontainers/go:${VARIANT}",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "VARIANT=\"1\""
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ghcr.io/crazy-max/osxcross:14.5-debian",
+      "alpine:3.22",
+      "scratch",
+      "node:lts-alpine",
+      "scratch",
+      "golang:1.27-alpine",
+      "golang:1.27-trixie",
+      "base",
+      "scratch",
+      "alpine:3.22",
+      "alpine:3.22"
+     ],
+     "copy_sources_sample": [
+      "/",
+      "/build",
+      "/out",
+      "/out/",
+      "/out/navidrome",
+      "ui/",
+      "ui/bin/",
+      "ui/package-lock.json",
+      "ui/package.json"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/app/navidrome\"]",
+      "expose": [
+       "${ND_PORT}"
+      ],
+      "from": "alpine:3.22",
+      "healthcheck": false,
+      "user": null,
+      "volume": [
+       "[\"/data\", \"/music\"]"
+      ],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [
+      "bind",
+      "cache"
+     ],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 14,
+     "run_total": 22,
+     "stage_aliases": [
+      "osxcross",
+      "xx-build",
+      "xx",
+      "ui",
+      "ui-bundle",
+      "build-alpine",
+      "base",
+      "build",
+      "binary",
+      "mpv-stubs",
+      "final"
+     ],
+     "stages": 11
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "alpine"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "alpine",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/workspace"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "release/wix/msitools.dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "38": {
+  "dockerfiles": [],
+  "root_default": false
+ },
+ "39": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "golang:1.27.1-alpine3.24.1",
+      "alpine:3.24.1"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/app/glance"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/app/glance\", \"--config\", \"/app/config/glance.yml\"]",
+      "expose": [
+       "8080/tcp"
+      ],
+      "from": "alpine:3.24.1",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 2
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "alpine:3.24.1"
+     ],
+     "copy_sources_sample": [
+      "glance"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/app/glance\", \"--config\", \"/app/config/glance.yml\"]",
+      "expose": [
+       "8080/tcp"
+      ],
+      "from": "alpine:3.24.1",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 0,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile.goreleaser"
+   }
+  ],
+  "root_default": true
+ },
+ "40": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "docker.io/library/alpine:${ALPINE_VERSION}",
+      "scratch"
+     ],
+     "copy_sources_sample": [
+      "/etc/ssl/certs/ca-certificates.crt",
+      "/tmp",
+      "/usr/bin/shiori",
+      "/usr/share/zoneinfo",
+      "dist/shiori_${TARGETOS}_${TARGETARCH}${TARGETVARIANT}/shiori"
+     ],
+     "final": {
+      "cmd": "[\"server\"]",
+      "entrypoint": "[\"/usr/bin/shiori\"]",
+      "expose": [
+       "${PORT}"
+      ],
+      "from": "scratch",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "${SHIORI_DIR}"
+     },
+     "global_args": [
+      "ALPINE_VERSION=3.19"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [
+      "builder"
+     ],
+     "stages": 2
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "docker.io/library/alpine:${ALPINE_VERSION}"
+     ],
+     "copy_sources_sample": [
+      "dist/shiori_${TARGETOS}_${TARGETARCH}${TARGETVARIANT}/shiori"
+     ],
+     "final": {
+      "cmd": "[\"server\"]",
+      "entrypoint": "[\"/usr/bin/shiori\"]",
+      "expose": [
+       "${PORT}"
+      ],
+      "from": "docker.io/library/alpine:${ALPINE_VERSION}",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "${SHIORI_DIR}"
+     },
+     "global_args": [
+      "ALPINE_VERSION=3.19"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile.alpine"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/golang:1.22-alpine"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": "[\"server\"]",
+      "entrypoint": "[\"go\", \"run\", \"main.go\"]",
+      "expose": [],
+      "from": "docker.io/golang:1.22-alpine",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/src/shiori"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 0,
+     "run_total": 0,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile.compose"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "docker.io/golang:${GOLANG_VERSION}-alpine${ALPINE_VERSION}"
+     ],
+     "copy_sources_sample": [
+      "."
+     ],
+     "final": {
+      "cmd": "[\"server\"]",
+      "entrypoint": "[\"go\", \"run\", \"main.go\"]",
+      "expose": [],
+      "from": "docker.io/golang:${GOLANG_VERSION}-alpine${ALPINE_VERSION}",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/src/shiori"
+     },
+     "global_args": [
+      "ALPINE_VERSION",
+      "GOLANG_VERSION"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 1,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "Dockerfile.e2e"
+   }
+  ],
+  "root_default": true
+ },
+ "41": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "docker.io/vaultwarden/web-vault@sha256:ba8bab66d4330ab9dbafa8f245bcbe99cf6ee3f2c8ce9b5fbb10e9c49658451c",
+      "ghcr.io/blackdex/rust-musl:x86_64-musl-stable-1.98.1",
+      "ghcr.io/blackdex/rust-musl:aarch64-musl-stable-1.98.1",
+      "ghcr.io/blackdex/rust-musl:armv7-musleabihf-stable-1.98.1",
+      "ghcr.io/blackdex/rust-musl:arm-musleabi-stable-1.98.1",
+      "build_${TARGETARCH}${TARGETVARIANT}",
+      "docker.io/library/alpine:3.24"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Cargo.*",
+      "./build.rs",
+      "./macros",
+      "./rust-toolchain.toml",
+      "/app/target/final/vaultwarden",
+      "/web-vault",
+      "docker/healthcheck.sh",
+      "docker/start.sh"
+     ],
+     "final": {
+      "cmd": "[\"/start.sh\"]",
+      "entrypoint": null,
+      "expose": [
+       "80"
+      ],
+      "from": "docker.io/library/alpine:3.24",
+      "healthcheck": true,
+      "user": null,
+      "volume": [
+       "/data"
+      ],
+      "workdir": "/"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [
+      "$BUILDPLATFORM",
+      "$TARGETPLATFORM",
+      "linux/amd64"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 7,
+     "run_total": 7,
+     "stage_aliases": [
+      "vault",
+      "build_amd64",
+      "build_arm64",
+      "build_armv7",
+      "build_armv6",
+      "build"
+     ],
+     "stages": 7
+    },
+    "path": "docker/Dockerfile.alpine"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/vaultwarden/web-vault@sha256:ba8bab66d4330ab9dbafa8f245bcbe99cf6ee3f2c8ce9b5fbb10e9c49658451c",
+      "docker.io/tonistiigi/xx@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707",
+      "docker.io/library/rust:1.98.1-slim-trixie",
+      "docker.io/library/debian:trixie-slim"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Cargo.*",
+      "./build.rs",
+      "./macros",
+      "./rust-toolchain.toml",
+      "/",
+      "/app/target/final/vaultwarden",
+      "/web-vault",
+      "docker/healthcheck.sh",
+      "docker/start.sh"
+     ],
+     "final": {
+      "cmd": "[\"/start.sh\"]",
+      "entrypoint": null,
+      "expose": [
+       "80"
+      ],
+      "from": "docker.io/library/debian:trixie-slim",
+      "healthcheck": true,
+      "user": null,
+      "volume": [
+       "/data"
+      ],
+      "workdir": "/"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [
+      "$BUILDPLATFORM",
+      "$TARGETPLATFORM",
+      "linux/amd64"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 7,
+     "run_total": 7,
+     "stage_aliases": [
+      "vault",
+      "xx",
+      "build"
+     ],
+     "stages": 4
+    },
+    "path": "docker/Dockerfile.debian"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/vaultwarden/web-vault@{{",
+      "docker.io/tonistiigi/xx@{{",
+      "{{",
+      "{{",
+      "{{"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "./Cargo.*",
+      "./build.rs",
+      "./macros",
+      "./rust-toolchain.toml",
+      "/",
+      "/app/target/final/vaultwarden",
+      "/web-vault",
+      "docker/healthcheck.sh",
+      "docker/start.sh"
+     ],
+     "final": {
+      "cmd": "[\"/start.sh\"]",
+      "entrypoint": null,
+      "expose": [
+       "80"
+      ],
+      "from": "{{",
+      "healthcheck": true,
+      "user": null,
+      "volume": [
+       "/data"
+      ],
+      "workdir": "/"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [
+      "$BUILDPLATFORM",
+      "$TARGETPLATFORM",
+      "linux/amd64"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 7,
+     "run_total": 8,
+     "stage_aliases": [],
+     "stages": 5
+    },
+    "path": "docker/Dockerfile.j2"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/library/debian:trixie-slim"
+     ],
+     "copy_sources_sample": [
+      "setup.sh"
+     ],
+     "final": {
+      "cmd": "\"/setup.sh\"",
+      "entrypoint": null,
+      "expose": [],
+      "from": "docker.io/library/debian:trixie-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "playwright/compose/keycloak/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/library/debian:trixie-slim"
+     ],
+     "copy_sources_sample": [
+      "*.ts",
+      "compose",
+      "docker-compose.yml",
+      "package-lock.json",
+      "package.json",
+      "test.env",
+      "tests"
+     ],
+     "final": {
+      "cmd": "[\"test\"]",
+      "entrypoint": "[\"/usr/bin/npx\", \"playwright\"]",
+      "expose": [],
+      "from": "docker.io/library/debian:trixie-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/playwright"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 3,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "playwright/compose/playwright/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "playwright_oidc_vaultwarden_prebuilt",
+      "node:22-trixie",
+      "docker.io/library/debian:trixie-slim"
+     ],
+     "copy_sources_sample": [
+      "/data",
+      "/start.sh",
+      "/vaultwarden",
+      "/web-vault",
+      "build.sh"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/start.sh\"]",
+      "expose": [],
+      "from": "docker.io/library/debian:trixie-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 2,
+     "stage_aliases": [
+      "prebuilt",
+      "build"
+     ],
+     "stages": 3
+    },
+    "path": "playwright/compose/warden/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "42": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "${BUILDER_IMAGE}",
+      "chef",
+      "chef",
+      "${RUNNER_IMAGE}"
+     ],
+     "copy_sources_sample": [
+      ".",
+      "/lemmy/lemmy_server",
+      "/lemmy/recipe.json"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"lemmy_server\"]",
+      "expose": [
+       "8536"
+      ],
+      "from": "${RUNNER_IMAGE}",
+      "healthcheck": false,
+      "user": "$UNAME",
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "RUST_VERSION=1.95",
+      "CARGO_BUILD_FEATURES=default",
+      "RUST_RELEASE_MODE=debug",
+      "BUILDER_IMAGE=lukemathwalker/cargo-chef:latest-rust-${RUST_VERSION}",
+      "RUNNER_IMAGE=debian:sid-slim",
+      "UNAME=lemmy",
+      "UID=1000",
+      "GID=1000"
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 4,
+     "run_total": 5,
+     "stage_aliases": [
+      "chef",
+      "planner",
+      "builder",
+      "runner"
+     ],
+     "stages": 4
+    },
+    "path": "docker/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "43": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/node:24-trixie-slim"
+     ],
+     "copy_sources_sample": [
+      "\"./\"",
+      "\"docker/rootfs/etc/ImageMagick-6/paperless-policy.xml\",",
+      "/uv",
+      "["
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "docker.io/node:24-trixie-slim",
+      "healthcheck": false,
+      "user": null,
+      "volume": [
+       "[\"/usr/src/paperless/paperless-ngx/data\",  \"/usr/src/paperless/paperless-ngx/media\",  \"/usr/src/paperless/paperless-ngx/"
+      ],
+      "workdir": "/usr/src/paperless/src/docker/"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 5,
+     "run_total": 7,
+     "stage_aliases": [
+      "main-app"
+     ],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/node:24-trixie-slim",
+      "ghcr.io/astral-sh/uv:0.12.16-python3.14-trixie-slim",
+      "s6-overlay-base"
+     ],
+     "copy_sources_sample": [
+      "\"uv.lock\",",
+      "./docker/rootfs",
+      "./src",
+      "./src-ui",
+      "/src/src/documents/static/frontend/",
+      "[\"pyproject.toml\","
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/init\"]",
+      "expose": [
+       "8000"
+      ],
+      "from": "s6-overlay-base",
+      "healthcheck": true,
+      "user": null,
+      "volume": [
+       "[\"/usr/src/paperless/data\",  \"/usr/src/paperless/media\",  \"/usr/src/paperless/consume\",  \"/usr/src/paperless/export\"]"
+      ],
+      "workdir": "/usr/src/paperless/src/"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [
+      "$BUILDPLATFORM"
+     ],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 4,
+     "run_total": 7,
+     "stage_aliases": [
+      "compile-frontend",
+      "s6-overlay-base",
+      "main-app"
+     ],
+     "stages": 3
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "44": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "mcr.microsoft.com/devcontainers/ruby:4.0-trixie"
+     ],
+     "copy_sources_sample": [
+      ".devcontainer/welcome-message.txt",
+      ".nvmrc"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "mcr.microsoft.com/devcontainers/ruby:4.0-trixie",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": ".devcontainer/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "${BASE_REGISTRY}/node:${NODE_MAJOR_VERSION}-${DEBIAN_VERSION}-slim",
+      "${BASE_REGISTRY}/ruby:${RUBY_VERSION}-slim-${DEBIAN_VERSION}",
+      "${BASE_REGISTRY}/ruby:${RUBY_VERSION}-slim-${DEBIAN_VERSION}",
+      "media-build",
+      "media-build",
+      "ruby",
+      "ruby-build",
+      "ruby-build",
+      "ruby"
+     ],
+     "copy_sources_sample": [
+      "${FFMPEG_URL}/n${FFMPEG_VERSION}.tar.gz",
+      "${VIPS_URL}/v${VIPS_VERSION}/vips-${VIPS_VERSION}.tar.xz",
+      ".",
+      "/opt/mastodon",
+      "/opt/mastodon/public/assets",
+      "/opt/mastodon/public/packs",
+      "/usr/local/bin",
+      "/usr/local/bundle/",
+      "/usr/local/ffmpeg/bin",
+      "/usr/local/ffmpeg/lib",
+      "/usr/local/lib",
+      "/usr/local/libvips/bin"
+     ],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/usr/bin/tini\", \"--\"]",
+      "expose": [
+       "3000"
+      ],
+      "from": "ruby",
+      "healthcheck": false,
+      "user": "mastodon",
+      "volume": [],
+      "workdir": null
+     },
+     "global_args": [
+      "TARGETPLATFORM=${TARGETPLATFORM}",
+      "BUILDPLATFORM=${BUILDPLATFORM}",
+      "BASE_REGISTRY=\"docker.io\"",
+      "RUBY_VERSION=\"4.0.7\"",
+      "NODE_MAJOR_VERSION=\"24\"",
+      "DEBIAN_VERSION=\"trixie\""
+     ],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 3,
+     "run_total": 18,
+     "stage_aliases": [
+      "node",
+      "ruby",
+      "media-build",
+      "libvips",
+      "ffmpeg",
+      "ruby-build",
+      "bundler",
+      "precompiler",
+      "mastodon"
+     ],
+     "stages": 9
+    },
+    "path": "Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": true,
+     "bases": [
+      "${BASE_REGISTRY}/node:${NODE_MAJOR_VERSION}-${DEBIAN_VERSION}-slim"
+     ],
+     "copy_sources_sample": [
+      "./streaming",
+      ".yarnrc.yml",
+      "package.json",
+      "yarn.lock"
+     ],
+     "final": {
+      "cmd": "[ \"node\", \"./streaming/index.js\" ]",
+      "entrypoint": null,
+      "expose": [
+       "4000"
+      ],
+      "from": "${BASE_REGISTRY}/node:${NODE_MAJOR_VERSION}-${DEBIAN_VERSION}-slim",
+      "healthcheck": false,
+      "user": "mastodon",
+      "volume": [],
+      "workdir": "/opt/mastodon"
+     },
+     "global_args": [
+      "TARGETPLATFORM=${TARGETPLATFORM}",
+      "BUILDPLATFORM=${BUILDPLATFORM}",
+      "BASE_REGISTRY=\"docker.io\"",
+      "NODE_MAJOR_VERSION=\"24\"",
+      "DEBIAN_VERSION=\"trixie\""
+     ],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 1,
+     "run_total": 5,
+     "stage_aliases": [
+      "streaming"
+     ],
+     "stages": 1
+    },
+    "path": "streaming/Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "45": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "docker.io/rust:1.96-bookworm",
+      "node:22.23-bookworm-slim",
+      "node:22.23-bookworm-slim"
+     ],
+     "copy_sources_sample": [
+      ".",
+      ".yarnrc.yml",
+      "/data/.yarnrc.yml",
+      "/data/apps/web",
+      "/data/apps/worker",
+      "/data/node_modules",
+      "/data/package.json",
+      "/data/packages",
+      "/data/yarn.lock",
+      "/usr/local/cargo/bin/monolith",
+      "apps/web/package.json",
+      "apps/worker/package.json"
+     ],
+     "final": {
+      "cmd": "[\"sh\", \"-c\", \"export PATH=/data/node_modules/.bin:$PATH && prisma migrate deploy --schema=/data/packages/prisma/schema.prisma && exec concurrently -k -n web,worker \\\"cd /data/apps/web && exec next sta",
+      "entrypoint": null,
+      "expose": [
+       "3000"
+      ],
+      "from": "node:22.23-bookworm-slim",
+      "healthcheck": true,
+      "user": null,
+      "volume": [],
+      "workdir": "/data"
+     },
+     "global_args": [],
+     "mounts": [
+      "cache"
+     ],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 8,
+     "run_total": 9,
+     "stage_aliases": [
+      "monolith-builder",
+      "app-builder",
+      "main-app"
+     ],
+     "stages": 3
+    },
+    "path": "Dockerfile"
+   }
+  ],
+  "root_default": true
+ },
+ "46": {
+  "dockerfiles": [],
+  "root_default": false
+ },
+ "47": {
+  "dockerfiles": [
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "php:8.3-apache"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": null,
+      "expose": [],
+      "from": "php:8.3-apache",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/app"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 6,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "dev/docker/Dockerfile"
+   },
+   {
+    "parsed": {
+     "all_bases_digest_pinned": false,
+     "arg_in_from": false,
+     "bases": [
+      "ubuntu:24.04"
+     ],
+     "copy_sources_sample": [],
+     "final": {
+      "cmd": null,
+      "entrypoint": "[\"/bin/php\"]",
+      "expose": [],
+      "from": "ubuntu:24.04",
+      "healthcheck": false,
+      "user": null,
+      "volume": [],
+      "workdir": "/var/www/bookstack"
+     },
+     "global_args": [],
+     "mounts": [],
+     "platforms": [],
+     "privileged": [],
+     "remote_add": [],
+     "run_network": 2,
+     "run_total": 2,
+     "stage_aliases": [],
+     "stages": 1
+    },
+    "path": "dev/docker/db-testing/Dockerfile"
+   }
+  ],
+  "root_default": false
+ },
+ "48": {
+  "dockerfiles": [],
+  "root_default": false
+ },
+ "49": {
+  "dockerfiles": [],
+  "root_default": false
+ },
+ "50": {
+  "dockerfiles": [],
+  "root_default": false
+ }
+}

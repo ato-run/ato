@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ato portability proof</title>
+<h1>Ato portability proof</h1>
+<p id="status">Loading proof…</p>
+<script type="module">
+const response = await fetch('/proof.txt');
+document.querySelector('#status').textContent = response.ok
+  ? (await response.text()).trim()
+  : `Proof failed: ${response.status}`;
+</script>
+</html>

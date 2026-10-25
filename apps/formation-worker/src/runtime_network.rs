@@ -1,0 +1,3802 @@
+//! Runtime Network Phase 1 — the Runtime side and the requester side.
+//!
+//! ```text
+//! requester                       coordinator (ato-api)            Runtime (this worker)
+//!   freeze I, plan each D   ──▶   candidates = D × environments
+//!   SatisfyRequest               hard filter, rank, ticket   ──▶   claim ticket
+//!                                                                   frozen I → build → temporary
+//!                                                                   realization → HTTP K → browser K
+//!                                attempt history, fallback   ◀──   result + receipts
+//!                                VerifiedRoute on pass
+//! ```
+//!
+//! The requester computes every identity (Contract, effective Contract,
+//! Derivation) and every requirement from the Derivation itself, because the
+//! canonical forms live here and nowhere else. The coordinator only matches
+//! typed facts, and treats the requester's effects and requirements as
+//! scheduling hints. The authority is the Runtime: before anything runs it
+//! plans the ticket's route from the ticket's archive, refuses a ticket whose
+//! refs, environment, effects or platform do not hold, and attests what it
+//! established. The coordinator decides fallback from that attestation.
+
+mod exploration;
+mod verification_state;
+const FUNCTIONAL_VERIFICATION_CAPABILITY: &str = "formation.functional_verification.v1";
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use ato_formation::authoring::AuthoringDraft;
+use ato_formation::browser::{BrowserContractV0, effective_contract_ref};
+use ato_formation::capsule_toml::parse_capsule_toml;
+use ato_formation::detect::detect;
+use ato_formation::request::AttemptStatus;
+use ato_formation::source::{SourceError, SourceLimits};
+use serde::{Deserialize, Serialize};
+
+use crate::attempt::{AttemptRequest, Continuation, ReceiptContext, run_reserved_attempt};
+use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
+use crate::executor::LocalAttemptExecutor;
+use crate::job::{PlannedCandidate, digest, plan_candidate};
+use crate::journal::{AttemptJournal, AttemptLedger, AttemptPermit, AttemptRecordState};
+use crate::local::{self, host_triple};
+use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
+use anyhow::ensure;
+use ato_formation::source::FileVerifiedArchive;
+use ato_runtime_attempt::admission::EffectAuthorization;
+use ato_runtime_attempt::formation_realizer::FormationRealizer;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{Read, Seek, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+mod delivery;
+pub mod proposal;
+mod publication;
+pub mod source_handoff;
+mod source_oci_exploration;
+
+pub const PROTOCOL: &str = "ato.runtime-network/0";
+/// The one execution environment a host advertises in Phase 1: itself.
+pub const NATIVE_ENVIRONMENT: &str = "native";
+/// Largest source archive a request carries inline.
+pub const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Search budget ceilings (ADR-031). Each is a limit on a whole search, spent
+/// across all of its requests — not on one HTTP request, one artifact or one
+/// Runtime's disk. The Coordinator holds the same values; both repos check
+/// them against `search-budget-ceilings.json`.
+pub const MAX_SEARCH_ATTEMPTS: u32 = 32;
+pub const MAX_SEARCH_DEADLINE_SECONDS: u64 = 7 * 24 * 60 * 60;
+pub const MAX_SEARCH_TRANSFER_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const MAX_SEARCH_EXPANDED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const MAX_SEARCH_STORED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+/// The most one attempt expands of its source: this Runtime's own source
+/// ceiling, `SourceLimits::default().max_total_bytes`. The Coordinator never
+/// reserves more than this for an attempt.
+pub const MAX_ATTEMPT_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
+/// The most one attempt keeps: the ceiling of one capsule bundle. An
+/// UNKNOWN attempt is charged its full caps, so an attempt's share is
+/// bounded here rather than by everything the search has left.
+pub const MAX_ATTEMPT_STORED_BYTES: u64 = 512 * 1024 * 1024;
+/// How long a Runtime may take to fetch a ticket's source: MAX_SOURCE_BYTES
+/// at about 40 KB/s.
+pub(crate) const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+// ─────────────────────────────────────────────────────────────── wire types
+
+/// A requirement a Derivation places on a Runtime, as a typed fact.
+/// `one_of: None` means the fact must merely be present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Requirement {
+    pub fact: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_of: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentAdvert {
+    pub environment_id: String,
+    pub facts: BTreeMap<String, String>,
+}
+
+/// What a Runtime says it is. Stable: no load, no free memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDescriptorAdvert {
+    pub protocol: String,
+    pub agent_version: String,
+    pub environments: Vec<EnvironmentAdvert>,
+}
+
+/// How a Runtime is doing right now. Mutable, separate from identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AvailabilityReport {
+    pub capacity: u32,
+    pub current_slots: u32,
+    pub health: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedDerivation {
+    pub derivation_ref: String,
+    /// The authored route, verbatim. The Runtime re-plans it and must reach
+    /// the same `derivation_ref`.
+    pub capsule_toml: String,
+    /// `pure`, `idempotent`, … — decides whether a failed attempt may fall
+    /// back to another Runtime.
+    pub effects: String,
+    pub requirements: Vec<Requirement>,
+    /// Toolchain facts the route provisions when a Runtime lacks them.
+    pub provisions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceTransport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_bytes: Option<u64>,
+    pub archive_digest: String,
+    pub closure_ref: String,
+}
+
+/// Read-only compatibility codec for already persisted v0 source tickets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacySourceTicket {
+    pub attempt_id: String,
+    pub fence: u32,
+    pub satisfy_id: String,
+    pub runtime_id: String,
+    pub environment_id: String,
+    pub contract_ref: String,
+    pub base_contract_ref: String,
+    pub derivation_ref: String,
+    pub capsule_toml: String,
+    #[serde(default)]
+    pub browser_contract: Option<BrowserContractV0>,
+    pub archive_digest: String,
+    pub bindings: BTreeMap<String, String>,
+    pub network: String,
+    /// This attempt's caps. A ticket without them is not one this Runtime
+    /// runs: it would have nothing to hold the attempt to.
+    pub resource_budget: TicketResourceBudget,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BuildRecordRetention {
+    #[serde(rename = "ato.build-record/1")]
+    V1,
+}
+
+impl AttemptTicket {
+    pub fn from_wire(mut value: serde_json::Value) -> Result<Self> {
+        if value.get("input").is_none() {
+            let old: LegacySourceTicket = serde_json::from_value(value.clone())?;
+            let map = value.as_object_mut().context("ticket object required")?;
+            map.remove("capsule_toml");
+            map.remove("archive_digest");
+            map.insert("input".into(),serde_json::json!({"kind":"source","capsule_toml":old.capsule_toml,"archive_digest":old.archive_digest}));
+        }
+        Ok(serde_json::from_value(value)?)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeConstraintWire {
+    Any,
+    Exact {
+        runtime_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SatisfyPolicy {
+    /// `denied` or `dependency-resolution` — what a build may reach.
+    pub network: String,
+    /// May `ato_managed` Runtimes be used for this request?
+    pub allow_managed: bool,
+    /// Stage 5a: whether this requester's DecisionProvider may choose among
+    /// offered attempts. Frozen with the search; absent means no provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ato_formation::decision::DecisionPolicy>,
+    /// Owner-authorized, frozen typed draft domain. No policy means no generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<ato_formation::generation::GenerationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ato_formation::proposal::ProposalAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ato_formation::exploration::ExplorationPolicy>,
+}
+
+/// The budget of the whole search the request belongs to (ADR-031). The
+/// search's first request freezes it; every later request of the search must
+/// state it exactly, and spends from what the earlier ones left. The
+/// Coordinator owns what remains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SatisfyBudget {
+    /// Attempts the search may claim, over all of its requests.
+    pub max_attempts: u32,
+    /// `first_pass`: stop at the first verified route. `all`: attempt every
+    /// admissible candidate (still within the budget). A search objective,
+    /// frozen with the budget.
+    pub mode: String,
+    /// The search's lifetime, from its first request. Never extended.
+    pub deadline_seconds: u64,
+    /// Logical source bytes the search may hand to Runtimes.
+    pub max_transfer_bytes: u64,
+    /// Logical bytes the search may expand on Runtimes.
+    pub max_expanded_bytes: u64,
+    /// Logical artifact bytes the search may have Runtimes keep.
+    pub max_stored_bytes: u64,
+}
+
+impl SatisfyBudget {
+    /// The largest budget a search may have: every ceiling.
+    pub fn ceilings(max_attempts: u32, mode: &str) -> Self {
+        Self {
+            max_attempts,
+            mode: mode.to_owned(),
+            deadline_seconds: MAX_SEARCH_DEADLINE_SECONDS,
+            max_transfer_bytes: MAX_SEARCH_TRANSFER_BYTES,
+            max_expanded_bytes: MAX_SEARCH_EXPANDED_BYTES,
+            max_stored_bytes: MAX_SEARCH_STORED_BYTES,
+        }
+    }
+
+    /// Refuse a budget the Coordinator would refuse: above a ceiling, or
+    /// with no attempt or no time at all.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=MAX_SEARCH_ATTEMPTS).contains(&self.max_attempts) {
+            bail!("max_attempts must be 1..={MAX_SEARCH_ATTEMPTS}");
+        }
+        if !matches!(self.mode.as_str(), "first_pass" | "all") {
+            bail!("mode must be first_pass or all");
+        }
+        if !(1..=MAX_SEARCH_DEADLINE_SECONDS).contains(&self.deadline_seconds) {
+            bail!("deadline_seconds must be 1..={MAX_SEARCH_DEADLINE_SECONDS}");
+        }
+        for (name, value, ceiling) in [
+            (
+                "max_transfer_bytes",
+                self.max_transfer_bytes,
+                MAX_SEARCH_TRANSFER_BYTES,
+            ),
+            (
+                "max_expanded_bytes",
+                self.max_expanded_bytes,
+                MAX_SEARCH_EXPANDED_BYTES,
+            ),
+            (
+                "max_stored_bytes",
+                self.max_stored_bytes,
+                MAX_SEARCH_STORED_BYTES,
+            ),
+        ] {
+            if value > ceiling {
+                bail!("{name} is above the search ceiling of {ceiling} bytes");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An attempt's share of its search's budget, fixed when the ticket was
+/// issued. Hard limits: this Runtime never goes past them, whatever it
+/// believes the search has left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TicketResourceBudget {
+    /// The source's logical bytes: the most this attempt may receive.
+    pub transfer_bytes: u64,
+    /// The most this attempt may expand of its source.
+    pub expanded_bytes: u64,
+    /// The most artifact bytes this attempt may keep.
+    pub stored_bytes: u64,
+}
+
+/// What an attempt used of its caps, in the budget's logical units. Transfer
+/// is not reported: the Coordinator charges it when it authorizes the source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceUsage {
+    pub expanded_bytes: u64,
+    pub stored_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SatisfyRequest {
+    pub protocol: String,
+    /// The Formation search this request belongs to: an opaque id, shared by
+    /// every request of one search and nothing else. It carries no K, no
+    /// source and nothing about the requester. While an attempt of the
+    /// search is UNKNOWN, the coordinator starts nothing more for it.
+    pub search_id: String,
+    /// The K being satisfied: the effective Contract when a browser Contract
+    /// is part of it, else the base Contract.
+    pub contract_ref: String,
+    pub base_contract_ref: String,
+    /// Canonical K frozen before any attempt; the Coordinator checks this digest.
+    pub base_contract: ato_formation::authoring::BoundContract,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_contract: Option<BrowserContractV0>,
+    pub source: SourceTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_source: Option<ato_formation::search::InitialSource>,
+    pub authorized_derivations: Vec<AuthorizedDerivation>,
+    pub runtime_constraint: RuntimeConstraintWire,
+    pub bindings: BTreeMap<String, String>,
+    pub policy: SatisfyPolicy,
+    pub budget: SatisfyBudget,
+}
+
+/// One attempt, fixed: exactly this D on exactly this environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptTicket {
+    pub attempt_id: String,
+    pub fence: u32,
+    pub satisfy_id: String,
+    pub runtime_id: String,
+    pub environment_id: String,
+    pub contract_ref: String,
+    pub base_contract_ref: String,
+    pub derivation_ref: String,
+    pub input: AttemptInput,
+    #[serde(default)]
+    pub browser_contract: Option<BrowserContractV0>,
+    pub bindings: BTreeMap<String, String>,
+    pub network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ExplorationTicket>,
+    /// Coordinator-issued state scope for separately authorized verification.
+    /// Historical tickets omit it; retained objects never grant it themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_state: Option<verification_state::VerificationStateTicket>,
+    /// This attempt's caps. A ticket without them is not one this Runtime
+    /// runs: it would have nothing to hold the attempt to.
+    pub resource_budget: TicketResourceBudget,
+    /// Coordinator-owned evidence transport. Absence preserves historical
+    /// full-workspace publication; it never authorizes projection by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_record_retention: Option<BuildRecordRetention>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationTicket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    /// Frozen Search transport budget. Historical tickets retain initial + 3.
+    #[serde(default = "default_transport_retries")]
+    pub max_retries: u32,
+    pub search_id: String,
+    pub ceiling: ato_formation::requirements::ExecutionRequirements,
+    pub network_transfer_bytes: u64,
+}
+
+fn default_transport_retries() -> u32 {
+    3
+}
+
+/// Operator configuration, read once at worker start and never projected as
+/// normal user authority. Tickets can narrow this ceiling, never expand it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationSandbox {
+    pub ceiling: ato_formation::requirements::ExecutionRequirements,
+    pub max_network_transfer_bytes_per_attempt: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_oci: Option<source_oci_exploration::SourceOciSandbox>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttemptInput {
+    Source {
+        capsule_toml: String,
+        archive_digest: String,
+    },
+    Retained {
+        retained_ref: String,
+        descriptor_json: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptFailureWire {
+    pub code: String,
+    pub stage: String,
+    pub message: String,
+}
+
+/// What the Runtime itself established about the ticket, from the archive
+/// and the authored route — never from the request's metadata. The
+/// coordinator decides fallback from this, not from what the requester said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAttestation {
+    /// The environment this Runtime executes (or refused to execute) in.
+    pub environment_id: String,
+    pub agent_version: String,
+    /// `None` when the ticket was refused before it could be planned.
+    pub derivation_ref: Option<String>,
+    pub contract_ref: Option<String>,
+    /// The canonical Derivation's effect class.
+    pub effects: Option<String>,
+    pub requirements: Vec<Requirement>,
+    pub provisions: Vec<String>,
+    /// Did anything of the candidate run — a build step, the application?
+    /// `false` for every refusal before execution. Kept for compatibility;
+    /// `attempt_record` is what UNKNOWN is decided from.
+    pub execution_started: bool,
+    /// What this Runtime's durable attempt record says: `not_started`,
+    /// `finished`, or `started_unfinished` — the attempt ran and its end is
+    /// not durable, so what it did is UNKNOWN whatever the outcome says.
+    pub attempt_record: AttemptRecordState,
+    /// Physical candidate stop is distinct from the durable execution record.
+    /// No captured log, private resource path or binding value is transported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_stop: Option<CandidateStopAttestation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateStopAttestation {
+    Confirmed,
+    ScratchKept,
+    Unconfirmed,
+}
+
+impl CandidateStopAttestation {
+    pub fn of(stop: &ato_runtime_attempt::realize::StopClass) -> Self {
+        use ato_runtime_attempt::realize::StopClass;
+        match stop {
+            StopClass::Confirmed => Self::Confirmed,
+            StopClass::ScratchKept { .. } => Self::ScratchKept,
+            StopClass::Unconfirmed { .. } => Self::Unconfirmed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptResultReport {
+    pub fence: u32,
+    /// `pass`, `fail` or `inconclusive`.
+    pub outcome: String,
+    pub contract_ref: Option<String>,
+    pub derivation_ref: Option<String>,
+    pub materialization_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_record_ref: Option<String>,
+    pub failure: Option<AttemptFailureWire>,
+    /// The Formation attempt as the Runtime recorded it: verification,
+    /// realization evidence, browser receipt.
+    pub formation_attempt: Option<serde_json::Value>,
+    pub verifier_receipts: Vec<serde_json::Value>,
+    pub attestation: RuntimeAttestation,
+    /// What the attempt used of the ticket's caps.
+    pub resource_usage: ResourceUsage,
+}
+
+// ────────────────────────────────────────────────────────────────── facts
+
+/// What this host is, as open-ended typed facts. Measured, never assumed.
+pub fn probe_facts(browser_verifier: Option<&BrowserVerifierCommand>) -> BTreeMap<String, String> {
+    let mut facts = BTreeMap::new();
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    facts.insert("platform.os".to_owned(), os.to_owned());
+    facts.insert("platform.arch".to_owned(), arch.to_owned());
+    facts.insert("platform".to_owned(), format!("{os}/{arch}"));
+    facts.insert("cpu.arch".to_owned(), arch.to_owned());
+    if let Some(vendor) = cpu_vendor() {
+        facts.insert("cpu.vendor".to_owned(), vendor);
+    }
+    let contained = containment_available();
+    facts.insert(
+        "containment".to_owned(),
+        if contained { "bwrap+landlock" } else { "none" }.to_owned(),
+    );
+    // A process candidate is realized only under containment (ADR-019).
+    facts.insert("runtime.process".to_owned(), contained.to_string());
+    // Binding-aware serve() replaces this conservative standalone probe.
+    facts.insert("runtime.oci".to_owned(), "false".to_owned());
+    // A browser verifier is a capability only when it runs contained: the
+    // helper, its runtimes and the sandbox all present, and the sandbox
+    // actually starting here. An uncontained verifier is never advertised.
+    let browser =
+        browser_verifier.is_some_and(|command| command.is_contained() && command.usable());
+    if browser {
+        facts.insert(
+            "verifier.browser.containment".to_owned(),
+            "bwrap".to_owned(),
+        );
+    }
+    facts.insert("runtime.browser".to_owned(), browser.to_string());
+    let root = Path::new(TOOLCHAIN_ROOT);
+    if root.is_dir() {
+        facts.insert("toolchain.root".to_owned(), TOOLCHAIN_ROOT.to_owned());
+        for language in [
+            "python",
+            "node",
+            "pnpm",
+            "yarn",
+            "gcc",
+            "make",
+            "pkg-config",
+        ] {
+            let Ok(entries) = std::fs::read_dir(root.join(language)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let binary = match language {
+                    "python" => "python3",
+                    _ => language,
+                };
+                if entry.path().join("bin").join(binary).is_file() {
+                    facts.insert(
+                        format!(
+                            "toolchain.{language}.{}",
+                            entry.file_name().to_string_lossy()
+                        ),
+                        "present".to_owned(),
+                    );
+                }
+            }
+        }
+    }
+    facts
+}
+
+fn cpu_vendor() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        let field = |name: &str| {
+            info.lines()
+                .find(|line| line.starts_with(name))
+                .and_then(|line| line.split(':').nth(1))
+                .map(|value| value.trim().to_owned())
+        };
+        if let Some(vendor) = field("vendor_id") {
+            return Some(
+                match vendor.as_str() {
+                    "GenuineIntel" => "intel",
+                    "AuthenticAMD" => "amd",
+                    other => return Some(other.to_ascii_lowercase()),
+                }
+                .to_owned(),
+            );
+        }
+        // ARM: the implementer code (0x41 Arm, 0xc0 Ampere, 0x61 Apple).
+        return field("CPU implementer").map(|code| {
+            match code.as_str() {
+                "0x41" => "arm",
+                "0xc0" => "ampere",
+                "0x61" => "apple",
+                other => return format!("arm-implementer-{other}"),
+            }
+            .to_owned()
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .ok()?;
+        let brand = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+        return Some(
+            if brand.contains("apple") {
+                "apple"
+            } else {
+                "intel"
+            }
+            .to_owned(),
+        );
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Digest of a fact set, as the coordinator records it on a route.
+pub fn facts_ref(facts: &BTreeMap<String, String>) -> String {
+    digest(&serde_jcs::to_vec(facts).expect("facts serialize"))
+}
+
+// ─────────────────────────────────────────────────────────── requirements
+
+/// What a planned Derivation needs from a Runtime, read from the Derivation.
+///
+/// Hard requirements are what running the route at all depends on; the
+/// provisions are toolchains it installs itself when they are absent (which
+/// needs a build network).
+pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>, Vec<String>) {
+    let mut requirements = Vec::new();
+    if !planned.derivation.platforms.is_empty() {
+        requirements.push(Requirement {
+            fact: "platform".to_owned(),
+            one_of: Some(
+                planned
+                    .derivation
+                    .platforms
+                    .iter()
+                    .map(|p| format!("{}/{}", p.os, p.arch))
+                    .collect(),
+            ),
+        });
+    }
+    if let Some(oci) = ato_formation::source_oci_plan::runtime_requirements(&planned.derivation) {
+        requirements.extend(oci.into_iter().map(|r| Requirement {
+            fact: r.fact,
+            one_of: r.one_of,
+        }));
+        return (requirements, vec![]);
+    }
+    requirements.extend(
+        ato_formation::search::execution_requirements(
+            planned.plan.lane.is_process(),
+            !planned.plan.actions.is_empty(),
+        )
+        .into_iter()
+        .map(|r| Requirement {
+            fact: r.fact,
+            one_of: r.one_of,
+        }),
+    );
+    if !planned.derivation.runtime_port_operations.is_empty() {
+        requirements.push(Requirement {
+            fact: ato_formation::port_operations::RUNTIME_CAPABILITY.into(),
+            one_of: Some(vec!["true".into()]),
+        });
+    }
+    requirements.extend(
+        ato_formation::proposal::native_runtime_requirements(&planned.derivation)
+            .into_iter()
+            .map(|r| Requirement {
+                fact: r.fact,
+                one_of: r.one_of,
+            }),
+    );
+    let mut provisions: Vec<String> = planned
+        .plan
+        .toolchains
+        .iter()
+        .map(|(name, version)| format!("toolchain.{name}.{version}"))
+        .chain(
+            planned
+                .plan
+                .package_manager
+                .iter()
+                .map(|manager| format!("toolchain.{}.{}", manager.name, manager.version)),
+        )
+        .collect();
+    provisions.sort();
+    provisions.dedup();
+    (requirements, provisions)
+}
+
+// ──────────────────────────────────────────────────────────── requesting
+
+pub struct Submission {
+    proposal_state: Option<proposal::RequesterProposal>,
+    archive: File,
+    source_entries: BTreeSet<String>,
+    frozen_source: local::FrozenSource,
+    project_summary: ato_formation::generation_context::ProjectSummary,
+    generation_context: Option<ato_formation::generation_context::GenerationContext>,
+    generation_context_v2: Option<ato_formation::generation_context::v2::GenerationContext>,
+    /// Pin the sole admitted generation; repeated receiver views may replay it,
+    /// but cannot grow the receipt authorization set with another generated D.
+    generated_derivation_ref: Option<String>,
+    pub request: SatisfyRequest,
+    /// The frozen K each authorized route was planned against, by
+    /// DerivationRef — what a returned receipt is checked against.
+    pub contracts: BTreeMap<String, ato_formation::authoring::BoundContract>,
+}
+
+/// A new, opaque search id: 128 random bits, nothing derived from the
+/// request or the requester.
+pub fn new_search_id(entropy: [u8; 16]) -> String {
+    let hex: String = entropy.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("search_{hex}")
+}
+
+impl Submission {
+    pub fn source_file(&self) -> Result<File> {
+        let mut file = self.archive.try_clone()?;
+        file.rewind()?;
+        Ok(file)
+    }
+
+    /// Explicit owner authorization of the small typed generation domain. This
+    /// must happen before submitting the search; the receiver freezes it.
+    pub fn authorize_generation(
+        &mut self,
+        entrypoints: BTreeMap<String, String>,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        use ato_formation::generation::{GENERATION_POLICY_SCHEMA, GenerationPolicy};
+        let base = self
+            .request
+            .authorized_derivations
+            .first()
+            .context("no base D")?;
+        let policy = GenerationPolicy {
+            schema: GENERATION_POLICY_SCHEMA.into(),
+            base_derivation_ref: base.derivation_ref.clone(),
+            entrypoints,
+            max_generations: 1,
+            timeout_ms,
+        };
+        policy.validate()?;
+        anyhow::ensure!(
+            policy
+                .entrypoints
+                .values()
+                .all(|path| self.source_entries.contains(path)),
+            "generation entrypoint absent from frozen source"
+        );
+        self.generation_context = None;
+        self.generation_context_v2 = None;
+        self.request.policy.generation = Some(policy);
+        Ok(())
+    }
+
+    /// Opt into prompt-v2 evidence, reading only our verified private snapshot.
+    /// No source path or bytes are retained in the provider-visible context.
+    pub fn enable_generation_context(&mut self) -> Result<()> {
+        use ato_formation::generation_context::{
+            GenerationContext, MAX_SOURCE_BYTES, project_python,
+        };
+        let policy = self
+            .request
+            .policy
+            .generation
+            .as_ref()
+            .context("generation not authorized")?;
+        let mut entries = Vec::with_capacity(policy.entrypoints.len());
+        for (id, relative) in &policy.entrypoints {
+            let file = File::open(self.frozen_source.root.join(relative))?;
+            let size = file.metadata()?.len();
+            let mut bytes = Vec::new();
+            // Oversized files produce only a size bucket; do not scan a prefix.
+            if size <= MAX_SOURCE_BYTES as u64 {
+                file.take(MAX_SOURCE_BYTES as u64).read_to_end(&mut bytes)?;
+            }
+            entries.push(project_python(id, &bytes, size)?);
+        }
+        self.generation_context = Some(GenerationContext::new(
+            entries,
+            self.project_summary.clone(),
+            vec![],
+            vec![],
+        )?);
+        self.generation_context_v2 = None;
+        Ok(())
+    }
+
+    /// Explicit prompt/3 opt-in. Cache source facts once, never reread on claim.
+    pub fn enable_generation_context_v2(&mut self) -> Result<()> {
+        self.generation_context_v2 = Some(self.project_generation_context_v2()?);
+        self.generation_context = None;
+        Ok(())
+    }
+
+    /// Offline c0 projection only: never installed into the point/2 provider path.
+    /// Reads only owner-authorized files in this requester's verified snapshot.
+    pub fn generation_context_v2_for_offline(
+        &self,
+        failures: &serde_json::Value,
+        evidence: &serde_json::Value,
+    ) -> Result<ato_formation::generation_context::v2::GenerationContext> {
+        let context = self.project_generation_context_v2()?;
+        Self::with_generation_evidence_v2(context, failures, evidence)
+    }
+
+    fn with_generation_evidence_v2(
+        mut context: ato_formation::generation_context::v2::GenerationContext,
+        failures: &serde_json::Value,
+        evidence: &serde_json::Value,
+    ) -> Result<ato_formation::generation_context::v2::GenerationContext> {
+        use ato_formation::generation_context::v2;
+        context.failures = v2::project_failures(failures);
+        context.inspections = v2::project_inspections(evidence);
+        context.validate()?;
+        Ok(context)
+    }
+
+    fn project_generation_context_v2(
+        &self,
+    ) -> Result<ato_formation::generation_context::v2::GenerationContext> {
+        use ato_formation::generation_context::{MAX_SOURCE_BYTES, v2};
+        let policy = self
+            .request
+            .policy
+            .generation
+            .as_ref()
+            .context("generation not authorized")?;
+        let mut entries = Vec::with_capacity(policy.entrypoints.len());
+        for (id, relative) in &policy.entrypoints {
+            let file = File::open(self.frozen_source.root.join(relative))?;
+            let size = file.metadata()?.len();
+            let mut bytes = Vec::new();
+            file.take(MAX_SOURCE_BYTES as u64).read_to_end(&mut bytes)?;
+            entries.push(v2::project_python(id, &bytes, size)?);
+        }
+        Ok(v2::GenerationContext::new(
+            entries,
+            self.project_summary.clone(),
+            vec![],
+            vec![],
+        )?)
+    }
+
+    /// Dynamic evidence is a separate fixed-vocabulary projection; never forward
+    /// durable evidence, raw failure messages or receiver identities wholesale.
+    pub fn generation_context_for(
+        &self,
+        failures: &serde_json::Value,
+        evidence: &serde_json::Value,
+    ) -> Result<Option<ato_formation::generation_context::GenerationContext>> {
+        use ato_formation::generation_context::{project_failures, project_inspections};
+        let Some(mut context) = self.generation_context.clone() else {
+            return Ok(None);
+        };
+        context.failures = project_failures(failures);
+        context.inspections = project_inspections(evidence);
+        context.validate()?;
+        Ok(Some(context))
+    }
+
+    /// Reconstruct an admitted generated D from our own frozen authorization,
+    /// not from the receiver's claimed authority. Receipt checks then use the
+    /// original K under that recomputed D, including after requester restart.
+    pub fn accept_generated_candidate(&mut self, status: &serde_json::Value) -> Result<()> {
+        let generation = &status["generation"];
+        if generation["outcome"] != "admitted" {
+            return Ok(());
+        }
+        let policy = self
+            .request
+            .policy
+            .generation
+            .as_ref()
+            .context("generation not authorized")?;
+        let base = self
+            .request
+            .authorized_derivations
+            .iter()
+            .find(|d| d.derivation_ref == policy.base_derivation_ref)
+            .context("generation base not authorized")?;
+        let draft = serde_json::from_value(generation["draft"].clone())?;
+        let compiled = ato_formation::generation::compile(
+            policy,
+            &base.capsule_toml,
+            &self.request.source.closure_ref,
+            &self.request.base_contract_ref,
+            &draft,
+        )?;
+        anyhow::ensure!(
+            generation["derivation_ref"] == compiled.derivation_ref
+                && generation["capsule_toml"] == compiled.capsule_toml,
+            "generated candidate differs from frozen authorization"
+        );
+        anyhow::ensure!(
+            self.generated_derivation_ref
+                .as_ref()
+                .is_none_or(|accepted| accepted == &compiled.derivation_ref),
+            "admitted generated candidate changed"
+        );
+        anyhow::ensure!(
+            !self
+                .request
+                .authorized_derivations
+                .iter()
+                .any(|known| { known.derivation_ref == compiled.derivation_ref }),
+            "generated candidate duplicates a frozen authorized derivation"
+        );
+        self.generated_derivation_ref = Some(compiled.derivation_ref.clone());
+        self.contracts
+            .insert(compiled.derivation_ref, self.request.base_contract.clone());
+        Ok(())
+    }
+}
+
+/// The provider can be invoked only after a durable one-shot Coordinator claim.
+/// A lost claim/result response is settled by status/replay or the fixed
+/// deadline; it never authorizes another model call.
+pub fn serve_generation(
+    submission: &mut Submission,
+    client: &Client,
+    satisfy_id: &str,
+    status: &serde_json::Value,
+    provider: &dyn crate::generation_provider::GenerationProvider,
+) -> Result<Option<serde_json::Value>> {
+    use crate::generation_provider::GenerationPoint;
+    submission.accept_generated_candidate(status)?;
+    let Some(raw) = status.get("generation_point").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    // Source context is requester-local. A receiver cannot supply it, even
+    // when no local v2 context was enabled, nor break v1 with malformed extras.
+    let mut wire = raw.clone();
+    if let Some(object) = wire.as_object_mut() {
+        object.remove("schema");
+        object.remove("context");
+    }
+    let mut point: GenerationPoint = serde_json::from_value(wire)?;
+    if point.claimed || status["status"] != "running" {
+        return Ok(None);
+    }
+    let policy = submission
+        .request
+        .policy
+        .generation
+        .as_ref()
+        .context("generation not authorized")?;
+    let expected: Vec<_> = policy.entrypoints.keys().cloned().collect();
+    let mut offered = point.entrypoint_ids.clone();
+    offered.sort();
+    anyhow::ensure!(
+        offered == expected,
+        "generation domain differs from frozen authorization"
+    );
+    let mut point_v3 = if let Some(context) = submission.generation_context_v2.clone() {
+        let context =
+            Submission::with_generation_evidence_v2(context, &raw["failures"], &raw["evidence"])?;
+        let local = crate::generation_provider::GenerationPointV3 {
+            schema: crate::generation_provider::GENERATION_POINT_SCHEMA_V3.into(),
+            revision: point.revision,
+            expires_at: point.expires_at.clone(),
+            claimed: false,
+            entrypoint_ids: point.entrypoint_ids.clone(),
+            context,
+        };
+        local.validate().map_err(anyhow::Error::msg)?;
+        Some(local)
+    } else {
+        None
+    };
+    if let Some(context) = submission.generation_context_for(&raw["failures"], &raw["evidence"])? {
+        point.schema = "ato.formation-generation-point/2".into();
+        point.context = Some(context);
+    }
+    let Ok(claim) = client.claim_generation(satisfy_id, point.revision) else {
+        // A competing requester may have claimed or the point closed.
+        return Ok(None);
+    };
+    point.revision = claim["revision"]
+        .as_u64()
+        .context("generation claim has no revision")?;
+    let started = std::time::Instant::now();
+    let answer = if let Some(local) = &mut point_v3 {
+        local.revision = point.revision;
+        local.claimed = true;
+        // Close the boundary for every provider, not just the Jev implementation.
+        local.validate_claimed().map_err(anyhow::Error::msg)?;
+        provider.generate_v3(local)
+    } else {
+        provider.generate(&point)
+    }
+    .submission(point.revision);
+    let provider_elapsed_ms = started.elapsed().as_millis();
+    let accepted = client.submit_generation(satisfy_id, &answer).is_ok();
+    Ok(Some(serde_json::json!({
+        "answer": answer,
+        "provider_elapsed_ms": provider_elapsed_ms,
+        "elapsed_ms": started.elapsed().as_millis(),
+        "submission_accepted": accepted,
+    })))
+}
+
+pub const MAX_SOURCE_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Inventory the private, already verified extraction, before it is dropped.
+/// Unlike detector markers this includes nested files. `file_type` does not
+/// follow links, so neither linked files nor directories authorize entrypoints.
+fn source_file_inventory(root: &Path) -> Result<BTreeSet<String>> {
+    let mut files = BTreeSet::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            if kind.is_dir() {
+                directories.push(path);
+            } else if kind.is_file() {
+                let relative = path.strip_prefix(root)?;
+                // Policy paths use '/' on every host; do not reinterpret a
+                // literal backslash in a Unix filename as a path separator.
+                let components: Result<Vec<_>> = relative
+                    .components()
+                    .map(|part| {
+                        part.as_os_str()
+                            .to_str()
+                            .context("source path is not UTF-8")
+                    })
+                    .collect();
+                files.insert(components?.join("/"));
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn file_digest(file: &mut File) -> Result<String> {
+    file.rewind()?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    file.rewind()?;
+    Ok(format!("sha256:{:x}", hash.finalize()))
+}
+
+/// Freeze `dir`, plan every authorized route against it, and assemble the
+/// request for the search `search_id`. Every route must bind to the same
+/// Contract: one K, several Ds.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_submission(
+    dir: &Path,
+    routes: &[PathBuf],
+    browser_contract: Option<BrowserContractV0>,
+    work_root: &Path,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+) -> Result<Submission> {
+    anyhow::ensure!(
+        policy.proposal.is_none(),
+        "enable CandidateProducer explicitly after freezing source"
+    );
+    prepare_submission_inner(
+        dir,
+        routes,
+        browser_contract,
+        work_root,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_submission_inner(
+    dir: &Path,
+    routes: &[PathBuf],
+    browser_contract: Option<BrowserContractV0>,
+    work_root: &Path,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    explicit_contract: Option<ato_formation::authoring::BoundContract>,
+) -> Result<Submission> {
+    budget.validate()?;
+    std::fs::create_dir_all(work_root)?;
+    anyhow::ensure!(
+        fs2::available_space(work_root)?
+            >= MAX_SOURCE_OBJECT_BYTES + SourceLimits::default().max_total_bytes,
+        "insufficient scratch capacity to freeze source"
+    );
+    let mut archive = local::snapshot_directory_file(dir, work_root, MAX_SOURCE_OBJECT_BYTES)?;
+    let archive_bytes = archive.metadata()?.len();
+    let archive_digest = file_digest(&mut archive)?;
+    let verified = FileVerifiedArchive::verify(
+        archive.try_clone()?,
+        &archive_digest,
+        archive_bytes,
+        SourceLimits::default(),
+    )?;
+    let frozen = local::freeze_verified_file(
+        verified,
+        &std::path::absolute(work_root)?,
+        SourceLimits::default(),
+    )?;
+    prepare_frozen_submission(
+        archive,
+        frozen,
+        routes,
+        browser_contract,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        explicit_contract,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_frozen_submission(
+    archive: File,
+    frozen: local::FrozenSource,
+    routes: &[PathBuf],
+    browser_contract: Option<BrowserContractV0>,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    explicit_contract: Option<ato_formation::authoring::BoundContract>,
+    infer_known_routes: bool,
+) -> Result<Submission> {
+    let archive_bytes = archive.metadata()?.len();
+    let archive_digest = file_digest(&mut archive.try_clone()?)?;
+    let evidence = detect(&frozen.root).context("detection failed")?;
+
+    let route_files: Vec<PathBuf> = if explicit_contract.is_some() && routes.is_empty() {
+        Vec::new()
+    } else if routes.is_empty() {
+        vec![frozen.root.join("capsule.toml")]
+    } else {
+        routes.to_vec()
+    };
+    let mut base_contract_ref = explicit_contract
+        .as_ref()
+        .map(|k| k.contract_ref())
+        .transpose()?;
+    let mut authorized = Vec::new();
+    let mut contracts = BTreeMap::new();
+    let auto_known = infer_known_routes && policy.exploration.is_some() && routes.is_empty();
+    let mut recipes: Vec<(String, String)> = route_files
+        .iter()
+        .map(|file| {
+            std::fs::read_to_string(file)
+                .map(|text| (file.display().to_string(), text))
+                .with_context(|| format!("cannot read route {}", file.display()))
+        })
+        .collect::<Result<_>>()?;
+    if auto_known {
+        if let Some(text) = ato_formation::capsule_toml::read_capsule_toml(&frozen.root)? {
+            recipes.push(("source capsule.toml".into(), text));
+        } else if let Ok(drafts) = ato_formation::preset::candidate_authoring(&evidence) {
+            for draft in drafts {
+                if let Ok(text) = ato_formation::capsule_toml::render_capsule_toml(&draft) {
+                    recipes.push(("known preset".into(), text));
+                }
+            }
+        }
+    }
+    for (label, text) in recipes {
+        let draft: AuthoringDraft = match parse_capsule_toml(&text) {
+            Ok(d) => d,
+            Err(_) if auto_known => continue,
+            Err(e) => return Err(ato_formation::failure::FormationFailure::from(e).into()),
+        };
+        let planned = match plan_candidate(
+            &draft,
+            &frozen.closure_ref,
+            &evidence,
+            BTreeMap::new(),
+            "/app",
+            &host_triple(),
+        ) {
+            Ok(p) => p,
+            Err(_) if auto_known => continue,
+            Err(e) => return Err(e),
+        };
+        match &base_contract_ref {
+            None => base_contract_ref = Some(planned.contract_ref.clone()),
+            Some(existing) if existing != &planned.contract_ref => {
+                if auto_known {
+                    continue;
+                }
+                bail!(
+                    "{label} binds to Contract {}, not {existing}: one request satisfies one K",
+                    planned.contract_ref
+                );
+            }
+            Some(_) => {}
+        }
+        let (requirements, provisions) = derivation_requirements(&planned);
+        contracts.insert(planned.derivation_ref.clone(), planned.contract.clone());
+        authorized.push(AuthorizedDerivation {
+            derivation_ref: planned.derivation_ref.clone(),
+            capsule_toml: text,
+            effects: serde_json::to_value(planned.derivation.effects)?
+                .as_str()
+                .unwrap_or("pure")
+                .to_owned(),
+            requirements,
+            provisions,
+        });
+    }
+    let base_contract_ref = base_contract_ref.context("no authorized route")?;
+    let contract_ref = effective_contract_ref(&base_contract_ref, browser_contract.as_ref());
+    let source_entries = source_file_inventory(&frozen.root)?;
+    let project_summary =
+        ato_formation::generation_context::project_project(&evidence, &source_entries);
+    Ok(Submission {
+        proposal_state: None,
+        source_entries,
+        project_summary,
+        generation_context: None,
+        generation_context_v2: None,
+        generated_derivation_ref: None,
+        request: SatisfyRequest {
+            protocol: PROTOCOL.to_owned(),
+            search_id: search_id.to_owned(),
+            contract_ref,
+            base_contract_ref,
+            base_contract: explicit_contract
+                .or_else(|| contracts.values().next().cloned())
+                .context("no frozen Contract")?,
+            browser_contract,
+            source: SourceTransport {
+                archive_base64: None,
+                content_ref: Some(archive_digest.clone()),
+                archive_bytes: Some(archive_bytes),
+                archive_digest,
+                closure_ref: frozen.closure_ref.as_str().to_owned(),
+            },
+            initial_source: None,
+            authorized_derivations: authorized,
+            runtime_constraint: constraint,
+            bindings: BTreeMap::new(),
+            policy,
+            budget,
+        },
+        contracts,
+        archive,
+        frozen_source: frozen,
+    })
+}
+
+/// Owner-session resolution wire; it does not stop a Runtime by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UnknownResolution {
+    Resolve {
+        resolution: EffectResolution,
+        note: String,
+        execution_stop: ExecutionStop,
+    },
+    TerminateSearch {
+        note: String,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectResolution {
+    NoEffectConfirmed,
+    EffectReconciled,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStop {
+    pub kind: ExecutionStopKind,
+    pub evidence: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStopKind {
+    RuntimeTerminated,
+    ExecutionDisabled,
+}
+
+/// Where a satisfy request stands, read from the coordinator's status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settlement {
+    /// Still being worked on.
+    Running,
+    Satisfied,
+    /// Every admissible candidate was tried, or none may follow a failure.
+    Unsatisfied,
+    /// The budget ran out with candidates left.
+    Exhausted,
+    /// An attempt may have run and what it did is not known. Not a failure
+    /// and not inconclusive: nothing further runs for the search until its
+    /// owner resolves the attempt.
+    EffectUnknown(Vec<UnknownAttempt>),
+    /// The owner stopped the search after an UNKNOWN attempt.
+    Stopped,
+    /// The search's own decision policy chose the offered stop: not a K
+    /// failure and not an owner stop.
+    DecisionStopped,
+}
+
+/// An attempt whose result is not known, as the requester is shown it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAttempt {
+    pub attempt_id: String,
+    pub runtime_id: String,
+    pub reason: String,
+}
+
+impl Settlement {
+    /// Read the coordinator's `status`. A status this requester does not
+    /// know is an error, never read as a settlement it does.
+    pub fn of(status: &serde_json::Value) -> Result<Self> {
+        let field =
+            |value: &serde_json::Value, name: &str| value[name].as_str().unwrap_or("?").to_owned();
+        Ok(match status["status"].as_str().unwrap_or("") {
+            "running" => Self::Running,
+            "satisfied" => Self::Satisfied,
+            "unsatisfied" => Self::Unsatisfied,
+            "exhausted" => Self::Exhausted,
+            "unknown" => Self::EffectUnknown(
+                status["unknown_attempts"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|attempt| attempt["resolution"].is_null())
+                    .map(|attempt| UnknownAttempt {
+                        attempt_id: field(attempt, "attempt_id"),
+                        runtime_id: field(attempt, "runtime_id"),
+                        reason: field(attempt, "unknown_reason"),
+                    })
+                    .collect(),
+            ),
+            "stopped" => match status["stop"]["kind"].as_str() {
+                Some("decision_stopped") => Self::DecisionStopped,
+                _ => Self::Stopped,
+            },
+            other => {
+                bail!("the coordinator reports a status this requester does not know: {other:?}")
+            }
+        })
+    }
+
+    /// The typed reason a request ended without a verified route.
+    pub fn terminal_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Running | Self::Satisfied => None,
+            Self::Unsatisfied => Some("unsatisfied"),
+            Self::Exhausted => Some("budget_exhausted"),
+            Self::EffectUnknown(_) => Some("effect_unknown"),
+            Self::Stopped => Some("search_stopped"),
+            Self::DecisionStopped => Some("decision_stopped"),
+        }
+    }
+}
+
+impl std::fmt::Display for Settlement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Running => write!(f, "running"),
+            Self::Satisfied => write!(f, "satisfied"),
+            Self::Unsatisfied => write!(f, "unsatisfied: no admissible candidate passed"),
+            Self::Exhausted => write!(f, "budget_exhausted: candidates remain"),
+            Self::EffectUnknown(attempts) => {
+                write!(f, "effect_unknown: ")?;
+                for (index, attempt) in attempts.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(
+                        f,
+                        "attempt {} on Runtime {} may have run and its result is not known ({})",
+                        attempt.attempt_id, attempt.runtime_id, attempt.reason
+                    )?;
+                }
+                write!(
+                    f,
+                    ". Nothing further runs for this search until its owner resolves it"
+                )
+            }
+            Self::Stopped => write!(f, "search_stopped: the owner stopped this search"),
+            Self::DecisionStopped => write!(
+                f,
+                "decision_stopped: the search's decision policy chose to stop the exploration"
+            ),
+        }
+    }
+}
+
+/// The verified routes of a settled satisfy request that prove the complete
+/// effective K, split from those that do not (with the reason).
+///
+/// The coordinator authenticates the Runtime and holds the fence; the
+/// judgement of what the receipts prove is
+/// [`ato_formation::receipt::accept_verified_route`], against the K this
+/// requester froze.
+pub fn accept_verified_routes(
+    submission: &Submission,
+    satisfy_id: &str,
+    status: &serde_json::Value,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    use ato_formation::receipt::VerifiedRouteAssignment;
+    let request = &submission.request;
+    let assignment = VerifiedRouteAssignment {
+        request_id: satisfy_id,
+        effective_contract_ref: &request.contract_ref,
+        base_contract_ref: &request.base_contract_ref,
+        contracts: &submission.contracts,
+        browser_contract: request.browser_contract.as_ref(),
+    };
+    accept_routes_for_assignment(&assignment, status)
+}
+pub fn accept_routes_for_assignment(
+    assignment: &ato_formation::receipt::VerifiedRouteAssignment<'_>,
+    status: &serde_json::Value,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    use ato_formation::receipt::accept_verified_route;
+    let empty = Vec::new();
+    let attempts = status["attempts"].as_array().unwrap_or(&empty);
+    let mut accepted = Vec::new();
+    let mut refused = Vec::new();
+    for route in status["verified_routes"].as_array().unwrap_or(&empty) {
+        match accept_verified_route(assignment, route, attempts) {
+            Ok(()) => accepted.push(route.clone()),
+            Err(rejection) => refused.push(format!(
+                "{} on {}/{}: {}: {}",
+                route["derivation_ref"].as_str().unwrap_or("?"),
+                route["runtime_id"].as_str().unwrap_or("?"),
+                route["environment_id"].as_str().unwrap_or("?"),
+                rejection.code,
+                rejection.detail
+            )),
+        }
+    }
+    (accepted, refused)
+}
+
+// ──────────────────────────────────────────────────────────────── client
+
+#[derive(Clone)]
+pub struct Client {
+    api: String,
+    token: String,
+    http: reqwest::blocking::Client,
+    deadline_ms: Option<u64>,
+    deadline_clock: Option<(std::time::Instant, Duration)>,
+}
+
+impl Client {
+    pub fn new(api: &str, token: &str) -> Result<Self> {
+        Ok(Self {
+            api: api.trim_end_matches('/').to_owned(),
+            token: token.trim().to_owned(),
+            deadline_ms: None,
+            deadline_clock: None,
+            http: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()?,
+        })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}/v1/runtime-network{path}", self.api)
+    }
+
+    /// Narrow an existing client without resetting the Search or round clock.
+    /// Heartbeats and delivery of already-saved results use the parent client.
+    pub fn with_deadline(&self, deadline_ms: u64) -> Self {
+        let mut bounded = self.clone();
+        bounded.deadline_ms = Some(
+            self.deadline_ms
+                .map_or(deadline_ms, |old| old.min(deadline_ms)),
+        );
+        let now = ato_runtime_attempt::control::now_ms();
+        let remaining = Duration::from_millis(bounded.deadline_ms.unwrap().saturating_sub(now));
+        let monotonic = self.deadline_clock.map_or(remaining, |(start, initial)| {
+            initial.saturating_sub(start.elapsed()).min(remaining)
+        });
+        bounded.deadline_clock = Some((std::time::Instant::now(), monotonic));
+        bounded
+    }
+
+    /// Report already-produced evidence without granting another execution.
+    /// The receiver's frozen completion fence still rejects expired proposals.
+    fn for_reporting(&self) -> Self {
+        let mut reporting = self.clone();
+        reporting.deadline_ms = None;
+        reporting.deadline_clock = None;
+        reporting
+    }
+
+    fn prepare(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Request> {
+        let mut request = request.bearer_auth(&self.token).build()?;
+        if let Some(deadline) = self.deadline_ms {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+            ensure!(
+                now < deadline,
+                "coordinator request deadline elapsed; operation preserved"
+            );
+            let remaining = Duration::from_millis(deadline - now).min(
+                self.deadline_clock
+                    .map_or(Duration::MAX, |(start, initial)| {
+                        initial.saturating_sub(start.elapsed())
+                    }),
+            );
+            ensure!(
+                !remaining.is_zero(),
+                "coordinator request monotonic deadline elapsed"
+            );
+            let configured = request
+                .timeout()
+                .copied()
+                .unwrap_or(Duration::from_secs(60));
+            *request.timeout_mut() = Some(configured.min(remaining));
+        }
+        Ok(request)
+    }
+
+    fn send<T: serde::de::DeserializeOwned>(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<Option<T>> {
+        let response = self.http.execute(self.prepare(request)?)?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let body = response.text()?;
+        if !status.is_success() {
+            bail!(
+                "coordinator answered {status}: {}",
+                crate::api::bounded_reason(&body)
+            );
+        }
+        Ok(Some(
+            serde_json::from_str(&body).context("coordinator answer is not JSON")?,
+        ))
+    }
+
+    pub fn advertise(&self, descriptor: &RuntimeDescriptorAdvert) -> Result<serde_json::Value> {
+        self.send(self.http.put(self.url("/runtimes/self")).json(descriptor))?
+            .context("empty advertise answer")
+    }
+
+    pub fn report_availability(&self, report: &AvailabilityReport) -> Result<()> {
+        let _: Option<serde_json::Value> = self.send(
+            self.http
+                .post(self.url("/runtimes/self/availability"))
+                .json(report),
+        )?;
+        Ok(())
+    }
+
+    pub fn variable_metadata(&self, application: &str, search_id: &str) -> Result<Vec<Value>> {
+        let reply: Value = self
+            .send(self.http.get(self.url("/variables")))?
+            .context("variable_metadata_empty")?;
+        let metadata = reply
+            .get("variables")
+            .and_then(Value::as_array)
+            .context("variable_metadata_invalid")?;
+        let metadata = metadata
+            .iter()
+            .filter(|v| {
+                v["metadata"]["applications"]
+                    .as_array()
+                    .is_some_and(|apps| apps.iter().any(|a| a == application))
+                    && (v["metadata"]["reuse"] == "reusable"
+                        || v["metadata"]["formation_id"] == search_id)
+            })
+            .collect::<Vec<_>>();
+        ensure!(metadata.len() <= 128, "variable_metadata_bounds");
+        Ok(metadata.iter().map(|v|serde_json::json!({"metadata":v["metadata"],"revoked_at_ms":v["revoked_at_ms"]})).collect())
+    }
+    pub fn formation_input(&self, search_id: &str) -> Result<Value> {
+        ensure!(
+            search_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                && search_id.len() <= 256,
+            "invalid search id"
+        );
+        self.send(
+            self.http
+                .get(self.url(&format!("/exploration/{search_id}/input"))),
+        )?
+        .context("formation_input_empty")
+    }
+    pub fn provide_formation_input(&self, search_id: &str, input: &Value) -> Result<Value> {
+        ensure!(
+            search_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                && search_id.len() <= 256,
+            "invalid search id"
+        );
+        self.send(
+            self.http
+                .post(self.url(&format!("/exploration/{search_id}/input")))
+                .json(input),
+        )?
+        .context("formation_input_empty")
+    }
+    /// Owner-session evidence metadata. Never accepts Runtime credentials as
+    /// functional permission; the API authenticates the same owning account.
+    pub fn source_result(&self, search_id: &str) -> Result<Value> {
+        Self::validate_owner_search_id(search_id)?;
+        self.send(
+            self.http
+                .get(self.url(&format!("/exploration/{search_id}/source-result"))),
+        )?
+        .context("source_result_empty")
+    }
+
+    /// Reuse the existing immutable functional plan and registration service.
+    /// Replaying identical request IDs returns the original Run and deadline.
+    pub fn prepare_retained_verification(&self, search_id: &str, plan: &Value) -> Result<Value> {
+        Self::validate_owner_search_id(search_id)?;
+        self.send(
+            self.http
+                .post(self.url(&format!("/exploration/{search_id}/retained-verification")))
+                .json(plan),
+        )?
+        .context("functional_verification_empty")
+    }
+
+    fn validate_owner_search_id(search_id: &str) -> Result<()> {
+        ensure!(
+            !search_id.is_empty()
+                && search_id.len() <= 256
+                && search_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "invalid search id"
+        );
+        Ok(())
+    }
+
+    pub fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>> {
+        let reply: Value = self
+            .send(self.http.get(self.url("/runtimes")))?
+            .context("runtime_capabilities_empty")?;
+        let rows = reply["runtimes"]
+            .as_array()
+            .context("runtime_capabilities_invalid")?;
+        let capabilities = rows.iter().filter(|v| match constraint { RuntimeConstraintWire::Any => true, RuntimeConstraintWire::Exact{runtime_id,..} => v["descriptor"]["runtime_id"] == runtime_id.as_str() }).take(16).map(|v| {
+            let environments = v["descriptor"]["execution_environments"].as_array().into_iter().flatten().map(|e| {
+                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.") || k.starts_with("formation.source_oci.") || k.starts_with("formation.oci.image.") || (k.as_str() == ato_formation::port_operations::RUNTIME_CAPABILITY || k.as_str() == FUNCTIONAL_VERIFICATION_CAPABILITY)) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:/-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
+                serde_json::json!({"environment_id":e["environment_id"],"facts_ref":e["facts_ref"],"facts":facts})
+            }).collect::<Vec<_>>();
+            serde_json::json!({"runtime_id":v["descriptor"]["runtime_id"], "environments": environments, "availability": v["availability"]})
+        }).collect::<Vec<_>>();
+        Ok(capabilities)
+    }
+    /// Redeem only the Coordinator's currently fenced, Rust-validated assignment.
+    /// Values remain private Runtime inputs; callers must retain the ticket's
+    /// original execution deadline and the scoped execution gate.
+    pub fn resolve_variables(
+        &self,
+        ticket: &AttemptTicket,
+        requirements: &[ato_formation::variables::VariableRequirement],
+        work_root: &Path,
+    ) -> Result<Vec<ato_runtime_attempt::variables::ResolvedVariable>> {
+        #[derive(Deserialize)]
+        struct Reply {
+            status: String,
+            #[serde(default)]
+            variables: Vec<Value>,
+        }
+        let deadline = ticket
+            .exploration
+            .as_ref()
+            .and_then(|e| e.deadline_ms)
+            .into_iter()
+            .chain(ticket.verification_state.as_ref().map(|s| s.deadline_ms))
+            .min()
+            .context("binding_wait_requires_deadline")?;
+        let control = ato_runtime_attempt::control::ExecutionControl::new(deadline);
+        let retries = ticket.exploration.as_ref().map_or(3, |e| e.max_retries);
+        let binding = delivery::Delivery::open(&work_root.join(format!(
+            "binding-{:x}",
+            Sha256::digest(format!("{}:{}", ticket.attempt_id, ticket.fence).as_bytes())
+        )))?;
+        let reply = loop {
+            control.remaining(ato_runtime_attempt::control::AttemptPhase::Source)?;
+            let reply: Reply = binding.binding_poll(retries, &control, || {
+                self.send(
+                    self.http
+                        .post(self.url(&format!(
+                            "/attempts/{}/variables/resolve",
+                            ticket.attempt_id
+                        )))
+                        .json(&json!({"fence":ticket.fence,"requirements":requirements})),
+                )?
+                .context("variable_resolution_empty")
+            })?;
+            if reply.status == "resolved" {
+                break reply;
+            }
+            ensure!(reply.status == "needs_input", "variable_resolution_invalid");
+            let _backoff = control.phase(ato_runtime_attempt::control::AttemptPhase::Backoff)?;
+            std::thread::sleep(control.cap(
+                ato_runtime_attempt::control::AttemptPhase::Backoff,
+                Duration::from_secs(5),
+            )?);
+        };
+        control.remaining(ato_runtime_attempt::control::AttemptPhase::Launch)?;
+        ensure!(
+            reply.variables.len() == requirements.len(),
+            "variable_resolution_mismatch"
+        );
+        let mut variables = Vec::new();
+        for (r, v) in requirements.iter().zip(reply.variables) {
+            ensure!(
+                v.get("name").and_then(Value::as_str) == Some(&r.name)
+                    && v.get("phase") == Some(&serde_json::to_value(r.phase)?),
+                "variable_resolution_mismatch"
+            );
+            variables.push(ato_runtime_attempt::variables::ResolvedVariable::new(
+                r,
+                v.get("grant_ref")
+                    .and_then(Value::as_str)
+                    .context("variable_grant_missing")?
+                    .to_owned(),
+                v.get("value")
+                    .and_then(Value::as_str)
+                    .context("variable_value_missing")?
+                    .to_owned(),
+            )?);
+        }
+        Ok(variables)
+    }
+    fn claim_operation(&self, id: &str) -> Result<Option<AttemptTicket>> {
+        self.send::<Value>(
+            self.http
+                .post(self.url("/attempts/claim"))
+                .json(&json!({"operation_id":id})),
+        )?
+        .map(AttemptTicket::from_wire)
+        .transpose()
+    }
+    pub fn claim(&self) -> Result<Option<AttemptTicket>> {
+        self.send::<serde_json::Value>(self.http.post(self.url("/attempts/claim")))?
+            .map(AttemptTicket::from_wire)
+            .transpose()
+    }
+
+    /// Use the Runtime's durable operation identity for a separately owned
+    /// execution driver. Reopening this directory never allocates another claim.
+    pub fn claim_recorded(&self, delivery_root: &Path) -> Result<Option<AttemptTicket>> {
+        delivery::Delivery::open(delivery_root)?.claim(self)
+    }
+
+    /// Deliver an already recorded result with the ticket's frozen retry budget.
+    /// This method performs no source, binding resolution or execution work.
+    pub fn report_recorded(
+        &self,
+        delivery_root: &Path,
+        ticket: &AttemptTicket,
+        report: &AttemptResultReport,
+    ) -> Result<()> {
+        delivery::Delivery::open(delivery_root)?.report(self, ticket, report)
+    }
+
+    /// The ticket's source, read up to `max_bytes` (the ticket's transfer
+    /// cap) and one byte more: a longer source is returned as such, never
+    /// read to its end.
+    pub fn source(
+        &self,
+        attempt_id: &str,
+        max_bytes: u64,
+        fence: u32,
+        work_root: &Path,
+    ) -> Result<File> {
+        self.download_input(attempt_id, max_bytes, fence, work_root, "source")
+    }
+    fn download_input(
+        &self,
+        attempt_id: &str,
+        max_bytes: u64,
+        fence: u32,
+        work_root: &Path,
+        kind: &str,
+    ) -> Result<File> {
+        anyhow::ensure!(
+            max_bytes <= MAX_SOURCE_OBJECT_BYTES,
+            "source exceeds object cap"
+        );
+        std::fs::create_dir_all(work_root)?;
+        anyhow::ensure!(
+            fs2::available_space(work_root)? >= max_bytes + SourceLimits::default().max_total_bytes,
+            "insufficient Runtime scratch capacity"
+        );
+        let request = self
+            .http
+            .get(self.url(&format!("/attempts/{attempt_id}/{kind}")))
+            .header("x-ato-attempt-fence", fence)
+            .timeout(SOURCE_TRANSFER_TIMEOUT);
+        let response = self.http.execute(self.prepare(request)?)?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "source unavailable ({})",
+            response.status()
+        );
+        let mut response = response.take(max_bytes.saturating_add(1));
+        let mut file = tempfile::tempfile_in(work_root)?;
+        let mut size = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = response.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            size += count as u64;
+            anyhow::ensure!(size <= max_bytes, "source exceeds transfer budget");
+            file.write_all(&buffer[..count])?;
+        }
+        anyhow::ensure!(size == max_bytes, "source size mismatch");
+        file.rewind()?;
+        Ok(file)
+    }
+
+    pub fn submit(&self, submission: &Submission) -> Result<serde_json::Value> {
+        submission.validate_proposal_submission()?;
+        let source = &submission.request.source;
+        let pending: serde_json::Value = self.send(self.http.post(self.url("/sources")).json(&serde_json::json!({
+            "archive_digest": source.archive_digest, "archive_bytes": source.archive_bytes,
+        })))?.context("missing source upload response")?;
+        let id = pending["upload_id"]
+            .as_str()
+            .context("missing source upload id")?;
+        if pending["status"] != "ready" {
+            let _: Option<serde_json::Value> = self.send(
+                self.http
+                    .put(self.url(&format!("/sources/{id}/content")))
+                    .timeout(SOURCE_TRANSFER_TIMEOUT)
+                    .body(submission.source_file()?),
+            )?;
+            let _: Option<serde_json::Value> = self.send(
+                self.http
+                    .post(self.url(&format!("/sources/{id}/finalize")))
+                    .timeout(SOURCE_TRANSFER_TIMEOUT),
+            )?;
+        }
+        self.satisfy(&submission.request)
+    }
+
+    pub fn report(&self, attempt_id: &str, result: &AttemptResultReport) -> Result<()> {
+        let _: Option<serde_json::Value> = self.send(
+            self.http
+                .post(self.url(&format!("/attempts/{attempt_id}/result")))
+                .json(result),
+        )?;
+        Ok(())
+    }
+
+    pub fn satisfy(&self, request: &SatisfyRequest) -> Result<serde_json::Value> {
+        self.send(self.http.post(self.url("/satisfy")).json(request))?
+            .context("empty satisfy answer")
+    }
+
+    /// Answer an open decision point of `id` (Stage 5a).
+    pub fn submit_decision(
+        &self,
+        id: &str,
+        submission: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/satisfy/{id}/decisions")))
+                .json(submission),
+        )?
+        .context("empty decision answer")
+    }
+
+    /// Reserve the sole generation invocation before contacting a model.
+    pub fn claim_generation(&self, id: &str, revision: u64) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/satisfy/{id}/generation/claim")))
+                .json(&serde_json::json!({"revision": revision})),
+        )?
+        .context("empty generation claim")
+    }
+
+    pub fn submit_generation(
+        &self,
+        id: &str,
+        answer: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/satisfy/{id}/generation")))
+                .json(answer),
+        )?
+        .context("empty generation answer")
+    }
+
+    pub fn satisfy_status(&self, id: &str) -> Result<serde_json::Value> {
+        self.send(self.http.get(self.url(&format!("/satisfy/{id}"))))?
+            .context("empty status answer")
+    }
+
+    /// Owner cancellation keeps started/UNKNOWN evidence and awaits cleanup.
+    pub fn cancel_exploration(&self, search_id: &str) -> Result<Value> {
+        ensure!(
+            search_id.len() <= 256
+                && !search_id.is_empty()
+                && search_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "invalid search id"
+        );
+        self.send(
+            self.http
+                .post(self.url(&format!("/exploration/{search_id}/cancel")))
+                .json(&json!({})),
+        )?
+        .context("empty exploration cancellation answer")
+    }
+
+    /// Reattach to the same owner's durable exploration. Never resubmit an
+    /// active request, allocate a second search, or reset any frozen budget.
+    pub fn resume_exploration(&self, submission: &Submission) -> Result<serde_json::Value> {
+        let id = &submission.request.search_id;
+        anyhow::ensure!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')),
+            "invalid search id"
+        );
+        let value: serde_json::Value = self
+            .send(
+                self.http
+                    .get(self.url(&format!("/exploration/{id}/resume"))),
+            )?
+            .context("missing exploration restart locator")?;
+        let frozen: ato_formation::search::FrozenSearchV1 =
+            serde_json::from_value(value["frozen"].clone())?;
+        anyhow::ensure!(
+            value["search_id"] == id.as_str()
+                && frozen == proposal::frozen_request(&submission.request)?,
+            "exploration restart identity mismatch"
+        );
+        Ok(value)
+    }
+}
+
+// The standalone host probe cannot advertise a configured adapter. Apply the
+// same binding predicate to both advertisement and actual attempt admission.
+fn bind_http_port_capability(
+    facts: &mut BTreeMap<String, String>,
+    contained_process: bool,
+    grant_path_bound: bool,
+) {
+    facts.insert(
+        ato_formation::port_operations::RUNTIME_CAPABILITY.into(),
+        (contained_process && grant_path_bound).to_string(),
+    );
+    facts.insert(
+        FUNCTIONAL_VERIFICATION_CAPABILITY.into(),
+        (contained_process && grant_path_bound).to_string(),
+    );
+}
+
+/// Admission facts for a configured scoped execution and current grant client.
+/// Standalone probes remain conservative; a caller must bind the scoped gate.
+pub fn ticket_runtime_profile(
+    scoped: bool,
+    publisher: Option<&Client>,
+) -> ato_formation::request::RuntimeProfile {
+    let mut profile = local::probe_local_runtime();
+    let contained = profile.get("formation.containment") == Some("bwrap+landlock");
+    bind_http_port_capability(
+        &mut profile.capabilities,
+        contained,
+        scoped && publisher.is_some(),
+    );
+    profile
+}
+
+// ─────────────────────────────────────────────────────────────── serving
+
+pub struct ServeConfig {
+    pub api: String,
+    pub token: String,
+    pub work_root: PathBuf,
+    pub out_dir: PathBuf,
+    pub shim: PathBuf,
+    pub browser_verifier: Option<BrowserVerifierCommand>,
+    pub poll: Duration,
+    /// Handle at most this many tickets, then return.
+    pub max_tickets: Option<u32>,
+    pub exploration: Option<ExplorationSandbox>,
+}
+
+/// Join the Runtime Network: advertise, report availability, and execute the
+/// tickets addressed to this Runtime, one at a time.
+pub fn serve(config: &ServeConfig) -> Result<()> {
+    let client = Arc::new(Client::new(&config.api, &config.token)?);
+    let mut facts = probe_facts(config.browser_verifier.as_ref());
+    let source_oci = config
+        .exploration
+        .as_ref()
+        .and_then(|e| e.source_oci.as_ref());
+    let contained_process = facts.get("runtime.process").is_some_and(|v| v == "true");
+    bind_http_port_capability(&mut facts, contained_process, config.exploration.is_some());
+    let oci_available = source_oci.is_some_and(|o| o.available());
+    facts.insert(
+        "formation.source_oci.bound".into(),
+        source_oci.is_some().to_string(),
+    );
+    facts.insert(
+        "formation.source_oci.available".into(),
+        oci_available.to_string(),
+    );
+    facts.insert(
+        "runtime.oci".into(),
+        source_oci
+            .is_some_and(|o| o.runtime_available())
+            .to_string(),
+    );
+    if let Some(oci) = source_oci {
+        let max = &oci.maximum_recipe;
+        facts.insert("formation.source_oci.platform".into(), max.platform.clone());
+        for (key, value) in [
+            ("build.memory_bytes", max.build.memory_bytes),
+            ("build.cpu_limit_millis", max.build.cpu_limit_millis),
+            ("build.pids_limit", max.build.pids_limit),
+            ("build_disk_bytes", max.build_disk_bytes),
+            ("runtime.memory_bytes", max.runtime.memory_bytes),
+            ("runtime.cpu_limit_millis", max.runtime.cpu_limit_millis),
+            ("runtime.pids_limit", max.runtime.pids_limit),
+            ("build_timeout_seconds", max.build_timeout_seconds),
+            ("max_archive_bytes", max.max_archive_bytes),
+        ] {
+            facts.insert(format!("formation.source_oci.{key}"), value.to_string());
+        }
+        for image in &oci.base_images {
+            if image.archive.is_file()
+                && max.base_images.iter().any(|b| {
+                    b.reference == image.reference && b.pinned_digest == image.pinned_digest
+                })
+            {
+                facts.insert(
+                    format!(
+                        "formation.oci.image.{}",
+                        image.pinned_digest.trim_start_matches("sha256:")
+                    ),
+                    "true".into(),
+                );
+            }
+        }
+    }
+    let advertised = client.advertise(&RuntimeDescriptorAdvert {
+        protocol: PROTOCOL.to_owned(),
+        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        environments: vec![EnvironmentAdvert {
+            environment_id: NATIVE_ENVIRONMENT.to_owned(),
+            facts: facts.clone(),
+        }],
+    })?;
+    eprintln!(
+        "[runtime-network] joined as {} ({})",
+        advertised["runtime_id"].as_str().unwrap_or("?"),
+        facts.get("platform").map(String::as_str).unwrap_or("?")
+    );
+
+    // Availability is reported on its own clock, so a long attempt does not
+    // make the Runtime look offline — and at once whenever a slot is taken or
+    // freed, so the coordinator does not schedule against a stale load.
+    let busy = Arc::new(AtomicU32::new(0));
+    let report_now = |client: &Client, slots: u32| {
+        if let Err(error) = client.report_availability(&AvailabilityReport {
+            capacity: 1,
+            current_slots: slots,
+            health: "ok".to_owned(),
+        }) {
+            eprintln!("[runtime-network] availability report failed: {error:#}");
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let heartbeat = {
+        let (client, busy, stop) = (client.clone(), busy.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = client.report_availability(&AvailabilityReport {
+                    capacity: 1,
+                    current_slots: busy.load(Ordering::Relaxed),
+                    health: "ok".to_owned(),
+                });
+                for _ in 0..30 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        })
+    };
+
+    let delivery = delivery::Delivery::open(&config.out_dir.join("delivery"))?;
+    let mut handled = 0_u32;
+    let outcome = (|| -> Result<()> {
+        loop {
+            if config.max_tickets.is_some_and(|max| handled >= max) {
+                return Ok(());
+            }
+            let ticket = match delivery.claim(&client) {
+                Ok(Some(ticket)) => ticket,
+                Ok(None) => {
+                    std::thread::sleep(config.poll);
+                    continue;
+                }
+                // A coordinator or link that drops a request is not a reason
+                // to leave the network; the next poll tries again.
+                Err(error) => {
+                    return Err(error);
+                }
+            };
+            busy.store(1, Ordering::Relaxed);
+            report_now(&client, 1);
+            eprintln!(
+                "[runtime-network] attempt {} — {} on {}",
+                ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
+            );
+            let report = if let Some(saved) = delivery.saved_report()? {
+                saved
+            } else {
+                let attempt_client = ticket
+                    .exploration
+                    .as_ref()
+                    .and_then(|e| e.deadline_ms)
+                    .map_or_else(
+                        || client.as_ref().clone(),
+                        |deadline| client.with_deadline(deadline),
+                    );
+                execute_ticket_with_publication(
+                    config,
+                    &ticket,
+                    || delivery.input(&attempt_client, &ticket, &config.work_root),
+                    Some(&attempt_client),
+                )
+            };
+            eprintln!(
+                "[runtime-network] attempt {} → {}",
+                ticket.attempt_id, report.outcome
+            );
+            // Free before the result lands: the result advances the request,
+            // and the next ticket may be this Runtime's.
+            busy.store(0, Ordering::Relaxed);
+            report_now(&client, 0);
+            // A result that cannot be delivered is retried; if it never is,
+            // the coordinator records the attempt as UNKNOWN: it was claimed,
+            // and nobody can say what it did.
+            delivery.report(&client, &ticket, &report)?;
+            handled += 1;
+        }
+    })();
+    stop.store(true, Ordering::Relaxed);
+    let _ = heartbeat.join();
+    outcome
+}
+
+use crate::admission::effects_name;
+pub use crate::admission::is_disposable;
+
+/// This Runtime's attestation before it has planned anything.
+pub fn attestation() -> RuntimeAttestation {
+    RuntimeAttestation {
+        environment_id: NATIVE_ENVIRONMENT.to_owned(),
+        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        derivation_ref: None,
+        contract_ref: None,
+        effects: None,
+        requirements: Vec::new(),
+        provisions: Vec::new(),
+        execution_started: false,
+        attempt_record: AttemptRecordState::NotStarted,
+        candidate_stop: None,
+    }
+}
+
+/// A ticket this Runtime did not run: nothing of the candidate executed.
+fn refused(
+    ticket: &AttemptTicket,
+    attestation: RuntimeAttestation,
+    code: &str,
+    message: &str,
+) -> AttemptResultReport {
+    AttemptResultReport {
+        fence: ticket.fence,
+        outcome: "inconclusive".to_owned(),
+        contract_ref: None,
+        derivation_ref: None,
+        materialization_ref: None,
+        retained_ref: None,
+        build_record_ref: None,
+        failure: Some(AttemptFailureWire {
+            code: code.to_owned(),
+            stage: "admission".to_owned(),
+            message: crate::api::bounded_reason(message),
+        }),
+        formation_attempt: None,
+        verifier_receipts: Vec::new(),
+        attestation,
+        resource_usage: ResourceUsage::default(),
+    }
+}
+
+/// Run one ticket through the common attempt entry — the ticket's frozen
+/// archive, the route it names and nothing else — and report what happened.
+///
+/// Before anything of the candidate runs, this Runtime re-establishes what
+/// the ticket is from the archive and the route alone — planned ONCE, and
+/// that plan is the one executed — and refuses it when the environment is
+/// not one it executes, it asks for bindings, or its own planning does not
+/// reach the ticket's refs. Effects, platform, containment and verifier
+/// admission are the common admission's, still before execution. Whether
+/// anything ran is read from the attempt's start record, never inferred
+/// from how the attempt ended.
+pub fn execute_ticket(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    archive: Vec<u8>,
+) -> AttemptResultReport {
+    execute_ticket_with_source(config, ticket, || Ok(archive))
+}
+
+/// Source acquisition is inside the durable delivery reservation too. An old
+/// ticket's historical state always takes precedence over early preflight errors.
+pub fn execute_ticket_with_source(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<Vec<u8>>,
+) -> AttemptResultReport {
+    execute_ticket_with_file(config, ticket, || {
+        let bytes = source()?;
+        std::fs::create_dir_all(&config.work_root)?;
+        let mut file = tempfile::tempfile_in(&config.work_root)?;
+        file.write_all(&bytes)?;
+        Ok(file)
+    })
+}
+
+pub fn execute_ticket_with_file(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<File>,
+) -> AttemptResultReport {
+    execute_ticket_with_publication(config, ticket, source, None)
+}
+fn execute_ticket_with_publication(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<File>,
+    publisher: Option<&Client>,
+) -> AttemptResultReport {
+    if let Some(publisher) = publisher {
+        match publication::resume(config, ticket, publisher) {
+            Ok(Some(report)) => return report,
+            Ok(None) => {}
+            Err(_) => {
+                return refused(
+                    ticket,
+                    RuntimeAttestation {
+                        attempt_record: AttemptRecordState::HistoryUnavailable,
+                        execution_started: true,
+                        ..attestation()
+                    },
+                    "publication_history_unavailable",
+                    "saved publication could not be authenticated",
+                );
+            }
+        }
+    }
+    let control = ticket
+        .exploration
+        .as_ref()
+        .and_then(|e| e.deadline_ms)
+        .into_iter()
+        .chain(ticket.verification_state.as_ref().map(|s| s.deadline_ms))
+        .min()
+        .map(ato_runtime_attempt::control::ExecutionControl::new);
+    let mut report = execute_ticket_inner(config, ticket, source, publisher, control.as_ref());
+    if let Some(control) = control
+        && !report
+            .verifier_receipts
+            .iter()
+            .any(|r| r["kind"] == "exploration_phase_timings")
+    {
+        report.verifier_receipts.push(serde_json::json!({
+            "kind":"exploration_phase_timings", "phases":control.timings(),
+        }));
+    }
+    report
+}
+
+fn execute_ticket_inner(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<File>,
+    publisher: Option<&Client>,
+    control: Option<&ato_runtime_attempt::control::ExecutionControl>,
+) -> AttemptResultReport {
+    let mut attested = attestation();
+    let permit = match AttemptJournal::new(config.out_dir.join("attempt-records"))
+        .acquire(&ticket.satisfy_id, &ticket.attempt_id)
+    {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            attested.attempt_record = refusal.record_state();
+            attested.execution_started = attested.attempt_record.execution_started();
+            let finished_without_report = attested.attempt_record == AttemptRecordState::Finished;
+            let mut report = refused(ticket, attested, refusal.code(), &refusal.message());
+            if finished_without_report {
+                // The computation finished but its precise evidence was not
+                // recovered. Redelivery cannot refund its original resources.
+                report.resource_usage = ResourceUsage {
+                    expanded_bytes: ticket.resource_budget.expanded_bytes,
+                    stored_bytes: ticket.resource_budget.stored_bytes,
+                };
+            }
+            return report;
+        }
+    };
+    let source_timing = match control
+        .map(|c| c.phase(ato_runtime_attempt::control::AttemptPhase::Source))
+        .transpose()
+    {
+        Ok(timing) => timing,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested,
+                "round_deadline_exceeded",
+                &error.to_string(),
+            );
+        }
+    };
+    let archive = match source() {
+        Ok(archive) => archive,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested,
+                if control.is_some_and(|c| {
+                    c.remaining(ato_runtime_attempt::control::AttemptPhase::Source)
+                        .is_err()
+                }) {
+                    "round_deadline_exceeded"
+                } else {
+                    "source_unavailable"
+                },
+                &format!("{error:#}"),
+            );
+        }
+    };
+    drop(source_timing);
+    // The ticket's transfer cap is the source's own size; a longer source is
+    // not the one the search paid for.
+    if archive.metadata().map(|m| m.len()).unwrap_or(u64::MAX)
+        > ticket.resource_budget.transfer_bytes
+    {
+        return refused(
+            ticket,
+            attested,
+            "search_transfer_budget_exceeded",
+            &format!(
+                "the source is longer than the ticket's transfer budget of {} bytes",
+                ticket.resource_budget.transfer_bytes
+            ),
+        );
+    }
+    if ticket.environment_id != NATIVE_ENVIRONMENT {
+        return refused(
+            ticket,
+            attested,
+            "environment_mismatch",
+            &format!(
+                "the ticket names environment {:?}; this Runtime executes only {NATIVE_ENVIRONMENT:?}",
+                ticket.environment_id
+            ),
+        );
+    }
+    if !ticket.bindings.is_empty() {
+        return refused(
+            ticket,
+            attested,
+            "bindings_unsupported",
+            "this Runtime binds no external state in Phase 1",
+        );
+    }
+    let attempt_root = config.work_root.join(&ticket.attempt_id);
+    let report = execute_planned_ticket(
+        config,
+        ticket,
+        archive,
+        &attempt_root,
+        &mut attested,
+        permit,
+        &TicketExecution { publisher, control },
+    );
+    let _cleanup = control.map(|c| c.cleanup());
+    cleanup_attempt_root(&attempt_root, &report.attestation);
+    report
+}
+
+fn cleanup_attempt_root(root: &Path, attested: &RuntimeAttestation) {
+    if attested.candidate_stop == Some(CandidateStopAttestation::Unconfirmed)
+        || !matches!(
+            attested.attempt_record,
+            AttemptRecordState::NotStarted | AttemptRecordState::Finished
+        )
+    {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+struct TicketExecution<'a> {
+    publisher: Option<&'a Client>,
+    control: Option<&'a ato_runtime_attempt::control::ExecutionControl>,
+}
+
+fn execute_planned_ticket(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    archive: File,
+    attempt_root: &Path,
+    attested: &mut RuntimeAttestation,
+    permit: Box<dyn AttemptPermit>,
+    context: &TicketExecution<'_>,
+) -> AttemptResultReport {
+    let TicketExecution { publisher, control } = *context;
+    let AttemptInput::Source {
+        capsule_toml,
+        archive_digest,
+    } = &ticket.input
+    else {
+        return execute_retained_ticket(
+            config,
+            ticket,
+            archive,
+            attempt_root,
+            attested,
+            permit,
+            context,
+        );
+    };
+    // The ticket's expanded cap, under this Runtime's own source ceiling. The
+    // tree is measured against it before anything is written, and expansion
+    // enforces it again.
+    let ceiling = SourceLimits::default();
+    let limits = SourceLimits {
+        max_total_bytes: ceiling
+            .max_total_bytes
+            .min(ticket.resource_budget.expanded_bytes),
+        ..ceiling
+    };
+    let source_oci_archive = match archive.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "source_unavailable",
+                &error.to_string(),
+            );
+        }
+    };
+    let source_timing = match control
+        .map(|c| c.phase(ato_runtime_attempt::control::AttemptPhase::Source))
+        .transpose()
+    {
+        Ok(timing) => timing,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "round_deadline_exceeded",
+                &error.to_string(),
+            );
+        }
+    };
+    let can_continue = || {
+        control.is_none_or(|c| {
+            c.remaining(ato_runtime_attempt::control::AttemptPhase::Source)
+                .is_ok()
+        })
+    };
+    let verified = match FileVerifiedArchive::verify_with_guard(
+        archive,
+        archive_digest,
+        ticket.resource_budget.transfer_bytes,
+        limits,
+        &can_continue,
+    )
+    .map_err(anyhow::Error::new)
+    {
+        Ok(verified) => verified,
+        Err(error) => {
+            let over_cap = ticket.resource_budget.expanded_bytes <= ceiling.max_total_bytes
+                && error.chain().any(|cause| {
+                    matches!(
+                        cause.downcast_ref::<SourceError>(),
+                        Some(SourceError::LimitExceeded {
+                            limit: "max_total_bytes"
+                        })
+                    )
+                });
+            return refused(
+                ticket,
+                attested.clone(),
+                if !can_continue() {
+                    "round_deadline_exceeded"
+                } else if over_cap {
+                    "search_expanded_budget_exceeded"
+                } else {
+                    "ticket_unplannable"
+                },
+                &format!("{error:#}"),
+            );
+        }
+    };
+    // From here the tree may be written: its measured bytes are what this
+    // attempt expanded, whatever happens next.
+    let mut usage = ResourceUsage {
+        expanded_bytes: verified.expanded_bytes(),
+        stored_bytes: 0,
+    };
+    let refused_after_expansion =
+        |attested: RuntimeAttestation, code: &str, message: &str| AttemptResultReport {
+            resource_usage: usage,
+            ..refused(ticket, attested, code, message)
+        };
+    let planned = (|| -> Result<_> {
+        std::fs::create_dir_all(attempt_root)?;
+        let frozen = local::freeze_verified_file_with_guard(
+            verified,
+            &std::path::absolute(attempt_root)?,
+            limits,
+            &can_continue,
+        )?;
+        let evidence = detect(&frozen.root).context("detection failed")?;
+        let draft: AuthoringDraft = parse_capsule_toml(capsule_toml)
+            .map_err(ato_formation::failure::FormationFailure::from)?;
+        let planned = plan_candidate(
+            &draft,
+            &frozen.closure_ref,
+            &evidence,
+            BTreeMap::new(),
+            "/app",
+            &host_triple(),
+        )?;
+        let contract_ref =
+            effective_contract_ref(&planned.contract_ref, ticket.browser_contract.as_ref());
+        Ok((frozen, planned, contract_ref))
+    })();
+    let (frozen, planned, contract_ref) = match planned {
+        Ok(planned) => planned,
+        Err(error) => {
+            return refused_after_expansion(
+                attested.clone(),
+                if can_continue() {
+                    "ticket_unplannable"
+                } else {
+                    "round_deadline_exceeded"
+                },
+                &format!("{error:#}"),
+            );
+        }
+    };
+    drop(source_timing);
+    let (requirements, provisions) = derivation_requirements(&planned);
+    attested.derivation_ref = Some(planned.derivation_ref.clone());
+    attested.contract_ref = Some(contract_ref.clone());
+    attested.effects = Some(effects_name(planned.derivation.effects));
+    attested.requirements = requirements;
+    attested.provisions = provisions;
+
+    // The Runtime does not rewrite the ticket: its own planning must reach
+    // the refs the requester computed.
+    if planned.derivation_ref != ticket.derivation_ref || contract_ref != ticket.contract_ref {
+        return refused_after_expansion(
+            attested.clone(),
+            "ticket_mismatch",
+            &format!(
+                "planned {}/{contract_ref}, the ticket names {}/{}",
+                planned.derivation_ref, ticket.derivation_ref, ticket.contract_ref
+            ),
+        );
+    }
+
+    if ticket
+        .exploration
+        .as_ref()
+        .and_then(|e| e.deadline_ms)
+        .is_some_and(|deadline| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+                >= deadline
+        })
+    {
+        return refused_after_expansion(
+            attested.clone(),
+            "round_deadline_exceeded",
+            "the round deadline elapsed before execution",
+        );
+    }
+    let resolved_variables = if planned.derivation.variable_bindings.is_empty() {
+        vec![]
+    } else {
+        match publisher
+            .context("variable_resolver_unavailable")
+            .and_then(|client| {
+                client.resolve_variables(
+                    ticket,
+                    &planned.derivation.variable_bindings,
+                    &config.out_dir,
+                )
+            }) {
+            Ok(v) => v,
+            Err(error) => {
+                return refused_after_expansion(
+                    attested.clone(),
+                    if error.chain().any(|e| e.to_string().contains("deadline")) {
+                        "round_deadline_exceeded"
+                    } else {
+                        "infrastructure_failure"
+                    },
+                    &format!("{error:#}"),
+                );
+            }
+        }
+    };
+    let scoped = ticket
+        .exploration
+        .as_ref()
+        .map(|exploration| {
+            exploration::ScopedGates::start(
+                exploration,
+                config.exploration.as_ref(),
+                &planned.derivation.requirements,
+                &attempt_root.join("network"),
+            )
+        })
+        .transpose();
+    let scoped = match scoped {
+        Ok(scoped) => scoped,
+        Err(error) => {
+            let code = error.to_string();
+            return refused_after_expansion(
+                attested.clone(),
+                if code.starts_with("exploration_") {
+                    code.split(':')
+                        .next()
+                        .unwrap_or("exploration_admission_failed")
+                } else {
+                    "exploration_admission_failed"
+                },
+                &code,
+            );
+        }
+    };
+    let network = if scoped.is_some() {
+        NetworkPolicy::Scoped
+    } else {
+        match ticket.network.as_str() {
+            "dependency-resolution" => NetworkPolicy::DependencyResolution,
+            _ => NetworkPolicy::Denied,
+        }
+    };
+    // A Runtime Network attempt is never verified outside the verifier
+    // sandbox, whatever the worker was started with.
+    let browser = ticket
+        .browser_contract
+        .as_ref()
+        .map(|contract| BrowserVerification {
+            contract: contract.clone(),
+            verifier: config
+                .browser_verifier
+                .clone()
+                .filter(BrowserVerifierCommand::is_contained),
+            budget: Default::default(),
+        });
+    let spec = planned.attempt_spec();
+    let builder = LocalAttemptExecutor {
+        shim: config.shim.clone(),
+        network,
+        limits: BuildLimits {
+            wall_clock_seconds: exploration_build_seconds(
+                ticket.exploration.as_ref().and_then(|e| e.deadline_ms),
+                ato_runtime_attempt::control::now_ms(),
+            ),
+            ..BuildLimits::default()
+        },
+    };
+    let legacy = FormationRealizer {
+        planned: &planned,
+        source_root: &frozen.root,
+        builder: &builder,
+        shim: &config.shim,
+        network,
+    };
+    let network_refusal = |phase| scoped.as_ref().and_then(|gates| gates.first_refusal(phase));
+    let exploring = ticket
+        .exploration
+        .as_ref()
+        .zip(scoped.as_ref())
+        .map(
+            |(grant, gates)| ato_runtime_attempt::exploration_realizer::ExplorationRealizer {
+                variables: &resolved_variables,
+                planned: &planned,
+                source_root: &frozen.root,
+                builder: &builder,
+                shim: &config.shim,
+                ceiling: &grant.ceiling,
+                gates: &gates.sockets,
+                network_refusal: Some(&network_refusal),
+            },
+        );
+    let source_oci = ticket
+        .exploration
+        .as_ref()
+        .filter(|_| {
+            planned.derivation.source_oci.is_some()
+                || planned.derivation.runtimes.contains_key("oci.image")
+        })
+        .map(|grant| source_oci_exploration::SourceOciRealizer {
+            variables: &resolved_variables,
+            planned: &planned,
+            archive: &source_oci_archive,
+            archive_digest,
+            source_root: &frozen.root,
+            artifact_root: &config.out_dir,
+            stored_limit: ticket.resource_budget.stored_bytes,
+            ticket: grant,
+            configured: config
+                .exploration
+                .as_ref()
+                .and_then(|c| c.source_oci.as_ref()),
+            artifact: std::cell::RefCell::new(None),
+        });
+    let realizer: &dyn ato_runtime_attempt::realize::CandidateRealizer = source_oci
+        .as_ref()
+        .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
+        .or_else(|| {
+            exploring
+                .as_ref()
+                .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
+        })
+        .unwrap_or(&legacy);
+    let deadline = ticket.exploration.as_ref().and_then(|e| e.deadline_ms);
+    let expired = std::sync::atomic::AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        let (cancel, wait) = std::sync::mpsc::channel();
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_sub(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
+            let expired = &expired;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_millis(remaining)).is_err() {
+                    expired.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        let outcome = run_reserved_attempt(
+            &AttemptRequest {
+                // Every attempt of one satisfy request spends from it: a
+                // redelivered ticket, or another route after an UNKNOWN one, is
+                // held by the same record.
+                request_id: &ticket.satisfy_id,
+                attempt_id: &ticket.attempt_id,
+                label: "authored",
+                spec: &spec,
+                contract_ref: &contract_ref,
+                runtime_id: &ticket.runtime_id,
+                profile: &ticket_runtime_profile(scoped.is_some(), publisher),
+                // A ticket runs unattended, and may be retried elsewhere.
+                authorization: ticket
+                    .exploration
+                    .as_ref()
+                    .map(|grant| EffectAuthorization::Exploration {
+                        derivation_ref: &ticket.derivation_ref,
+                        grant: &grant.ceiling,
+                    })
+                    .unwrap_or(EffectAuthorization::Unattended),
+                network,
+                browser: browser.as_ref(),
+                attempt_root,
+                // The Runtime keeps the artifact for the coordinator, not the
+                // running candidate.
+                continuation: Continuation::Stop,
+                receipt: ReceiptContext::formation(),
+                interrupt: deadline.map(|_| &expired),
+                control,
+            },
+            realizer,
+            Ok(permit),
+        );
+        let _ = cancel.send(());
+        outcome
+    });
+    attested.execution_started = outcome.execution_started();
+    attested.candidate_stop = outcome.stop.as_ref().map(CandidateStopAttestation::of);
+    attested.attempt_record = outcome.attempt_record;
+    // Exact registered helper evidence is acknowledged before projection.
+    // This path checkpoints only a durably finished, verified process; a
+    // restart resumes publication and never enters source/build/launch again.
+    if let (
+        Some(publisher),
+        Some(ato_runtime_attempt::executor::ExecutedCandidate::Process { workspace_root }),
+    ) = (publisher, outcome.verified.as_ref())
+        && ticket.build_record_retention.is_some()
+        && planned.derivation.source_oci.is_none()
+        && !planned.derivation.runtimes.contains_key("oci.image")
+        && ato_formation::proposal::python_build_outputs(&planned.derivation)
+            .is_ok_and(|roots| !roots.is_empty())
+    {
+        let mut report = attempt_report(ticket, &outcome.attempt, attested, None, None, usage);
+        if let Some(gates) = scoped.as_ref() {
+            report.verifier_receipts.push(gates.evidence());
+        }
+        if let Ok(facts) = ato_runtime_attempt::execution_facts::read(
+            &attempt_root.join("control/execution-facts.jsonl"),
+        ) {
+            report
+                .verifier_receipts
+                .push(serde_json::json!({"kind":"exploration_execution_facts","facts":facts}));
+        }
+        if let Some(control) = control {
+            report.verifier_receipts.push(
+                serde_json::json!({"kind":"exploration_phase_timings", "phases":control.timings()}),
+            );
+        }
+        return publication::begin(config, ticket, publisher, workspace_root, &planned, report);
+    }
+    let mut attempt = outcome.attempt;
+    // Keeping the artifact is publication, not verification: a publication
+    // that fails — or that the ticket's stored cap does not allow — leaves
+    // the receipt and `runtime_verification` exactly as they were.
+    let publication_failed =
+        |attempt: &mut ato_formation::request::FormationAttempt, code: &str, message: String| {
+            attempt.status = AttemptStatus::Failed;
+            attempt.outcomes.publication = ato_formation::request::Outcome::failed(code);
+            attempt.failure = Some(ato_formation::request::AttemptFailure {
+                code: code.to_owned(),
+                stage: "publish".to_owned(),
+                message: crate::api::bounded_reason(&message),
+            });
+            None
+        };
+    let materialization_ref = match &outcome.verified {
+        Some(executed) => match local::prepare_artifact(executed) {
+            Ok(prepared) if prepared.logical_bytes() > ticket.resource_budget.stored_bytes => {
+                publication_failed(
+                    &mut attempt,
+                    "search_stored_budget_exceeded",
+                    format!(
+                        "the artifact is {} bytes; the ticket's stored budget is {} bytes",
+                        prepared.logical_bytes(),
+                        ticket.resource_budget.stored_bytes
+                    ),
+                )
+            }
+            Ok(prepared) => {
+                // Keeping it was attempted: charged even if the write fails.
+                usage.stored_bytes = prepared.logical_bytes();
+                match prepared.store(&config.out_dir) {
+                    Ok(reference) => {
+                        attempt.outcomes.publication = ato_formation::request::Outcome::succeeded();
+                        Some(reference)
+                    }
+                    Err(error) => publication_failed(
+                        &mut attempt,
+                        "artifact_store_failed",
+                        format!("{error:#}"),
+                    ),
+                }
+            }
+            Err(error) => {
+                publication_failed(&mut attempt, "artifact_store_failed", format!("{error:#}"))
+            }
+        },
+        None => None,
+    };
+
+    let mut report = attempt_report(ticket, &attempt, attested, materialization_ref, None, usage);
+    if let Some(artifact) = source_oci.and_then(|r| r.artifact.into_inner()) {
+        report.resource_usage.stored_bytes = report
+            .resource_usage
+            .stored_bytes
+            .saturating_add(artifact["stored_bytes"].as_u64().unwrap_or(0));
+        report.verifier_receipts.push(artifact);
+    }
+    if let Some(gates) = scoped.as_ref() {
+        report.verifier_receipts.push(gates.evidence());
+        if let Ok(facts) = ato_runtime_attempt::execution_facts::read(
+            &attempt_root.join("control/execution-facts.jsonl"),
+        ) {
+            report
+                .verifier_receipts
+                .push(serde_json::json!({"kind":"exploration_execution_facts","facts":facts}));
+        }
+    }
+    if ticket.exploration.is_some()
+        && report
+            .failure
+            .as_ref()
+            .is_some_and(|f| f.code == "authority_denied")
+    {
+        let denied = ato_runtime_attempt::exploration_realizer::required_isolated_authority(
+            &planned.derivation,
+        )
+        .into_iter()
+        .filter(|a| !planned.derivation.requirements.authority.contains(a))
+        .collect::<Vec<_>>();
+        report
+            .verifier_receipts
+            .push(serde_json::json!({"kind":"exploration_authority_evidence","refused":denied}));
+    }
+
+    if let Some(publisher) = publisher
+        && report.outcome == "pass"
+        && planned.derivation.source_oci.is_none()
+        && !planned.derivation.runtimes.contains_key("oci.image")
+    {
+        let publisher = publisher.for_reporting();
+        let publication = (|| -> Result<String> {
+            let executed = outcome
+                .verified
+                .as_ref()
+                .context("verified artifact missing")?;
+            let prepared = crate::retained::prepare(
+                executed,
+                &planned,
+                ticket.browser_contract.as_ref(),
+                &ticket.attempt_id,
+            )?;
+            anyhow::ensure!(
+                prepared.descriptor.artifact.bytes <= ticket.resource_budget.stored_bytes,
+                "search_stored_budget_exceeded"
+            );
+            report.resource_usage.stored_bytes = prepared.descriptor.artifact.bytes;
+            publisher.retain(
+                ticket,
+                &prepared,
+                &report,
+                &publication::delivery(config, ticket)?,
+            )
+        })();
+        match publication {
+            Ok(reference) => report.retained_ref = Some(reference),
+            Err(error) => {
+                report.outcome = "fail".into();
+                report.materialization_ref = None;
+                report.failure = Some(AttemptFailureWire {
+                    code: "retained_publication_failed".into(),
+                    stage: "publish".into(),
+                    message: crate::api::bounded_reason(&format!("{error:#}")),
+                });
+                if let Some(attempt) = &mut report.formation_attempt {
+                    attempt["status"] = serde_json::json!("failed");
+                    attempt["outcomes"]["publication"] = serde_json::json!({"state":"failed","reason":"retained_publication_failed"});
+                    attempt["failure"] = serde_json::to_value(&report.failure).unwrap_or_default();
+                }
+            }
+        }
+    }
+    report
+}
+
+/// Explicit replay dispatch. Never call source resolution or plan_candidate.
+fn execute_retained_ticket(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    mut archive: File,
+    attempt_root: &Path,
+    attested: &mut RuntimeAttestation,
+    permit: Box<dyn AttemptPermit>,
+    context: &TicketExecution<'_>,
+) -> AttemptResultReport {
+    let control = context.control;
+    use ato_formation::{execution::lower_retained, retained::RetainedCandidateV1};
+    use ato_runtime_attempt::{
+        plan::{BoundCandidate, PlannedCandidate},
+        retained::RetainedCandidateRealizer,
+    };
+    let AttemptInput::Retained {
+        retained_ref,
+        descriptor_json,
+    } = &ticket.input
+    else {
+        unreachable!("typed dispatch")
+    };
+    let prepared = (|| -> Result<_> {
+        let descriptor = RetainedCandidateV1::parse(descriptor_json.as_bytes(), retained_ref)?;
+        descriptor.match_assignment(&ticket.contract_ref, &ticket.derivation_ref)?;
+        anyhow::ensure!(
+            descriptor.base_contract_ref == ticket.base_contract_ref
+                && descriptor.browser_contract == ticket.browser_contract,
+            "retained frozen K mismatch"
+        );
+        anyhow::ensure!(
+            descriptor.artifact.bytes == ticket.resource_budget.transfer_bytes,
+            "retained transfer reservation mismatch"
+        );
+        anyhow::ensure!(
+            descriptor.artifact.expanded_bytes <= ticket.resource_budget.expanded_bytes,
+            "retained expanded reservation exceeded"
+        );
+        let planned = PlannedCandidate {
+            bound: BoundCandidate {
+                contract: descriptor.base_contract.clone(),
+                derivation: descriptor.derivation.clone(),
+                contract_ref: descriptor.base_contract_ref.clone(),
+                derivation_ref: descriptor.derivation_ref.clone(),
+            },
+            plan: lower_retained(&descriptor)?,
+        };
+        std::fs::create_dir_all(attempt_root)?;
+        let path = attempt_root.join("retained.tar");
+        archive.rewind()?;
+        std::io::copy(&mut archive, &mut File::create(&path)?)?;
+        Ok((descriptor, planned, path))
+    })();
+    let (descriptor, planned, path) = match prepared {
+        Ok(value) => value,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "retained_preflight_failed",
+                &format!("{error:#}"),
+            );
+        }
+    };
+    let (requirements, provisions) = derivation_requirements(&planned);
+    attested.derivation_ref = Some(planned.derivation_ref.clone());
+    attested.contract_ref = Some(ticket.contract_ref.clone());
+    attested.effects = Some(effects_name(planned.derivation.effects));
+    attested.requirements = requirements;
+    attested.provisions = provisions;
+    let functional_plan = ticket
+        .verification_state
+        .as_ref()
+        .and_then(|g| g.acceptance.as_ref());
+    let variable_requirements = match functional_plan
+        .map(|plan| {
+            plan.validate(
+                &planned.derivation,
+                &ticket.verification_state.as_ref().unwrap().ceiling,
+            )
+        })
+        .transpose()
+    {
+        Ok(variables) => variables.unwrap_or_else(|| planned.derivation.variable_bindings.clone()),
+        Err(_) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "functional_acceptance_invalid",
+                "approved functional plan is invalid",
+            );
+        }
+    };
+    let resolved_variables = if variable_requirements.is_empty() {
+        vec![]
+    } else {
+        match context
+            .publisher
+            .context("variable_resolver_unavailable")
+            .and_then(|client| {
+                client.resolve_variables(ticket, &variable_requirements, &config.out_dir)
+            }) {
+            Ok(variables) => variables,
+            Err(error) => {
+                return refused(
+                    ticket,
+                    attested.clone(),
+                    if error.chain().any(|e| e.to_string().contains("deadline")) {
+                        "round_deadline_exceeded"
+                    } else {
+                        "infrastructure_failure"
+                    },
+                    &format!("{error:#}"),
+                );
+            }
+        }
+    };
+    if ticket.exploration.is_some() && ticket.verification_state.is_some() {
+        return refused(
+            ticket,
+            attested.clone(),
+            "verification_scope_conflict",
+            "conflicting execution grants",
+        );
+    }
+    let functional_grant = ticket
+        .verification_state
+        .as_ref()
+        .map(|g| ExplorationTicket {
+            deadline_ms: Some(g.deadline_ms),
+            max_retries: 0,
+            search_id: g.search_id.clone(),
+            ceiling: g.ceiling.clone(),
+            network_transfer_bytes: 0,
+        });
+    let scope_grant = ticket.exploration.as_ref().or(functional_grant.as_ref());
+    let functional_requirements = functional_grant
+        .as_ref()
+        .map(|grant| {
+            exploration::ScopedGates::retained_runtime_requirements(
+                &planned.derivation.requirements,
+                &grant.ceiling,
+            )
+        })
+        .transpose();
+    let functional_requirements = match functional_requirements {
+        Ok(requirements) => requirements,
+        Err(_) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "functional_ceiling_exceeded",
+                "retained requirements exceed the approved grant",
+            );
+        }
+    };
+    let scoped = match scope_grant
+        .map(|grant| {
+            exploration::ScopedGates::start(
+                grant,
+                config.exploration.as_ref(),
+                functional_requirements
+                    .as_ref()
+                    .unwrap_or(&planned.derivation.requirements),
+                &attempt_root.join("control"),
+            )
+        })
+        .transpose()
+    {
+        Ok(gates) => gates,
+        Err(e) => {
+            let code = e.to_string();
+            return refused(
+                ticket,
+                attested.clone(),
+                if code.starts_with("exploration_") {
+                    code.split(':')
+                        .next()
+                        .unwrap_or("exploration_admission_failed")
+                } else {
+                    "exploration_admission_failed"
+                },
+                &format!("{e:#}"),
+            );
+        }
+    };
+    let mut state_session = match ticket
+        .verification_state
+        .as_ref()
+        .map(|grant| {
+            verification_state::VerificationStateSession::prepare(
+                grant,
+                &descriptor,
+                ticket,
+                context
+                    .publisher
+                    .context("verification_state_transport_unavailable")?,
+                attempt_root,
+                control,
+            )
+        })
+        .transpose()
+    {
+        Ok(state) => state,
+        Err(_) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "verification_state_preflight_failed",
+                "assigned state could not be prepared",
+            );
+        }
+    };
+    let entries = state_session
+        .as_ref()
+        .map(|state| state.entries(&descriptor));
+    let state_bindings = state_session
+        .as_ref()
+        .zip(entries.as_ref())
+        .map(
+            |(state, entries)| ato_runtime_attempt::state_bindings::VerificationStateBindings {
+                context: &state.spec.context,
+                attachments: entries,
+            },
+        );
+    let browser = ticket
+        .browser_contract
+        .as_ref()
+        .map(|contract| BrowserVerification {
+            contract: contract.clone(),
+            verifier: config
+                .browser_verifier
+                .clone()
+                .filter(BrowserVerifierCommand::is_contained),
+            budget: Default::default(),
+        });
+    let spec = planned.attempt_spec();
+    if let Some(state) = &state_session {
+        state.mark_started();
+    }
+    let (permit, deferred) = if ticket.verification_state.is_some() {
+        let (p, d) = verification_state::DeferredFinish::wrap(permit);
+        (p, Some(d))
+    } else {
+        (permit, None)
+    };
+    let mut outcome = run_reserved_attempt(
+        &AttemptRequest {
+            request_id: &ticket.satisfy_id,
+            attempt_id: &ticket.attempt_id,
+            label: "retained",
+            spec: &spec,
+            contract_ref: &ticket.contract_ref,
+            runtime_id: &ticket.runtime_id,
+            profile: &ticket_runtime_profile(scoped.is_some(), context.publisher),
+            authorization: if let Some(g) = &ticket.verification_state {
+                EffectAuthorization::FunctionalVerification {
+                    derivation_ref: &ticket.derivation_ref,
+                    grant: &g.ceiling,
+                }
+            } else {
+                ticket
+                    .exploration
+                    .as_ref()
+                    .map(|g| EffectAuthorization::Exploration {
+                        derivation_ref: &ticket.derivation_ref,
+                        grant: &g.ceiling,
+                    })
+                    .unwrap_or(EffectAuthorization::Unattended)
+            },
+            network: NetworkPolicy::Denied,
+            browser: browser.as_ref(),
+            attempt_root,
+            continuation: if functional_plan.is_some_and(|p| !p.operations.is_empty()) {
+                Continuation::HandOff
+            } else {
+                Continuation::Stop
+            },
+            receipt: ReceiptContext::formation(),
+            interrupt: None,
+            control,
+        },
+        &RetainedCandidateRealizer {
+            descriptor: &descriptor,
+            archive: &path,
+            expected_contract_ref: &ticket.contract_ref,
+            expected_derivation_ref: &ticket.derivation_ref,
+            expanded_limit: ticket.resource_budget.expanded_bytes,
+            shim: &config.shim,
+            exploration: scope_grant.zip(scoped.as_ref()).map(|(g, s)| {
+                ato_runtime_attempt::retained::RetainedExploration {
+                    ceiling: &g.ceiling,
+                    runtime_gate: &s.sockets[&ato_formation::requirements::ExecutionPhase::Runtime],
+                    variables: &resolved_variables,
+                    state: state_bindings.as_ref(),
+                }
+            }),
+        },
+        Ok(permit),
+    );
+    let mut action_evidence = Vec::new();
+    if let Some(live) = outcome.live.take() {
+        let actions = ato_runtime_attempt::port_operations::execute_acceptance(
+            &planned.derivation,
+            functional_plan.expect("explicit action handoff"),
+            &ticket.verification_state.as_ref().unwrap().ceiling,
+            live.endpoints(),
+            &resolved_variables,
+            control.expect("frozen functional deadline"),
+            &mut action_evidence,
+        );
+        let stopped = live.stop();
+        outcome.stop = Some(ato_runtime_attempt::realize::StopClass::of(&stopped));
+        outcome.attempt.outcomes.cleanup = if stopped.is_ok() {
+            ato_formation::request::Outcome::succeeded()
+        } else {
+            ato_formation::request::Outcome::failed("candidate_stop_unconfirmed")
+        };
+        if actions.is_err() || stopped.is_err() {
+            outcome.attempt.status = AttemptStatus::Failed;
+            outcome.attempt.failure = Some(ato_formation::request::AttemptFailure { code:if actions.is_err() {"functional_actions_failed"} else {"candidate_stop_unconfirmed"}.into(),stage:"verification".into(),message:"functional actions or confirmed stop did not complete; actions are not replayed".into() });
+        }
+    }
+    attested.execution_started = outcome.execution_started();
+    attested.candidate_stop = outcome.stop.as_ref().map(CandidateStopAttestation::of);
+    attested.attempt_record = outcome.attempt_record;
+    let mut attempt = outcome.attempt;
+    let state_outcome = if let Some(state) = state_session.as_mut() {
+        match state.finish(
+            attested.execution_started,
+            attested.candidate_stop.as_ref(),
+            &ticket.attempt_id,
+        ) {
+            Ok(outcome) => Some(outcome),
+            Err(_) => {
+                attempt.status = AttemptStatus::Failed;
+                attempt.failure = Some(ato_formation::request::AttemptFailure {
+                    code: "verification_state_commit_failed".into(),
+                    stage: "cleanup".into(),
+                    message: "workload stop and state settlement were not both confirmed".into(),
+                });
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(deferred) = deferred {
+        attested.attempt_record = deferred.finish(
+            if attempt.status == AttemptStatus::Verified {
+                "verified"
+            } else {
+                "functional_failed"
+            },
+            attested.attempt_record.clone(),
+        );
+    }
+    let pass = attempt.status == AttemptStatus::Verified;
+    let mut report = attempt_report(
+        ticket,
+        &attempt,
+        attested,
+        pass.then_some(descriptor.materialization_ref),
+        pass.then(|| retained_ref.clone()),
+        ResourceUsage {
+            expanded_bytes: descriptor.artifact.expanded_bytes,
+            stored_bytes: 0,
+        },
+    );
+    if let Some(state_outcome) = state_outcome {
+        report.verifier_receipts.push(state_outcome);
+    }
+    if !action_evidence.is_empty() {
+        report.verifier_receipts.push(serde_json::json!({"kind":"functional_http_observations","observations":action_evidence}));
+    }
+    report
+}
+
+impl Client {
+    fn retain(
+        &self,
+        ticket: &AttemptTicket,
+        prepared: &crate::retained::PreparedRetained,
+        report: &AttemptResultReport,
+        delivery: &delivery::Delivery,
+    ) -> Result<String> {
+        let retries = ticket.exploration.as_ref().map_or(3, |e| e.max_retries);
+        let reference = prepared.descriptor.retained_ref()?;
+        let path = format!("/attempts/{}/retained", ticket.attempt_id);
+        let mut reservation = serde_json::json!({"fence":ticket.fence,"retained_ref":reference,
+            "descriptor_json":String::from_utf8(prepared.descriptor.canonical_bytes()?)?,"verification":report,
+            "build_record_ref":report.build_record_ref});
+        if report.build_record_ref.is_none() {
+            reservation
+                .as_object_mut()
+                .unwrap()
+                .remove("build_record_ref");
+        }
+        let pending: serde_json::Value = delivery.evidence("retained-reserve", retries, || {
+            self.send(self.http.post(self.url(&path)).json(&reservation))?
+                .context("missing retained reservation")
+        })?;
+        let id = pending["upload_id"]
+            .as_str()
+            .context("missing retained upload id")?;
+        if pending["status"] != "ready" {
+            let _: Option<serde_json::Value> =
+                delivery.evidence("retained-content", retries, || {
+                    self.send(
+                        self.http
+                            .put(self.url(&format!("{path}/{id}/content")))
+                            .header("x-ato-attempt-fence", ticket.fence)
+                            .timeout(SOURCE_TRANSFER_TIMEOUT)
+                            .body(prepared.bytes.clone()),
+                    )
+                })?;
+            let ready: serde_json::Value =
+                delivery.evidence("retained-finalize", retries, || {
+                    self.send(
+                        self.http
+                            .post(self.url(&format!("{path}/{id}/finalize")))
+                            .header("x-ato-attempt-fence", ticket.fence)
+                            .timeout(SOURCE_TRANSFER_TIMEOUT),
+                    )?
+                    .context("missing retained finalization")
+                })?;
+            anyhow::ensure!(
+                ready["status"] == "ready" && ready["retained_ref"] == reference,
+                "retained object is not ready"
+            );
+        }
+        Ok(reference)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedAuthorizedDerivation {
+    pub derivation_ref: String,
+    pub effects: String,
+    pub requirements: Vec<Requirement>,
+    pub provisions: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RetainedRequestInput {
+    Retained { retained_ref: String },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedSatisfyRequest {
+    pub protocol: String,
+    pub search_id: String,
+    pub contract_ref: String,
+    pub base_contract_ref: String,
+    pub base_contract: ato_formation::authoring::BoundContract,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_contract: Option<BrowserContractV0>,
+    pub input: RetainedRequestInput,
+    pub authorized_derivations: Vec<RetainedAuthorizedDerivation>,
+    pub runtime_constraint: RuntimeConstraintWire,
+    pub bindings: BTreeMap<String, String>,
+    pub policy: SatisfyPolicy,
+    pub budget: SatisfyBudget,
+}
+pub struct RetainedSubmission {
+    pub request: RetainedSatisfyRequest,
+    pub contracts: BTreeMap<String, ato_formation::authoring::BoundContract>,
+}
+impl RetainedSubmission {
+    pub fn accept_routes(
+        &self,
+        satisfy_id: &str,
+        status: &serde_json::Value,
+    ) -> (Vec<serde_json::Value>, Vec<String>) {
+        accept_routes_for_assignment(
+            &ato_formation::receipt::VerifiedRouteAssignment {
+                request_id: satisfy_id,
+                effective_contract_ref: &self.request.contract_ref,
+                base_contract_ref: &self.request.base_contract_ref,
+                contracts: &self.contracts,
+                browser_contract: self.request.browser_contract.as_ref(),
+            },
+            status,
+        )
+    }
+}
+impl Client {
+    pub fn prepare_retained(
+        &self,
+        reference: &str,
+        search_id: &str,
+        constraint: RuntimeConstraintWire,
+        budget: SatisfyBudget,
+    ) -> Result<RetainedSubmission> {
+        use ato_formation::{
+            execution::lower_retained,
+            retained::{MAX_DESCRIPTOR_BYTES, RetainedCandidateV1},
+        };
+        use ato_runtime_attempt::plan::{BoundCandidate, PlannedCandidate};
+        anyhow::ensure!(
+            reference.len() == 71
+                && reference.starts_with("sha256:")
+                && reference[7..]
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid retained reference"
+        );
+        budget.validate()?;
+        let response = self
+            .http
+            .execute(self.prepare(self.http.get(self.url(&format!("/retained/{reference}"))))?)?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "retained descriptor unavailable ({})",
+            response.status()
+        );
+        let mut bytes = Vec::new();
+        response
+            .take((MAX_DESCRIPTOR_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        let d = RetainedCandidateV1::parse(&bytes, reference)?;
+        let planned = PlannedCandidate {
+            bound: BoundCandidate {
+                contract: d.base_contract.clone(),
+                derivation: d.derivation.clone(),
+                contract_ref: d.base_contract_ref.clone(),
+                derivation_ref: d.derivation_ref.clone(),
+            },
+            plan: lower_retained(&d)?,
+        };
+        let (requirements, provisions) = derivation_requirements(&planned);
+        Ok(RetainedSubmission {
+            contracts: BTreeMap::from([(d.derivation_ref.clone(), d.base_contract.clone())]),
+            request: RetainedSatisfyRequest {
+                protocol: PROTOCOL.into(),
+                search_id: search_id.into(),
+                contract_ref: d.contract_ref,
+                base_contract_ref: d.base_contract_ref,
+                base_contract: d.base_contract,
+                browser_contract: d.browser_contract,
+                input: RetainedRequestInput::Retained {
+                    retained_ref: reference.into(),
+                },
+                authorized_derivations: vec![RetainedAuthorizedDerivation {
+                    derivation_ref: d.derivation_ref,
+                    effects: effects_name(d.derivation.effects),
+                    requirements,
+                    provisions,
+                }],
+                runtime_constraint: constraint,
+                bindings: BTreeMap::new(),
+                policy: SatisfyPolicy {
+                    network: "denied".into(),
+                    allow_managed: false,
+                    decision: None,
+                    generation: None,
+                    proposal: None,
+                    exploration: None,
+                },
+                budget,
+            },
+        })
+    }
+    pub fn submit_retained(&self, submission: &RetainedSubmission) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url("/satisfy"))
+                .json(&submission.request),
+        )?
+        .context("missing retained request response")
+    }
+}
+
+/// Encode the common Runtime's recorded attempt without repeating verification.
+pub fn attempt_report(
+    ticket: &AttemptTicket,
+    attempt: &ato_formation::request::FormationAttempt,
+    attested: &RuntimeAttestation,
+    materialization_ref: Option<String>,
+    retained_ref: Option<String>,
+    usage: ResourceUsage,
+) -> AttemptResultReport {
+    let failure_code = attempt.failure.as_ref().map(|f| f.code.as_str());
+    let outcome = match (attempt.status, failure_code) {
+        (AttemptStatus::Verified, _) => "pass",
+        (_, Some("browser_contract_inconclusive")) | (AttemptStatus::Filtered, _) => "inconclusive",
+        _ => "fail",
+    };
+    let mut receipts = Vec::new();
+    if let Some(verification) = &attempt.verification {
+        receipts.push(serde_json::json!({"kind":"http_contract","verification":verification}));
+    }
+    if let Some(receipt) = &attempt.receipt {
+        receipts.push(serde_json::json!({"kind":"contract_verification","receipt":receipt}));
+    }
+    if let Some(browser) = &attempt.browser_verification {
+        receipts.push(serde_json::json!({"kind":"browser_contract","receipt":browser}));
+    }
+    AttemptResultReport {
+        fence: ticket.fence,
+        outcome: outcome.into(),
+        contract_ref: attempt.contract_ref.clone(),
+        derivation_ref: attempt.derivation_ref.clone(),
+        materialization_ref,
+        retained_ref,
+        build_record_ref: None,
+        failure: attempt.failure.as_ref().map(|f| AttemptFailureWire {
+            code: f.code.clone(),
+            stage: f.stage.clone(),
+            message: f.message.clone(),
+        }),
+        formation_attempt: serde_json::to_value(attempt).ok(),
+        verifier_receipts: receipts,
+        attestation: attested.clone(),
+        resource_usage: usage,
+    }
+}
+
+/// The coarse build limit must not shorten the frozen execution deadline.
+/// ExecutionControl caps each operation in milliseconds; cleanup remains
+/// possible after expiry and does not need a reservation from this budget.
+fn exploration_build_seconds(deadline_ms: Option<u64>, now_ms: u64) -> u64 {
+    deadline_ms.map_or(900, |deadline| {
+        deadline.saturating_sub(now_ms).div_ceil(1000)
+    })
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn http_port_capability_requires_containment_and_current_grant_path() {
+        for (contained, granted, expected) in [
+            (false, false, "false"),
+            (true, false, "false"),
+            (false, true, "false"),
+            (true, true, "true"),
+        ] {
+            let mut facts = BTreeMap::new();
+            bind_http_port_capability(&mut facts, contained, granted);
+            assert_eq!(
+                facts[ato_formation::port_operations::RUNTIME_CAPABILITY],
+                expected
+            );
+            assert_eq!(facts[FUNCTIONAL_VERIFICATION_CAPABILITY], expected);
+        }
+    }
+
+    #[test]
+    fn uncertain_candidate_or_journal_keeps_owned_attempt_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        for (index, record, stop) in [
+            (
+                0,
+                AttemptRecordState::Finished,
+                Some(CandidateStopAttestation::Unconfirmed),
+            ),
+            (1, AttemptRecordState::StartedUnfinished, None),
+            (2, AttemptRecordState::HistoryUnavailable, None),
+        ] {
+            let root = fixture.path().join(index.to_string());
+            std::fs::create_dir(&root).unwrap();
+            let sentinel = root.join("owned-state");
+            std::fs::write(&sentinel, b"keep unknown execution resources").unwrap();
+            let mut attested = attestation();
+            attested.attempt_record = record;
+            attested.candidate_stop = stop;
+            cleanup_attempt_root(&root, &attested);
+            assert!(sentinel.exists());
+            cleanup_attempt_root(&root, &attested);
+            assert!(sentinel.exists());
+        }
+        for stop in [
+            None,
+            Some(CandidateStopAttestation::Confirmed),
+            Some(CandidateStopAttestation::ScratchKept),
+        ] {
+            let root = fixture.path().join(format!("confirmed-{stop:?}"));
+            std::fs::create_dir(&root).unwrap();
+            let mut attested = attestation();
+            attested.attempt_record = AttemptRecordState::Finished;
+            attested.candidate_stop = stop;
+            cleanup_attempt_root(&root, &attested);
+            assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn candidate_stop_wire_preserves_legacy_and_omits_private_context() {
+        let original = attestation();
+        let legacy = serde_json::to_value(&original).unwrap();
+        assert!(legacy.get("candidate_stop").is_none());
+        let decoded: RuntimeAttestation = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.candidate_stop.is_none());
+        let stop = ato_runtime_attempt::realize::StopClass::Unconfirmed {
+            reason: "private stop error".into(),
+            resources: vec!["private resource path".into()],
+        };
+        let mut current = original;
+        current.candidate_stop = Some(CandidateStopAttestation::of(&stop));
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(json.contains("\"candidate_stop\":\"unconfirmed\""));
+        assert!(!json.contains("private"));
+    }
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn build_uses_remaining_deadline_without_cleanup_reservation_or_rounding_down() {
+        assert_eq!(exploration_build_seconds(None, 100_000), 900);
+        assert_eq!(exploration_build_seconds(Some(144_000), 100_000), 44);
+        assert_eq!(exploration_build_seconds(Some(100_001), 100_000), 1);
+        assert_eq!(exploration_build_seconds(Some(101_001), 100_000), 2);
+        assert_eq!(exploration_build_seconds(Some(100_000), 100_000), 0);
+        assert_eq!(exploration_build_seconds(Some(99_999), 100_000), 0);
+    }
+
+    #[test]
+    fn frozen_deadline_caps_source_and_status_timeouts_and_never_expands() {
+        let client = Client::new("http://127.0.0.1:1", "private").unwrap();
+        let bounded = client
+            .with_deadline(now_ms() + 1000)
+            .with_deadline(now_ms() + 60_000);
+        let source = bounded
+            .prepare(
+                bounded
+                    .http
+                    .get(bounded.url("/source"))
+                    .timeout(SOURCE_TRANSFER_TIMEOUT),
+            )
+            .unwrap();
+        assert!(source.timeout().unwrap() <= &Duration::from_secs(1));
+        let status = bounded
+            .prepare(bounded.http.get(bounded.url("/status")))
+            .unwrap();
+        assert!(status.timeout().unwrap() <= &Duration::from_secs(1));
+        let short = bounded
+            .prepare(
+                bounded
+                    .http
+                    .get(bounded.url("/status"))
+                    .timeout(Duration::from_millis(1)),
+            )
+            .unwrap();
+        assert_eq!(short.timeout(), Some(&Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn expired_operation_does_not_dispatch_and_slow_http_read_stops_at_deadline() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = Client::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "private",
+        )
+        .unwrap();
+        let expired = client.with_deadline(now_ms().saturating_sub(1));
+        let error = expired
+            .send::<Value>(expired.http.get(expired.url("/status")))
+            .unwrap_err();
+        assert!(error.to_string().contains("deadline elapsed"));
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        listener.set_nonblocking(false).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(350));
+            let _ = stream.write_all(b"{}");
+        });
+        let bounded = client.with_deadline(now_ms() + 100);
+        let started = std::time::Instant::now();
+        let error = bounded
+            .send::<Value>(bounded.http.get(bounded.url("/status")))
+            .unwrap_err();
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+}

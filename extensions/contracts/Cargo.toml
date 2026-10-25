@@ -1,0 +1,22 @@
+[package]
+name = "ato-contracts"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Extension-defined Contract verifiers for Ato Realizations"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "contract-verifier"
+
+[dependencies]
+ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-materializer-api = { path = "../materializers/api", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

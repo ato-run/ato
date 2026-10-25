@@ -285,6 +285,9 @@ pub struct SupervisorConfig {
     /// Terminal Surface. Existing artifacts default to per-service log files.
     #[serde(default)]
     pub stdio_mode: StdioMode,
+    /// Private, workload-owned Linux X server. Never attaches to the host display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_surface: Option<crate::pixel::PixelProducerConfig>,
     /// LEGACY single-service argv. Empty when `services` is used.
     #[serde(default)]
     pub cmd: Vec<String>,
@@ -488,6 +491,18 @@ impl SupervisorConfig {
             }
         }
         let services = self.services();
+        if let Some(pixel) = &self.pixel_surface {
+            pixel.validate()?;
+            if self.stdio_mode != StdioMode::Log
+                || services.len() != 1
+                || services[0].kind != ServiceKind::Service
+            {
+                return Err(
+                    "supervisor.json: pixel_surface requires exactly one long-running log service"
+                        .into(),
+                );
+            }
+        }
         if self.stdio_mode == StdioMode::Pty
             && (services.len() != 1 || services[0].kind != ServiceKind::Service)
         {
@@ -2481,6 +2496,7 @@ mod tests {
         write(dir.path(), "openai", "sk-REAL-VALUE"); // the value must NOT enter the plan
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::from([("PORT".to_string(), "8080".to_string())]),
@@ -2621,6 +2637,7 @@ mod tests {
         write(dir.path(), "openai", "sk-PLACEHOLDER");
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
@@ -2661,6 +2678,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["true".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
@@ -2686,6 +2704,7 @@ mod tests {
         write(dir.path(), "openai", "sk-CHILD-ONLY-VALUE");
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec![
                 "sh".into(),
                 "-c".into(),
@@ -2729,6 +2748,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec![
                 "sh".into(),
                 "-c".into(),
@@ -2764,6 +2784,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["sleep".into(), "300".into()], // default SIGTERM disposition = terminate
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
@@ -2795,6 +2816,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
             stdio_mode: StdioMode::Log,
+            pixel_surface: None,
             cmd: vec!["sh".into(), "-c".into(), "sleep 300; true".into()],
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),

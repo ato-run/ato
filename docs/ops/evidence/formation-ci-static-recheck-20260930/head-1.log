@@ -1,0 +1,262 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling syn v2.0.117
+   Compiling cfg-if v1.0.4
+   Compiling jobserver v0.1.35
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling cc v1.2.63
+   Compiling itoa v1.0.18
+   Compiling synstructure v0.13.2
+   Compiling smallvec v1.15.1
+   Compiling serde_core v1.0.228
+   Compiling version_check v0.9.5
+   Compiling zerofrom-derive v0.1.7
+   Compiling memchr v2.8.1
+   Compiling generic-array v0.14.7
+   Compiling zerofrom v0.1.8
+   Compiling yoke-derive v0.8.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling subtle v2.6.1
+   Compiling serde v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling pin-project-lite v0.2.17
+   Compiling yoke v0.8.3
+   Compiling serde_derive v1.0.228
+   Compiling bytes v1.11.1
+   Compiling typenum v1.20.1
+   Compiling zerovec-derive v0.11.3
+   Compiling parking_lot_core v0.9.12
+   Compiling displaydoc v0.2.6
+   Compiling zerovec v0.11.6
+   Compiling zeroize v1.8.2
+   Compiling scopeguard v1.2.0
+   Compiling futures-core v0.3.32
+   Compiling lock_api v0.4.14
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling errno v0.3.14
+   Compiling digest v0.10.7
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling tokio-macros v2.7.0
+   Compiling getrandom v0.2.17
+   Compiling socket2 v0.6.4
+   Compiling mio v1.2.1
+   Compiling zmij v1.0.21
+   Compiling thiserror v2.0.18
+   Compiling futures-sink v0.3.32
+   Compiling tokio v1.52.3
+   Compiling tinystr v0.8.3
+   Compiling thiserror-impl v2.0.18
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling serde_json v1.0.150
+   Compiling cpufeatures v0.2.17
+   Compiling icu_locale_core v2.2.0
+   Compiling potential_utf v0.1.5
+   Compiling zerotrie v0.2.4
+   Compiling tracing-core v0.1.36
+   Compiling slab v0.4.12
+   Compiling icu_properties_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling http v1.4.2
+   Compiling tracing-attributes v0.1.31
+   Compiling ring v0.17.14
+   Compiling zerocopy v0.8.52
+   Compiling percent-encoding v2.3.2
+   Compiling tracing v0.1.44
+   Compiling rustls-pki-types v1.14.1
+   Compiling futures-macro v0.3.32
+   Compiling hashbrown v0.17.1
+   Compiling futures-task v0.3.32
+   Compiling equivalent v1.0.2
+   Compiling futures-io v0.3.32
+   Compiling futures-util v0.3.32
+   Compiling indexmap v2.14.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling bitflags v2.13.0
+   Compiling semver v1.0.28
+   Compiling untrusted v0.9.0
+   Compiling httparse v1.10.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling idna_adapter v1.2.2
+   Compiling form_urlencoded v1.2.2
+   Compiling sha2 v0.10.9
+   Compiling rustix v1.1.4
+   Compiling ryu-js v0.2.2
+   Compiling rustls v0.23.40
+   Compiling serde_jcs v0.1.0
+   Compiling idna v1.1.0
+   Compiling rustls-webpki v0.103.13
+   Compiling rustc_version v0.4.1
+   Compiling http-body v1.0.1
+   Compiling futures-channel v0.3.32
+   Compiling linux-raw-sys v0.12.1
+   Compiling base64 v0.22.1
+   Compiling anyhow v1.0.102
+   Compiling pkg-config v0.3.34
+   Compiling getrandom v0.3.4
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling curve25519-dalek v4.1.3
+   Compiling url v2.5.8
+   Compiling tokio-util v0.7.18
+   Compiling blake3 v1.8.5
+   Compiling tower-service v0.3.3
+   Compiling hex v0.4.3
+   Compiling ipnet v2.12.0
+   Compiling atomic-waker v1.1.2
+   Compiling tower-layer v0.3.3
+   Compiling fnv v1.0.7
+   Compiling data-encoding v2.11.0
+   Compiling log v0.4.32
+   Compiling try-lock v0.2.5
+   Compiling tinyvec_macros v0.1.1
+   Compiling want v0.3.1
+   Compiling tinyvec v1.11.0
+   Compiling h2 v0.4.14
+   Compiling webpki-roots v1.0.7
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling httpdate v1.0.3
+   Compiling heck v0.5.0
+   Compiling cpufeatures v0.3.0
+   Compiling arrayref v0.3.9
+   Compiling signature v2.2.0
+   Compiling arrayvec v0.7.6
+   Compiling constant_time_eq v0.4.2
+   Compiling option-ext v0.2.0
+   Compiling dirs-sys v0.4.1
+   Compiling ed25519 v2.2.3
+   Compiling hyper v1.10.1
+   Compiling rand_core v0.9.5
+   Compiling tokio-rustls v0.26.4
+   Compiling rand_core v0.6.4
+   Compiling crc32fast v1.5.1
+   Compiling thiserror v1.0.69
+   Compiling zstd-safe v7.2.4
+   Compiling getrandom v0.4.2
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling hyper-util v0.1.20
+   Compiling ato-computation v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/lib/computation)
+   Compiling dirs v5.0.1
+   Compiling sync_wrapper v1.0.2
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling enumflags2_derive v0.7.12
+   Compiling thiserror-impl v1.0.69
+   Compiling fs2 v0.4.3
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling winnow v0.7.15
+   Compiling toml_write v0.1.2
+   Compiling adler2 v2.0.1
+   Compiling regex-syntax v0.8.11
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling simd-adler32 v0.3.10
+   Compiling colorchoice v1.0.5
+   Compiling anstream v1.0.0
+   Compiling miniz_oxide v0.9.1
+   Compiling toml_edit v0.22.27
+   Compiling regex-automata v0.4.14
+   Compiling ato-objects v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/lib/objects)
+   Compiling enumflags2 v0.7.12
+   Compiling tower v0.5.3
+   Compiling rand v0.9.4
+   Compiling rand v0.8.6
+   Compiling enum-as-inner v0.6.1
+   Compiling xattr v1.6.1
+   Compiling http-body-util v0.1.3
+   Compiling sha1 v0.10.6
+   Compiling async-trait v0.1.89
+   Compiling filetime v0.2.29
+   Compiling utf-8 v0.7.6
+   Compiling linked-hash-map v0.5.6
+   Compiling ryu v1.0.23
+   Compiling clap_lex v1.1.0
+   Compiling fastrand v2.4.1
+   Compiling lazy_static v1.5.0
+   Compiling strsim v0.11.1
+   Compiling sharded-slab v0.1.7
+   Compiling clap_builder v4.6.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling tempfile v3.27.0
+   Compiling hickory-proto v0.24.4
+   Compiling lru-cache v0.1.2
+   Compiling tungstenite v0.28.0
+   Compiling tar v0.4.46
+   Compiling flate2 v1.1.10
+   Compiling tower-http v0.6.11
+   Compiling landlock v0.4.7
+   Compiling ato-adapter-api v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/extensions/adapters/api)
+   Compiling zstd v0.13.3
+   Compiling matchers v0.2.0
+   Compiling toml v0.8.23
+   Compiling ato-ipc v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/lib/ipc)
+   Compiling hyper-rustls v0.27.9
+   Compiling clap_derive v4.6.1
+   Compiling webpki-roots v0.26.11
+   Compiling unicode-normalization v0.1.25
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling nu-ansi-term v0.50.3
+   Compiling resolv-conf v0.7.6
+   Compiling hickory-resolver v0.24.4
+   Compiling tracing-subscriber v0.3.23
+   Compiling ato-materializer-static-web v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/extensions/materializers/static-web)
+   Compiling tokio-tungstenite v0.28.0
+   Compiling clap v4.6.1
+   Compiling reqwest v0.12.28
+   Compiling ato-formation v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/lib/formation)
+   Compiling ato-adapter-process v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/extensions/adapters/process)
+   Compiling ato-sandbox v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/lib/sandbox)
+   Compiling ato-adapter-oci v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/extensions/adapters/oci)
+   Compiling hmac v0.12.1
+   Compiling socket2 v0.5.10
+   Compiling netd v0.5.2 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/services/netd)
+   Compiling ato-runtime-attempt v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/lib/runtime-attempt)
+   Compiling ato-portable-application v0.1.0 (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/head/apps/portable-application)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 52s
+     Running unittests src/lib.rs (/home/ekohsuke/ato-d2/.tmp/ci-1449-06330897/target/debug/deps/ato_portable_application-f667ac5fbe2ef939)
+
+running 1 test
+test tests::local_static_server_rejects_browser_state_without_the_run_token ... 
+thread 'tests::local_static_server_rejects_browser_state_without_the_run_token' (3194554) panicked at apps/portable-application/src/lib.rs:3566:43:
+called `Result::unwrap()` on an `Err` value: Os { code: 104, kind: ConnectionReset, message: "Connection reset by peer" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::unwrap
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/result.rs:1233:23
+   4: ato_portable_application::tests::local_static_server_rejects_browser_state_without_the_run_token
+             at ./src/lib.rs:3566:43
+   5: ato_portable_application::tests::local_static_server_rejects_browser_state_without_the_run_token::{{closure}}
+             at ./src/lib.rs:3535:73
+   6: core::ops::function::FnOnce::call_once
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+
+failures:
+
+failures:
+    tests::local_static_server_rejects_browser_state_without_the_run_token
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p ato-portable-application --lib`

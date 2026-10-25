@@ -1,0 +1,32 @@
+[
+  {
+    "case": "E04",
+    "contract_ref": "sha256:7a71acc84baa808a2b8af95db95c5238243869d336cf7927da20c70db5b80ab5",
+    "same_k_pass": true,
+    "model_calls": 0,
+    "fixed_provider_calls": 1,
+    "fixture_hash": "25f0aa2f92e0800572167b8357220dde20b0f56e039d0d324cde5c4601afb293",
+    "derivation_ref": "sha256:fbab8cf070fbfc3bad51263eb80681490f6a9b01c2a8b2ff286cf81f71f02bca",
+    "requester_exit": 0
+  },
+  {
+    "case": "E06",
+    "contract_ref": "sha256:2ff31c333cae34cc20389ec708ee4bb1ead2c7a11bf63af1a23178542ed715ec",
+    "same_k_pass": true,
+    "model_calls": 0,
+    "fixed_provider_calls": 1,
+    "fixture_hash": "c0628b0d6c6adf2b8f3b6d71a1c2d0f4c42d48cc33c44173263343194f714e10",
+    "derivation_ref": "sha256:572479d4282b7f0ca5466d45db6662fa25298be64edf817b795b61e0b2f13d21",
+    "requester_exit": 0
+  },
+  {
+    "case": "E07",
+    "contract_ref": "sha256:ee63c42014f04fae24e2b4045513869abd00cf76a6dbbf224dda0047e2366fec",
+    "same_k_pass": true,
+    "model_calls": 0,
+    "fixed_provider_calls": 1,
+    "fixture_hash": "49687aaadd2a439f082ac3172596c9b211d53958d1872a34998b6b449efbfb8f",
+    "derivation_ref": "sha256:6aa0fa7401a2b6171c90c518a5bb2e47648480bd15f77808da7066a5a5f0becc",
+    "requester_exit": 0
+  }
+]

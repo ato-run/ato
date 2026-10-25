@@ -9,9 +9,9 @@ use ato_computation::{
     RoleId, SemanticsId,
 };
 use ato_kernel::{
-    Action, ChoiceId, Kernel, ProtocolError, ProtocolPayload, ProtocolSemantics, Run,
-    SemanticError, SemanticHost, SemanticStep, Semantics, Transition, TransitionOffer,
-    TransitionSink,
+    Action, ChoiceId, EvolutionError, Kernel, ProtocolError, ProtocolPayload, ProtocolSemantics,
+    Run, RunEvolutionAuthority, SemanticError, SemanticHost, SemanticStep, Semantics, Transition,
+    TransitionOffer, TransitionSink,
 };
 use ato_objects::{MemoryObjectStore, ObjectStore};
 
@@ -321,6 +321,122 @@ fn behavioral_hello_world_branches_from_same_computation() {
             .count(),
         2
     );
+}
+
+#[test]
+fn external_evolution_is_two_phase_and_freezes_at_a_logical_frontier() {
+    let objects = Arc::new(MemoryObjectStore::default());
+    let mut kernel = Kernel::new(objects.clone());
+    kernel.register(Arc::new(NameProvider::new())).unwrap();
+    kernel
+        .register_protocol(Arc::new(TextProtocol::new()))
+        .unwrap();
+    let initial = seal_leaf(
+        &kernel,
+        objects.as_ref(),
+        "example.name-provider@1",
+        BTreeMap::from([
+            (port("input"), text_port("receiver")),
+            (port("name"), text_port("sender")),
+        ]),
+        "WaitingInput",
+    );
+    let authority = RunEvolutionAuthority::new(kernel, initial.clone());
+    let input = TransitionOffer::external_input(port("input"), ProtocolPayload::from("Ada"));
+
+    let failed = authority.accept(
+        &input,
+        || Err("device refused input".to_owned()),
+        |_| Ok(()),
+        |_, _| Ok(()),
+    );
+    assert!(matches!(failed, Err(EvolutionError::Apply(_))));
+    assert_eq!(authority.current_head().head, initial);
+    assert_eq!(authority.current_head().run_seq, 0);
+
+    let accepted = authority
+        .accept(
+            &input,
+            || Ok(()),
+            |pending| {
+                assert_eq!(pending.run_seq, 1);
+                Ok(())
+            },
+            |_, _| Err("record store temporarily unavailable".to_owned()),
+        )
+        .unwrap();
+    assert!(accepted.record_error.is_some());
+    assert_eq!(authority.current_head().head, accepted.transition.to);
+    assert_eq!(authority.current_head().run_seq, 1);
+
+    let output = TransitionOffer::selected(
+        ChoiceId::new("emit-name"),
+        Action::Output {
+            port: port("name"),
+            payload: ProtocolPayload::from("Ada"),
+        },
+    );
+    let next = authority
+        .accept(&output, || Ok(()), |_| Ok(()), |_, _| Ok(()))
+        .unwrap();
+    assert_eq!(next.run_seq, 2);
+    assert_eq!(authority.current_head().head, next.transition.to);
+
+    let frontier = authority.freeze().unwrap();
+    assert_eq!(frontier.head, next.transition.to);
+    assert!(matches!(
+        authority.accept(&output, || Ok(()), |_| Ok(()), |_, _| Ok(())),
+        Err(EvolutionError::Frozen)
+    ));
+    authority.unfreeze();
+}
+
+#[test]
+fn persistence_failure_advances_once_then_fail_closes_until_retry() {
+    let objects = Arc::new(MemoryObjectStore::default());
+    let mut kernel = Kernel::new(objects.clone());
+    kernel.register(Arc::new(NameProvider::new())).unwrap();
+    kernel
+        .register_protocol(Arc::new(TextProtocol::new()))
+        .unwrap();
+    let initial = seal_leaf(
+        &kernel,
+        objects.as_ref(),
+        "example.name-provider@1",
+        BTreeMap::from([
+            (port("input"), text_port("receiver")),
+            (port("name"), text_port("sender")),
+        ]),
+        "WaitingInput",
+    );
+    let authority = RunEvolutionAuthority::new(kernel, initial);
+    let input = TransitionOffer::external_input(port("input"), ProtocolPayload::from("Ada"));
+
+    assert!(matches!(
+        authority.accept(
+            &input,
+            || Ok(()),
+            |_| Err("control plane unavailable".to_owned()),
+            |_, _| Ok(())
+        ),
+        Err(EvolutionError::Persist(_))
+    ));
+    let pending = authority.pending_persistence().unwrap();
+    assert_eq!(pending.run_seq, 1);
+    assert_eq!(authority.current_head().head, pending.transition.to);
+    assert!(matches!(
+        authority.accept(&input, || Ok(()), |_| Ok(()), |_, _| Ok(())),
+        Err(EvolutionError::PersistencePending(1))
+    ));
+    assert!(
+        authority
+            .retry_pending_persistence(|retry| {
+                assert_eq!(retry, &pending);
+                Ok(())
+            })
+            .unwrap()
+    );
+    assert!(authority.pending_persistence().is_none());
 }
 
 fn branch(kernel: &Kernel, computation: &ComputationRef, name: &str) -> [ComputationRef; 3] {

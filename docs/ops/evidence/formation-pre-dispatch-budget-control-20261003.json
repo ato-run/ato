@@ -1,0 +1,119 @@
+{
+  "schema": "ato.formation-pre-dispatch-call-budget-control/1",
+  "pins": {
+    "execution_code_pin": "da7c452c1dcd6011399d2e12c7cb47e653e40ccd",
+    "API_pin": "9b483d4a7df9aa2370636bd1b60c2fbcda98320b",
+    "authority_source_pin": "da7c452c1dcd6011399d2e12c7cb47e653e40ccd",
+    "authority_WASM_sha256": "7306e3c1cf5efc3459abab449c78bd2a6d003862718fcd84a733377adf661462",
+    "binaries": {
+      "ato": {
+        "path": "/opt/ato/.tmp/fv0-source-final-da7-binaries/ato",
+        "sha256": "e0ccf4bbeee7305d518a33369cde1079207961342fbe753aa799a43d5cb2972f"
+      },
+      "worker": {
+        "path": "/opt/ato/.tmp/fv0-source-final-da7-binaries/ato-formation-worker",
+        "sha256": "d725914a43c7b5e620d2ebfce1065eb60448201087c0c78611026e2882e8227f"
+      },
+      "preflight": {
+        "path": "/opt/ato/.tmp/fv0-source-final-da7-binaries/preflight",
+        "sha256": "368ec816bbf8748ae29b1b3190c1771eeab42643fc6e821d3e1a57444af93ac5"
+      }
+    },
+    "preflight_lock_sha256": "dff527749e3d4cc7a7399a10f39960c2e5f37c68f1388eb38015c54b25880c10"
+  },
+  "search_id": "search_79476bdf41eefb072c0604b5dd702e73",
+  "K": "sha256:76dff85cd1fb7f9b7b9942de9eba6ece2c88957bd1b227191a33c2a564a73956",
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-03T04:33:55.537Z",
+    "deadline_at": "2026-10-03T04:34:55.537Z",
+    "attempts": {
+      "max": 4,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 4
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 1073741824
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 2147483648
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 1073741824
+    }
+  },
+  "budget_counters": {
+    "attempts_reserved": 0,
+    "attempts_used": 0,
+    "expanded_reserved": 0,
+    "expanded_used": 0,
+    "stored_reserved": 0,
+    "stored_used": 0,
+    "transfer_reserved": 0,
+    "transfer_used": 0
+  },
+  "round": {
+    "candidates": [],
+    "diagnostics": [
+      "reasoning_call_budget_exhausted"
+    ],
+    "expires_at_ms": 1791002095537,
+    "opened_at_ms": 1791002035537,
+    "outcome": "provider_error"
+  },
+  "stop": {
+    "reason": "budget_exhausted",
+    "status": "not_reached",
+    "stopped_at": "2026-10-03T04:33:56.761Z"
+  },
+  "completed_exchanges": 6,
+  "exchange_errors": [
+    "inspection_no_new_information",
+    "inspection_no_new_information",
+    "inspection_no_new_information",
+    "inspection_no_new_information",
+    "inspection_no_new_information",
+    "inspection_no_new_information"
+  ],
+  "no_new_information_deliberately_repeated": true,
+  "new_exchange_after_exhaustion": false,
+  "attempts": [],
+  "paid_API_calls": 0,
+  "actual_provider_calls": null,
+  "provider_call_rows": 0,
+  "source_execution": false,
+  "Requester_restarted": false,
+  "restart_unit_test": "six_saved_exchanges_refuse_a_new_round_without_a_provider_call_on_restart",
+  "old_Search_reset": false,
+  "old_UNKNOWN_reexecution": false,
+  "ordinary_Run_permission": false,
+  "preregistration_sha256": "3f514a222cbdc9c87e86110758d8ebea51e1ae6416db369481cc78ba71a9e917",
+  "result_sha256": "c6e091301a6c2ff1980388eda5f6bb2b8142a23b4579197a47a1108e84fb83e8",
+  "collector_error_preserved": "Original observer treated summary result pathname as inline JSON; collected saved result only, with no rerun",
+  "elapsed_seconds": 2.212,
+  "prior_harness_failures": [
+    {
+      "path": "budget-control-da7",
+      "reason": "ULID browser crypto stub; Source reservation failed before Search creation"
+    },
+    {
+      "path": "budget-control-da7-v2",
+      "reason": "Premature extraction of in-flight archive; Coordinator initialization failed"
+    },
+    {
+      "path": "budget-control-da7-v3",
+      "reason": "Missing existing ESM require crypto bridge; Coordinator initialization failed"
+    }
+  ]
+}

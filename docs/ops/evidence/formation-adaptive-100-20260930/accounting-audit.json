@@ -1,0 +1,91 @@
+{
+  "metrics": {
+    "baseline_typed_K_PASS": 7,
+    "adaptive_typed_K_PASS": 7,
+    "additional_typed_K_success": 0,
+    "proposal_eligible_apps": 13,
+    "wire_ready_callable_apps": 12,
+    "producer_invoked_apps": 12,
+    "valid_proposal_apps": 10,
+    "validator_registry_admitted_generated_D_apps": 10,
+    "runtime_admitted_generated_D_apps": 2,
+    "generated_D_executed_apps": 2,
+    "generated_D_PASS_apps": 0,
+    "calls_per_additional_PASS": null,
+    "tokens_per_additional_PASS": null,
+    "cost_per_additional_PASS_usd_micros": null,
+    "zero_gain_ratio_basis": "undefined because additional PASS is0",
+    "explicit_K_entry_added_apps": 81,
+    "model_K_gain_apps": 0,
+    "generated_D_from_no_baseline_D_apps": 9,
+    "new_execution_apps": 2,
+    "baseline_PASS_preserved": 7
+  },
+  "funnel": {
+    "A": 100,
+    "B": 100,
+    "C": 28,
+    "D": 9,
+    "E": 9,
+    "F": 7,
+    "G": 7,
+    "H": 7,
+    "I": 0
+  },
+  "usage": {
+    "candidate_producer": {
+      "calls": 12,
+      "input_tokens": 29127,
+      "output_tokens": 504,
+      "estimated_cost_usd_micros": 9357,
+      "unknown_usage_calls": 0,
+      "latency_ms": null
+    },
+    "decision_provider": {
+      "calls": 12,
+      "input_tokens": 8232,
+      "output_tokens": 888,
+      "estimated_cost_usd_micros": 348,
+      "unknown_usage_calls": 0,
+      "latency_ms": [
+        189,
+        83,
+        79,
+        103,
+        249,
+        107,
+        111,
+        95,
+        152,
+        110,
+        98,
+        96
+      ],
+      "latency_summary_ms": {
+        "min": 79,
+        "median": 105.0,
+        "max": 249,
+        "total": 1472
+      }
+    },
+    "total_calls": 24,
+    "total_input_tokens": 37359,
+    "total_output_tokens": 1392,
+    "estimated_peak_cache_miss_cost_usd_micros": 9705,
+    "billing_receipt": false,
+    "full_ceiling_reservation_consumed_usd_micros": 1006260,
+    "remaining_reservation_usd_micros": 3507128,
+    "unresolved_calls": 0,
+    "unresolved_reservations": 0,
+    "settlement": "all responses observed, blocking provider transports returned, per-app producer journals halted; full call ceilings consumed with no refund; estimates are not billed amounts"
+  },
+  "terminals": {
+    "attempt_failed": 3,
+    "known_d_pass": 7,
+    "network_denied": 7,
+    "operation_catalog_gap": 80,
+    "proposal_declined": 2,
+    "source_transport_limit": 1
+  },
+  "same_known_terminals": 100
+}

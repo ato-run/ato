@@ -1,0 +1,234 @@
+{
+  "evidence_id": "formation-windows-attempt-journal-native-20261003-02",
+  "source_pin": "384457c97225c3bb196d3974cb84e9a8eaecabff",
+  "workflow": "computation CLI",
+  "run_id": 37113580365,
+  "run_url": "https://github.com/ato-run/ato/actions/runs/37113580365",
+  "run_status": "completed",
+  "run_conclusion": "success",
+  "workflow_created_at": "2026-10-03T09:35:44Z",
+  "workflow_updated_at": "2026-10-03T09:42:40Z",
+  "journal_blob": "f0e022c4ad4448e8f9352f0ef4eed068706841cd",
+  "local_fix_commit": "478ab4857dcaad91ddb090c3b30b4c38c87b675e",
+  "previous_failure": {
+    "source_pin": "5798e23d28aaebd4fabd6d44cecef51ab869c717",
+    "run_id": 37109321016,
+    "portable_passed": 7,
+    "portable_failed": 8,
+    "preserved": true,
+    "measurement_not_rewritten": true
+  },
+  "jobs": [
+    {
+      "id": 111175979866,
+      "name": "cli (windows-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 111175980003,
+      "name": "cli (macos-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 111175980024,
+      "name": "cli (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "windows_job_id": 111175979866,
+  "windows_steps": [
+    {
+      "completedAt": "2026-10-03T09:35:50Z",
+      "conclusion": "success",
+      "name": "Set up job",
+      "number": 1,
+      "startedAt": "2026-10-03T09:35:48Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:36:02Z",
+      "conclusion": "success",
+      "name": "Run actions/checkout@v4",
+      "number": 2,
+      "startedAt": "2026-10-03T09:35:50Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:36:23Z",
+      "conclusion": "success",
+      "name": "Run dtolnay/rust-toolchain@stable",
+      "number": 3,
+      "startedAt": "2026-10-03T09:36:02Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:36:35Z",
+      "conclusion": "success",
+      "name": "Run Swatinem/rust-cache@v2",
+      "number": 4,
+      "startedAt": "2026-10-03T09:36:23Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:36:35Z",
+      "conclusion": "success",
+      "name": "Run actions/setup-python@v5",
+      "number": 5,
+      "startedAt": "2026-10-03T09:36:35Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:38:09Z",
+      "conclusion": "success",
+      "name": "Windows durable attempt journal",
+      "number": 6,
+      "startedAt": "2026-10-03T09:36:35Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:38:09Z",
+      "conclusion": "skipped",
+      "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+      "number": 7,
+      "startedAt": "2026-10-03T09:38:09Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:41:10Z",
+      "conclusion": "success",
+      "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+      "number": 8,
+      "startedAt": "2026-10-03T09:38:09Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:42:12Z",
+      "conclusion": "success",
+      "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+      "number": 9,
+      "startedAt": "2026-10-03T09:41:10Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:42:12Z",
+      "conclusion": "success",
+      "name": "Post Run actions/setup-python@v5",
+      "number": 16,
+      "startedAt": "2026-10-03T09:42:12Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:42:36Z",
+      "conclusion": "success",
+      "name": "Post Run Swatinem/rust-cache@v2",
+      "number": 17,
+      "startedAt": "2026-10-03T09:42:12Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:42:38Z",
+      "conclusion": "success",
+      "name": "Post Run actions/checkout@v4",
+      "number": 18,
+      "startedAt": "2026-10-03T09:42:36Z",
+      "status": "completed"
+    },
+    {
+      "completedAt": "2026-10-03T09:42:38Z",
+      "conclusion": "success",
+      "name": "Complete job",
+      "number": 19,
+      "startedAt": "2026-10-03T09:42:38Z",
+      "status": "completed"
+    }
+  ],
+  "windows_results": {
+    "journal": {
+      "step_number": 6,
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 70,
+      "evidence_lines": [
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.4547766Z test journal::tests::a_finished_attempt_lets_the_request_continue_and_is_never_rerun ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.4671052Z test journal::tests::a_new_start_write_failure_is_distinct_from_unreadable_history ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.4837316Z test journal::tests::a_readonly_destination_refuses_a_start_and_preserves_the_reservation ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.5235081Z test journal::tests::an_unfinished_attempt_stops_every_later_attempt_of_its_request ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.5560791Z test journal::tests::an_unreadable_record_is_not_read_as_nothing_started ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.5575290Z test journal::tests::an_unwritable_journal_starts_nothing ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.5869323Z test journal::tests::every_published_transition_can_be_reopened_with_its_exact_identity ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.7077194Z test journal::tests::the_request_lock_is_held_until_the_delivery_permit_is_dropped ... ok",
+        "cli (windows-latest)\tWindows durable attempt journal\t2026-10-03T09:38:09.7078639Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.32s"
+      ]
+    },
+    "portable_application": {
+      "step_number": 8,
+      "executable": "tests\\portable_application.rs (target\\debug\\deps\\portable_application-d6ed755d7cb0afb6.exe)",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0,
+      "evidence_lines": [
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:28.2514509Z      Running tests\\portable_application.rs (target\\debug\\deps\\portable_application-d6ed755d7cb0afb6.exe)",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:28.2653215Z ",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:28.2654220Z running 15 tests",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:28.3147844Z test a_multi_route_bundle_never_selects_a_derivation_implicitly ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:33.8560554Z test a_process_run_is_owned_by_its_run_until_stopped ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:36.4536748Z test a_run_whose_contract_fails_keeps_nothing_running ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:44.7539703Z test a_static_run_is_owned_by_its_run_until_stopped ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:44.8355224Z test byte_identical_fixture_runs_and_emits_a_fully_satisfied_cli_receipt ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:44.8569922Z test changed_root_contract_ref_fails_before_running ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:46.9879458Z test explicitly_selected_process_route_satisfies_the_same_contract_at_runtime ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:50.2265438Z test export_plan_preserves_identity_and_refuses_unproven_offline_claim ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:50.2270679Z durable lifecycle: import",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:50.2685126Z durable lifecycle: first start",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:50.9615953Z durable lifecycle: inspect first run",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:50.9815848Z durable lifecycle: stop first run",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:52.8109780Z durable lifecycle: inspect stopped instance",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:52.8307716Z durable lifecycle: second start",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:53.5241056Z durable lifecycle: inspect second run",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:53.5434408Z durable lifecycle: stop second run",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:55.3828124Z test imported_local_instance_can_stop_and_restart_without_reimporting ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:55.4034191Z test one_byte_bundle_tamper_fails_before_running ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:59.6879334Z test pack_compiles_v2_authoring_and_both_explicit_routes_satisfy_one_contract ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:40:59.8525435Z test process_snapshot_start_fails_before_claiming_a_restore ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:41:00.0059549Z test snapshot_bundle_imports_into_independent_asset_namespaces_and_reexports ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:41:02.6136478Z test snapshot_bundle_start_records_the_installed_snapshot_in_its_receipt ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:41:08.6700104Z test v4_bundle_can_be_planned_and_reexported_without_changing_identity ... ok",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:41:08.6700796Z ",
+        "cli (windows-latest)\tRun cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture\t2026-10-03T09:41:08.6701296Z test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.40s"
+      ]
+    },
+    "strict_clippy": {
+      "step_number": 9,
+      "command": "cargo clippy -p ato-cli --all-targets -- -D warnings",
+      "conclusion": "success"
+    }
+  },
+  "toolchain": "native stable rustc 1.99.0 (b940084d7 2026-09-28), x86_64-pc-windows-msvc",
+  "test_order": "Windows CLI normal tests used --test-threads=1 --nocapture; journal step used --test-threads=1",
+  "limits": {
+    "power_loss_experiment": false,
+    "native_codex_claude_acceptance": false,
+    "pwa_input_resume_acceptance": false,
+    "same_artifact_kutt_changedetection_acceptance": false,
+    "ci_runtime_scope": "Controlled portable process/static fixtures; requested OSS functional acceptance was not performed",
+    "ci_runtime_attempt_count": "not aggregated in this record",
+    "direct_paid_llm_api_calls": 0,
+    "deployment_or_remote_migration": false,
+    "existing_source_contract_receipt_history_modified": false
+  },
+  "retrieval": "Completed run metadata and Windows job log fetched once each after the 60-second-interval watch completed",
+  "files": [
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-windows-durability/.tmp/native-windows-actions-37113580365.json",
+      "sha256": "69d7d768b56f7757c9ddbf02acff59571852ccc68514da248c033228219621fa"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato-windows-durability/.tmp/native-windows-actions-37113580365.log",
+      "sha256": "bd33ce7879ea93ba0986d3c78b1f31de052f5bb3d3bde0abf7f2ab4c9b3e59d4"
+    }
+  ]
+}

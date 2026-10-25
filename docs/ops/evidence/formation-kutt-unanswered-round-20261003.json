@@ -1,0 +1,72 @@
+{
+  "schema": "ato.formation-preserved-unanswered-round/1",
+  "observed_at": "2026-10-03T03:50:57.790741+00:00",
+  "execution_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "cause": "Human-visible Codex exchange was interrupted without a response; original 10-minute round timed out before any candidate/Runtime attempt",
+  "Search_id": "search_9a1e27fd1a9d5102a86620b2d61e7b93",
+  "K": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-02T09:14:14.362Z",
+    "deadline_at": "2026-10-02T09:44:14.362Z",
+    "attempts": {
+      "max": 4,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 4
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 1073741824
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 2147483648
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 0,
+      "reserved": 0,
+      "remaining": 1073741824
+    }
+  },
+  "rounds": [
+    {
+      "candidates": [],
+      "expires_at_ms": 1790933054362,
+      "opened_at_ms": 1790932454362,
+      "outcome": "timeout"
+    }
+  ],
+  "stop": {
+    "reason": "deadline_exceeded",
+    "status": "not_reached",
+    "stopped_at": "2026-10-02T09:24:14.653Z"
+  },
+  "attempts": [],
+  "unknown_attempts": [],
+  "elapsed_seconds": 602.184,
+  "result_sha256": "50665526385224538b2062e60c349b2e51d573ab990b4a8953157263c4a350ae",
+  "status_sha256": "a6b1fa8aae4acb40154a1cd438ea5fc90670b958393443fd9aa4932f2c1981e6",
+  "pending_frame_sha256": "6002bd0472a787cd08e88048883e4e590943beb953ef9b741cd416957576bbd6",
+  "owner_input_cleanup": {
+    "reusable_owner_values_revoked": 2,
+    "remaining_encrypted_values": 0,
+    "Requester_restarted": false,
+    "budget_reset": false
+  },
+  "paid_API_calls": 0,
+  "actual_provider_calls": null,
+  "completed_session_exchanges": 0,
+  "Requester_resumed": false,
+  "Runtime_reexecuted": false,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "budget_or_deadline_reset": false,
+  "ordinary_Run_permission": false
+}

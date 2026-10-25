@@ -1,0 +1,1024 @@
+{
+  "schema": "ato.formation-node-static-workspace-ledger/1",
+  "base": {
+    "pr": 1440,
+    "merge": "a6033ecfb768f8aa00f08fd6cf489a25e0d04483"
+  },
+  "execution_sha": "c9500b37c91f6844f68b07cf1633d21144674dde",
+  "plan_sha256": "00bf84d711582da68e73189ea75911c8331ab4ccd7a7eb6174cfa70477894db5",
+  "raw_results_sha256": "4b269aa96efcb7812c3ea473233a21da0a6e52ce42305cefad2a736d21e64354",
+  "binary_hashes": {
+    "coverage_baseline": "3e18e9d23486b4cb59b59ac075d97b9d8703cd4ab4bfd3420a699ff5ffd08d4f",
+    "workspace_proposal": "78e5de8a126d2e892a363cbd4cf1247f02505b22148b8aa4390a945c245534d0",
+    "ato-formation-worker": "5e8eb144412a4d566b343ddf28a831602b0e862af01819bde1f45753dc99f2ca"
+  },
+  "host": {
+    "platform": "linux/aarch64",
+    "containment": "bwrap+landlock"
+  },
+  "model_calls": 0,
+  "deploy": "none",
+  "remote_migration": "none",
+  "fixture_acceptance": {
+    "archive_sha256": "fc25688f3715834532e5cf3e271095f1c26efe1833ba140c31ded72e90d5bdf3",
+    "note": "Yarn 1 monorepo; tools/vite is a fixture-local stand-in, not Vite; no registry access needed.",
+    "cases": {
+      "F1_W12_same_K_pass": "network dependency_resolution (explicit local owner policy), w_0 -> formed, fully_satisfied receipt",
+      "F2_W9_W11_network_denied": "network denied, w_0 -> D admitted by validator, admission network_denied, nothing ran, no receipt",
+      "F3_W3_unknown_id": "w_9 -> proposal_id_unauthorized, nothing compiled"
+    },
+    "records": {
+      "F1": {
+        "sha256": "c19e3e2d88e437c09ac288dc91231cc607fe37bfb9089c300de1b68d3962ee11",
+        "record": {
+          "candidate_producer": "fixed",
+          "closure_ref": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+          "inventory": {
+            "installation": {
+              "scope": {
+                "install_mode": "--frozen-lockfile",
+                "node_version": "20.20.2",
+                "package_manager": "yarn",
+                "package_manager_version": "1.22.22"
+              },
+              "state": "exact"
+            },
+            "patterns": [
+              "apps/*",
+              "tools/*"
+            ],
+            "schema": "ato.formation-workspace-inventory/1",
+            "workspaces": [
+              {
+                "package_name": "web",
+                "qualification": {
+                  "output_root": "apps/web/dist",
+                  "state": "static_qualified"
+                },
+                "relative_root": "apps/web"
+              },
+              {
+                "package_name": "vite",
+                "qualification": {
+                  "code": "workspace_build_script_missing",
+                  "state": "excluded"
+                },
+                "relative_root": "tools/vite"
+              }
+            ]
+          },
+          "model_calls": 0,
+          "network": "dependency_resolution",
+          "operation_published": true,
+          "producer_output": {
+            "proposals": [
+              {
+                "kind": "propose_derivation",
+                "operations": [
+                  {
+                    "operation": "node_static_workspace@1",
+                    "workspace_id": "w_0"
+                  }
+                ]
+              }
+            ],
+            "schema": "ato.formation-proposal/1"
+          },
+          "proposal": {
+            "base_contract_ref": "sha256:7b5250adf7783de1c5175354affa8c46cd8d591a509c984c35f75060e66bec50",
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"root\"\nmethod = \"GET\"\npath = \"/\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\ninput = \"workspace\"\nuse = \"ato.contract.workspace@1\"\n\n[contract.require.expect]\ndigest = \"sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355\"\n\n[[derive.step]]\nargv = [\"yarn\", \"install\", \"--frozen-lockfile\"]\ncwd = \".\"\nid = \"install\"\nnetwork = \"dependency-resolution\"\nop = \"exec\"\nuse = \"ato.process@1\"\n\n[[derive.step]]\nargv = [\"yarn\", \"run\", \"build\"]\ncwd = \"apps/web\"\nid = \"build\"\nop = \"exec\"\nuse = \"ato.process@1\"\n\n[[derive.step]]\ncwd = \".\"\nentry = \"index.html\"\nid = \"site\"\nop = \"serve\"\nroot = \"apps/web/dist\"\nsource = \"workspace\"\nspa_fallback = true\nuse = \"ato.browser@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"site\"\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"node\"\nversion = \"20.20.2\"\n\n[[runtime]]\nname = \"yarn\"\nversion = \"1.22.22\"\n",
+            "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+            "proposal_id": "proposal-content:sha256:8d373a8d9b6d36d99b30a583f3d7e392a5a0e1106c4253867d8ea2c1ede937c4",
+            "search_candidate": {
+              "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:fc25688f3715834532e5cf3e271095f1c26efe1833ba140c31ded72e90d5bdf3",
+                "closure_ref": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.node.20.20.2",
+                "toolchain.yarn.1.22.22"
+              ],
+              "requirements": [
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            }
+          },
+          "provider_request": {
+            "failure_evidence": [],
+            "frozen_contract": {
+              "requirements": [
+                {
+                  "id": "root",
+                  "method": "GET",
+                  "path": "/",
+                  "port": "app.http",
+                  "status": 200,
+                  "verifier": "ato.contract.http@1"
+                },
+                {
+                  "digest": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+                  "id": "source-identity",
+                  "input": "workspace",
+                  "verifier": "ato.contract.workspace@1"
+                }
+              ],
+              "schema": "ato.contract/1"
+            },
+            "inspection_evidence": [],
+            "known_derivations": [],
+            "operation_catalog": {
+              "operations": [
+                {
+                  "operation": "node_static_workspace@1",
+                  "workspace_ids": [
+                    "w_0"
+                  ]
+                }
+              ],
+              "schema": "ato.formation-operation-catalog/1"
+            },
+            "remaining_budget": {
+              "attempts_remaining": 4,
+              "max_proposals": 1,
+              "rounds_remaining": 1,
+              "timeout_ms": 30000
+            },
+            "runtime_constraint": {
+              "kind": "exact",
+              "runtime_id": "local"
+            },
+            "schema": "ato.formation-proposal-request/1",
+            "search_id": "workspace-acceptance"
+          },
+          "result": {
+            "result": {
+              "attempts": [
+                {
+                  "attempt_id": "local-2090618-3",
+                  "candidate": "authored",
+                  "contract_ref": "sha256:7b5250adf7783de1c5175354affa8c46cd8d591a509c984c35f75060e66bec50",
+                  "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+                  "outcomes": {
+                    "cleanup": {
+                      "state": "succeeded"
+                    },
+                    "publication": {
+                      "state": "succeeded"
+                    },
+                    "runtime_verification": {
+                      "state": "succeeded"
+                    },
+                    "seal": {
+                      "state": "succeeded"
+                    }
+                  },
+                  "realization": {
+                    "build_network": "n/a",
+                    "candidate_network": "loopback only",
+                    "containment": "none; serves the produced bundle's files, runs nothing",
+                    "destroyed": true,
+                    "endpoints": {
+                      "app.http": "loopback static server"
+                    },
+                    "executor": "runtime-static-loopback",
+                    "workspace": "the produced static web bundle, read-only"
+                  },
+                  "receipt": {
+                    "contract_ref": "sha256:7b5250adf7783de1c5175354affa8c46cd8d591a509c984c35f75060e66bec50",
+                    "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+                    "execution": {
+                      "attempt_id": "local-2090618-3",
+                      "endpoint": "http://127.0.0.1:43037/",
+                      "platform": "linux/aarch64",
+                      "realization": "static_web",
+                      "request_id": "local-2090618-2-1790661125072176342"
+                    },
+                    "fully_satisfied": true,
+                    "observations": [
+                      {
+                        "evidence": {
+                          "body_sha256": "sha256:1afe992dcca1ecb8aaaa24b710dc18e4a797a9178e41283355d38245e37958b1",
+                          "method": "GET",
+                          "path": "/",
+                          "status": 200
+                        },
+                        "id": "root",
+                        "outcome": "satisfied"
+                      },
+                      {
+                        "evidence": {
+                          "digest": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+                          "input": "workspace"
+                        },
+                        "id": "source-identity",
+                        "outcome": "satisfied"
+                      }
+                    ],
+                    "schema": "ato.contract-verification-receipt/1",
+                    "target": {
+                      "kind": "formation-runtime"
+                    }
+                  },
+                  "runtime_id": "local",
+                  "status": "verified",
+                  "verification": {
+                    "verdicts": [
+                      {
+                        "id": "root",
+                        "outcome": {
+                          "result": "satisfied"
+                        }
+                      },
+                      {
+                        "id": "source-identity",
+                        "outcome": {
+                          "result": "satisfied"
+                        }
+                      }
+                    ]
+                  }
+                }
+              ],
+              "contract_ref": "sha256:7b5250adf7783de1c5175354affa8c46cd8d591a509c984c35f75060e66bec50",
+              "status": "formed",
+              "verified_routes": [
+                {
+                  "attempt_id": "local-2090618-3",
+                  "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+                  "materialization_ref": "sha256:41384646777d154fa5810cc884e7c0d10d5eec7d35da449847495afd2743d158",
+                  "runtime_id": "local"
+                }
+              ]
+            },
+            "status": "formation_result"
+          },
+          "runtime_facts": {
+            "formation.containment": "bwrap+landlock",
+            "formation.toolchain_root": "/opt/ato/toolchains",
+            "platform.arch": "aarch64",
+            "platform.os": "linux"
+          },
+          "schema": "ato.formation-workspace-acceptance/1",
+          "selection": "w_0"
+        }
+      },
+      "F2": {
+        "sha256": "f6ea7d73d6a5157ffd7eebb5d9a070bd7857db644549d6a73940339a4a1b817d",
+        "record": {
+          "candidate_producer": "fixed",
+          "closure_ref": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+          "inventory": {
+            "installation": {
+              "scope": {
+                "install_mode": "--frozen-lockfile",
+                "node_version": "20.20.2",
+                "package_manager": "yarn",
+                "package_manager_version": "1.22.22"
+              },
+              "state": "exact"
+            },
+            "patterns": [
+              "apps/*",
+              "tools/*"
+            ],
+            "schema": "ato.formation-workspace-inventory/1",
+            "workspaces": [
+              {
+                "package_name": "web",
+                "qualification": {
+                  "output_root": "apps/web/dist",
+                  "state": "static_qualified"
+                },
+                "relative_root": "apps/web"
+              },
+              {
+                "package_name": "vite",
+                "qualification": {
+                  "code": "workspace_build_script_missing",
+                  "state": "excluded"
+                },
+                "relative_root": "tools/vite"
+              }
+            ]
+          },
+          "model_calls": 0,
+          "network": "denied",
+          "operation_published": true,
+          "producer_output": {
+            "proposals": [
+              {
+                "kind": "propose_derivation",
+                "operations": [
+                  {
+                    "operation": "node_static_workspace@1",
+                    "workspace_id": "w_0"
+                  }
+                ]
+              }
+            ],
+            "schema": "ato.formation-proposal/1"
+          },
+          "proposal": {
+            "base_contract_ref": "sha256:7b5250adf7783de1c5175354affa8c46cd8d591a509c984c35f75060e66bec50",
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"root\"\nmethod = \"GET\"\npath = \"/\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\ninput = \"workspace\"\nuse = \"ato.contract.workspace@1\"\n\n[contract.require.expect]\ndigest = \"sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355\"\n\n[[derive.step]]\nargv = [\"yarn\", \"install\", \"--frozen-lockfile\"]\ncwd = \".\"\nid = \"install\"\nnetwork = \"dependency-resolution\"\nop = \"exec\"\nuse = \"ato.process@1\"\n\n[[derive.step]]\nargv = [\"yarn\", \"run\", \"build\"]\ncwd = \"apps/web\"\nid = \"build\"\nop = \"exec\"\nuse = \"ato.process@1\"\n\n[[derive.step]]\ncwd = \".\"\nentry = \"index.html\"\nid = \"site\"\nop = \"serve\"\nroot = \"apps/web/dist\"\nsource = \"workspace\"\nspa_fallback = true\nuse = \"ato.browser@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"site\"\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"node\"\nversion = \"20.20.2\"\n\n[[runtime]]\nname = \"yarn\"\nversion = \"1.22.22\"\n",
+            "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+            "proposal_id": "proposal-content:sha256:8d373a8d9b6d36d99b30a583f3d7e392a5a0e1106c4253867d8ea2c1ede937c4",
+            "search_candidate": {
+              "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:fc25688f3715834532e5cf3e271095f1c26efe1833ba140c31ded72e90d5bdf3",
+                "closure_ref": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.node.20.20.2",
+                "toolchain.yarn.1.22.22"
+              ],
+              "requirements": [
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            }
+          },
+          "provider_request": {
+            "failure_evidence": [],
+            "frozen_contract": {
+              "requirements": [
+                {
+                  "id": "root",
+                  "method": "GET",
+                  "path": "/",
+                  "port": "app.http",
+                  "status": 200,
+                  "verifier": "ato.contract.http@1"
+                },
+                {
+                  "digest": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+                  "id": "source-identity",
+                  "input": "workspace",
+                  "verifier": "ato.contract.workspace@1"
+                }
+              ],
+              "schema": "ato.contract/1"
+            },
+            "inspection_evidence": [],
+            "known_derivations": [],
+            "operation_catalog": {
+              "operations": [
+                {
+                  "operation": "node_static_workspace@1",
+                  "workspace_ids": [
+                    "w_0"
+                  ]
+                }
+              ],
+              "schema": "ato.formation-operation-catalog/1"
+            },
+            "remaining_budget": {
+              "attempts_remaining": 4,
+              "max_proposals": 1,
+              "rounds_remaining": 1,
+              "timeout_ms": 30000
+            },
+            "runtime_constraint": {
+              "kind": "exact",
+              "runtime_id": "local"
+            },
+            "schema": "ato.formation-proposal-request/1",
+            "search_id": "workspace-acceptance"
+          },
+          "result": {
+            "result": {
+              "attempted_contract_refs": [
+                "sha256:7b5250adf7783de1c5175354affa8c46cd8d591a509c984c35f75060e66bec50"
+              ],
+              "attempts": [
+                {
+                  "attempt_id": "local-2090673-3",
+                  "candidate": "authored",
+                  "contract_ref": "sha256:7b5250adf7783de1c5175354affa8c46cd8d591a509c984c35f75060e66bec50",
+                  "derivation_ref": "sha256:218c22fdf6f5e038197ec7e601b6c102c03f407fb412f647a20af313e94967b0",
+                  "failure": {
+                    "code": "network_denied",
+                    "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+                    "stage": "admission"
+                  },
+                  "outcomes": {
+                    "cleanup": {
+                      "reason": "nothing ran",
+                      "state": "not_applicable"
+                    },
+                    "publication": {
+                      "reason": "network_denied",
+                      "state": "not_attempted"
+                    },
+                    "runtime_verification": {
+                      "reason": "network_denied",
+                      "state": "not_attempted"
+                    },
+                    "seal": {
+                      "reason": "network_denied",
+                      "state": "not_attempted"
+                    }
+                  },
+                  "runtime_id": "local",
+                  "status": "filtered"
+                }
+              ],
+              "status": "no_verified_route"
+            },
+            "status": "formation_result"
+          },
+          "runtime_facts": {
+            "formation.containment": "bwrap+landlock",
+            "formation.toolchain_root": "/opt/ato/toolchains",
+            "platform.arch": "aarch64",
+            "platform.os": "linux"
+          },
+          "schema": "ato.formation-workspace-acceptance/1",
+          "selection": "w_0"
+        }
+      },
+      "F3": {
+        "sha256": "80429ac0cba450653dbe58168ed6c5637b203ca1342ebb6027a66dc111cfc6d8",
+        "record": {
+          "candidate_producer": "fixed",
+          "closure_ref": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+          "inventory": {
+            "installation": {
+              "scope": {
+                "install_mode": "--frozen-lockfile",
+                "node_version": "20.20.2",
+                "package_manager": "yarn",
+                "package_manager_version": "1.22.22"
+              },
+              "state": "exact"
+            },
+            "patterns": [
+              "apps/*",
+              "tools/*"
+            ],
+            "schema": "ato.formation-workspace-inventory/1",
+            "workspaces": [
+              {
+                "package_name": "web",
+                "qualification": {
+                  "output_root": "apps/web/dist",
+                  "state": "static_qualified"
+                },
+                "relative_root": "apps/web"
+              },
+              {
+                "package_name": "vite",
+                "qualification": {
+                  "code": "workspace_build_script_missing",
+                  "state": "excluded"
+                },
+                "relative_root": "tools/vite"
+              }
+            ]
+          },
+          "model_calls": 0,
+          "network": "denied",
+          "operation_published": true,
+          "producer_output": {
+            "proposals": [
+              {
+                "kind": "propose_derivation",
+                "operations": [
+                  {
+                    "operation": "node_static_workspace@1",
+                    "workspace_id": "w_9"
+                  }
+                ]
+              }
+            ],
+            "schema": "ato.formation-proposal/1"
+          },
+          "proposal_outcomes": "[Rejected(ProposalError(\"proposal_id_unauthorized\"))]",
+          "provider_request": {
+            "failure_evidence": [],
+            "frozen_contract": {
+              "requirements": [
+                {
+                  "id": "root",
+                  "method": "GET",
+                  "path": "/",
+                  "port": "app.http",
+                  "status": 200,
+                  "verifier": "ato.contract.http@1"
+                },
+                {
+                  "digest": "sha256:7432349af342b57c5490fc1bacefe2478e3c920736e23fb97ebf8690238ac355",
+                  "id": "source-identity",
+                  "input": "workspace",
+                  "verifier": "ato.contract.workspace@1"
+                }
+              ],
+              "schema": "ato.contract/1"
+            },
+            "inspection_evidence": [],
+            "known_derivations": [],
+            "operation_catalog": {
+              "operations": [
+                {
+                  "operation": "node_static_workspace@1",
+                  "workspace_ids": [
+                    "w_0"
+                  ]
+                }
+              ],
+              "schema": "ato.formation-operation-catalog/1"
+            },
+            "remaining_budget": {
+              "attempts_remaining": 4,
+              "max_proposals": 1,
+              "rounds_remaining": 1,
+              "timeout_ms": 30000
+            },
+            "runtime_constraint": {
+              "kind": "exact",
+              "runtime_id": "local"
+            },
+            "schema": "ato.formation-proposal-request/1",
+            "search_id": "workspace-acceptance"
+          },
+          "schema": "ato.formation-workspace-acceptance/1",
+          "selection": "w_9",
+          "terminal": "proposal_not_admitted"
+        }
+      }
+    }
+  },
+  "applications": [
+    {
+      "index": 1,
+      "name": "Excalidraw",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "ref": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "archive_sha256": "94603a7879307fd68bd993b4758a1ccdcf1ff068222bf98a9f5b6c5bdaca56a3",
+      "A_known_D": {
+        "terminal": "preset_node_static_v2_workspace",
+        "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+        "byte_identical_to_6b_A": true
+      },
+      "B_fixed_producer": {
+        "terminal": "preset_node_static_v2_manager_config",
+        "record_sha256": "9da0eccb9fd302bee0ad7ab2fa27c098291251331a04c3a7f038d961b1a7ce4a",
+        "operation_published": false,
+        "authorized_ids": 0,
+        "producer_invoked": false,
+        "inventory": {
+          "patterns": [
+            "excalidraw-app",
+            "packages/*",
+            "examples/*"
+          ],
+          "installation": {
+            "code": "preset_node_static_v2_manager_config",
+            "state": "refused"
+          },
+          "workspaces_discovered": 10,
+          "qualification_distribution": {
+            "workspace_nested_lock": 1,
+            "workspace_static_unproven": 2,
+            "workspace_build_script_missing": 7
+          },
+          "workspaces": [
+            {
+              "package_name": "with-nextjs",
+              "qualification": {
+                "code": "workspace_nested_lock",
+                "state": "excluded"
+              },
+              "relative_root": "examples/with-nextjs"
+            },
+            {
+              "package_name": "with-script-in-browser",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "examples/with-script-in-browser"
+            },
+            {
+              "package_name": "excalidraw-app",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "excalidraw-app"
+            },
+            {
+              "package_name": "@excalidraw/common",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/common"
+            },
+            {
+              "package_name": "@excalidraw/element",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/element"
+            },
+            {
+              "package_name": "@excalidraw/excalidraw",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/excalidraw"
+            },
+            {
+              "package_name": "@excalidraw/fractional-indexing",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/fractional-indexing"
+            },
+            {
+              "package_name": "@excalidraw/laser-pointer",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/laser-pointer"
+            },
+            {
+              "package_name": "@excalidraw/math",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/math"
+            },
+            {
+              "package_name": "@excalidraw/utils",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/utils"
+            }
+          ]
+        }
+      },
+      "D_admitted": false,
+      "execution_started": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "functional_application_success": false
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "repo": "https://github.com/ether/etherpad",
+      "ref": "c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "archive_sha256": "268168f1f5e6644f86e6c514d1f90068d01d56a1a290e5762f4ffcd1e0097ec0",
+      "A_known_D": {
+        "terminal": "preset_node_static_v2_workspace",
+        "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+        "byte_identical_to_6b_A": true
+      },
+      "B_fixed_producer": {
+        "terminal": "workspace_pnpm_deferred",
+        "record_sha256": "576ba699b77a581e04896c954b00975c56628b4c97a0af4eab00940692648f30",
+        "operation_published": false,
+        "authorized_ids": 0,
+        "producer_invoked": false,
+        "inventory": {
+          "refused": "workspace_pnpm_deferred"
+        }
+      },
+      "D_admitted": false,
+      "execution_started": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "functional_application_success": false
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "repo": "https://github.com/go-gitea/gitea",
+      "ref": "fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "archive_sha256": "8e2f5281daf1ec18427319ae7d61ccbc12038310bd44fb72ecc66d43b1c061f8",
+      "A_known_D": {
+        "terminal": "preset_node_static_v2_workspace",
+        "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+        "byte_identical_to_6b_A": true
+      },
+      "B_fixed_producer": {
+        "terminal": "workspace_pnpm_deferred",
+        "record_sha256": "db350b7e3d24ae07c67886e8db0e8a19f0474319717f254f94cd21b6d595ec1b",
+        "operation_published": false,
+        "authorized_ids": 0,
+        "producer_invoked": false,
+        "inventory": {
+          "refused": "workspace_pnpm_deferred"
+        }
+      },
+      "D_admitted": false,
+      "execution_started": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "functional_application_success": false
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "repo": "https://github.com/hedgedoc/hedgedoc",
+      "ref": "5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "archive_sha256": "6b99ac59a4ce6990f9a9e20d4b44b405c255900943c5bfaa868fc8a526e7720d",
+      "A_known_D": {
+        "terminal": "preset_node_static_v2_workspace",
+        "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+        "byte_identical_to_6b_A": true
+      },
+      "B_fixed_producer": {
+        "terminal": "workspace_pnpm_deferred",
+        "record_sha256": "b3ccac181096e880b676ed9ea4ddb4eee208a00932b724c75faefc585950a4ce",
+        "operation_published": false,
+        "authorized_ids": 0,
+        "producer_invoked": false,
+        "inventory": {
+          "refused": "workspace_pnpm_deferred"
+        }
+      },
+      "D_admitted": false,
+      "execution_started": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "functional_application_success": false
+    },
+    {
+      "index": 14,
+      "name": "Actual Budget",
+      "repo": "https://github.com/actualbudget/actual",
+      "ref": "eb28966d6ca549236dd08b163ffc8570c710e712",
+      "archive_sha256": "23659e0cc54128ac20e459ddb7a7524c96148f906dcb74dfe66342ce84ddb8a5",
+      "A_known_D": {
+        "terminal": "preset_node_static_v2_workspace",
+        "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+        "byte_identical_to_6b_A": true
+      },
+      "B_fixed_producer": {
+        "terminal": "preset_node_static_v2_manager_config",
+        "record_sha256": "36babe622366a6921d0ae95065600f8568d5f045b41970b7f328aae0bcb79f52",
+        "operation_published": false,
+        "authorized_ids": 0,
+        "producer_invoked": false,
+        "inventory": {
+          "patterns": [
+            "packages/*"
+          ],
+          "installation": {
+            "code": "preset_node_static_v2_manager_config",
+            "state": "refused"
+          },
+          "workspaces_discovered": 14,
+          "qualification_distribution": {
+            "workspace_static_unproven": 9,
+            "workspace_build_script_missing": 4,
+            "workspace_server_dependency": 1
+          },
+          "workspaces": [
+            {
+              "package_name": "@actual-app/api",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/api"
+            },
+            {
+              "package_name": "@actual-app/ci-actions",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/ci-actions"
+            },
+            {
+              "package_name": "@actual-app/cli",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/cli"
+            },
+            {
+              "package_name": "@actual-app/components",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/component-library"
+            },
+            {
+              "package_name": "@actual-app/crdt",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/crdt"
+            },
+            {
+              "package_name": "@actual-app/web",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/desktop-client"
+            },
+            {
+              "package_name": "desktop-electron",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/desktop-electron"
+            },
+            {
+              "package_name": "docs",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/docs"
+            },
+            {
+              "package_name": "eslint-plugin-actual",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/eslint-plugin-actual"
+            },
+            {
+              "package_name": "@actual-app/core",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/loot-core"
+            },
+            {
+              "package_name": "mobile-client",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/mobile-client"
+            },
+            {
+              "package_name": "plugins-service",
+              "qualification": {
+                "code": "workspace_static_unproven",
+                "state": "excluded"
+              },
+              "relative_root": "packages/plugins-service"
+            },
+            {
+              "package_name": "@actual-app/sync-server",
+              "qualification": {
+                "code": "workspace_server_dependency",
+                "state": "excluded"
+              },
+              "relative_root": "packages/sync-server"
+            },
+            {
+              "package_name": "@actual-app/vite-plugin-peggy",
+              "qualification": {
+                "code": "workspace_build_script_missing",
+                "state": "excluded"
+              },
+              "relative_root": "packages/vite-plugin-peggy"
+            }
+          ]
+        }
+      },
+      "D_admitted": false,
+      "execution_started": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "functional_application_success": false
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "repo": "https://github.com/jupyterlab/jupyterlab",
+      "ref": "bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "archive_sha256": "af39846f2016b0d0a4220123ba13b69180ab11b64c8ec893572018157b2c56c5",
+      "A_known_D": {
+        "terminal": "preset_node_static_v2_workspace",
+        "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+        "byte_identical_to_6b_A": true
+      },
+      "B_fixed_producer": {
+        "terminal": "workspace_pattern_unsupported",
+        "record_sha256": "b79727f5a235df30ef97646dbb3c8f0b3325958652bfc74e90331a2e7b313da9",
+        "operation_published": false,
+        "authorized_ids": 0,
+        "producer_invoked": false,
+        "inventory": {
+          "refused": "workspace_pattern_unsupported"
+        }
+      },
+      "D_admitted": false,
+      "execution_started": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "functional_application_success": false
+    }
+  ],
+  "aggregate": {
+    "measured": 6,
+    "A_known_D": {
+      "terminal_distribution": {
+        "preset_node_static_v2_workspace": 6
+      },
+      "byte_identical_to_6b_A": 6,
+      "new_automatic_routes": 0
+    },
+    "B_terminal_distribution": {
+      "preset_node_static_v2_manager_config": 2,
+      "workspace_pnpm_deferred": 3,
+      "workspace_pattern_unsupported": 1
+    },
+    "inventory_completed": 2,
+    "workspaces_discovered": 24,
+    "static_qualified_workspaces": 0,
+    "operation_published": 0,
+    "proposal_authoring_reach_delta": 0,
+    "known_D_reach_delta": 0,
+    "same_K_verified_delta": 0,
+    "functional_success_delta": 0
+  },
+  "tests": {
+    "macos_selected_rust": {
+      "passed": 721,
+      "failed": 0,
+      "ignored": 1,
+      "packages": [
+        "ato-formation",
+        "ato-formation-worker",
+        "ato-runtime-attempt",
+        "ato-receipt-authority"
+      ],
+      "at": "c842d328 (Rust identical to c9500b37)"
+    },
+    "linux_aarch64_selected_rust": {
+      "passed": 717,
+      "failed": 5,
+      "ignored": 2,
+      "at": "c9500b37",
+      "failures_base_reproduced": [
+        "exec_projection_v1 x3",
+        "lowering_parity::lowering_preserves_canonical_identity_and_physical_behavior",
+        "process_toolchains_v1::a_python_and_node_route_provisions_both_and_serves_python"
+      ],
+      "cause": "host already has /opt/ato/toolchains/python/3.12.7, so plans emit verify-provisioned-python instead of provision-python; identical failures on base a6033ecf with a separate target"
+    },
+    "linux_final_head_new_tests": {
+      "sha": "7da82eac (rustfmt only after execution sha)",
+      "node_static_workspace": 16,
+      "node_static_v2": 26,
+      "proposal": 54,
+      "formation_lib": 118,
+      "worker_proposal": 35,
+      "failed": 0
+    },
+    "clippy_all_targets_D_warnings": "PASS (formation, formation-worker, receipt-authority)",
+    "fmt": "PASS after style commit"
+  }
+}

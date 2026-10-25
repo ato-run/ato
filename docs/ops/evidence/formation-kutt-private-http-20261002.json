@@ -1,0 +1,484 @@
+{
+  "schema": "ato.formation-kutt-private-http-acceptance/1",
+  "at": "2026-10-02T06:20:38.883554+00:00",
+  "trials": [
+    {
+      "case": "kutt-http-601f-v1",
+      "Search_id": "search_965fe7989ccff01fa4f8cc1df52b9f31",
+      "K": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "source_closure": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+      "D": "sha256:94c4f097eb7d348c546b8e342593eb9e2d2ceec7738683970251c85c92eb5b98",
+      "attempt_id": "01M3XK9CVEYC60J6C1H5GVVC57",
+      "status": "fail",
+      "failure": {
+        "code": "http_status_mismatch",
+        "stage": "verification",
+        "message": "root: GET / on app.http returned 302; expected 200"
+      },
+      "receipt": {
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:94c4f097eb7d348c546b8e342593eb9e2d2ceec7738683970251c85c92eb5b98",
+        "execution": {
+          "attempt_id": "01M3XK9CVEYC60J6C1H5GVVC57",
+          "endpoint": "http://127.0.0.1:3000/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M3XJWV668N45774CX3VEFGQ7"
+        },
+        "fully_satisfied": false,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:34323d59838e183642b46e19edbd84f1c1311638b5d6bb78d6cfe54bc86255bf",
+              "method": "GET",
+              "path": "/",
+              "status": 302
+            },
+            "failure": "http_status_mismatch: GET / on app.http returned 302; expected 200",
+            "id": "root",
+            "outcome": "failed"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "metadata_mismatch": [],
+      "attestation": {
+        "environment_id": "native",
+        "agent_version": "0.1.0",
+        "derivation_ref": "sha256:94c4f097eb7d348c546b8e342593eb9e2d2ceec7738683970251c85c92eb5b98",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "effects": "pure",
+        "requirements": [
+          {
+            "fact": "runtime.process",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "containment",
+            "one_of": [
+              "bwrap+landlock"
+            ]
+          },
+          {
+            "fact": "toolchain.root"
+          },
+          {
+            "fact": "formation.http_port.operations.v1",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "toolchain.gcc.13.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.make.4.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.python.3.12.7",
+            "one_of": [
+              "present"
+            ]
+          }
+        ],
+        "provisions": [
+          "toolchain.node.22.14.0"
+        ],
+        "execution_started": true,
+        "attempt_record": "finished",
+        "candidate_stop": "confirmed"
+      },
+      "safe_port_operations": [
+        {
+          "guard": true,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "json_bindings": {},
+              "method": "GET",
+              "path": "/"
+            }
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": true,
+          "observation": {
+            "kind": "response_status",
+            "status": 302
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "json_bindings": {
+                "email": "OWNER_EMAIL",
+                "password": "OWNER_PASSWORD"
+              },
+              "method": "POST",
+              "path": "/api/v2/auth/create-admin"
+            }
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 201
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        }
+      ],
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T05:55:18.803Z",
+        "deadline_at": "2026-10-02T06:25:18.803Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 1295360,
+          "reserved": 0,
+          "remaining": 1072446464
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1098877,
+          "reserved": 0,
+          "remaining": 2146384771
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 0,
+          "reserved": 0,
+          "remaining": 1073741824
+        }
+      },
+      "rounds_consumed": 2,
+      "session_exchanges": 6,
+      "actual_provider_calls": null,
+      "Codex_usage_and_cost": "not_exposed",
+      "paid_API_calls": 0,
+      "result_ACK_closed_count": 1,
+      "elapsed_seconds": 546.856,
+      "result_sha256": "20e7f4a3f78b2cac58f5a1737ff142f416781e705880947e6d9ea73720cc0cad",
+      "status_sha256": "d959c169604ffdb61593856172d8b937286a756c34398132d1cc35a8f8824776",
+      "plan_sha256": "7dbbd57f1c7ec908815c7bece69cda548c39e9c37adf32ecef5d406bec2a0e7a",
+      "preregistration_sha256": "87f458f54367430945d9879f2ee1e6887c3bacbf24c867f1cfc5650de3b4c5c3",
+      "input_cleanup": {
+        "reusable_owner_values_revoked": 2,
+        "remaining_encrypted_values": 0,
+        "Requester_restarted": false,
+        "budget_reset": false
+      },
+      "input_privacy": {
+        "schema": "ato.formation-owned-local-owner-input/1",
+        "public_password_occurrences": 0,
+        "public_files_checked": 608,
+        "external_account": false,
+        "paid_API_calls": 0
+      },
+      "execution_pin": "601f71ea3ce47c1750f2fae5c97a10121c512df4",
+      "harness_pin": "bbc1d62b91707abbd0c16c7e385edb191c0c99df",
+      "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+      "authority_source_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+      "build_provenance": {
+        "execution_code_pin": "601f71ea3ce47c1750f2fae5c97a10121c512df4",
+        "authority_source_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+        "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+        "authority_WASM_sha256": "9420802a52f32a021fb0839ef64d46f63299a8b5db59ed92c9522c483217987b",
+        "binaries": {
+          "ato": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/bound-http-gate-601f-v3/frozen/ato",
+            "sha256": "95f6646a021c7b5ed8cd8451e3e35937b44f6d952fb1c30d5d32337c557f48da"
+          },
+          "worker": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/bound-http-gate-601f-v3/frozen/ato-formation-worker",
+            "sha256": "4f86651508d82d20af4d81b90702c8e1321e37e27a4a49591f5a115da18ba3b6"
+          },
+          "preflight": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/bound-http-gate-601f-v3/frozen/preflight",
+            "sha256": "3396c8e705a02f3890a20d2d6f72379e0f1f8103994476e7dd0a811717b2b744"
+          }
+        }
+      },
+      "source_generated_D": true,
+      "known_D_seed": false,
+      "functional_and_persistence_acceptance": "pending",
+      "ordinary_Run_authorized": false
+    },
+    {
+      "case": "kutt-http-601f-v2",
+      "Search_id": "search_74240d7416d1e2acf1556586147afdc6",
+      "K": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "source_closure": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+      "D": "sha256:1c5a59c45a569c3400fe4993e0068e27eed63cbddc6602353deea09f776def66",
+      "attempt_id": "01M3XKN9K0BGBVFMPZ8BP6Y0XE",
+      "status": "pass",
+      "failure": null,
+      "receipt": {
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "derivation_ref": "sha256:1c5a59c45a569c3400fe4993e0068e27eed63cbddc6602353deea09f776def66",
+        "execution": {
+          "attempt_id": "01M3XKN9K0BGBVFMPZ8BP6Y0XE",
+          "endpoint": "http://127.0.0.1:3000/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M3XKKNZCN1R3A6Q22MHG9PM1"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:78ec720b8f886971540591901954e1cf7b58b593e0d876745ded438178e932ac",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "metadata_mismatch": [],
+      "attestation": {
+        "environment_id": "native",
+        "agent_version": "0.1.0",
+        "derivation_ref": "sha256:1c5a59c45a569c3400fe4993e0068e27eed63cbddc6602353deea09f776def66",
+        "contract_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+        "effects": "pure",
+        "requirements": [
+          {
+            "fact": "runtime.process",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "containment",
+            "one_of": [
+              "bwrap+landlock"
+            ]
+          },
+          {
+            "fact": "toolchain.root"
+          },
+          {
+            "fact": "formation.http_port.operations.v1",
+            "one_of": [
+              "true"
+            ]
+          },
+          {
+            "fact": "toolchain.gcc.13.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.make.4.3.0",
+            "one_of": [
+              "present"
+            ]
+          },
+          {
+            "fact": "toolchain.python.3.12.7",
+            "one_of": [
+              "present"
+            ]
+          }
+        ],
+        "provisions": [
+          "toolchain.node.22.14.0"
+        ],
+        "execution_started": true,
+        "attempt_record": "finished",
+        "candidate_stop": "confirmed"
+      },
+      "safe_port_operations": [
+        {
+          "guard": true,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "json_bindings": {},
+              "method": "GET",
+              "path": "/"
+            }
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": true,
+          "observation": {
+            "kind": "response_status",
+            "status": 302
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "request_template",
+            "template": {
+              "json_bindings": {
+                "email": "OWNER_EMAIL",
+                "password": "OWNER_PASSWORD"
+              },
+              "method": "POST",
+              "path": "/api/v2/auth/create-admin"
+            }
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        },
+        {
+          "guard": false,
+          "observation": {
+            "kind": "response_status",
+            "status": 201
+          },
+          "operation_index": 0,
+          "port": "app.http"
+        }
+      ],
+      "budget": {
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "mode": "first_pass",
+        "created_at": "2026-10-02T06:07:47.130Z",
+        "deadline_at": "2026-10-02T06:37:47.130Z",
+        "attempts": {
+          "max": 4,
+          "used": 1,
+          "reserved": 0,
+          "remaining": 3
+        },
+        "transfer_bytes": {
+          "max": 1073741824,
+          "used": 1295360,
+          "reserved": 0,
+          "remaining": 1072446464
+        },
+        "expanded_bytes": {
+          "max": 2147483648,
+          "used": 1098877,
+          "reserved": 0,
+          "remaining": 2146384771
+        },
+        "stored_bytes": {
+          "max": 1073741824,
+          "used": 67472515,
+          "reserved": 0,
+          "remaining": 1006269309
+        }
+      },
+      "rounds_consumed": 2,
+      "session_exchanges": 7,
+      "actual_provider_calls": null,
+      "Codex_usage_and_cost": "not_exposed",
+      "paid_API_calls": 0,
+      "result_ACK_closed_count": 1,
+      "elapsed_seconds": 614.631,
+      "result_sha256": "6f6e481cac5ba533bdb6fde5510ede475efd81284b9304ced04bd7317a331ddb",
+      "status_sha256": "4a61aac25bab4568364d56ab231bcef967f9706645ac04508960dc1465d88374",
+      "plan_sha256": "8ed435cb7b79d8ff40cc3ae9058fad5d1723dd66bc14f0627fb71e3dd7e1deeb",
+      "preregistration_sha256": "dc5f372a5c5d2aef1feb1d2007c66eab1eab927d85407ae3e476d8898522b04b",
+      "input_cleanup": {
+        "reusable_owner_values_revoked": 2,
+        "remaining_encrypted_values": 0,
+        "Requester_restarted": false,
+        "budget_reset": false
+      },
+      "input_privacy": {
+        "schema": "ato.formation-owned-local-owner-input/1",
+        "public_password_occurrences": 0,
+        "public_files_checked": 1136,
+        "external_account": false,
+        "paid_API_calls": 0
+      },
+      "execution_pin": "601f71ea3ce47c1750f2fae5c97a10121c512df4",
+      "harness_pin": "bbc1d62b91707abbd0c16c7e385edb191c0c99df",
+      "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+      "authority_source_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+      "build_provenance": {
+        "execution_code_pin": "601f71ea3ce47c1750f2fae5c97a10121c512df4",
+        "authority_source_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+        "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+        "authority_WASM_sha256": "9420802a52f32a021fb0839ef64d46f63299a8b5db59ed92c9522c483217987b",
+        "binaries": {
+          "ato": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/bound-http-gate-601f-v3/frozen/ato",
+            "sha256": "95f6646a021c7b5ed8cd8451e3e35937b44f6d952fb1c30d5d32337c557f48da"
+          },
+          "worker": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/bound-http-gate-601f-v3/frozen/ato-formation-worker",
+            "sha256": "4f86651508d82d20af4d81b90702c8e1321e37e27a4a49591f5a115da18ba3b6"
+          },
+          "preflight": {
+            "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/bound-http-gate-601f-v3/frozen/preflight",
+            "sha256": "3396c8e705a02f3890a20d2d6f72379e0f1f8103994476e7dd0a811717b2b744"
+          }
+        }
+      },
+      "source_generated_D": true,
+      "known_D_seed": false,
+      "functional_and_persistence_acceptance": "pending",
+      "ordinary_Run_authorized": false
+    }
+  ],
+  "classification": "Source-declared configuration repair PASS across separately preregistered Searches; prior failure retained",
+  "repair": "DISALLOW_ANONYMOUS_LINKS=false from Source declaration; frozen K and Source unchanged",
+  "prior_Search_restarted_or_budget_reset": false,
+  "successful_D_seeded_into_API": false,
+  "paid_API_calls": 0,
+  "functional_persistence_acceptance_complete": false,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "deployed": false,
+  "remote_migration": false
+}

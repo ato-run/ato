@@ -1,0 +1,83 @@
+{
+  "evidence_id": "formation-agent-integration-local-20261003-01",
+  "source_pin": "8bb3a2b1dd1a3ab3b8e10da270ed9a627d53c0ec",
+  "toolchain": "1.96.0",
+  "target_directory": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/target",
+  "cargo_incremental": false,
+  "test_results": {
+    "cli_library": 49,
+    "mcp_mode_boundary": 1,
+    "activity_mcp": 1,
+    "cli_worker_all_target_strict_clippy": "PASS",
+    "workspace_fmt": "PASS",
+    "mcp_build": "PASS",
+    "portable_application": 15
+  },
+  "binary": {
+    "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/ato-formation-session-mcp",
+    "sha256": "0aca096859d4f4410d3674c0ef061bd572762774b680995d423f2c8d619a62f8",
+    "bytes": 6092024,
+    "mode": "0555"
+  },
+  "logs": [
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/activity-mcp.log",
+      "sha256": "a7a20dbf6d3b39970223e38f9b02f262a20a8ca20b557355a6888eaa2c502229"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/build.log",
+      "sha256": "14cfaeb6693965d9af357f1170cfc7d27e20f94b5550bf658d9a2f2dcfccbfaf"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/cli-lib.log",
+      "sha256": "bc901db329cc6262d5d86a1f907739a6f5d4f93923d01b51574dbb3e306d09fa"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/clippy.log",
+      "sha256": "55611d44d8444c99de63912a9735cff07d8e19e2a689c813681ea8c47d720fe9"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/mcp-bin.log",
+      "sha256": "8d45011cc9eb669d3fd85603ceaff7e30d757197b71f84e46752ab98dd8bdb76"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/integration-final/unique-target/portable-application.log",
+      "sha256": "6019275b3f05f1a2b8e31a9bf3f3cd7e13033874108444422d6a3c23026f4455"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-agent-session/ato/.tmp/ci-current/ato-session-37111939319-failed.log",
+      "sha256": "c9e3be600a031029042ddf866f62dacc27bbc914cfa1a2881347d6de231ec662"
+    }
+  ],
+  "actual_native_agents": 0,
+  "actual_acceptance_runtime_attempts": 0,
+  "direct_llm_api_calls": 0,
+  "source_edits_for_test": false,
+  "worker_runtime_evidence": "formation-native-integration-cache-20261003-01",
+  "native_ci_observation": {
+    "source_pin": "407650fa4e5a359b2f6ed0371f09550e858cd979",
+    "run": "https://github.com/ato-run/ato/actions/runs/37111939319",
+    "ubuntu": "PASS",
+    "macos": "FAIL: existing portable process early worker exit; CI dependency #1478 absent",
+    "windows": "FAIL: unchanged Unix browser internals; CI dependency #1478 absent",
+    "architecture_run": "https://github.com/ato-run/ato/actions/runs/37111939576",
+    "architecture": "PASS",
+    "failing_source_files_match_base_31a6d6b4": true,
+    "original_macos_cause": "unconfirmed"
+  },
+  "api_ci_observation": {
+    "source_pin": "57991090c7a84ae39883893e763ec61aba4f5ea8",
+    "run": "https://github.com/ato-run/ato-api/actions/runs/37110623145",
+    "activity_failure_names_same_as_exact_base_head": true,
+    "activity_failed": 13,
+    "activity_passed": 155,
+    "instance_state_sync": "FAIL: existing CoopPresenceRoom fixture registration; CI dependency #729 absent"
+  },
+  "source_tree_clean_at_cli_and_binary_build": true,
+  "portable_test_tracked_source_matches_pin": true,
+  "portable_test_untracked_document_preparation_only": true
+}

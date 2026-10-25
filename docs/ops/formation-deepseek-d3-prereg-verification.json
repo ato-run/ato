@@ -1,0 +1,151 @@
+{
+  "schema": "ato.formation-deepseek-d3-prereg-verification/1",
+  "tested_ato_sha": "10ad1cd8338e8261cc5bd5e944c38867f22bfe8b",
+  "plan_sha256": "b67607c6cff1de5339f79822bd3e5d6610d1663dcce6e3f0d6b418ef8a2a1585",
+  "receiver": "38668a97e7632256b33074b0d223670c16b76bfd",
+  "rust": {
+    "passed": 658,
+    "failed": 0,
+    "ignored": 1
+  },
+  "rust_packages": [
+    "ato-formation",
+    "ato-formation-worker",
+    "ato-runtime-attempt",
+    "ato-receipt-authority"
+  ],
+  "clippy": "PASS",
+  "fmt": "PASS",
+  "diff_check": "PASS",
+  "offline_unit_tests": 8,
+  "independent_frozen_projection_reproduced": true,
+  "preflight": {
+    "result": "PASS",
+    "mode": "preflight_only",
+    "plan_sha256": "b67607c6cff1de5339f79822bd3e5d6610d1663dcce6e3f0d6b418ef8a2a1585",
+    "fresh_public_pricing": {
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "model_version": "DeepSeek-V4.1-Flash",
+      "checked_at": "2026-09-28T10:13:14Z",
+      "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "document_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "input_basis": "peak_cache_miss",
+      "input_usd_per_million": "0.3",
+      "output_usd_per_million": "1.2",
+      "input_price_usd_micros_per_million": 300000,
+      "output_price_usd_micros_per_million": 1200000
+    },
+    "live_calls": 0,
+    "spend_usd_micros": 0,
+    "key_read": false,
+    "execution_authorized": false
+  },
+  "preflight_negatives": {
+    "plan_hash": {
+      "result": "PASS",
+      "rejected": "plan SHA mismatch",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "ato_sha": {
+      "result": "PASS",
+      "rejected": "git SHA mismatch",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "api_sha": {
+      "result": "PASS",
+      "rejected": "receiver pin drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "wasm_sha": {
+      "result": "PASS",
+      "rejected": "receiver pin drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "prompt_hash": {
+      "result": "PASS",
+      "rejected": "prompt pin drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "model": {
+      "result": "PASS",
+      "rejected": "model/transport/budget drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "thinking": {
+      "result": "PASS",
+      "rejected": "model/transport/budget drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "max_calls": {
+      "result": "PASS",
+      "rejected": "model/transport/budget drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "price_increase": {
+      "result": "PASS",
+      "rejected": "price increased: STOP before credential read",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "stale_price": {
+      "result": "PASS",
+      "rejected": "fresh public price/model recheck required",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "existing_journal": {
+      "result": "PASS",
+      "rejected": "existing journal: GET-only recovery review required",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "fixture_hash": {
+      "result": "PASS",
+      "rejected": "fixture drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "context_hash": {
+      "result": "PASS",
+      "rejected": "Rust frozen K/D/context projection drift",
+      "live_calls": 0,
+      "key_read": false
+    },
+    "cell_order": {
+      "result": "PASS",
+      "rejected": "cell order drift",
+      "live_calls": 0,
+      "key_read": false
+    }
+  },
+  "live_G0_G5": {
+    "G0": "NOT_RUN",
+    "G1": "NOT_RUN",
+    "G2": "NOT_RUN",
+    "G3": "NOT_RUN",
+    "G4": "NOT_RUN",
+    "G5": "NOT_RUN"
+  },
+  "actual_runtime_verifier_in_D3": "NOT_RUN",
+  "D2_actual_evidence": "formation-deepseek-d2-final-integration.json",
+  "log_sha256": {
+    "regression-final.log": "3572e5a98628ac12e25a96c62c680d29699333162a9a8bd6d41d5b79bcb59ef3",
+    "clippy-final.log": "05f27b775ab713ddb7260408e121b16e731da76e3433fc122f11ff1a86de2888",
+    "preflight-tests.log": "322e9bec5d6bbde47d6476008f309469c1e42048ed96320a3bae52af8811e27a",
+    "build-final.log": "8a2933ae25e59188be988ea6218274cb341f13d8bc4b533f57b12ececd4be8b3"
+  },
+  "live_calls": 0,
+  "spend_usd_micros": 0,
+  "api_key_read": false,
+  "migration_remote_applied": false,
+  "deployed": false
+}

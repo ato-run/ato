@@ -1,0 +1,524 @@
+{
+  "schema": "ato.formation-final-source-regression-proof/1",
+  "application": "OCI single-service fixture",
+  "code_pin": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "API_pin": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "receipt_authority_pin": "0fd912f6754541a3cbfe33cd6f0f573343ca11b4",
+  "Source": {
+    "archive_digest": "sha256:fb3e19cc70588a1ff8399a280fc2c6035ec53a4c16af9b87895c9db02ef2087e",
+    "closure_ref": "sha256:2301e60425e27a7d1b1f5b450d2b17d92d5948308bd33d1931d8c20f0b3f9667"
+  },
+  "K": "sha256:e4fa58e07858ae71ce33b07fd016663ab3cb1713584685171dfb9c76f52ba862",
+  "D": "sha256:1456f7067b5732228a8186d5bbe8acd8d56e04829bcb163a21697cef31932d3c",
+  "source_context_seeded_from_prior_D": false,
+  "search_id": "search_ff3e9c7b9c810954c75573b4beede527",
+  "satisfy_id": "01M3XV4TFT1XS0WS4DVXP7BRJN",
+  "search_budget": {
+    "budget_version": "ato.runtime-network.search-budget/0",
+    "mode": "first_pass",
+    "created_at": "2026-10-02T08:19:28.841Z",
+    "deadline_at": "2026-10-02T08:49:28.841Z",
+    "attempts": {
+      "max": 4,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 3
+    },
+    "transfer_bytes": {
+      "max": 1073741824,
+      "used": 5120,
+      "reserved": 0,
+      "remaining": 1073736704
+    },
+    "expanded_bytes": {
+      "max": 2147483648,
+      "used": 513,
+      "reserved": 0,
+      "remaining": 2147483135
+    },
+    "stored_bytes": {
+      "max": 1073741824,
+      "used": 4360821,
+      "reserved": 0,
+      "remaining": 1069381003
+    }
+  },
+  "summary": {
+    "index": 101,
+    "name": "OCI single-service fixture",
+    "provider": "codex_session",
+    "known_D": false,
+    "typed_K_pass": true,
+    "rounds_consumed": 2,
+    "reasoning_accounting": {
+      "API_calls": 0,
+      "actual_provider_calls": null,
+      "call_count": 3,
+      "calls": [
+        {
+          "call_id": "search_ff3e9c7b9c810954c75573b4beede527_r1_s1",
+          "input_file": "r001_s001.input.json",
+          "input_sha256": "sha256:481c170b407a220eb556c645ebc76fb8cc74bfe9ce63aedc45b2d1889b3f92e9",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 85585,
+          "output_file": "r001_s001.record.json",
+          "output_sha256": "sha256:ef6cb507e059fa02bfff0988f9ba4b1302b41748139b446e1bae6c5dc4465531",
+          "provider_call": null,
+          "reasoning_ms": 85584,
+          "validation_ms": 1
+        },
+        {
+          "call_id": "search_ff3e9c7b9c810954c75573b4beede527_r1_s2",
+          "input_file": "r001_s002.input.json",
+          "input_sha256": "sha256:035f094f9f4de64a2850b5bae21349f934057eb15c3bd27bfcae1850755340d4",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 113719,
+          "output_file": "r001_s002.record.json",
+          "output_sha256": "sha256:5ab375f62efc56ab5df821e618b69a165728eaa7463fbb2a5c1231e3a9d461ca",
+          "provider_call": null,
+          "reasoning_ms": 113714,
+          "validation_ms": 5
+        },
+        {
+          "call_id": "search_ff3e9c7b9c810954c75573b4beede527_r2_s1",
+          "input_file": "r002_s001.input.json",
+          "input_sha256": "sha256:c3031f6a57b1a3f92aad3d9f3445d805f2c2e40aca47ebda503e44fac0627719",
+          "inspection_error": null,
+          "inspection_ms": 0,
+          "inspection_refs": [],
+          "latency_ms": 39839,
+          "output_file": "r002_s001.record.json",
+          "output_sha256": "sha256:b79f750c184d0eeefc74cd11dd1e129f38a9ab6946fd0161f874ebf5a11eca33",
+          "provider_call": null,
+          "reasoning_ms": 39838,
+          "validation_ms": 1
+        }
+      ],
+      "configuration_ref": "sha256:aefd26e024548e6cf63f9cf5f60045729fd0e4e2d4eac54f50fef4ca4d77f822",
+      "provider": "codex_session",
+      "provider_transport": null,
+      "schema": "ato.formation-reasoning-accounting/1",
+      "session_cost": "not_exposed",
+      "session_token_usage": "not_exposed; no fabricated usage"
+    },
+    "terminal_origin": "requester_verified",
+    "coordinator_status": "satisfied",
+    "automatic_retry": false,
+    "input_requirements": [],
+    "search_budget": null,
+    "result": "cells/101/requester.stdout.log",
+    "result_sha256": "a4e23afc8f80f6ba86ac7a8dfe2673aeeae38a1776ebce4a8c36b37b33bd8604",
+    "exit_code": 0,
+    "elapsed_seconds": 262.384,
+    "functional_acceptance": "not_measured",
+    "deployed": false
+  },
+  "attempt": {
+    "attempt_id": "01M3XVAXYA3VZ760NM1X4JTWPB",
+    "status": "pass",
+    "failure": null,
+    "formation_attempt": {
+      "attempt_id": "01M3XVAXYA3VZ760NM1X4JTWPB",
+      "candidate": "authored",
+      "contract_ref": "sha256:e4fa58e07858ae71ce33b07fd016663ab3cb1713584685171dfb9c76f52ba862",
+      "derivation_ref": "sha256:1456f7067b5732228a8186d5bbe8acd8d56e04829bcb163a21697cef31932d3c",
+      "outcomes": {
+        "cleanup": {
+          "state": "succeeded"
+        },
+        "publication": {
+          "reason": "running an existing published bundle",
+          "state": "not_applicable"
+        },
+        "runtime_verification": {
+          "state": "succeeded"
+        },
+        "seal": {
+          "state": "succeeded"
+        }
+      },
+      "realization": {
+        "build_network": "phase-scoped",
+        "candidate_network": "internal network, no egress",
+        "containment": "private bounded builder; internal container network, dropped capabilities",
+        "destroyed": true,
+        "endpoints": {},
+        "executor": "source-oci/runtime-oci",
+        "workspace": "verified source read-only; empty isolated state"
+      },
+      "receipt": {
+        "contract_ref": "sha256:e4fa58e07858ae71ce33b07fd016663ab3cb1713584685171dfb9c76f52ba862",
+        "derivation_ref": "sha256:1456f7067b5732228a8186d5bbe8acd8d56e04829bcb163a21697cef31932d3c",
+        "execution": {
+          "attempt_id": "01M3XVAXYA3VZ760NM1X4JTWPB",
+          "container_id": "fab6f24315014314f5da976712fc53d6f7326c390768e84e7f0daf1bdf167775",
+          "embedded_oci_image_loaded": "sha256:46dd5153418db85122450effae4d1e671fbb539cb74ef45a326e0545392bb056",
+          "image": "ato-source/2301e60425e2@sha256:cfb9e1686044970354b3cec0bd675ac3ccd62bb21e79a9b6423e2824b42b49ca",
+          "platform": "linux/arm64",
+          "realization": "oci",
+          "request_id": "01M3XV4TFT1XS0WS4DVXP7BRJN",
+          "runtime_executable": "docker"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f3d152fda847862a626789c9a3717f9ec5218092852f0747803912f6b8f2b668",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:2301e60425e27a7d1b1f5b450d2b17d92d5948308bd33d1931d8c20f0b3f9667",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "runtime_id": "local",
+      "status": "verified",
+      "verification": {
+        "verdicts": [
+          {
+            "id": "root",
+            "outcome": {
+              "result": "satisfied"
+            }
+          },
+          {
+            "id": "source-identity",
+            "outcome": {
+              "result": "satisfied"
+            }
+          }
+        ]
+      }
+    },
+    "exploration_evidence": [
+      {
+        "kind": "exploration_source_oci_evidence",
+        "provenance": {
+          "authorized_state": [],
+          "build_elapsed_ms": 731,
+          "declared_transport_port": 8080,
+          "egress": {
+            "policy": null,
+            "preflight": null,
+            "report": null
+          },
+          "http_suitability": "unverified until the Runtime and Verifier observe it",
+          "inputs": {
+            "base_images": [
+              {
+                "archive_sha256": "sha256:df1187c3b4821d46961e837aec4befcf3e835774a77b5fcc67393b5b5f6ad2ef",
+                "config_digest": "sha256:ad4f11f7c85f87c0a6d6c0fe492ad53f9cdcff6e8c88b881360c70eff701c67b",
+                "layer_digests": [
+                  "sha256:af820adcc158da1182aefa4259d1eb0a2e72416663faf00f6700f5415111974e"
+                ],
+                "pinned_digest": "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+                "platform_manifest_digest": "sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c",
+                "reference": "busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+              }
+            ],
+            "build_args": {},
+            "build_context": ".",
+            "builder": {
+              "buildx": "github.com/docker/buildx v0.30.1 9e66234aa13328a5e75b75aa5574e1ca6d6d9c01",
+              "docker_server": "28.5.2",
+              "driver": "docker (private daemon, classic image store)",
+              "session": {
+                "cache": "session-local; deleted with the session",
+                "cgroup_parent_for_build_steps": "/ato-source-oci-1200904-1790929370624540171/builds",
+                "daemon_config": "empty (host daemon.json not used)",
+                "isolation": {
+                  "caller_netns": "net:[4026531833]",
+                  "cpu_max": "200000 100000",
+                  "daemon_cgroup": "/ato-source-oci-1200904-1790929370624540171/daemon",
+                  "daemon_comm": "dockerd",
+                  "daemon_netns": "net:[4026533485]",
+                  "daemon_pid": 1201516,
+                  "default_routes": 0,
+                  "docker_user_rules": [],
+                  "host_netns": "net:[4026531833]",
+                  "interfaces": [
+                    "lo"
+                  ],
+                  "memory_max": "1073741824",
+                  "non_loopback_routes": 0,
+                  "pids_max": "256",
+                  "reported_cgroup_driver": "cgroupfs",
+                  "reported_root_dir": "/home/ubuntu/.tmp/fv0b/e518a0e167286909/fs/data",
+                  "socket_is_socket": true,
+                  "socket_listener_pid": 1201516
+                },
+                "limits": {
+                  "cpu_limit_millis": 2000,
+                  "disk_bytes": 2147483648,
+                  "memory_bytes": 1073741824,
+                  "pids_limit": 256
+                }
+              }
+            },
+            "dockerfile": "Dockerfile",
+            "dockerfile_selection": [],
+            "dockerfile_sha256": "sha256:d25dab10b5dd052e4121df70346420004a7c824ae03b54ad95b9b3d33696cb53",
+            "dockerignore_sha256": null,
+            "platform": "linux/arm64",
+            "policy": {
+              "build": {
+                "cpu_limit_millis": 2000,
+                "disk_bytes": 2147483648,
+                "memory_bytes": 1073741824,
+                "pids_limit": 256
+              },
+              "build_timeout_seconds": 300,
+              "max_archive_bytes": 67108864,
+              "network": "none",
+              "runtime": {
+                "cpu_limit_millis": 1000,
+                "memory_bytes": 268435456,
+                "pids_limit": 128
+              }
+            },
+            "source_archive_sha256": "sha256:fb3e19cc70588a1ff8399a280fc2c6035ec53a4c16af9b87895c9db02ef2087e",
+            "source_closure_ref": "sha256:2301e60425e27a7d1b1f5b450d2b17d92d5948308bd33d1931d8c20f0b3f9667",
+            "target": "default (last stage)"
+          },
+          "outputs": {
+            "archive_bytes": 4357120,
+            "archive_sha256": "sha256:46dd5153418db85122450effae4d1e671fbb539cb74ef45a326e0545392bb056",
+            "config_digest": "sha256:3151427ea191feb4a228b71b72e5b0493d6b8e988d387a5c09ae5baf28b333bf",
+            "image_config": {
+              "cmd": [
+                "busybox",
+                "httpd",
+                "-f",
+                "-p",
+                "8080",
+                "-h",
+                "/srv"
+              ],
+              "entrypoint": [],
+              "exposed_ports": [
+                "8080/tcp"
+              ],
+              "user": "",
+              "volumes": [],
+              "working_dir": "/srv"
+            },
+            "image_reference": "ato-source/2301e60425e2@sha256:cfb9e1686044970354b3cec0bd675ac3ccd62bb21e79a9b6423e2824b42b49ca",
+            "layer_digests": [
+              "sha256:eb380aebecfca9bc8f9229d9aefcb5b08b26a21c3a8467090b1bc55309729d93",
+              "sha256:8c56c09e8188ee5bcead24f14fa94e8a86d99f41bfdc500757f0f4c070c5fefb",
+              "sha256:3370107983cbb56d174da951b1949642aa883502c51422cc558e469f20e2b68a"
+            ],
+            "manifest_digest": "sha256:cfb9e1686044970354b3cec0bd675ac3ccd62bb21e79a9b6423e2824b42b49ca",
+            "repack": {
+              "dropped_unreferenced_members": 3,
+              "rule": "keep oci-layout, index.json, manifest.json and blobs referenced by the one OCI manifest; blob bytes unchanged"
+            }
+          },
+          "package_inventory": null,
+          "reproducibility": "not claimed; outputs are observed digests of this build",
+          "schema": "ato.source-oci-materialization/1",
+          "working_dir": "/srv"
+        },
+        "stored_bytes": 4360821
+      },
+      {
+        "kind": "exploration_network_evidence",
+        "reports": [
+          {
+            "phase": "dependencies",
+            "report": {
+              "allowance": {
+                "hosts": [
+                  "exploration-denied.invalid"
+                ],
+                "max_transfer_bytes": 134217728,
+                "ports": [
+                  443
+                ]
+              },
+              "allowed": [],
+              "budget_exhausted": false,
+              "refused": [],
+              "transferred_bytes": 0
+            }
+          },
+          {
+            "phase": "build",
+            "report": {
+              "allowance": {
+                "hosts": [
+                  "exploration-denied.invalid"
+                ],
+                "max_transfer_bytes": 134217728,
+                "ports": [
+                  443
+                ]
+              },
+              "allowed": [],
+              "budget_exhausted": false,
+              "refused": [],
+              "transferred_bytes": 0
+            }
+          },
+          {
+            "phase": "runtime",
+            "report": {
+              "allowance": {
+                "hosts": [
+                  "exploration-denied.invalid"
+                ],
+                "max_transfer_bytes": 134217728,
+                "ports": [
+                  443
+                ]
+              },
+              "allowed": [],
+              "budget_exhausted": false,
+              "refused": [],
+              "transferred_bytes": 0
+            }
+          }
+        ]
+      },
+      {
+        "facts": [],
+        "kind": "exploration_execution_facts"
+      },
+      {
+        "kind": "exploration_phase_timings",
+        "phases": [
+          {
+            "phase": "source",
+            "started_at_ms": 1790929370166,
+            "elapsed_ms": 62
+          },
+          {
+            "phase": "source",
+            "started_at_ms": 1790929370228,
+            "elapsed_ms": 4
+          },
+          {
+            "phase": "source",
+            "started_at_ms": 1790929370239,
+            "elapsed_ms": 383
+          },
+          {
+            "phase": "build",
+            "started_at_ms": 1790929370623,
+            "elapsed_ms": 6218
+          },
+          {
+            "phase": "launch",
+            "started_at_ms": 1790929376842,
+            "elapsed_ms": 1388
+          },
+          {
+            "phase": "verification",
+            "started_at_ms": 1790929378230,
+            "elapsed_ms": 11
+          },
+          {
+            "phase": "cleanup",
+            "started_at_ms": 1790929378242,
+            "elapsed_ms": 10347
+          },
+          {
+            "phase": "cleanup",
+            "started_at_ms": 1790929388612,
+            "elapsed_ms": 0
+          }
+        ]
+      }
+    ],
+    "metadata_mismatch": [],
+    "resource_charged": {
+      "transfer_bytes": 5120,
+      "expanded_bytes": 513,
+      "stored_bytes": 4360821
+    },
+    "claimed_at": "2026-10-02T08:22:50.133Z",
+    "finished_at": "2026-10-02T08:23:08.644Z"
+  },
+  "binary_hashes": {
+    "ato": {
+      "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/ato",
+      "sha256": "bad2737892da0d76fa17eef1ab0a017b8d2a368ce8baea75d753d3e1048e6b9b"
+    },
+    "worker": {
+      "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/ato-formation-worker",
+      "sha256": "5986f96105e407579c305931bce8e7b23f6b4e86c6c6c46b6c4559cb8a53b59a"
+    },
+    "preflight": {
+      "path": "/opt/ato/.tmp/fv0-source-final-3bb-binaries/preflight",
+      "sha256": "b4f352809188e6d28a5884a884ed74537cf229e31b029eed9125b477222ee388"
+    }
+  },
+  "builder_recipe": {
+    "available": true,
+    "build_network": "explicit HTTPS host/port allowance within frozen ceiling",
+    "builder_bound": true,
+    "configured": true,
+    "recipe": {
+      "base_images": [
+        {
+          "pinned_digest": "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+          "reference": "busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+        }
+      ],
+      "build": {
+        "cpu_limit_millis": 2000,
+        "memory_bytes": 1073741824,
+        "pids_limit": 256
+      },
+      "build_disk_bytes": 2147483648,
+      "build_timeout_seconds": 300,
+      "dockerfile": "Dockerfile",
+      "max_archive_bytes": 67108864,
+      "platform": "linux/arm64",
+      "runtime": {
+        "cpu_limit_millis": 1000,
+        "memory_bytes": 268435456,
+        "pids_limit": 128
+      },
+      "schema": "ato.source-oci-recipe/1"
+    },
+    "runtime_network": "isolated internal network; no egress",
+    "selection": "root Dockerfile or literal reference from acquired root declarations",
+    "single_service": true,
+    "source_rewrite": false,
+    "state": "explicit isolated writable VOLUME bindings",
+    "supported": true,
+    "unavailable_reason": "none",
+    "variables": "runtime-phase grants only; dependencies/build grants unavailable; no values in D or image"
+  },
+  "plan_sha256": "e37e5c30c5c0fb495e353248ac8ac33635d47c1c4bbe40c2c26f799ea7dc4d39",
+  "ACKed_attempt_ids": [
+    "01M3XVAXYA3VZ760NM1X4JTWPB"
+  ],
+  "pilot_observer_exit_code": 0,
+  "preserved_same_round_schema_correction": "missing required build_scripts: supplied empty list; no extra round or execution",
+  "first_execution_PASS": true,
+  "paid_API_calls": 0,
+  "actual_Codex_provider_calls": null,
+  "new_unique_OSS_app_successes": 0,
+  "old_WBO_UNKNOWN_reexecuted": false,
+  "deployment_remote_migration_ordinary_Run_permission": false
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "ato.Formation-staging-Notes-followup/1",
+  "measurement_id": "formation-v0-staging-Notes-followup-20261006-01",
+  "Instance": "cinst_01M1XBW8FA4JE7RQJPBQKGSP3M",
+  "new_Instance_created": false,
+  "browser": "real Chrome existing normal owner session",
+  "create_save_preview_edit": true,
+  "edited_text_visible_after_reload": true,
+  "own_test_note_deleted": true,
+  "own_test_note_count_after_reload": 0,
+  "existing_Notes_count_before_and_after": 5,
+  "other_Notes_modified": false,
+  "StateService_persistence_claim": false,
+  "storage_observed": "App declares browser-local block storage",
+  "legacy_console_clean_claim": false,
+  "historical_timeout_unchanged": true,
+  "screenshot_sha256": "18a7a119f54abd8479f0cb19d9e9cbed3fb17b29bb9169985b829c36a315ac45",
+  "at_ms": 1791246661399
+}

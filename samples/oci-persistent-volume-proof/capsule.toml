@@ -1,0 +1,60 @@
+schema = "ato.capsule/2"
+
+# Proof for Runner-local persistent volumes (Mail Step ②b): a value the
+# backend has committed to SQLite on /data must survive every way a Run can
+# end — a normal stop, a Runner crash, a restart — because the volume, not a
+# State Revision packed at stop, is the state.
+
+[application]
+title = "OCI persistent volume proof"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "surface-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/healthz"
+status = 200
+
+# Served by the internal backend, which opens its database on /data.
+[[contract.observation]]
+id = "backend-through-surface"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/api/healthz"
+status = 200
+
+[[derivation]]
+id = "oci-service-group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "backend"
+runtimes = { "oci.image" = "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b", "oci.memory_bytes" = "134217728", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64", "oci.entrypoint" = "/usr/local/bin/python3" }
+argv = ["/app/backend.py"]
+ports = [{ id = "backend.http", guest_port = 8081 }]
+state = ["data"]
+
+[[derivation.service]]
+id = "web"
+runtimes = { "oci.image" = "docker.io/nginxinc/nginx-unprivileged@sha256:28d91bdce70ad09025ea901458fdd149259d8e05982ade79d4ef2c0d9470eb48", "oci.memory_bytes" = "134217728", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64", "oci.entrypoint" = "/usr/sbin/nginx" }
+argv = ["-c", "/app/nginx.conf", "-g", "daemon off;"]
+ports = [{ id = "app.http", guest_port = 8080 }]
+
+[effects]
+default = "pure"

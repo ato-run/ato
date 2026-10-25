@@ -1,0 +1,150 @@
+{
+  "attempt": {
+    "attempt_id": "att_test",
+    "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "environment_id": "native",
+    "runtime_id": "rt_test",
+    "status": "pass"
+  },
+  "authorized_derivations": [
+    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "frozen": {
+    "base_contract": {
+      "requirements": [
+        {
+          "id": "root",
+          "method": "GET",
+          "path": "/",
+          "port": "app.http",
+          "status": 200,
+          "verifier": "ato.contract.http@1"
+        }
+      ],
+      "schema": "ato.contract/1"
+    },
+    "base_contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "browser_contract": {
+      "criteria": [
+        {
+          "id": "primary",
+          "instruction": "Create a note and see it after a reload.",
+          "kind": "browser.task",
+          "required": true
+        }
+      ],
+      "normalization": "v0.identity",
+      "original_prompt": "Create a note and see it after a reload.",
+      "schema": "ato.browser-contract/0"
+    },
+    "effective_contract_ref": "sha256:fdf1a7e7724023f12546d2e97312a04e1c810644eefb71bdf81869978b323e2f"
+  },
+  "operation": "accept_route",
+  "request_id": "sat_test",
+  "route": {
+    "attempt_id": "att_test",
+    "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "effective_contract_ref": "sha256:fdf1a7e7724023f12546d2e97312a04e1c810644eefb71bdf81869978b323e2f",
+    "environment_id": "native",
+    "runtime_id": "rt_test",
+    "verifier_receipts": [
+      {
+        "kind": "contract_verification",
+        "receipt": {
+          "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+          "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "execution": {
+            "attempt_id": "att_test",
+            "realization": "process",
+            "request_id": "sat_test"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      },
+      {
+        "kind": "browser_contract",
+        "receipt": {
+          "actions": [],
+          "browser_contract_ref": "sha256:55a8ec4bcbf63ef74ebf85aec6fb1a47c767dc0612ef78d4395d11e76f80a194",
+          "containment": {
+            "browser_process": "own pid namespace",
+            "containment": "bwrap",
+            "filesystem": "allowlisted",
+            "network": "loopback candidate only",
+            "secrets": "fd"
+          },
+          "criteria": [
+            {
+              "decision": {
+                "choice": "complete",
+                "confidence": 0.9,
+                "model": "jev-1.13.0",
+                "probabilities": {
+                  "complete": 0.95
+                }
+              },
+              "evidence_refs": [
+                "e1"
+              ],
+              "id": "primary",
+              "reason": null,
+              "rounds": 1,
+              "verdict": "pass"
+            }
+          ],
+          "evidence": [
+            {
+              "facts": [
+                "the page says hi"
+              ],
+              "id": "e1",
+              "kind": "browser_snapshot",
+              "sequence": 1,
+              "text_excerpt": null,
+              "title": "hi",
+              "url": "http://127.0.0.1:41234/"
+            }
+          ],
+          "observed_events": [
+            {
+              "kind": "navigation",
+              "sequence": 1,
+              "url": "http://127.0.0.1:41234/"
+            }
+          ],
+          "original_prompt_digest": "sha256:99dffdc19f85f8f4fc6de8738d8f1fff34db5bde70ed7263fd11fc88fc4e5c7b",
+          "overall": "pass",
+          "reason": null,
+          "target": {
+            "attempt_id": "att_test",
+            "endpoint": "http://127.0.0.1:41234/",
+            "runtime_id": "rt_test"
+          },
+          "verifier": {
+            "agent_model": null,
+            "browser_version": null,
+            "judge_model": "jev-1.13.0",
+            "stagehand_version": null,
+            "verifier": "formation-browser-verifier/0"
+          }
+        }
+      }
+    ]
+  }
+}

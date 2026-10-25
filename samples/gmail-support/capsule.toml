@@ -1,0 +1,79 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Ato Support Desk"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[binding]]
+id = "chatwoot_secret_key"
+protocol = "ato.secret@1"
+required = true
+
+[[binding]]
+id = "chatwoot_runtime"
+protocol = "ato.secret@1"
+required = true
+
+[[binding]]
+id = "app_origin"
+protocol = "ato.config@1"
+required = true
+
+[[binding]]
+id = "gmail_oauth"
+protocol = "ato.secret-refresh@1"
+required = false
+
+[[binding]]
+id = "google_oauth_client"
+protocol = "ato.secret@1"
+required = true
+
+[[binding]]
+id = "google_https_egress"
+protocol = "ato.tcp-egress@1"
+required = false
+
+[[state]]
+id = "support_data"
+use = "ato.state.filesystem@1"
+mount = "/var/lib/ato-support"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "support-desk-live"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+status = 200
+
+[[derivation]]
+id = "oci-service-group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "support"
+runtimes = { "oci.image" = "ato.local/gmail-support:0.1.0@sha256:f270669fe83479ceebbdea567b08d9b8c4821d41ea2447742933558bf68860dd", "oci.workspace_mount" = "/ato-workspace", "oci.entrypoint" = "/usr/local/bin/ato-support-supervise", "oci.memory_bytes" = "4026531840", "oci.cpu_limit_millis" = "3750", "oci.pids_limit" = "896" }
+argv = ["serve"]
+env = { GMAIL_SUPPORT_ADDRESS = "support@ato.run", GMAIL_MAILBOX_ID = "support-primary", GMAIL_INITIAL_QUERY = "newer_than:30d (to:support@ato.run OR deliveredto:support@ato.run)", GMAIL_INITIAL_MAX_MESSAGES = "100", GMAIL_ATTACHMENT_MAX_BYTES = "5242880", GMAIL_MAXIMUM_MESSAGE_BYTES = "26214400", GMAIL_SYNC_INTERVAL_SECONDS = "60" }
+ports = [{ id = "app.http", guest_port = 8080 }]
+state = ["support_data"]
+bindings = ["chatwoot_secret_key", "chatwoot_runtime", "app_origin", "gmail_oauth", "google_oauth_client", "google_https_egress"]
+
+[[derivation.service]]
+id = "redis"
+runtimes = { "oci.image" = "docker.io/library/redis:8.2.1-alpine@sha256:f887e6dacdcfa8e14af2f625fdf4474ff8c37dc36ce13b9e89e6e9a901f155ad", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "250", "oci.pids_limit" = "128" }
+argv = ["redis-server", "--save", "", "--appendonly", "no", "--loglevel", "warning"]
+ports = [{ id = "redis.tcp", guest_port = 6379 }]
+
+[effects]
+default = "requires-confirmation"

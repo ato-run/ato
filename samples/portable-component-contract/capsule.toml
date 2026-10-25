@@ -1,0 +1,58 @@
+schema = "ato.capsule/2"
+[application]
+title = "Component Contract fixture"
+surface_path = "/"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "backend-health"
+use = "ato.contract.http@1"
+port = "backend.http"
+path = "/health"
+status = 200
+body_digest = "sha256:0a749feba689ae7885aa286b66065484daa713667216cf2a260f88b5b0a1412a"
+
+[[contract.observation]]
+id = "web-health"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+body_digest = "sha256:7f489a4761bdf16235e2e6a86d14a29b1fa6b09e0ce544014048505eec5f2f79"
+
+[[contract.observation]]
+id = "sibling-connection"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/joined"
+status = 200
+body_digest = "sha256:ff412ed914362f3d8df687ccd13dcf5c5449a1bb194f5e0a3c39bcda45ddf088"
+
+[[derivation]]
+id = "group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "backend"
+runtimes = { "oci.image" = "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b", "oci.user" = "1000:1000", "oci.memory_bytes" = "134217728", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64" }
+argv = ["python3", "/app/app.py", "backend", "8091"]
+ports = [{ id = "backend.http", guest_port = 8091 }]
+env = { PYTHONDONTWRITEBYTECODE = "1", FAIL_HEALTH = "0" }
+
+[[derivation.service]]
+id = "web"
+runtimes = { "oci.image" = "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b", "oci.user" = "1000:1000", "oci.memory_bytes" = "134217728", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64" }
+argv = ["python3", "/app/app.py", "web", "8090"]
+ports = [{ id = "app.http", guest_port = 8090 }]
+env = { PYTHONDONTWRITEBYTECODE = "1", FAIL_HEALTH = "0" }
+
+depends_on = ["backend"]
+
+[effects]
+default = "pure"

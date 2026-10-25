@@ -1,0 +1,79 @@
+{
+  "schema": "ato.formation-platform-ci-comparison/1",
+  "Ato_head": "3bb28192419f4a12cf2566cab57a8f641cf88018",
+  "HTTP_base": "785adb7c35b26702708c280a0b432cfe554bbe96",
+  "state_input_base": "f362c894",
+  "API_head": "02a9e58bbf2f8b27c6f976107995c5c14f662a8f",
+  "API_base": "f83d1109081a3d46091a03695ced822b4472b87b",
+  "rust": "1.96.0",
+  "Windows": {
+    "target": "x86_64-pc-windows-gnu",
+    "command": "cargo +1.96.0 check --locked --offline -p ato-runtime-attempt --target x86_64-pc-windows-gnu",
+    "head_errors": 13,
+    "base_errors": 13,
+    "matched": "unconditional browser_sandbox Unix imports/process_group/libc kill/recv; non-Unix plan.rs missing bail import",
+    "actual_Windows_test_execution": false,
+    "shared_target_head_check_excluded": "mixed worktree cache produced extra stale Formation type errors; repeated with a fresh isolated target"
+  },
+  "macOS": {
+    "base_one_test_PASS": true,
+    "base_suite": "14 PASS, 1 FAIL static cleanup; process ownership test PASS",
+    "head_CI": "14 PASS, 1 FAIL process ownership: local Instance worker exited before becoming active",
+    "same_failure_reproduced": false,
+    "CI_platform_failure_pending": true
+  },
+  "API_instance_state_sync": {
+    "local_Node": "22.22.0",
+    "CI_Node": "22.23.3",
+    "local_platform": "macOS",
+    "head_and_base_same_failure": "run.mjs:310 actual404 expected403 after preceding ownership/write/reload checks",
+    "local_crypto_warning_both": "nodeCrypto.randomBytes is not a function",
+    "CI_failure": "WebKit coop-presence WebSocket handshake, run.mjs:196",
+    "same_CI_failure_reproduced": false
+  },
+  "connected_Worker_clippy": {
+    "command": "cargo clippy -p ato-connected-realization-worker --all-targets -- -D warnings",
+    "head_and_exact_base_same_failure": "runtime_launch/lease.rs:736 ActiveWorkload large_enum_variant; unchanged file",
+    "unrelated_suppression_added": false
+  },
+  "logs": [
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/.tmp/windows-runtime-head-isolated-check.log",
+      "sha256": "85faeb1a354509ce6ee685a1f4df612b98c6e2b6eb994269cf804b408248b42b"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/.tmp/windows-runtime-head-shared-target-check.log",
+      "sha256": "d91e580db66df7348c2485e8d83e72e4edf7eac0bcfb4f86319171190b0e1a30"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato-http-ci-base/.tmp/windows-runtime-check.log",
+      "sha256": "dfb2ac247cc6a6ce17389979d60b4361314eb8b88a0f9451ede877f16830cf60"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato-http-ci-base/.tmp/macos-portable-process-base.log",
+      "sha256": "09bd1989de2961cfb2f7af7527ca1b78db9918b58583ba91b263aeea95e1f9f4"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato-http-ci-base/.tmp/macos-portable-suite-base.log",
+      "sha256": "9a1271164e25864797f19588ba9556a238a139736d8654c0abd3bbbb5082cf85"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato/.tmp/state-input-state-transport-clippy.log",
+      "sha256": "c3762549988575943930bceeccfed8c27a3811948a09ca1359a6539efb37e3d4"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/ato-state-ci-base/.tmp/state-input-base-clippy.log",
+      "sha256": "6014d704033e28d7f73de0485c45d6d7b525cd3bfbeb42a5d4e1c581993a6dc9"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/api/.tmp/http-ci-local-head-state-sync.log",
+      "sha256": "69a9e1994d7f4e43b61015a1a239fd09cc0ceb9ef5fc9edeee8d635a932cf2d6"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/formation-v0/api-http-ci-base/.tmp/http-ci-local-base-state-sync.log",
+      "sha256": "e521e971ea05c53d4b74547ad1ea9e8535acc3cf984b7de9c4f34a01ce25f143"
+    }
+  ],
+  "CI_billing_failure": false,
+  "CI_rerun": false
+}

@@ -1,0 +1,322 @@
+{
+  "schema": "ato.formation-efficacy-amendment/1",
+  "experiment": "E1",
+  "registered_date": "2026-09-27",
+  "ato_main": "beefc6101beae745cb9e258fd59ea7c2d8f65386",
+  "api_main": "4b695432478084082cd55db3b1454ae50d49fb15",
+  "harness_commit": "d1c585133620c8a103d90e2c0747b6c93595ea5f",
+  "model": "jev-1.13.0",
+  "prompt": "ato.formation-generation-prompt/2",
+  "cells": 60,
+  "max_model_calls": 20,
+  "retry": false,
+  "case_count": 10,
+  "permutations": 2,
+  "arms": [
+    "A",
+    "B",
+    "C"
+  ],
+  "cell_order": "case ascending; permutation0 ABC, permutation1 CBA",
+  "max_attempts": {
+    "default": 2,
+    "E09": 3
+  },
+  "budget": {
+    "deadline_seconds": 604800,
+    "max_transfer_bytes": 10737418240,
+    "max_expanded_bytes": 10737418240,
+    "max_stored_bytes": 10737418240
+  },
+  "max_generations": 1,
+  "generation_timeout_ms": 30000,
+  "provider_timeout_ms": 20000,
+  "harness_settle_seconds": 180,
+  "harness_wait_seconds": 240,
+  "gate": {
+    "minimum_cases_with_C_pass_B_fail_both_permutations": 2,
+    "C_net_success_must_exceed_B": true,
+    "zero_authority_escapes": true
+  },
+  "artifacts": {
+    "requester": "52796558ab1fb658cf512a350e454c8c6225d993110ad41e57264226ec5b33d5",
+    "runtime": "a02c962cb3a25b8e74be37e57ea66110b5c21b8b477a98b5ad19daa27bac86a6",
+    "wasm": "16e1a370344fbb5c99100ecb59d1c584d84ac9a55cdfb685962af8eb7d3d0ddb"
+  },
+  "code_sha256": {
+    "scripts/acceptance/formation-generation-efficacy.py": "4c7a836b281e1ac7ceac7d9b15f643d704054504b3b8356302fa5b0e67467b02",
+    "scripts/acceptance/efficacy/fixtures.py": "244162de29fa452d3e59a5b3ba7639087cc7c4025255b207957607db439003e3",
+    "scripts/acceptance/formation-generation-context.py": "b8032884ca82772c55517357fc142a069dc85e2c559ea1de10d9bb29ccf5d2fa",
+    "scripts/acceptance/formation-typed-generation.py": "4bd833a43eed715bfd86706f87ee77a5c1c98906e56dffcf4f4daa2d177602b8",
+    "scripts/acceptance/formation-stage4-search.py": "86c45a5ece25e82f11aeab9fbc97928e9e391659c39a7962aa6039ac256cc7b7",
+    "scripts/acceptance/formation-5a-decision.py": "7a36c96d8ae0d86ed9dd4aa4f11202b04f28ff76763a8efea3faf2a35ccbdb34",
+    "apps/formation-worker/examples/formation_search.rs": "5554bcd3bdcd0826e2e1ea296938316b36e1ddc317354783647a6ff86fb16fb8"
+  },
+  "fixtures": {
+    "E01": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "candidate_1.py": "d90bd83458d35814d9181a32178dc64e0371795e60be4c47dc7f446ba08ab257",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E02": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "candidate_1.py": "07e2d44be0ac2c7d2423506b5e3e3fef56d5aa6747d6d9b63634dc422445318e",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0,
+        1
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E03": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "candidate_1.py": "f5a495b108f0606c9d1fbdb1f8cfe15eb902dcb65bfb9156d147a893c2240b5b",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E04": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "a8856245e429e8650fcb483f4e1731c892d697c20fea45e9a2d78ed6a04ed0b0",
+        "candidate_1.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E05": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "candidate_1.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E06": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "6dc5cd153e2a45f331252cbdccc0cad7bd43d45a5c299361cb06f26b1687d60d",
+        "candidate_1.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E07": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "1a4c30694fe60683052c5e0d017c6ae3e8f28a8f7ef645751f6841883a9ba8fc",
+        "candidate_1.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E08": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "9674bd275a9f41edf01b161a6491d30877ebe0369f5d61f39e1aa1045b663009",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "candidate_1.py": "5b9e0077984652b76361f63305130c69a18b3fc390d9d608c62387223e36cb51",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E09": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "candidate_1.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    },
+    "E10": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "d1f1240eb4e52fed9c4e7e05a0dbcd532d0f50863a7c541505b03b51b0fe4951",
+        "bad_b.py": "64c71821621307b4883f138422f04177006c78a634fc77d08277647c6daa8e94",
+        "candidate_0.py": "d90bd83458d35814d9181a32178dc64e0371795e60be4c47dc7f446ba08ab257",
+        "candidate_1.py": "af22b1ff4d4922df5f2b631d1ebb791a22304b1c951f4e0e064b770875cdb9a5",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "1252ce17f7dc9ee38102c2f582b5a25d0406745190b2336c8ecb17cc01821130"
+      },
+      "correct_candidate_indices": [],
+      "permutations": [
+        {
+          "q7": "candidate_0.py",
+          "m2": "candidate_1.py"
+        },
+        {
+          "q7": "candidate_1.py",
+          "m2": "candidate_0.py"
+        }
+      ]
+    }
+  },
+  "amendment": "B model-name validation repair; only B reruns allowed; no A/C reruns",
+  "original_registration": "410285f3679a9e9f25b9787f96db1a7f24b3f10f",
+  "original_results_sha256": "cb5e2620fc587d6e6221d9a09eab78102d4c82549f6e080c002839c4c6689d73",
+  "reuse_cells": [
+    "E01p0A",
+    "E01p0C",
+    "E01p1C",
+    "E01p1A",
+    "E02p0A",
+    "E02p0C",
+    "E02p1C",
+    "E02p1A",
+    "E03p0A"
+  ],
+  "previous_model_calls": 4,
+  "remaining_model_calls_cap": 16
+}

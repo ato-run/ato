@@ -10,8 +10,15 @@
 pub mod binding_control;
 pub mod binding_lease;
 pub mod computation;
+pub mod desktop_control;
 pub mod error;
+pub mod formation;
 pub mod net;
+pub mod oci_component_inputs;
+pub mod oci_service_group;
+pub mod runtime_launch;
+pub mod runtime_launch_v2;
+pub mod runtime_launch_v3;
 pub mod session_surface;
 pub mod terminal_surface;
 
