@@ -324,6 +324,176 @@ impl ScenarioV1 {
     }
 }
 
+/// The schema of the deterministic transcript whose digest a receipt carries.
+pub const SCENARIO_TRANSCRIPT_SCHEMA: &str = "ato.scenario-transcript/1";
+/// The schema of the raw sidecar kept beside a Run's receipt. It is evidence,
+/// not identity: captures, response bodies and failure details also live here,
+/// so the hashed transcript can stay stable across runs.
+pub const SCENARIO_TRANSCRIPT_RAW_SCHEMA: &str = "ato.scenario-transcript-raw/1";
+
+/// The outcome of executing one Scenario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScenarioResult {
+    Satisfied,
+    Failed,
+}
+
+/// What one runtime Scenario execution established, as the Runtime states it.
+///
+/// This is evidence, not identity: `scenario_ref` is the object K pins and
+/// `transcript_digest` is a digest of the deterministic transcript. It never
+/// carries response bodies or captured values; those stay in the raw sidecar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioObservation {
+    /// The Contract requirement id this execution answers.
+    pub requirement_id: String,
+    /// The `ato.scenario/1` object the Contract requirement pins.
+    pub scenario_ref: String,
+    pub verifier_version: u32,
+    /// `sha256:` of the canonical transcript. Empty for an execution that was
+    /// refused before it started (e.g. isolation unavailable).
+    pub transcript_digest: String,
+    pub result: ScenarioResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_step: Option<String>,
+    /// The verifier-level failure code, when `result` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ScenarioObservation {
+    pub fn satisfied(
+        requirement_id: impl Into<String>,
+        scenario_ref: impl Into<String>,
+        transcript_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            requirement_id: requirement_id.into(),
+            scenario_ref: scenario_ref.into(),
+            verifier_version: SCENARIO_VERIFIER_VERSION,
+            transcript_digest: transcript_digest.into(),
+            result: ScenarioResult::Satisfied,
+            failed_step: None,
+            code: None,
+            detail: None,
+        }
+    }
+
+    pub fn failed(
+        requirement_id: impl Into<String>,
+        scenario_ref: impl Into<String>,
+        transcript_digest: impl Into<String>,
+        failed_step: Option<String>,
+        code: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            requirement_id: requirement_id.into(),
+            scenario_ref: scenario_ref.into(),
+            verifier_version: SCENARIO_VERIFIER_VERSION,
+            transcript_digest: transcript_digest.into(),
+            result: ScenarioResult::Failed,
+            failed_step,
+            code: Some(code.into()),
+            detail: Some(detail.into()),
+        }
+    }
+
+    /// A refusal before the scenario ran: the v1 verifier only executes on a
+    /// fresh instance, never on a restored/stateful one.
+    pub fn isolation_unavailable(
+        requirement_id: impl Into<String>,
+        scenario_ref: impl Into<String>,
+    ) -> Self {
+        Self::failed(
+            requirement_id,
+            scenario_ref,
+            String::new(),
+            None,
+            "scenario_isolation_unavailable",
+            "the candidate runs from restored state or a snapshot; v1 executes scenarios only \
+             on a fresh instance",
+        )
+    }
+}
+
+/// The deterministic transcript of one Scenario execution.
+///
+/// Captured values are normalised to `${name}` before hashing, so an app that
+/// returns a random id produces the same digest on every run. Timing, pids,
+/// endpoints and cookie values are deliberately absent. The object is JCS
+/// canonical; its SHA-256 is what the receipt records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioTranscriptV1 {
+    pub schema: String,
+    pub scenario_ref: String,
+    pub verifier_version: u32,
+    pub steps: Vec<ScenarioTranscriptStepV1>,
+    pub result: ScenarioResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioTranscriptStepV1 {
+    pub id: String,
+    pub request: ScenarioTranscriptRequestV1,
+    pub response: ScenarioTranscriptResponseV1,
+    pub outcome: ScenarioResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioTranscriptRequestV1 {
+    pub method: String,
+    /// The authored path template: `${name}` stays in place.
+    pub path: String,
+    /// SHA-256 of the authored body template, not the substituted bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioTranscriptResponseV1 {
+    pub status: u16,
+    /// SHA-256 of the response body with captured values normalised to
+    /// `${name}`.
+    pub body_sha256: String,
+}
+
+impl ScenarioTranscriptV1 {
+    pub fn new(
+        scenario_ref: impl Into<String>,
+        steps: Vec<ScenarioTranscriptStepV1>,
+        result: ScenarioResult,
+    ) -> Self {
+        Self {
+            schema: SCENARIO_TRANSCRIPT_SCHEMA.to_owned(),
+            scenario_ref: scenario_ref.into(),
+            verifier_version: SCENARIO_VERIFIER_VERSION,
+            steps,
+            result,
+        }
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ScenarioError> {
+        serde_jcs::to_vec(self).map_err(|_| ScenarioError("scenario_transcript_canonicalization"))
+    }
+
+    /// `sha256:` of the canonical transcript bytes.
+    pub fn transcript_digest(&self) -> Result<String, ScenarioError> {
+        Ok(format!(
+            "sha256:{:x}",
+            Sha256::digest(self.canonical_bytes()?)
+        ))
+    }
+}
+
 fn decode_body(encoded: &str, max_bytes: u64) -> Result<Vec<u8>, ScenarioError> {
     let body = base64::engine::general_purpose::STANDARD
         .decode(encoded)

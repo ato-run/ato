@@ -230,6 +230,7 @@ impl PlannedCandidate {
             },
             input_refs: observe_candidate(&self.derivation, &self.contract, None).input_refs,
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         }
     }
 }

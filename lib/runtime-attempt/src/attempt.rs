@@ -437,6 +437,36 @@ fn realize_and_verify(
             return not_observable(attempt, error, Some(stopped));
         }
     };
+    // Contract scenarios run after the read-only GET observations, so their
+    // state changes cannot affect what those observations measured, and before
+    // the verification point, so the same verdict decides both.
+    let scenario_observations = if spec.scenarios.is_empty() {
+        Vec::new()
+    } else if spec.derivation.state.is_empty() && spec.instance_snapshot_ref.is_none() {
+        match crate::scenario::execute_scenarios(
+            candidate.as_mut(),
+            &spec.scenarios,
+            request.attempt_root,
+            request.interrupt,
+            request.control,
+        ) {
+            Ok(observations) => observations,
+            Err(error) => {
+                drop(verification_timing);
+                let _cleanup = request.control.map(|c| c.cleanup());
+                let stopped = candidate.stop();
+                if let Some(evidence) = attempt.realization.as_mut() {
+                    evidence.destroyed = stopped.is_ok();
+                }
+                return not_observable(attempt, error, Some(stopped));
+            }
+        }
+    } else {
+        // v1 executes scenarios only on a fresh instance. The refusal is an
+        // observation so the receipt states why, and `fully_satisfied` stays
+        // false instead of a scenario silently not being run.
+        crate::scenario::isolation_failures(&spec.scenarios)
+    };
     // The receipt covers the Contract's observations at this verification
     // point, and nothing that happens after it.
     let mut execution = realized.execution;
@@ -445,7 +475,13 @@ fn realize_and_verify(
     let VerificationPoint {
         verification,
         receipt,
-    } = verify_observed_candidate(spec, http, execution, &request.receipt);
+    } = verify_observed_candidate(
+        spec,
+        http,
+        scenario_observations,
+        execution,
+        &request.receipt,
+    );
 
     // The browser drives the SAME candidate, and only one that already
     // satisfies the typed observations: a candidate that fails its HTTP
@@ -961,6 +997,7 @@ mod tests {
                 "app.http", "GET", "/", 200, b"ok",
             )],
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         let verification = verify_runtime(&contract, &runtime);
         let receipt = ContractVerificationReceipt::from_attempt(
@@ -1077,6 +1114,7 @@ mod tests {
             shape: crate::spec::CandidateShape::Process,
             input_refs: BTreeMap::new(),
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         let scratch = tempfile::tempdir().unwrap();
         // One journal directory, read again as a restarted process would.
@@ -1453,6 +1491,7 @@ mod tests {
             shape: crate::spec::CandidateShape::Process,
             input_refs: BTreeMap::new(),
             instance_snapshot_ref: None,
+            scenarios: Vec::new(),
         };
         let scratch = tempfile::tempdir().unwrap();
         run_attempt(
@@ -1516,6 +1555,7 @@ mod tests {
                 shape: crate::spec::CandidateShape::Process,
                 input_refs: BTreeMap::from([("workspace".to_owned(), "sha256:tree".to_owned())]),
                 instance_snapshot_ref: Some("sha256:snapshot".to_owned()),
+                scenarios: Vec::new(),
             };
             let context = ReceiptContext {
                 target: VerificationTargetKind::CliLocal,
@@ -1557,6 +1597,7 @@ mod tests {
                 vec![RuntimeHttpObservation::from_response(
                     "app.http", "GET", "/", 200, b"ok",
                 )],
+                Vec::new(),
                 serde_json::from_value(serde_json::json!({
                     "realization": "test",
                     "attempt_id": "attempt-1",
@@ -1821,6 +1862,7 @@ mod tests {
                 input_refs: BTreeMap::new(),
                 http: observed,
                 instance_snapshot_ref: None,
+                scenarios: Vec::new(),
             },
         );
         assert!(!verdict.fully_satisfied());
