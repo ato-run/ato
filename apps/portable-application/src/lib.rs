@@ -42,6 +42,7 @@ pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
 pub mod source_oci;
+pub mod transformation;
 pub mod validator_agent;
 
 use instance_snapshot::{
@@ -92,6 +93,20 @@ pub enum PortableApplicationError {
     Binding(String),
     #[error("portable application profile violation: {0}")]
     Profile(String),
+    /// A Contract-preserving transformation refused before execution. The
+    /// code is stable and user-facing; the detail names the refs involved.
+    #[error("{code}: {detail}")]
+    Transformation { code: &'static str, detail: String },
+}
+
+impl PortableApplicationError {
+    /// The stable code of a transformation refusal, when this error is one.
+    pub fn transformation_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Transformation { code, .. } => Some(code),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
