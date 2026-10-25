@@ -14,6 +14,7 @@
 //! to the candidate afterwards is its owner's and is not in the receipt.
 
 use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
+use ato_formation::scenario::ScenarioObservation;
 use ato_formation::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2, ContractVerification, ContractVerificationReceipt,
     RuntimeHttpObservation, RuntimeObservation, VerificationExecutionEvidence,
@@ -113,6 +114,7 @@ pub struct VerificationPoint {
 pub fn verify_observed_candidate(
     spec: &AttemptSpec<'_>,
     http: Vec<RuntimeHttpObservation>,
+    scenarios: Vec<ScenarioObservation>,
     mut execution: VerificationExecutionEvidence,
     context: &ReceiptContext<'_>,
 ) -> VerificationPoint {
@@ -120,6 +122,7 @@ pub fn verify_observed_candidate(
         input_refs: spec.input_refs.clone(),
         http,
         instance_snapshot_ref: spec.instance_snapshot_ref.clone(),
+        scenarios,
     };
     let verification = verify_runtime(spec.contract, &observation);
     let mut receipt = ContractVerificationReceipt::for_attempt(
@@ -236,6 +239,7 @@ mod tests {
             shape: CandidateShape::Process,
             input_refs: BTreeMap::from([("workspace".to_owned(), tree.to_owned())]),
             instance_snapshot_ref: snapshot.map(str::to_owned),
+            scenarios: Vec::new(),
         }
     }
 
@@ -329,7 +333,13 @@ mod tests {
     fn every_observation_satisfied_is_a_fully_satisfied_receipt() {
         let (contract, derivation) = (contract(), derivation());
         let spec = spec(&contract, &derivation, TREE, Some(SNAPSHOT));
-        let point = verify_observed_candidate(&spec, served(200, PROOF), execution(), &hosted());
+        let point = verify_observed_candidate(
+            &spec,
+            served(200, PROOF),
+            Vec::new(),
+            execution(),
+            &hosted(),
+        );
         assert_consistent(&point, &contract);
         assert!(point.receipt.fully_satisfied);
         let receipt = &point.receipt;
@@ -376,7 +386,13 @@ mod tests {
     fn a_failed_http_status_fails_that_observation_only() {
         let (contract, derivation) = (contract(), derivation());
         let spec = spec(&contract, &derivation, TREE, Some(SNAPSHOT));
-        let point = verify_observed_candidate(&spec, served(503, PROOF), execution(), &hosted());
+        let point = verify_observed_candidate(
+            &spec,
+            served(503, PROOF),
+            Vec::new(),
+            execution(),
+            &hosted(),
+        );
         assert_consistent(&point, &contract);
         assert!(!point.receipt.fully_satisfied);
         assert_eq!(
@@ -400,7 +416,7 @@ mod tests {
         let spec = spec(&contract, &derivation, TREE, Some(SNAPSHOT));
         let mut http = served(200, PROOF);
         http.remove(0);
-        let point = verify_observed_candidate(&spec, http, execution(), &hosted());
+        let point = verify_observed_candidate(&spec, http, Vec::new(), execution(), &hosted());
         assert_consistent(&point, &contract);
         assert!(!point.receipt.fully_satisfied);
         assert_eq!(
@@ -418,6 +434,7 @@ mod tests {
         let point = verify_observed_candidate(
             &spec,
             served(200, b"not the proof\n"),
+            Vec::new(),
             execution(),
             &hosted(),
         );
@@ -441,7 +458,13 @@ mod tests {
         let (contract, derivation) = (contract(), derivation());
         let other = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
         let spec = spec(&contract, &derivation, other, Some(SNAPSHOT));
-        let point = verify_observed_candidate(&spec, served(200, PROOF), execution(), &hosted());
+        let point = verify_observed_candidate(
+            &spec,
+            served(200, PROOF),
+            Vec::new(),
+            execution(),
+            &hosted(),
+        );
         assert_consistent(&point, &contract);
         assert_eq!(
             failure(&point, "source-identity").as_deref(),
@@ -463,16 +486,26 @@ mod tests {
         let (contract, derivation) = (contract(), derivation());
         let other = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
         let restored_other = spec(&contract, &derivation, TREE, Some(other));
-        let point =
-            verify_observed_candidate(&restored_other, served(200, PROOF), execution(), &hosted());
+        let point = verify_observed_candidate(
+            &restored_other,
+            served(200, PROOF),
+            Vec::new(),
+            execution(),
+            &hosted(),
+        );
         assert_consistent(&point, &contract);
         assert_eq!(
             failure(&point, "saved-state").as_deref(),
             Some("instance_snapshot_mismatch")
         );
         let restored_none = spec(&contract, &derivation, TREE, None);
-        let point =
-            verify_observed_candidate(&restored_none, served(200, PROOF), execution(), &hosted());
+        let point = verify_observed_candidate(
+            &restored_none,
+            served(200, PROOF),
+            Vec::new(),
+            execution(),
+            &hosted(),
+        );
         assert_eq!(
             failure(&point, "saved-state").as_deref(),
             Some("instance_snapshot_missing")
@@ -490,6 +523,7 @@ mod tests {
         let point = verify_observed_candidate(
             &spec,
             served(200, PROOF),
+            Vec::new(),
             evidence.clone(),
             &ReceiptContext {
                 target: VerificationTargetKind::CliLocal,
@@ -509,6 +543,7 @@ mod tests {
         let point = verify_observed_candidate(
             &spec,
             served(200, PROOF),
+            Vec::new(),
             evidence,
             &ReceiptContext::formation(),
         );
@@ -546,7 +581,13 @@ mod tests {
             vec![required("/proof.txt"), required("/"), required("/")]
         );
         // What is not required is not observed, and fails as unobserved.
-        let point = verify_observed_candidate(&spec, served(200, PROOF), execution(), &hosted());
+        let point = verify_observed_candidate(
+            &spec,
+            served(200, PROOF),
+            Vec::new(),
+            execution(),
+            &hosted(),
+        );
         assert_eq!(
             failure(&point, "posted").as_deref(),
             Some("runtime_observation_missing")
