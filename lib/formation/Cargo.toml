@@ -19,6 +19,7 @@ planning = ["dep:flate2", "dep:tar", "dep:zstd"]
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.1"
 semver = "1"
