@@ -2363,7 +2363,11 @@ fn run_portable_application(
         .prefix("ato-portable-run-")
         .tempdir_in(cache)?;
     let runtime_root = runtime.keep();
-    let started = match start_and_verify_portable_application(
+    // A Run that fails verification publishes nothing: `--verification-receipt`
+    // names the receipt of a Run that was accepted. The attempt record (and,
+    // for a scenario, the transcript under the runtime scratch) is the failure
+    // evidence; writing a receipt here would make a refused Run look published.
+    let started = start_and_verify_portable_application(
         bundle_bytes,
         bundle,
         &selected_derivation,
@@ -2373,21 +2377,7 @@ fn run_portable_application(
             bindings: Some(&bindings),
             ..PortableRuntimeState::default()
         },
-    ) {
-        Ok(started) => started,
-        Err(error) => {
-            // A refused verification still leaves the receipt and transcripts
-            // the attempt wrote. Keep them where the caller asked for them, so
-            // a negative result has evidence rather than only a sentence.
-            if let Some(path) = &args.verification_receipt
-                && let Ok(bytes) = fs::read(runtime_root.join("verification-receipt.json"))
-            {
-                let _ = fs::write(path, bytes);
-                let _ = copy_scenario_sidecars(&runtime_root, &scenario_sidecar_directory(path));
-            }
-            return Err(error);
-        }
-    };
+    )?;
     let mut runtime = started.runtime;
     let receipt = started.receipt;
     let result = (|| -> Result<()> {

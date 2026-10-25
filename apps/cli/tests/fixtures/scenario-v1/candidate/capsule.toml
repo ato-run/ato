@@ -1,7 +1,7 @@
 schema = "ato.capsule/2"
 
 [application]
-title = "Scenario verifier v1 fixture"
+title = "Scenario verifier v1 candidate"
 surface_path = "/"
 
 [[input]]
