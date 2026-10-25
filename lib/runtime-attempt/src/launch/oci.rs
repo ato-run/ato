@@ -39,6 +39,9 @@ use super::resolved::ResolvedRuntimeLaunchContext;
 use crate::realize::{CandidateStopFailure, RunningCandidate};
 
 const INTERNAL_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Delivered input Assets/Model Sets and stop-time outputs for a single OCI
+/// workload. Host-boundary authority is additionally required by the Runner.
+pub const OCI_DATA_PLANE_RUNTIME_FEATURE: &str = "runtime_feature=oci_data_plane_v1";
 
 /// A running OCI workload.
 pub enum LaunchedOci {
@@ -175,6 +178,10 @@ pub fn container_oci_spec(
     context: &ResolvedRuntimeLaunchContext,
     labels: BTreeMap<String, String>,
 ) -> Result<OciSpec> {
+    ensure!(
+        oci.native_surface.is_none(),
+        "native_surface_unavailable: ordinary OCI execution cannot own a native workload lifecycle"
+    );
     let image = oci
         .image_reference
         .clone()
@@ -199,7 +206,7 @@ pub fn container_oci_spec(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let mounts = context
+    let mut mounts = context
         .state_attachments()
         .iter()
         .map(|attachment| OciMount {
@@ -215,6 +222,21 @@ pub fn container_oci_spec(
             attachment.guest_target().to_owned(),
         );
     }
+    if context.output_dir().is_some()
+        && let Some(boundary) = super::host_boundary::active()
+    {
+        ensure!(
+            oci.user
+                .is_none_or(|user| user.uid == boundary.uid && user.gid == boundary.gid),
+            "oci_user_state_owner_mismatch: output requires the configured workload identity"
+        );
+    }
+    super::oci_data::attach(
+        context,
+        oci.workspace_mount_path.as_deref().unwrap_or("/app"),
+        &mut mounts,
+        &mut environment,
+    )?;
     Ok(OciSpec {
         id: spec.context.run_id.clone(),
         image,
@@ -403,6 +425,8 @@ pub struct ServiceEgress {
     pub environment_value: String,
     pub network: OciNetwork,
     pub guard: Box<dyn Send>,
+    /// Exact original scalar for the fixed managed embedding projection only.
+    pub expected_secret_value: Option<String>,
 }
 
 /// Start an `ato.runtime-launch-spec.v2` OCI service group: one `--internal`
@@ -451,12 +475,22 @@ pub fn launch_service_group(
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let adapter = DockerOciAdapter::new(service_oci_spec(
+        let expected_rebindings = mine
+            .iter()
+            .filter_map(|grant| {
+                grant
+                    .expected_secret_value
+                    .as_ref()
+                    .map(|value| (grant.environment_name.clone(), value.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let adapter = DockerOciAdapter::new(service_oci_spec_rebinding(
             spec,
             service,
             context,
             owner,
             &network_environment,
+            &expected_rebindings,
         )?)?;
         let (networks, guards) = mine
             .into_iter()
@@ -495,6 +529,30 @@ pub fn service_oci_spec(
     owner: &OciOwner,
     network_environment: &BTreeMap<String, String>,
 ) -> Result<OciSpec> {
+    service_oci_spec_rebinding(
+        spec,
+        service,
+        context,
+        owner,
+        network_environment,
+        &BTreeMap::new(),
+    )
+}
+
+fn service_oci_spec_rebinding(
+    spec: &RuntimeLaunchSpecV2,
+    service: &OciServiceV2,
+    context: &ResolvedRuntimeLaunchContext,
+    owner: &OciOwner,
+    network_environment: &BTreeMap<String, String>,
+    expected_rebindings: &BTreeMap<String, String>,
+) -> Result<OciSpec> {
+    ensure!(
+        expected_rebindings
+            .keys()
+            .all(|name| name == "OPENAI_BASE_URL" && network_environment.contains_key(name)),
+        "only explicit managed embedding base URL can be rebound"
+    );
     let group = spec.service_group();
     let endpoints = service
         .endpoints
@@ -543,6 +601,16 @@ pub fn service_oci_spec(
         .collect::<BTreeMap<_, _>>();
     environment.extend(context.secret_environment_for(&secret_names)?);
     for (name, value) in network_environment {
+        if let Some(expected) = expected_rebindings.get(name) {
+            ensure!(
+                secret_names.contains(name.as_str())
+                    && environment.get(name) == Some(expected)
+                    && !service.public_env.iter().any(|entry| entry.name == *name),
+                "managed embedding base URL rebind mismatch"
+            );
+            environment.insert(name.clone(), value.clone());
+            continue;
+        }
         ensure!(
             environment.insert(name.clone(), value.clone()).is_none(),
             "network Binding `{name}` conflicts with another environment value"
@@ -561,6 +629,15 @@ pub fn service_oci_spec(
         service.name,
         service.working_dir
     );
+    let mut mounts = attachments
+        .iter()
+        .map(|attachment| OciMount {
+            host_path: attachment.working_copy_for_mount().to_path_buf(),
+            guest_path: attachment.guest_target().to_owned(),
+            writable: attachment.access() == StateAccessV1::ReadWrite,
+        })
+        .collect();
+    super::oci_component_inputs::attach(group, service, context, &mut mounts, &mut environment)?;
     Ok(OciSpec {
         id: format!("{}-{}", spec.context.run_id, service.name),
         image: service.image_reference.clone(),
@@ -575,14 +652,7 @@ pub fn service_oci_spec(
         workspace_mount_path: service.workspace_mount_path.clone(),
         environment,
         endpoints,
-        mounts: attachments
-            .iter()
-            .map(|attachment| OciMount {
-                host_path: attachment.working_copy_for_mount().to_path_buf(),
-                guest_path: attachment.guest_target().to_owned(),
-                writable: attachment.access() == StateAccessV1::ReadWrite,
-            })
-            .collect(),
+        mounts,
         limits: OciResourceLimits {
             memory_bytes: service.resource_limits.memory_bytes,
             cpu_limit_millis: service.resource_limits.cpu_limit_millis,
@@ -776,6 +846,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn managed_embedding_rebind_is_exact_and_preserves_generic_collision_rejection() {
+        use crate::launch::resolved::ResolvedSecret;
+        let mut raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../ipc/tests/fixtures/runtime-launch-spec-v3/service-group-volume.json"
+        ))
+        .unwrap();
+        raw["realization"]["services"][0]["state_keys"] = serde_json::json!([]);
+        raw["state_attachments"] = serde_json::json!([]);
+        raw["protocol"] = serde_json::json!("ato.runtime-launch-spec.v2");
+        raw["realization"]["services"][0]["secret_grants"] = serde_json::json!([
+            {"name":"OPENAI_API_KEY","grant_ref":"portable-binding:key"},
+            {"name":"OPENAI_BASE_URL","grant_ref":"portable-binding:url"}
+        ]);
+        let parsed = ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::parse(
+            &serde_json::to_string(&raw).unwrap(),
+        )
+        .unwrap();
+        let spec = parsed.service_group_spec().unwrap();
+        let service = &spec.service_group().services[0];
+        let workspace = tempfile::tempdir().unwrap();
+        let original = "https://broker.example/v1/managed-secrets";
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.path().to_path_buf(),
+            "",
+            BTreeMap::new(),
+            vec![
+                ResolvedSecret::new("OPENAI_API_KEY", "short-capability"),
+                ResolvedSecret::new("OPENAI_BASE_URL", original),
+            ],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let owner = OciOwner {
+            runner_id: "runner".into(),
+            slot_id: "slot".into(),
+            lease_id: "lease".into(),
+            run_id: spec.context.run_id.clone(),
+            incarnation: "inc".into(),
+        };
+        let local = BTreeMap::from([("OPENAI_BASE_URL".into(), "http://172.22.0.1:1080".into())]);
+        assert!(service_oci_spec(spec, service, &context, &owner, &local).is_err());
+        let expected = BTreeMap::from([("OPENAI_BASE_URL".into(), original.into())]);
+        let projected =
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &expected).unwrap();
+        assert_eq!(
+            projected.environment["OPENAI_BASE_URL"],
+            local["OPENAI_BASE_URL"]
+        );
+        assert_eq!(projected.environment["OPENAI_API_KEY"], "short-capability");
+        let wrong = BTreeMap::from([("OPENAI_BASE_URL".into(), "https://wrong.example".into())]);
+        assert!(
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &wrong).is_err()
+        );
+        let forbidden = BTreeMap::from([("OPENAI_API_KEY".into(), "short-capability".into())]);
+        assert!(
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &forbidden)
+                .is_err()
+        );
+        let context =
+            context.with_read_only_inputs(vec![crate::launch::resolved::ResolvedReadOnlyInput {
+                input_id: None,
+                env_name: "ATO_INPUT_ASSETS_DIR".into(),
+                path: workspace.path().to_path_buf(),
+            }]);
+        assert!(
+            service_oci_spec_rebinding(spec, service, &context, &owner, &local, &expected)
+                .unwrap_err()
+                .to_string()
+                .contains("oci_group_data_plane_unsupported")
+        );
+    }
+
+    #[test]
     fn the_hosted_portable_projection_reaches_the_adapter_with_its_working_dir() {
         use crate::launch::resolved::{ResolvedStateAttachment, allocate_endpoint};
         // The exact bytes ato-api's portableRouteRealization produces.
@@ -812,6 +956,58 @@ mod tests {
         assert!(adapter_spec.mounts[0].writable);
         ato_adapter_oci::validate_oci_spec(&adapter_spec).expect("the Adapter accepts it");
 
+        let assets = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let output = state.path().join("output");
+        // Run output must be distinct from an attached state directory.
+        let separate_output = tempfile::tempdir().unwrap();
+        let context = context
+            .with_read_only_inputs(vec![
+                crate::launch::resolved::ResolvedReadOnlyInput {
+                    input_id: None,
+                    env_name: "ATO_INPUT_ASSETS_DIR".into(),
+                    path: assets.path().to_path_buf(),
+                },
+                crate::launch::resolved::ResolvedReadOnlyInput {
+                    input_id: None,
+                    env_name: "ATO_INPUT_PATH_MODELS".into(),
+                    path: models.path().to_path_buf(),
+                },
+            ])
+            .with_output_dir(Some(separate_output.path().to_path_buf()));
+        let data_spec = container_oci_spec(&spec, oci, &context, BTreeMap::new()).unwrap();
+        assert_eq!(data_spec.mounts.len(), 4);
+        assert_eq!(
+            data_spec.environment["ATO_INPUT_ASSETS_DIR"],
+            "/.ato-data/inputs/0"
+        );
+        assert_eq!(
+            data_spec.environment["ATO_OUTPUT_DIR"],
+            "/.ato-data/outputs"
+        );
+        assert_eq!(
+            data_spec.environment["ATO_INPUT_PATH_MODELS"],
+            "/.ato-data/inputs/1"
+        );
+        assert!(
+            !data_spec.mounts[1].writable
+                && !data_spec.mounts[2].writable
+                && data_spec.mounts[3].writable
+        );
+        ato_adapter_oci::validate_oci_spec(&data_spec).unwrap();
+        let context = context.with_output_dir(Some(output));
+        assert!(container_oci_spec(&spec, oci, &context, BTreeMap::new()).is_err());
+        let context = context.with_read_only_inputs(vec![]).with_output_dir(None);
+
+        let mut native = oci.clone();
+        native.native_surface = Some(serde_json::json!({}));
+        assert!(
+            container_oci_spec(&spec, &native, &context, BTreeMap::new())
+                .unwrap_err()
+                .to_string()
+                .starts_with("native_surface_unavailable")
+        );
+
         let mut explicit = oci.clone();
         explicit.user = Some(ato_ipc::runtime_launch::OciUserV1 {
             uid: 10001,
@@ -832,6 +1028,298 @@ mod tests {
         let adapter_spec =
             container_oci_spec(&spec, &legacy, &context, BTreeMap::new()).expect("spec");
         assert_eq!(adapter_spec.working_dir, "/app");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires native Linux Docker and ATO_OCI_DATA_TEST_IMAGE pinned Python"]
+    fn delivered_files_are_read_only_and_outputs_survive_owned_container_stop() {
+        use crate::data_plane::{
+            GrantedOutputs, LeaseData, ModelCache, ModelSetEntry, ModelSetManifest, save_outputs,
+        };
+        use crate::launch::resolved::ResolvedReadOnlyInput;
+        use ato_ipc::runtime_launch::LaunchRealizationV1;
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::MetadataExt;
+        let boundary = if std::env::var("ATO_OCI_DATA_TEST_HOST_BOUNDARY").as_deref() == Ok("1") {
+            let boundary = super::super::host_boundary::HostBoundary {
+                uid: std::env::var("ATO_OCI_DATA_WORKLOAD_UID")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                gid: std::env::var("ATO_OCI_DATA_WORKLOAD_GID")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            };
+            super::super::host_boundary::enable(boundary).unwrap();
+            Some(boundary)
+        } else {
+            None
+        };
+        let image = std::env::var("ATO_OCI_DATA_TEST_IMAGE").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let assets = root.path().join("assets");
+        let output = root.path().join("outputs");
+        let models = root.path().join("inputs/models");
+        let model_bytes = b"verified model weights\n";
+        let entry = ModelSetEntry {
+            path: "weights/model.bin".into(),
+            digest: format!("sha256:{:x}", Sha256::digest(model_bytes)),
+            bytes: model_bytes.len() as u64,
+        };
+        let cache = ModelCache::open(root.path()).unwrap();
+        cache
+            .ensure(
+                &entry,
+                |start, end| {
+                    Ok(Box::new(std::io::Cursor::new(
+                        model_bytes[start as usize..=end as usize].to_vec(),
+                    )))
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        cache
+            .materialize(
+                &ModelSetManifest {
+                    schema: "ato.model-set/1".into(),
+                    objects: vec![entry.clone()],
+                },
+                &models,
+            )
+            .unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&assets).unwrap();
+        std::fs::write(assets.join("seed.txt"), b"owned input\n").unwrap();
+        let mut spec = RuntimeLaunchSpecV1::parse(include_str!(
+            "../../../ipc/tests/fixtures/runtime-launch-spec-v1/portable-oci-working-dir.json"
+        ))
+        .unwrap();
+        spec.context.run_id = format!("data-{}", std::process::id());
+        let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+            panic!("OCI")
+        };
+        oci.image_digest_ref = image.rsplit_once('@').unwrap().1.to_owned();
+        oci.image_reference = Some(image);
+        oci.entrypoint = Some("/usr/local/bin/python3".into());
+        oci.working_dir = Some("/app".into());
+        oci.workspace_mount_path = Some("/app".into());
+        let owner = std::fs::metadata(&workspace).unwrap();
+        oci.user = Some(ato_ipc::runtime_launch::OciUserV1 {
+            uid: boundary.map_or(owner.uid(), |b| b.uid),
+            gid: boundary.map_or(owner.gid(), |b| b.gid),
+        });
+        oci.argv = Some(vec![
+            "-c".into(),
+            r#"
+import os, pathlib, time
+source = pathlib.Path(os.environ['ATO_INPUT_ASSETS_DIR']) / 'seed.txt'
+model = pathlib.Path(os.environ['ATO_INPUT_PATH_MODELS']) / 'weights/model.bin'
+value = source.read_bytes() + model.read_bytes()
+try:
+    model.write_bytes(b'unexpected model write')
+except OSError:
+    pass
+else:
+    raise RuntimeError('model was writable')
+try:
+    source.write_bytes(b'unexpected write')
+except OSError:
+    pass
+else:
+    raise RuntimeError('input was writable')
+(pathlib.Path(os.environ['ATO_OUTPUT_DIR']) / 'result.txt').write_bytes(value)
+time.sleep(30)
+"#
+            .into(),
+        ]);
+        let LaunchRealizationV1::Oci(oci) = &spec.realization else {
+            unreachable!()
+        };
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.clone(),
+            "",
+            BTreeMap::new(),
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_read_only_inputs(vec![
+            ResolvedReadOnlyInput {
+                input_id: None,
+                env_name: "ATO_INPUT_ASSETS_DIR".into(),
+                path: assets.clone(),
+            },
+            ResolvedReadOnlyInput {
+                input_id: None,
+                env_name: "ATO_INPUT_PATH_MODELS".into(),
+                path: models.clone(),
+            },
+        ])
+        .with_output_dir(Some(output.clone()));
+        let owner = OciOwner {
+            runner_id: "data-fixture".into(),
+            slot_id: spec.context.run_id.clone(),
+            lease_id: "data-lease".into(),
+            run_id: spec.context.run_id.clone(),
+            incarnation: "data-test".into(),
+        };
+        let adapter =
+            container_adapter(&spec, oci, &context, owner.labels(Some("main")).unwrap()).unwrap();
+        let started = Instant::now();
+        let container = adapter
+            .spawn(&workspace, &root.path().join("runtime"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !output.join("result.txt").exists() && Instant::now() < deadline {
+            assert!(
+                container.exit_code().unwrap().is_none(),
+                "workload exited before output"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            std::fs::read(output.join("result.txt")).unwrap(),
+            b"owned input\nverified model weights\n"
+        );
+        assert_eq!(
+            std::fs::read(assets.join("seed.txt")).unwrap(),
+            b"owned input\n"
+        );
+        assert!(
+            container
+                .stop_gracefully(StopBudget {
+                    graceful: Duration::from_secs(1),
+                    force: Duration::from_secs(1)
+                })
+                .is_confirmed()
+        );
+        assert_eq!(
+            std::fs::read(output.join("result.txt")).unwrap(),
+            b"owned input\nverified model weights\n"
+        );
+        assert_eq!(
+            std::fs::read(models.join("weights/model.bin")).unwrap(),
+            model_bytes
+        );
+        cache.verify_cached(&entry).unwrap();
+        // Real container bytes, then the unchanged Coordinator save protocol.
+        // The HTTP coordinator below is a local fixture, not staging or R2.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let mut requests = Vec::new();
+            for step in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let method_path = line.trim().to_owned();
+                let mut length = 0;
+                let mut authorized = false;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if lower.trim() == "authorization: bearer model-save-fixture" {
+                        authorized = true;
+                    }
+                }
+                assert!(authorized);
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                drop(reader);
+                requests.push((method_path, body));
+                let response = match step {
+                    0 => r#"{"output_id":"out_model","part_bytes":65536}"#,
+                    1 => r#"{"part_number":1,"etag":"fixture"}"#,
+                    _ => r#"{"asset_id":"ast_model_output"}"#,
+                };
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+            }
+            requests
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let saved = save_outputs(
+            &LeaseData {
+                client: &client,
+                base: &base,
+                token: "model-save-fixture",
+                lease_id: &owner.lease_id,
+            },
+            &output,
+            &GrantedOutputs {
+                max_count: 8,
+                max_bytes_each: 32768,
+            },
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].save_status, "saved");
+        assert_eq!(saved[0].asset_id.as_deref(), Some("ast_model_output"));
+        assert!(requests[0].0.contains("/data/outputs "));
+        let generated: serde_json::Value = serde_json::from_slice(&requests[0].1).unwrap();
+        assert_eq!(generated["output_key"], "result.txt");
+        assert_eq!(requests[1].1, b"owned input\nverified model weights\n");
+        assert!(requests[2].0.contains("/complete "));
+        let resources =
+            ato_adapter_oci::OwnedResourceScanner::new(&owner.runner_id, &owner.slot_id)
+                .unwrap()
+                .scan()
+                .unwrap();
+        assert!(resources.containers.is_empty() && resources.networks.is_empty());
+        let mut wrong = oci.clone();
+        let user = oci.user.unwrap();
+        wrong.user = Some(ato_ipc::runtime_launch::OciUserV1 {
+            uid: if user.uid == 65534 { 65533 } else { 65534 },
+            gid: user.gid,
+        });
+        let refused = container_adapter(
+            &spec,
+            &wrong,
+            &context,
+            owner.labels(Some("wrong-user")).unwrap(),
+        )
+        .and_then(|adapter| adapter.spawn(&workspace, &root.path().join("wrong-runtime")));
+        let error = match refused {
+            Ok(container) => {
+                let _ = container.stop();
+                panic!("mismatching workload user was accepted")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("oci_user_state_owner_mismatch"),
+            "{error:#}"
+        );
+        let resources =
+            ato_adapter_oci::OwnedResourceScanner::new(&owner.runner_id, &owner.slot_id)
+                .unwrap()
+                .scan()
+                .unwrap();
+        assert!(resources.containers.is_empty() && resources.networks.is_empty());
+        eprintln!(
+            "OCI file delivery complete: elapsed_ms={} host_boundary={}",
+            started.elapsed().as_millis(),
+            boundary.is_some()
+        );
     }
 
     /// Uses real Docker, with one test-process-only wrapper refusing the

@@ -102,6 +102,12 @@ pub(crate) fn admit_with_model_delivery(
     browser: Option<&BrowserVerification>,
     delivers_model_sets: bool,
 ) -> Option<AttemptFailure> {
+    if spec.derivation.native_surface.is_some() {
+        return refused(
+            "native_surface_unavailable",
+            "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
+        );
+    }
     // No entry into this attempt path measures its host against a route's
     // host condition, so none may run such a route. The route is not wrong;
     // it is unverified here, and only a Runner admitted against the condition

@@ -70,6 +70,8 @@ fn profile(temp: &Path) -> GuestPhysicalBuildProfile {
     fs::write(&kernel, b"kernel").unwrap();
     fs::write(&mke2fs, b"tool").unwrap();
     GuestPhysicalBuildProfile {
+        stdio_mode: StdioMode::Log,
+        pixel_surface: None,
         base_image: "docker.io/library/python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         guest_agent: agent,
         kernel,
@@ -122,5 +124,62 @@ fn init_uses_semantic_relay_and_zero_binding_supervisor() -> Result<()> {
     let supervisor = supervisor_config(&plan)?;
     assert!(supervisor.bindings_env.is_empty());
     assert!(supervisor.services.is_empty());
+    Ok(())
+}
+
+#[test]
+fn native_materialization_keeps_computation_and_workspace_identity() -> Result<()> {
+    let (objects, target) = fixture()?;
+    let temp = tempfile::tempdir()?;
+    let baseline = derive_guest_build_plan(&target, &objects, &profile(temp.path()))?;
+    assert!(
+        serde_json::to_value(&baseline)?
+            .get("pixel_surface")
+            .is_none()
+    );
+    assert!(serde_json::to_value(&baseline)?.get("stdio_mode").is_none());
+    let mut native = profile(temp.path());
+    native.pixel_surface = Some(PixelProducerConfig {
+        width: 1280,
+        height: 720,
+        rfb_port: 5900,
+        display: 99,
+    });
+    let gui = derive_guest_build_plan(&target, &objects, &native)?;
+    assert_eq!(gui.target_computation_ref, baseline.target_computation_ref);
+    assert_eq!(gui.workspace, baseline.workspace);
+    assert_eq!(gui.processes, baseline.processes);
+    assert_eq!(supervisor_config(&gui)?.pixel_surface, native.pixel_surface);
+    assert!(
+        init_script(&gui).contains("tcp-relay --listen-guest-port 5900 --target 127.0.0.1:5900")
+    );
+    assert!(dockerfile(&gui.base_image, true).contains("command -v Xtigervnc"));
+    native.pixel_surface = None;
+    native.stdio_mode = StdioMode::Pty;
+    let tui = derive_guest_build_plan(&target, &objects, &native)?;
+    assert_eq!(supervisor_config(&tui)?.stdio_mode, StdioMode::Pty);
+    assert_eq!(tui.target_computation_ref, baseline.target_computation_ref);
+    Ok(())
+}
+
+#[test]
+fn native_profile_refuses_conflicting_surfaces_and_relay_ports() -> Result<()> {
+    let (objects, target) = fixture()?;
+    let temp = tempfile::tempdir()?;
+    let mut native = profile(temp.path());
+    native.pixel_surface = Some(PixelProducerConfig {
+        width: 1280,
+        height: 720,
+        rfb_port: 5900,
+        display: 99,
+    });
+    native.stdio_mode = StdioMode::Pty;
+    assert!(derive_guest_build_plan(&target, &objects, &native).is_err());
+    native.stdio_mode = StdioMode::Log;
+    let baseline = derive_guest_build_plan(&target, &objects, &native)?;
+    native.pixel_surface.as_mut().unwrap().rfb_port = baseline.http_relays[0].guest_port;
+    assert!(derive_guest_build_plan(&target, &objects, &native).is_err());
+    native.pixel_surface.as_mut().unwrap().width = 0;
+    assert!(derive_guest_build_plan(&target, &objects, &native).is_err());
     Ok(())
 }
