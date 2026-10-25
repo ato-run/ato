@@ -1,0 +1,81 @@
+# A Contract, and one Derivation that proposes a way to reach it.
+#
+# This file is not a software manifest and not a build description. The
+# `[[contract.require]]` block is what this Capsule IS — the observable
+# conditions that decide whether a future computation counts as the same
+# resumable point. Everything else is one route to getting there.
+#
+# Nothing below is inferred. The argv is the launch, exactly as written; the
+# port is declared, not detected; and `[[state]]` exists because this says so —
+# without it `/data` would be scratch space that vanishes when the app sleeps,
+# which is data loss wearing a friendly face.
+schema = "ato.capsule/1"
+
+# ── the route ───────────────────────────────────────────────────────────────
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "python"
+version = "3.12.7"
+
+[[state]]
+id = "app_data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = [
+  "/opt/ato/toolchains/python/3.12.7/bin/python3",
+  "-B", "main.py",
+]
+
+[derive.step.env]
+APP_DB_PATH = "/data/app.sqlite"
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8000
+
+# ── what must be true ───────────────────────────────────────────────────────
+#
+# Deliberately weak about content and strong about availability: this app's
+# notes change every time somebody writes one, so observing the response body
+# would mint a new Capsule on every save. What the author wants preserved is
+# "this app is up and answering", and the source it was formed from.
+
+[[contract.require]]
+id = "app-responds"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+
+[contract.require.expect]
+digest = "capture"
+
+# ── effects ─────────────────────────────────────────────────────────────────
+#
+# Nothing this route does outlives the continuation it produces. Satisfying the
+# same Contract twice and being safe to run twice are different claims, and
+# this is where the second one is made.
+
+[effects]
+default = "pure"

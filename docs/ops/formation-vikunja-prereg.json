@@ -1,0 +1,91 @@
+{
+  "schema": "ato.formation-source-oci-prereg/1",
+  "app": "Vikunja",
+  "fixed_before_execution": true,
+  "recorded": "2026-09-30",
+  "source": {
+    "repo": "https://github.com/go-vikunja/vikunja",
+    "ref": "7b2dddd9133a27539d7e782b795b5e9752040a70",
+    "archive_sha256": "sha256:ca94ccdd17d2acf552a878d317ff88fc4d3265d4277a7027e422a7b3126e826b",
+    "archive_verified": true,
+    "dockerfile": "root Dockerfile (unchanged); three stages: frontendbuilder, apibuilder, final FROM scratch"
+  },
+  "static_facts": {
+    "method": "read from the pinned source and from registry manifests only (no blob bodies); the Dockerfile text is a survey input, never a validator",
+    "syntax_frontend": {
+      "reference": "docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32",
+      "note": "an external BuildKit frontend image; the session has no route for BuildKit to fetch it and it cannot be bound with --build-context"
+    },
+    "base_images": [
+      {
+        "stage": "frontendbuilder",
+        "reference": "node:24.21.0-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1",
+        "note": "same root digest as the node:24-alpine base frozen in WBO run 2 (~/ato-d2/wbo-run-2/base-node.tar); reusable without acquisition"
+      },
+      {
+        "stage": "apibuilder",
+        "reference": "ghcr.io/techknowlogick/xgo:go-1.27.x@sha256:8cc742b41f043a4fd45d2f63f1fcd12cb27949342df09efb5561f2aadfbe6da3",
+        "linux_amd64_manifest": "sha256:897c0323caa7...",
+        "layers": 25,
+        "compressed_bytes": 4161691592,
+        "endpoints": ["ghcr.io (registry and token)", "pkg-containers.githubusercontent.com (blob redirect)"]
+      }
+    ],
+    "build_egress_hosts_implied": {
+      "frontendbuilder": ["registry.npmjs.org (npm install -g corepack; corepack's pnpm; pnpm install --frozen-lockfile)"],
+      "apibuilder": ["proxy.golang.org and sum.golang.org (go install github.com/magefile/mage@latest, an unpinned version; Go module download)", "hosts the Go proxy redirects to were not determined"]
+    },
+    "build_args": "RELEASE_VERSION has no default in the apibuilder stage; with no build args mage falls back to `git describe`, and the source archive has no .git",
+    "final_image": {
+      "base": "scratch",
+      "working_dir": "/app/vikunja",
+      "entrypoint": ["/app/vikunja/vikunja"],
+      "cmd": "none (the root command with no arguments runs the web server)",
+      "expose": ["3456/tcp"],
+      "user": "1000",
+      "volumes": "none declared",
+      "writable_paths_by_default": ["/db/vikunja.db (VIKUNJA_DATABASE_PATH)", "/app/vikunja/files (files.basepath relative to service.rootpath)"],
+      "file_capabilities": "none expected (no setcap; FROM scratch)"
+    },
+    "declared_transport_port": 3456
+  },
+  "functional_checks_if_executed": {
+    "K": "authored K: GET / on app.http = 200 (typed K only)",
+    "D_application_operation": [
+      "POST /api/v1/register {username: ato-probe, email: ato-probe@example.invalid, password: fixed 24-character value} -> 200 (service.enableregistration defaults to true)",
+      "POST /api/v1/login {username, password} -> 200 with token",
+      "PUT /api/v1/projects {title: ato-probe-project} with Bearer token -> project id",
+      "PUT /api/v1/projects/{id}/tasks {title: ato-probe-task-1} -> task id",
+      "GET /api/v1/tasks/{task id} -> title == ato-probe-task-1"
+    ],
+    "E_restart_state": [
+      "ato app stop, then ato app start of the same Instance",
+      "POST /api/v1/login -> token",
+      "GET /api/v1/tasks/{task id} -> title == ato-probe-task-1"
+    ],
+    "success_levels": {"A_to_C": "typed-K success", "D": "functional success", "E": "retention success"}
+  },
+  "approved_policy_for_comparison": {
+    "source": "WBO approval (2026-09-30), which is specific to WBO and not a Vikunja approval",
+    "base_acquisition_max_bytes": 209715200,
+    "transfer_total_bytes": 524288000,
+    "job_disk_bytes": 5368709120,
+    "archive_max_bytes": 536870912,
+    "acquisition_endpoints": ["registry-1.docker.io", "auth.docker.io", "production.cloudfront.docker.com"]
+  },
+  "verdict_before_execution": {
+    "executed": false,
+    "reason": "Vikunja's pinned inputs exceed the approved bounds and endpoints before any build. Running it would need a new explicit network and size approval; allowlists and bounds are not widened in response to what is observed.",
+    "blockers": [
+      {"code": "base_acquisition_bound", "fact": "xgo linux/amd64 is 4,161,691,592 compressed bytes: over the 200 MiB acquisition bound and 500 MiB transfer total. Expanded job disk usage is unmeasured; compressed size alone does not establish exceeding 5 GiB."},
+      {"code": "base_registry_unapproved", "fact": "ghcr.io and pkg-containers.githubusercontent.com are not approved acquisition endpoints, and acquire_base supports docker.io only"},
+      {"code": "external_frontend_image", "fact": "the # syntax= frontend image is an external input the session cannot supply to BuildKit"},
+      {"code": "build_egress_unapproved", "fact": "Go module proxy hosts would be needed; mage@latest is unpinned"},
+      {"code": "build_arg_required", "fact": "without a RELEASE_VERSION build arg, mage runs git describe on a source archive without .git"},
+      {"code": "profile_argv_required", "fact": "the final image has ENTRYPOINT only; the OCI profile requires argv (source_oci_cmd_absent)"},
+      {"code": "state_not_declared", "fact": "writable /db and /app/vikunja/files are not image VOLUMEs; the exact VOLUME=state rule has nothing to authorize, and a read-only root cannot write them"}
+    ],
+    "functional_success": 0
+  },
+  "not_done": ["no build or run", "no allowlist or bound change", "no source or Dockerfile change", "no deploy, no remote migration, no model call; #1421 untouched"]
+}

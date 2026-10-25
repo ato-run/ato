@@ -1,0 +1,55 @@
+{
+  "schema": "ato.formation-producer-isolation-os-fixture/1",
+  "measurement_id": "session-private-capability-os-20261004-final",
+  "execution_pin": "45926a272d0cd5686afd28fe900f8253fe749d9b",
+  "public_package_sha256": "04084e172cfc100a0b781280baadd0fb7f53af76c002ab2ed1244c402f434d88",
+  "environment": {
+    "platform": "macOS-15.8.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64"
+  },
+  "runner_sha256": "28822c2a424fc5bd783e786c032a2d63dca0123aab7f12e735b7128ac3f64dc4",
+  "profile_sha256": "c2940ff8805f640c2c1c2374533fabd9985bc0291d8e9d1f4f9dbd3673923e34",
+  "checks": {
+    "public_skill_read": true,
+    "public_skill_write_denied": true,
+    "private_classes_read_denied": true,
+    "private_classes_write_denied": true,
+    "scratch_write": true,
+    "symlink_escape_denied": true,
+    "fork_inherits_denial": true,
+    "source_direct_launch_denied": true,
+    "shell_exec_denied": true,
+    "security_exec_denied": true,
+    "curl_exec_denied": true,
+    "docker_unix_socket_denied": true,
+    "arbitrary_tcp_denied": true
+  },
+  "private_fixture_classes": [
+    "source",
+    "owner-credential",
+    "session-capability",
+    "private-grant",
+    "runtime-ticket",
+    "state-db",
+    "old-measurements",
+    "credential-store-file"
+  ],
+  "private_fixture_class_count": 8,
+  "fixture_canary_output_exposure": false,
+  "captured_output_sha256": "6679a43acaca9b6a87e62f05ff88100246233db06fd76bb9e2bc4efd730f89a6",
+  "captured_output_bytes": 382,
+  "auth_IPC_rules_prepared": [
+    "com.apple.secd",
+    "com.apple.SecurityServer"
+  ],
+  "native_auth_IPC_invoked": false,
+  "native_agent_tool_inventory_measured": false,
+  "native_acceptance_ready": false,
+  "Source_or_owner_credentials_read": false,
+  "Formation_searches": 0,
+  "Formation_inference_dispatches": 0,
+  "paid_API_calls": 0,
+  "real_Runtime_attempts": 0,
+  "agent_internal_LLM_calls": "unknown",
+  "agent_internal_cost": "unknown"
+}

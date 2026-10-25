@@ -1,0 +1,996 @@
+{
+  "schema": "ato.formation-v0-staging-acceptance/1",
+  "measurement_id": "formation-v0-staging-control-20261005-04",
+  "complete": false,
+  "pins": {
+    "Ato": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+    "API_main": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+    "API_deployed_including_Compute_overlay": "285d5f7684bb4dcba2cdd5111d6a8e191ff18343",
+    "API_Worker": "ac8baf2d-8c66-43c9-a6bd-49876d3d6349",
+    "PWA_main": "ddb0667619617b564375aff7334f2c3fdaa52799",
+    "PWA_deployed_including_Compute_overlay": "37356cb9c808a9cb0b3193cf74c80a748d73a61b",
+    "PWA_Worker": "ca3695a7-4045-4e0c-b7d8-c65ad0cf6cd4",
+    "authority_WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635"
+  },
+  "Native": {
+    "agent": "codex",
+    "version": "0.160.0",
+    "fresh_context": true,
+    "known_D_seed": false,
+    "campaign_limits": {
+      "schema": "ato.native-acceptance-campaign/1",
+      "measurement_id": "formation-v0-staging-control-20261005-04",
+      "initial_campaign": true,
+      "authorization": "Explicit Formation v0 staging E2E and automatic additional Native scope authorization; production gate remains separate",
+      "purpose": "short real Native Session/Skill + successful Source anchor for explicit functional state verification",
+      "aggregate_ceiling": {
+        "searches": 1,
+        "D_rounds": 3,
+        "exchanges": 6,
+        "Runtime_attempts": 3,
+        "inspections": 3,
+        "sequential_elapsed_seconds": 2100
+      },
+      "Source": {
+        "files": [
+          {
+            "path": "README.md",
+            "sha256": "80f8594cc71dfb8571e93fe4c831d4b4c22811f003646433cdd74a3262e51a27"
+          },
+          {
+            "path": "package.json",
+            "sha256": "b818e1410a18bd8c511c59ad3da29b65b020bd1c2e9df78b20bcd69136faee54"
+          },
+          {
+            "path": "server.js",
+            "sha256": "c718676181e46c7a5d66f29aa3bc40dd819a0757d1a6d54eed88e846357b7828"
+          }
+        ]
+      },
+      "prerequisites": [
+        "merged final integration code",
+        "all three OS integration CI",
+        "staging D1 backup and migration preservation",
+        "staging API deploy and active version verification",
+        "same authorized staging account and normal runner registration"
+      ],
+      "execution_permitted": true,
+      "known_D_seed": false,
+      "old_Native_13_12_modified": false,
+      "direct_API_ledger_modified": false,
+      "execution_pins": {
+        "Ato_main": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "API_main": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+        "API_staging_combined": "285d5f7684bb4dcba2cdd5111d6a8e191ff18343",
+        "API_version": "ac8baf2d-8c66-43c9-a6bd-49876d3d6349",
+        "PWA_staging_combined": "37356cb9c808a9cb0b3193cf74c80a748d73a61b",
+        "Runtime_facts_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc",
+        "WASM_sha256": "af9e50c353fd97f60b253b9e3ee3915d443bdda48b757e2a67130c11d3569635"
+      },
+      "previous_rejected_start": {
+        "measurement_id": "formation-v0-staging-control-20261005-01",
+        "ledger_sha256": "6d64a81c702cee7100af3513f77a6c09a52dd58462f7e163088917dc09c3c5d3",
+        "status": "CLI_config_rejected_before_Source_preparation_or_API_request",
+        "Search_created": false,
+        "Native_started": false,
+        "old_start_reservation_not_reused": true
+      },
+      "previous_measured_infrastructure_failure": {
+        "measurement_id": "formation-v0-staging-control-20261005-02",
+        "report_sha256": "9f253d01274e95e58ade6a0a1750eba7089acc58696de2e67e2717161d3e4772",
+        "Source_Search_preserved": "search_f7fc2274f559d0e73313a490ce00f3b4",
+        "ACK_closed": true,
+        "workload_never_started": true,
+        "condition_changed": "Runtime work-root shortened; real AF_UNIX bind/connect tested at >= actual phase socket lengths",
+        "new_context_and_no_D_seed": true
+      },
+      "explicit_owner_scope": {
+        "basis": "Human requested controlled Source fresh PASS and state create/commit/reopen acceptance; no Source-text-derived authorization",
+        "authority_added": {
+          "phase": "runtime",
+          "protocol": "ato.state.filesystem@1",
+          "resource": "data",
+          "operation": "create"
+        },
+        "previous_Search_unchanged": "search_13f52e6cdfd2c464cc072e4cdad94a7a",
+        "previous_terminal_report_sha256": "fef79f322a053f9fc8a270042efc430f97caf4cc55075358231db6b0041d437c",
+        "not_a_resume_or_budget_reset": true
+      }
+    },
+    "usage": {
+      "Ato_direct_LLM_calls": 0,
+      "internal_LLM_calls": "unknown",
+      "token_usage": "unknown",
+      "cost": "unknown",
+      "SDK_reported_usage": {
+        "scope": "native context; SDK reported counters only",
+        "internal_LLM_calls": "unknown",
+        "account_charge_usd": "unknown",
+        "last_cumulative_tokens": {
+          "totalTokens": 202059,
+          "inputTokens": 200643,
+          "cachedInputTokens": 168960,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 1416,
+          "reasoningOutputTokens": 15
+        },
+        "coverage": "last SDK update; update events are not LLM calls"
+      }
+    },
+    "progress": {
+      "ACK": "unknown; reconcile the owner and Runtime evidence",
+      "approval": "not_assessed",
+      "attempts": [
+        {
+          "attempt_id": "01M46D0BAYRGB5ANXY7RAY0RTN",
+          "candidate_stop": "confirmed",
+          "cleanup_state": "succeeded",
+          "derivation_ref": "sha256:f6003b2bdd352f3f655bad41dc2e8c0f82944d8b895333eb646f0d360eda932a",
+          "execution_started": true,
+          "finished_at": "2026-10-05T16:05:52.385Z",
+          "status": "pass"
+        }
+      ],
+      "cleanup": "not_confirmed",
+      "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+      "deployed": false,
+      "execution_pin": {
+        "git_commit": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+        "git_dirty": "false",
+        "profile": "debug",
+        "version": "0.7.9"
+      },
+      "execution_stop_confirmed": null,
+      "input_cleanup": null,
+      "input_requirements": [],
+      "pause_reason": null,
+      "receipt": {
+        "attempt_id": "01M46D0BAYRGB5ANXY7RAY0RTN",
+        "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+        "derivation_ref": "sha256:f6003b2bdd352f3f655bad41dc2e8c0f82944d8b895333eb646f0d360eda932a",
+        "fully_satisfied": true,
+        "receipt_sha256": "sha256:7f4c949cdecde0e8fe72d0989f49b7c81d9a2080b8a6abd61109cccaa73d5bb5",
+        "status": "k_reached_awaiting_assessment"
+      },
+      "rounds_consumed": 2,
+      "search_budget": {
+        "attempts": {
+          "max": 3,
+          "remaining": 2,
+          "reserved": 0,
+          "used": 1
+        },
+        "expanded_bytes": {
+          "max": 134217728,
+          "remaining": 134214870,
+          "reserved": 0,
+          "used": 2858
+        },
+        "stored_bytes": {
+          "max": 134217728,
+          "remaining": 134211584,
+          "reserved": 0,
+          "used": 6144
+        },
+        "transfer_bytes": {
+          "max": 67108864,
+          "remaining": 67102208,
+          "reserved": 0,
+          "used": 6656
+        }
+      },
+      "status": "satisfied",
+      "termination_reason": "submitted",
+      "unresolved_attempts": 0
+    },
+    "deadline_ms": 1791218062126,
+    "exchange_used": 2,
+    "aggregate_start_audit": {
+      "schema": "ato.native-acceptance-start-admission/1",
+      "measurement_id": "formation-v0-staging-control-20261005-04",
+      "used": {
+        "D_rounds": 2,
+        "exchanges": 2,
+        "Runtime_attempts": 1,
+        "inspections": 0,
+        "sequential_elapsed_seconds": 126,
+        "searches": 1
+      },
+      "held": {
+        "D_rounds": 0,
+        "exchanges": 0,
+        "Runtime_attempts": 0,
+        "inspections": 0,
+        "sequential_elapsed_seconds": 0,
+        "searches": 0
+      },
+      "requested": {},
+      "exceeded": {},
+      "admitted": true,
+      "direct_API_ledger_modified": false
+    }
+  },
+  "Source_Result": {
+    "schema": "ato.formation-source-result-view/1",
+    "source_result_ref": "sha256:263356d33e2b668691f0308fafa614a1cf3d50e04ccbc024042f168634b40281",
+    "search_id": "search_0f7f24afbd134a87136bebaca8d554da",
+    "attempt_id": "01M46D0BAYRGB5ANXY7RAY0RTN",
+    "source_closure_ref": "sha256:b9db4119bba874e6777fc4fe0c5bb6d40e6b85d68d6a6d471f30227a704f12b5",
+    "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "derivation_ref": "sha256:f6003b2bdd352f3f655bad41dc2e8c0f82944d8b895333eb646f0d360eda932a",
+    "retained_ref": "sha256:63e086d9ec91bf3db656fb4abd02d191342be730e642bcbb9800ce753b257955",
+    "runtime_id": "01M46ATG90JMZ3XDQ7005ZFEXT",
+    "environment_id": "native",
+    "capability_profile_ref": "sha256:a622612573c85d3c6807d4ca974f2fc008f904f7ae15ee836808d206befe83dc",
+    "target_triple": "aarch64-unknown-linux-gnu",
+    "permission": "functional_verification_required"
+  },
+  "functional_registration": {
+    "id": "frreg_01M46D3T2TWGF5VAME23FJQ48G",
+    "instance_id": "cinst_01M46D3TBJ83BG55ZYRV1XT4CA",
+    "schema_id": "csch_01M46D3T2T6DZSMQ1ZGPYFMB0F",
+    "replay_same_identity": true,
+    "manual_Source_Instance_or_private_dispatch": false
+  },
+  "functional_A": {
+    "metadata": {
+      "ack": "unknown",
+      "compute_instance_id": "cinst_01M46D3TBJ83BG55ZYRV1XT4CA",
+      "compute_schema_id": "csch_01M46D3T2T6DZSMQ1ZGPYFMB0F",
+      "lease_id": "flease_01M46D3XBHDR0Q80ZP07VHHC6S",
+      "registration_id": "frreg_01M46D3T2TWGF5VAME23FJQ48G",
+      "run_id": "frun_01M46D3XBH6BDJ3DD98XW50SDQ",
+      "satisfy_id": "01M46D403C5MESZZF71WP5EHEP",
+      "search_id": "search_release_staging_20261005_04_A",
+      "status": "running"
+    },
+    "outcome": "pass",
+    "receipts": [
+      {
+        "kind": "http_contract",
+        "verification": {
+          "verdicts": [
+            {
+              "id": "root",
+              "outcome": {
+                "result": "satisfied"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "contract_verification",
+        "receipt": {
+          "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+          "derivation_ref": "sha256:f6003b2bdd352f3f655bad41dc2e8c0f82944d8b895333eb646f0d360eda932a",
+          "execution": {
+            "attempt_id": "01M46D423A2RJQ7KZ9M4T0JMWQ",
+            "endpoint": "http://127.0.0.1:3000/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M46D403C5MESZZF71WP5EHEP"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:a2128edc6db6899e998617ca35706446bc50870822bad9c72698f3ac46668093",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      },
+      {
+        "kind": "functional_state_outcome",
+        "run_id": "frun_01M46D3XBH6BDJ3DD98XW50SDQ",
+        "states": [
+          {
+            "parent_revision_ref": null,
+            "revision_ref": "isrev_01M46DDW5C2APS9QAWTPS1YXJS",
+            "state_key": "data",
+            "writer_fence": 1
+          }
+        ],
+        "status": "committed"
+      },
+      {
+        "kind": "functional_http_observations",
+        "observations": [
+          {
+            "guard": false,
+            "observation": {
+              "kind": "request_template",
+              "template": {
+                "json_bindings": {
+                  "value": "CONTROL_ITEM"
+                },
+                "method": "POST",
+                "path": "/items"
+              }
+            },
+            "operation_index": 0,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "kind": "response_status",
+              "status": 201
+            },
+            "operation_index": 0,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "check": {
+                "binding": "EXPECTED_COUNT",
+                "json_pointer": "/count",
+                "scalar": "integer"
+              },
+              "kind": "response_check",
+              "matched": true
+            },
+            "operation_index": 0,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "kind": "request_template",
+              "template": {
+                "json_bindings": {},
+                "method": "GET",
+                "path": "/items"
+              }
+            },
+            "operation_index": 1,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "kind": "response_status",
+              "status": 200
+            },
+            "operation_index": 1,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "check": {
+                "binding": "CONTROL_ITEM",
+                "json_pointer": "/items/0",
+                "scalar": "string"
+              },
+              "kind": "response_check",
+              "matched": true
+            },
+            "operation_index": 1,
+            "port": "app.http"
+          }
+        ]
+      },
+      {
+        "kind": "exploration_phase_timings",
+        "phases": [
+          {
+            "elapsed_ms": 1312,
+            "phase": "source",
+            "started_at_ms": 1791216456272
+          },
+          {
+            "elapsed_ms": 395,
+            "phase": "source",
+            "started_at_ms": 1791216772319
+          },
+          {
+            "elapsed_ms": 2,
+            "phase": "source",
+            "started_at_ms": 1791216772719
+          },
+          {
+            "elapsed_ms": 53,
+            "phase": "launch",
+            "started_at_ms": 1791216772721
+          },
+          {
+            "elapsed_ms": 16,
+            "phase": "verification",
+            "started_at_ms": 1791216772775
+          },
+          {
+            "elapsed_ms": 0,
+            "phase": "cleanup",
+            "started_at_ms": 1791216777699
+          }
+        ]
+      }
+    ],
+    "ACK_accepted": true,
+    "delivery_closed": true
+  },
+  "functional_B": {
+    "metadata": {
+      "ack": "unknown",
+      "compute_instance_id": "cinst_01M46D3TBJ83BG55ZYRV1XT4CA",
+      "compute_schema_id": "csch_01M46D3T2T6DZSMQ1ZGPYFMB0F",
+      "lease_id": "flease_01M46DG8RRJ4X4QG962H1GK6X7",
+      "registration_id": "frreg_01M46D3T2TWGF5VAME23FJQ48G",
+      "run_id": "frun_01M46DG8RR6AYD3HVCN2JA1PBR",
+      "satisfy_id": "01M46DGAW9VMY535H189GKJK2C",
+      "search_id": "search_release_staging_20261005_04_B",
+      "status": "running"
+    },
+    "outcome": "pass",
+    "receipts": [
+      {
+        "kind": "http_contract",
+        "verification": {
+          "verdicts": [
+            {
+              "id": "root",
+              "outcome": {
+                "result": "satisfied"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "contract_verification",
+        "receipt": {
+          "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+          "derivation_ref": "sha256:f6003b2bdd352f3f655bad41dc2e8c0f82944d8b895333eb646f0d360eda932a",
+          "execution": {
+            "attempt_id": "01M46DGCHAGF2E5F06ZZZ679MZ",
+            "endpoint": "http://127.0.0.1:3000/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M46DGAW9VMY535H189GKJK2C"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:a2128edc6db6899e998617ca35706446bc50870822bad9c72698f3ac46668093",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      },
+      {
+        "kind": "functional_state_outcome",
+        "run_id": "frun_01M46DG8RR6AYD3HVCN2JA1PBR",
+        "states": [
+          {
+            "parent_revision_ref": "isrev_01M46DDW5C2APS9QAWTPS1YXJS",
+            "revision_ref": "isrev_01M46DGMSV9SY243959VF3WCYZ",
+            "state_key": "data",
+            "writer_fence": 2
+          }
+        ],
+        "status": "committed"
+      },
+      {
+        "kind": "functional_http_observations",
+        "observations": [
+          {
+            "guard": false,
+            "observation": {
+              "kind": "request_template",
+              "template": {
+                "json_bindings": {},
+                "method": "GET",
+                "path": "/items"
+              }
+            },
+            "operation_index": 0,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "kind": "response_status",
+              "status": 200
+            },
+            "operation_index": 0,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "check": {
+                "binding": "CONTROL_ITEM",
+                "json_pointer": "/items/0",
+                "scalar": "string"
+              },
+              "kind": "response_check",
+              "matched": true
+            },
+            "operation_index": 0,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "kind": "request_template",
+              "template": {
+                "json_bindings": {},
+                "method": "DELETE",
+                "path": "/items"
+              }
+            },
+            "operation_index": 1,
+            "port": "app.http"
+          },
+          {
+            "guard": false,
+            "observation": {
+              "kind": "response_status",
+              "status": 200
+            },
+            "operation_index": 1,
+            "port": "app.http"
+          }
+        ]
+      },
+      {
+        "kind": "exploration_phase_timings",
+        "phases": [
+          {
+            "elapsed_ms": 1316,
+            "phase": "source",
+            "started_at_ms": 1791216858850
+          },
+          {
+            "elapsed_ms": 385,
+            "phase": "source",
+            "started_at_ms": 1791216862107
+          },
+          {
+            "elapsed_ms": 849,
+            "phase": "source",
+            "started_at_ms": 1791216862493
+          },
+          {
+            "elapsed_ms": 3,
+            "phase": "source",
+            "started_at_ms": 1791216863350
+          },
+          {
+            "elapsed_ms": 55,
+            "phase": "launch",
+            "started_at_ms": 1791216863353
+          },
+          {
+            "elapsed_ms": 13,
+            "phase": "verification",
+            "started_at_ms": 1791216863408
+          },
+          {
+            "elapsed_ms": 0,
+            "phase": "cleanup",
+            "started_at_ms": 1791216868978
+          }
+        ]
+      }
+    ],
+    "ACK_accepted": true,
+    "delivery_closed": true,
+    "scoped_input_reused_without_reinput": true
+  },
+  "state": {
+    "slots": [
+      {
+        "id": "isslot_01M46D3XHDT7ESJFPW7QY27D9Y",
+        "state_key": "data",
+        "head_revision_id": "isrev_01M46DGMSV9SY243959VF3WCYZ",
+        "writer_epoch": 2,
+        "active_writer_run_id": null,
+        "quarantined_run_id": null,
+        "storage_mode": "revision"
+      }
+    ],
+    "run_states": [
+      {
+        "run_id": "frun_01M46D3XBH6BDJ3DD98XW50SDQ",
+        "state_key": "data",
+        "state_slot_id": "isslot_01M46D3XHDT7ESJFPW7QY27D9Y",
+        "writer_fence": 1,
+        "start_revision_id": null,
+        "status": "committed",
+        "created_at": "2026-10-05 16:07:29",
+        "updated_at": "2026-10-05T16:12:57.132Z",
+        "reclaimed_at": null,
+        "volume_ref": null
+      },
+      {
+        "run_id": "frun_01M46DG8RR6AYD3HVCN2JA1PBR",
+        "state_key": "data",
+        "state_slot_id": "isslot_01M46D3XHDT7ESJFPW7QY27D9Y",
+        "writer_fence": 2,
+        "start_revision_id": "isrev_01M46DDW5C2APS9QAWTPS1YXJS",
+        "status": "committed",
+        "created_at": "2026-10-05 16:14:13",
+        "updated_at": "2026-10-05T16:14:28.359Z",
+        "reclaimed_at": null,
+        "volume_ref": null
+      }
+    ],
+    "leases": [
+      {
+        "id": "flease_01M46D3XBHDR0Q80ZP07VHHC6S",
+        "status": "stopped"
+      },
+      {
+        "id": "flease_01M46DG8RRJ4X4QG962H1GK6X7",
+        "status": "stopped"
+      }
+    ],
+    "foreign_key_violations": 0
+  },
+  "PWA_input_revoke_reinput": {
+    "schema": "ato.formation-staging-PWA-input-acceptance/1",
+    "search_id": "search_release_staging_20261005_04_A",
+    "mocked_API_responses": false,
+    "owner_device_auth_injected_only_at_exact_API_origin": true,
+    "input_values_exported": false,
+    "original_deadline_preserved": true,
+    "completed": true,
+    "original_deadline_at_ms": 1791218239112,
+    "initial_attempt_budget": {
+      "max": 1,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 0
+    },
+    "revoke_status": 204,
+    "confirmed_inputs_cleared": true,
+    "fresh_nonce_after_revoke": true,
+    "registration_ids": [
+      "input_88d76dc82cb9124feeff1c0a0405eef03de2372406d0365ba708da2ab32eb930",
+      "input_9267fe384dcef6da82a516b523c5d920cb89a4712fba5e5b31c502398dea71d5",
+      "input_414fca86aada44a3f7dd379fca79dbeab05899e4154bb8786633e2c6c70a75fe"
+    ],
+    "revoked_ids": [
+      "input_88d76dc82cb9124feeff1c0a0405eef03de2372406d0365ba708da2ab32eb930"
+    ],
+    "registration_request_id_hashes": [
+      "1545b52f69a47f7a01843e2c9e0eaa0edb8d7c36b8aef4599614d6fcd78b826e",
+      "13dbc9cb502298b41d282e603410a8613aacb458b220895503a439a377cfe136",
+      "bbaf0af5d6f1af6e4e6554be444515d4281171eeadbdf2024a845727e7ebb34e"
+    ],
+    "actual_API_request_origin": "https://staging.api.ato.run"
+  },
+  "PWA_first_rejection": {
+    "schema": "ato.formation-staging-PWA-input-acceptance/1",
+    "search_id": "search_release_staging_20261005_04_A",
+    "mocked_API_responses": false,
+    "owner_device_auth_injected_only_at_exact_API_origin": true,
+    "input_values_exported": false,
+    "original_deadline_preserved": false,
+    "completed": false,
+    "original_deadline_at_ms": 1791218239112,
+    "initial_attempt_budget": {
+      "max": 1,
+      "used": 1,
+      "reserved": 0,
+      "remaining": 0
+    },
+    "error_category": "real_input_registration_rejected",
+    "registration_ids": [
+      "input_6cfafc99a6672901c37d8387aa5b5ab2934210038b7a39df9604154a06e4dac2"
+    ],
+    "revoked_ids": [
+      "input_6cfafc99a6672901c37d8387aa5b5ab2934210038b7a39df9604154a06e4dac2"
+    ]
+  },
+  "PWA_first_rejection_cause": "not captured; same Search succeeded on separate real-browser verification; original failed record retained",
+  "ordinary_Run_guard": {
+    "name": "ordinary_Run",
+    "status": 409,
+    "error": "source_result_functional_only"
+  },
+  "publication_and_fork_guard": {
+    "schema": "ato.formation-staging-publication-guard/1",
+    "origin": "https://stg-app.ato.run",
+    "checks": [
+      {
+        "name": "public_shared_instance",
+        "status": 409,
+        "error": "source_result_functional_only"
+      },
+      {
+        "name": "public_separate_copy",
+        "status": 409,
+        "error": "source_result_functional_only"
+      },
+      {
+        "name": "install_shared_instance",
+        "status": 409,
+        "error": "source_result_functional_only"
+      },
+      {
+        "name": "install_separate_copy",
+        "status": 409,
+        "error": "source_result_functional_only"
+      }
+    ],
+    "passed": true
+  },
+  "owner_input_cleanup": {
+    "schema": "ato.formation-owner-input-cleanup/1",
+    "owned_metadata_count": 4,
+    "active_before": 2,
+    "revoked": [
+      {
+        "id": "input_414fca86aada44a3f7dd379fca79dbeab05899e4154bb8786633e2c6c70a75fe",
+        "status": 204
+      },
+      {
+        "id": "input_9267fe384dcef6da82a516b523c5d920cb89a4712fba5e5b31c502398dea71d5",
+        "status": 204
+      }
+    ],
+    "active_after": 0,
+    "passed": true
+  },
+  "secret_scan": {
+    "schema": "ato.formation-release-secret-scan/1",
+    "secret_categories": [
+      "private_control_canaries",
+      "owner_device_credential",
+      "Runtime_credential_if_present",
+      "private_relay_or_Bridge_capability"
+    ],
+    "tested_secret_count": 6,
+    "target_count": 25,
+    "retained_content_identity_matches": true,
+    "hits": [],
+    "passed": true,
+    "private_Runtime_binding_and_state_values_excluded_from_public_projection_scan": true,
+    "universal_owner_tool_non_exposure_claimed": false
+  },
+  "old_production_rollback": {
+    "schema": "ato.formation-old-production-real-DB-rollback/1",
+    "historical_version": "bbb7a674-c635-4ecd-8c81-e091a1456458",
+    "historical_modules_unchanged": true,
+    "staging_backup_sha256": "ed626eb53449e4d8d8ba2f91d7d021db6b7f4ab47f2f17395042956c9c903661",
+    "restore": {
+      "real_Source_Result_row_present": true,
+      "real_functional_Instance_matches": true,
+      "foreign_key_violations": 0,
+      "table_count": 340
+    },
+    "synthetic_identity_rows": false,
+    "remote_mutation": false,
+    "checks": [
+      {
+        "name": "ordinary_Run",
+        "status": 409,
+        "error": "execution_placement_required",
+        "protected_rows_unchanged": true,
+        "safely_rejected": false
+      },
+      {
+        "name": "public_shared_instance",
+        "status": 201,
+        "error": null,
+        "protected_rows_unchanged": false,
+        "safely_rejected": false
+      }
+    ],
+    "health_status": 200,
+    "binary_downgrade_compatible": false,
+    "production_rollback_policy": "feature_stop_and_forward_fix",
+    "remote_outbound_disabled": true,
+    "blocked_outbound_request_count": 0
+  },
+  "prior_measurements": [
+    {
+      "id": "formation-v0-staging-control-20261005-01",
+      "result": "preparation schema failure; no Search/inference",
+      "ledger_preserved": true
+    },
+    {
+      "id": "formation-v0-staging-control-20261005-02",
+      "result": "infrastructure_failure: Unix socket work path exceeded SUN_LEN; no workload",
+      "attempts": 1,
+      "rounds": 2,
+      "exchanges": 2,
+      "reservations": 0
+    },
+    {
+      "id": "formation-v0-staging-control-20261005-03",
+      "result": "needs_input: required data Create outside declared authority; no workload",
+      "attempts": 1,
+      "rounds": 2,
+      "exchanges": 2,
+      "reservations": 0
+    }
+  ],
+  "pending": [
+    "new 100 OSS measurement",
+    "independent API producer plans",
+    "final evidence/RFC merge"
+  ],
+  "historical_campaign_13_over_12_modified": false,
+  "historical_WBO_reexecuted": false,
+  "production_changed": false,
+  "ordinary_Run_or_publication_authorized": false,
+  "cleanup": {
+    "Native": {
+      "schema": "ato.formation-owner-Native-cleanup/1",
+      "bridge_pid_identity_checked": true,
+      "bridge_alive": false,
+      "only_native_auth_symlink_removed": false,
+      "original_account_auth_file_deleted": false,
+      "Native_exit_code": 0,
+      "terminal_snapshot_and_budget_audit_preserved": true,
+      "own_auth_symlinks_removed": 1,
+      "remaining_own_auth_symlinks": 0,
+      "Native_exit_record": {
+        "native_owner_exit": 0,
+        "measurement_id": "formation-v0-staging-control-20261005-04",
+        "direct_API_calls_started": false,
+        "admitted": true,
+        "Native_exit_code": 0,
+        "Search_reset": false
+      }
+    },
+    "owned_Runtime_manager_stopped": true,
+    "owned_workload_directories": 0,
+    "additional_LLM_exploration_after_Source_PASS": false,
+    "DB_confirmed": [
+      {
+        "encrypted_values": 0,
+        "active_metadata": 0,
+        "active_or_quarantined_writers": 0
+      }
+    ],
+    "temporary_values_encrypted_store_zero": true
+  },
+  "legacy_browser": {
+    "notes_render": false,
+    "notes_frame_flow": {
+      "schema": "ato.formation-existing-app-functional-regression/1",
+      "instance_id": "cinst_01M1XBW8FA4JE7RQJPBQKGSP3M",
+      "new_Instance_created": false,
+      "external_provider_used": false,
+      "completed": false,
+      "PWA_parent_and_real_Instance_frame": true,
+      "phase": "delete_note",
+      "error_category": "TimeoutError",
+      "failure_message_hash": "2b59a65444f980e3bcfcaf7b85d68d96cc6d8abf92e9146f1a60c3061df21e7c"
+    },
+    "own_temporary_note_cleanup": {
+      "schema": "ato.formation-existing-note-cleanup/1",
+      "completed": true,
+      "temporary_note_buttons_before": 0,
+      "temporary_note_buttons_after": 0
+    },
+    "converter": {
+      "schema": "ato.formation-existing-browser-app-regression/1",
+      "instance_id": "cinst_01M1XNEA68BZBG1CYZAK8HMKT8",
+      "new_Instance_created": false,
+      "external_provider_used": false,
+      "completed": false,
+      "owner_auth_checked_at_verified_first_party_static_Instance_gateway": true,
+      "HTTP_status": 200,
+      "final_origin": "https://cinst-7cbpgimlyypcheob.stg-app.ato.run",
+      "title": "no-server-image-converter",
+      "button_count": 2,
+      "textbox_count": 0,
+      "page_error_names": [
+        "Error"
+      ]
+    },
+    "converter_functional": {
+      "schema": "ato.formation-existing-converter-functional-regression/1",
+      "instance_id": "cinst_01M1XNEA68BZBG1CYZAK8HMKT8",
+      "new_Instance_created": false,
+      "external_provider_used": false,
+      "completed": true,
+      "phase": "complete",
+      "converted_archive_bytes": 564,
+      "converted_archive_sha256": "cd7ef68c0ed01e3f97b5419a58d6e8cad8575ccbbc4a0013f39307a0485db4ca",
+      "page_error_categories": [
+        "invalid_window_identity"
+      ]
+    },
+    "bridge_classification": {
+      "schema": "ato.formation-existing-static-bridge-classification/1",
+      "compared_source": [
+        {
+          "path": "src/shared/AtoBrowserBridge.ts",
+          "base": "b9a7f213960bb8bc7fbe0792c1367e10ccf61a4e",
+          "head": "ddb0667619617b564375aff7334f2c3fdaa52799",
+          "base_sha256": "03c73f40e4fe892413e0e55d1211ae2eae355fdaff9a508fa3c991505c06366e",
+          "head_sha256": "03c73f40e4fe892413e0e55d1211ae2eae355fdaff9a508fa3c991505c06366e",
+          "byte_identical": true
+        },
+        {
+          "path": "src/shared/AtoBrowserBridgeBootstrap.ts",
+          "base": "b9a7f213960bb8bc7fbe0792c1367e10ccf61a4e",
+          "head": "ddb0667619617b564375aff7334f2c3fdaa52799",
+          "base_sha256": "8163abd4ba8a8d9dfab90c72ce0fb8748925eded6d43c9f4ec3e31b19a45fdba",
+          "head_sha256": "8163abd4ba8a8d9dfab90c72ce0fb8748925eded6d43c9f4ec3e31b19a45fdba",
+          "byte_identical": true
+        },
+        {
+          "path": "src/components/personal-apps/InstanceAppPage.tsx",
+          "base": "b9a7f213960bb8bc7fbe0792c1367e10ccf61a4e",
+          "head": "ddb0667619617b564375aff7334f2c3fdaa52799",
+          "base_sha256": "dd97c51ad7b6b820fc60e7655db40fcc70b26bb0c55d9602b5c5aeefc76a41f6",
+          "head_sha256": "dd97c51ad7b6b820fc60e7655db40fcc70b26bb0c55d9602b5c5aeefc76a41f6",
+          "byte_identical": true
+        }
+      ],
+      "served_bridge_url": "https://cinst-7cbpgimlyypcheob.stg-app.ato.run/__ato/browser-runner-bridge-v0.1.2.js",
+      "served_bridge_status": 200,
+      "served_bridge_sha256": "202b72a15d7a8882f7054c765925695c94b93dce28e1b19613ab742e15752ac2",
+      "served_bridge_bytes": 34319,
+      "served_bridge_contains_invalid_window_identity": true,
+      "base_browser_execution_performed": false,
+      "functional_converter_report": "legacy-converter-functional-report.json",
+      "functional_ui_pass": true,
+      "console_error": "invalid_window_identity",
+      "classification": "legacy strict peer identity bootstrap present before Formation; functional conversion passed; no clean-console claim",
+      "instance_created_at": "2026-09-07 10:08:24",
+      "source_result_ref": null
+    }
+  },
+  "subsequent_shared_stage_deployment_readback": {
+    "API_code": "b3f8db2856d326e2e924a579d489f95de10378a5",
+    "API_active_Worker": "a7d2be23-41a2-44ea-9e65-84251f27a4bb",
+    "PWA_code": "6571f2435ce68fc3108db2fd1ade7e15af6f0f79",
+    "PWA_Worker": "cde0afd5-9a1e-4171-a07a-000cf9fec2c8",
+    "served_asset": {
+      "url": "https://stg-app.ato.run/assets/index-BeST6ptn.js",
+      "status": 200,
+      "sha256": "00bebc13660e8ad26a02d6e690407ba2397c478e5605345533cdadfb91479e41",
+      "bytes": 997767,
+      "expected_sha_matches": true,
+      "staging_api_marker": true
+    },
+    "historical_measurement_pins_reassigned": false,
+    "scope": "Compute overlay update; Source/functional A/B acceptance remains at its original pins"
+  },
+  "staging_functional_gates": {
+    "real_Native_Source_PASS": true,
+    "Source_Result_registration": true,
+    "functional_state_A_commit_B_restore": true,
+    "PWA_revoke_reinput_resume": true,
+    "legacy_static_converter_functional": true,
+    "legacy_console_known_code_unchanged": true,
+    "base_browser_execution_claimed": false,
+    "shared_global_cleanup_pending": false
+  },
+  "subsequent_shared_safe_checkpoint": {
+    "provider_owned_pods_deleted": 2,
+    "live_provisions": 0,
+    "enrollment_and_Runner_credentials_revoked": true,
+    "independent_Compute_PR_completion_claimed": false
+  }
+}

@@ -6,17 +6,32 @@
 #![forbid(unsafe_code)]
 
 mod bundle;
+mod portable_bundle;
 mod repository;
 
 pub use bundle::{
     BUNDLE_VERSION, BundleError, BundleIndex, BundleMaterialization, BundleObjectDescriptor,
-    BundleObjectKind, CapsuleBundle, ComputationReferences, MaterializationReferences, ObjectLink,
-    ReferenceRegistry, bundle_root, decode_bundle, encode_bundle, export_bundle,
-    export_bundle_with_materializations, import_bundle, sign_bundle,
+    BundleObjectKind, CapsuleBundle, ComputationReferences, GraphMaterialization,
+    GraphObjectDescriptor, GraphObjectKind, GraphRestoreCapability, MaterializationReferences,
+    ObjectGraphClosure, ObjectLink, ReferenceRegistry, bundle_root, decode_bundle, encode_bundle,
+    export_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
+    sign_bundle, verify_declared_object_graph,
+};
+pub use portable_bundle::{
+    CapsuleBundleDocument, CapsuleBundleDocumentError, PORTABLE_APPLICATION_BUNDLE_VERSION,
+    PORTABLE_APPLICATION_BUNDLE_VERSION_V4, PORTABLE_APPLICATION_PROFILE,
+    PORTABLE_APPLICATION_PROFILE_V2, PortableApplicationBundle, PortableBundleError,
+    PortableBundleIndex, PortableBundleObjectDescriptor, PortableBundleObjectKind,
+    PortableBundlePayload, PortableDependencyProfile, PortableDependencyTransport,
+    PortableExternalObject, PortableOciArchive, PortableReferenceExtractor,
+    PortableReferenceRegistry, decode_capsule_bundle_document, decode_portable_application_bundle,
+    encode_portable_application_bundle, reachable_portable_application_objects,
+    validate_portable_application_closure,
 };
 pub use repository::{
-    ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordEnvelope,
-    RecordId, RepositoryError,
+    ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordBodyV2,
+    RecordCandidate, RecordEnvelope, RecordEnvelopeV2, RecordId, RecordIdV2, RepositoryError,
+    decode_record_v2, encode_record_v2,
 };
 
 use std::collections::BTreeMap;

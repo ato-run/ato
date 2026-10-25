@@ -1,0 +1,342 @@
+{
+  "schema": "ato.formation-independent-api-final-comparison/1",
+  "complete": true,
+  "arms": [
+    {
+      "measurement_id": "formation-independent-api-oci-20261006",
+      "arm": "oci",
+      "Source": {
+        "name": "OCI single-service fixture",
+        "archive_sha256": "d089fd97b7d621120aa1854a45e793dcbbe702c8ebada2a55d5ecc623fa920c3",
+        "source_closure_ref": "sha256:2301e60425e27a7d1b1f5b450d2b17d92d5948308bd33d1931d8c20f0b3f9667"
+      },
+      "K_ref": "sha256:e4fa58e07858ae71ce33b07fd016663ab3cb1713584685171dfb9c76f52ba862",
+      "search_id": "search_7e30ee573e229d68fe4786d9f3c97518",
+      "execution_plan_sha256": "dfe3c7d5680e46dd54f884f873e4f6e3865d899a4fac5521612f311a87f8bd8f",
+      "original_prepared_plan": {
+        "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-da7-oci-plan-prepared.json",
+        "sha256": "b2388500a89c7e4a5f3bf7c306fc0be1242a127a748cc1ffad97ae1131754a8b",
+        "preserved": true
+      },
+      "Ato_pin": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+      "API_pin": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+      "binaries": {
+        "ato": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "worker": "aa128aa14b685ee20f71c742423adac0b2aec5c5477c2e517e415bbe491c02bb",
+        "preflight": "368ec816bbf8748ae29b1b3190c1771eeab42643fc6e821d3e1a57444af93ac5"
+      },
+      "known_D_seeded": false,
+      "Native_success_D_seeded": false,
+      "typed_K_PASS": true,
+      "infrastructure_fixture": true,
+      "terminal": {
+        "reason": "submitted",
+        "status": "k_reached_awaiting_assessment",
+        "stopped_at": "2026-10-06T00:46:32.535Z"
+      },
+      "authority_termination_reason": "submitted",
+      "D_rounds": 2,
+      "Runtime_attempts": 1,
+      "attempts": [
+        {
+          "attempt_id": "01M47ASGJZSHAT0J7PPDN47N59",
+          "status": "pass"
+        }
+      ],
+      "receipt": {
+        "contract_ref": "sha256:e4fa58e07858ae71ce33b07fd016663ab3cb1713584685171dfb9c76f52ba862",
+        "derivation_ref": "sha256:1456f7067b5732228a8186d5bbe8acd8d56e04829bcb163a21697cef31932d3c",
+        "execution": {
+          "attempt_id": "01M47ASGJZSHAT0J7PPDN47N59",
+          "container_id": "c82de1cfcba36acbe020725a94c76cb114a91f49e0a37956035a90450e873b17",
+          "embedded_oci_image_loaded": "sha256:4b9ae21caca68860d6130bea2919a29e8144ba8d90178fb9e9798217be0c254c",
+          "image": "ato-source/2301e60425e2@sha256:42598a918c8953b6d0afb2bef48c546726d084f7795aaa8ba07ddd5fe2be1897",
+          "platform": "linux/arm64",
+          "realization": "oci",
+          "request_id": "01M47AS8RMCZC3N71D8QWKMY1N",
+          "runtime_executable": "docker"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f3d152fda847862a626789c9a3717f9ec5218092852f0747803912f6b8f2b668",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:2301e60425e27a7d1b1f5b450d2b17d92d5948308bd33d1931d8c20f0b3f9667",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "D_ref": "sha256:1456f7067b5732228a8186d5bbe8acd8d56e04829bcb163a21697cef31932d3c",
+      "functional_acceptance": "not_measured",
+      "max_calls": 6,
+      "actual_provider_calls": 6,
+      "provider_reported_input_tokens": 38367,
+      "provider_reported_output_tokens": 2577,
+      "conservative_peak_estimated_cost_usd_micros": 14608,
+      "actual_invoice": "unknown",
+      "elapsed_seconds": 36.901,
+      "cleanup": {
+        "Runtime_records": [
+          {
+            "attempt_id": "01M47ASGJZSHAT0J7PPDN47N59",
+            "ACK": true,
+            "closed": true
+          }
+        ],
+        "workload_directories": 0,
+        "unresolved_UNKNOWN": 0,
+        "temporary_inputs": 0,
+        "active_or_quarantined_writer": 0,
+        "reservations": 0,
+        "FK_violations": 0,
+        "owned_processes": 0,
+        "private_capabilities_removed": [
+          "session-token",
+          "runtime-token",
+          "auth.key",
+          "store.key",
+          "owner-email"
+        ],
+        "normal_registered_Runner_revoked": true
+      },
+      "provider_credential_scan": {
+        "actual_provider_credential_components": 1,
+        "producer_tool_and_requester_output_files_scanned": 198,
+        "raw_or_base64_matches": [],
+        "plaintext_or_secret_hash_saved": false,
+        "provider_credential_memory_only": true,
+        "scope": "completed independent producer public/model/tool/requester outputs; not universal owner-tool guarantee"
+      },
+      "owner_secret_scan": {
+        "files_scanned": null,
+        "hits": []
+      },
+      "source_programs_on_owner_host": 0,
+      "ordinary_Run_or_publication_permission_granted": false,
+      "proof_sha256": {
+        "requester.stdout.log": "5c086b18282df31bbdf7a911dc5546399b07c548e4c0cb3095a3dbfe1d284ffa",
+        "authority.final.private.json": "b4da35dcef6fac8623732325bdb40e2ee47588274114a6c8cd6daf7b4cd10fa1",
+        "cleanup.final.json": "bad46be2a28ff6fed1aacfef003e19d02f927850ad4184d5616ea3bd99f7cbda",
+        "provider-credential-secret-scan.json": "76544e540ec3b4a7208bd4a748e36de9061c3107547e56a8523a0fb5a987ee6c",
+        "owner-secret-scan.json": "3bc088b8abfd3e7405296312b1e4dcdaebacfe6ed1d9bab877a8f231dccebe8d",
+        "accounting.final.json": "c52be8f6e4db2863abb8907cecb9087fe89955ac8e79a2084ada6a67c7c3635a"
+      },
+      "owner_harness_cleanup_followup_without_new_execution": false
+    },
+    {
+      "measurement_id": "formation-independent-api-changedetection-20261006",
+      "arm": "changedetection",
+      "Source": {
+        "name": "changedetection.io",
+        "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+        "source_closure_ref": "sha256:5dcc9e34548a7c53e369ef5f0911f46ce3414a93aa1404d32e5e04955de11431"
+      },
+      "K_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+      "search_id": "search_ea6c04ff067f86aeb444f32e223ba423",
+      "execution_plan_sha256": "4df7638b3854169c2b1b6701bd0f1715ffe8d7e95bdcca513d2d525c3ee42aaa",
+      "original_prepared_plan": {
+        "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-da7-changedetection-plan-prepared.json",
+        "sha256": "b62238e35275c41a8faf3aa1a89c1828491e9d195ee03180673fac9ef7d60e96",
+        "preserved": true
+      },
+      "Ato_pin": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+      "API_pin": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+      "binaries": {
+        "ato": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "worker": "aa128aa14b685ee20f71c742423adac0b2aec5c5477c2e517e415bbe491c02bb",
+        "preflight": "368ec816bbf8748ae29b1b3190c1771eeab42643fc6e821d3e1a57444af93ac5"
+      },
+      "known_D_seeded": false,
+      "Native_success_D_seeded": false,
+      "typed_K_PASS": false,
+      "infrastructure_fixture": false,
+      "terminal": {
+        "reason": "no_progress",
+        "status": "not_reached",
+        "stopped_at": "2026-10-06T00:48:07.327Z"
+      },
+      "authority_termination_reason": "no_progress",
+      "D_rounds": 1,
+      "Runtime_attempts": 0,
+      "attempts": [],
+      "receipt": null,
+      "D_ref": null,
+      "functional_acceptance": "not_measured",
+      "max_calls": 6,
+      "actual_provider_calls": 3,
+      "provider_reported_input_tokens": 36802,
+      "provider_reported_output_tokens": 1608,
+      "conservative_peak_estimated_cost_usd_micros": 12972,
+      "actual_invoice": "unknown",
+      "elapsed_seconds": 27.959,
+      "cleanup": {
+        "Runtime_attempts": 0,
+        "unresolved_UNKNOWN": 0,
+        "temporary_inputs": 0,
+        "active_or_quarantined_writer": 0,
+        "reservations": 0,
+        "FK_violations": 0,
+        "Runtime_records": [],
+        "workload_directories": 0,
+        "owned_processes": 0,
+        "private_capabilities_removed": [
+          "session-token",
+          "runtime-token",
+          "auth.key",
+          "store.key",
+          "owner-email"
+        ],
+        "original_cleanup_assertion_preserved": true,
+        "missing_work_directory_is_zero_workloads_with_no_attempt": true,
+        "new_Searches_attempts_and_inference": 0,
+        "authority_termination_reason": "no_progress",
+        "normal_registered_Runner_revoked": true,
+        "aggregate_call_slots": 30,
+        "estimated_cost_usd_micros": 125298,
+        "provider_unsettled": 0
+      },
+      "provider_credential_scan": {
+        "actual_provider_credential_components": 1,
+        "producer_tool_and_requester_output_files_scanned": 47,
+        "raw_or_base64_matches": [],
+        "plaintext_or_secret_hash_saved": false,
+        "provider_credential_memory_only": true,
+        "scope": "completed independent producer public/model/tool/requester outputs; not universal owner-tool guarantee"
+      },
+      "owner_secret_scan": {
+        "files_scanned": null,
+        "hits": []
+      },
+      "source_programs_on_owner_host": 0,
+      "ordinary_Run_or_publication_permission_granted": false,
+      "proof_sha256": {
+        "requester.stdout.log": "7509f0e0c04de29da934bf96c0a03ce57b36bac86c87dc7d6a4a255ef9832e08",
+        "authority.final.private.json": "711921e4ea50b36425fc44418dc2adeb99d73897dac9a372fa9d4726d55f2f60",
+        "cleanup.followup.json": "9caa8cf09aa6899375f7238ddbcff48c79bd6a1117ebbf318a7ed174d7294c03",
+        "provider-credential-secret-scan.json": "01e0f169582b2bef2e4a104077b14bfc1f9fca839c69d2e9b7bf3488ac05ec61",
+        "owner-secret-scan.json": "3987b5497d0c0da2922db59e254533e628166d77c3c5c4d960a8e73b42a47cbf",
+        "accounting.final.json": "ff21ea4f2ac15792afd6c6235407562ae59469b53604212ff78a20c6108951d7"
+      },
+      "owner_harness_cleanup_followup_without_new_execution": true
+    },
+    {
+      "measurement_id": "formation-independent-api-kutt-20261006",
+      "arm": "kutt",
+      "Source": {
+        "name": "Kutt",
+        "archive_sha256": "6fd86408c5ec917506aa0b081e72532dfaf78542855c1b9e1d984c1b6d2f52ae",
+        "source_closure_ref": "sha256:dfaadb8c7df176e72ef6900df8d33b752c2afdafb4b2317752ec647e1a0e5145"
+      },
+      "K_ref": "sha256:2940ae2d3538206497a9cf7fcaf66521556d009b38524679f0643df63a7fc73d",
+      "search_id": "search_935fabd4b11aa98f9b4d87d8bddb0161",
+      "execution_plan_sha256": "5effe65fe4066cb0db1f138d4995ef863050dea17e916e848ff9881292ea4305",
+      "original_prepared_plan": {
+        "path": "/home/ubuntu/formation-foundation/.tmp/formation-v0-20261001/api-final-da7-kutt-plan-prepared.json",
+        "sha256": "3eaef6e041030aa4ad9975e4dc7e8643f3ee59c65501387185001393c2899979",
+        "preserved": true
+      },
+      "Ato_pin": "b61ba2cd9cf8cab20ef57f7a21f7583a696f98c0",
+      "API_pin": "94f864ffd69a3a7c81c1d4caeee0ed389c336251",
+      "binaries": {
+        "ato": "c3c1989c69c2b96a153409f886d5bb77283ae7574eacab123f8557afb7b5065c",
+        "worker": "aa128aa14b685ee20f71c742423adac0b2aec5c5477c2e517e415bbe491c02bb",
+        "preflight": "368ec816bbf8748ae29b1b3190c1771eeab42643fc6e821d3e1a57444af93ac5"
+      },
+      "known_D_seeded": false,
+      "Native_success_D_seeded": false,
+      "typed_K_PASS": false,
+      "infrastructure_fixture": false,
+      "terminal": {
+        "reason": "no_progress",
+        "status": "not_reached",
+        "stopped_at": "2026-10-06T00:51:10.614Z"
+      },
+      "authority_termination_reason": "no_progress",
+      "D_rounds": 1,
+      "Runtime_attempts": 0,
+      "attempts": [],
+      "receipt": null,
+      "D_ref": null,
+      "functional_acceptance": "not_measured",
+      "max_calls": 8,
+      "actual_provider_calls": 3,
+      "provider_reported_input_tokens": 41031,
+      "provider_reported_output_tokens": 2278,
+      "conservative_peak_estimated_cost_usd_micros": 15045,
+      "actual_invoice": "unknown",
+      "elapsed_seconds": 13.805,
+      "cleanup": {
+        "Runtime_records": [],
+        "workload_directories": 0,
+        "unresolved_UNKNOWN": 0,
+        "temporary_inputs": 0,
+        "active_or_quarantined_writer": 0,
+        "reservations": 0,
+        "FK_violations": 0,
+        "owned_processes": 0,
+        "private_capabilities_removed": [
+          "session-token",
+          "runtime-token",
+          "auth.key",
+          "store.key",
+          "owner-email"
+        ],
+        "normal_registered_Runner_revoked": true
+      },
+      "provider_credential_scan": {
+        "actual_provider_credential_components": 1,
+        "producer_tool_and_requester_output_files_scanned": 47,
+        "raw_or_base64_matches": [],
+        "plaintext_or_secret_hash_saved": false,
+        "provider_credential_memory_only": true,
+        "scope": "completed independent producer public/model/tool/requester outputs; not universal owner-tool guarantee"
+      },
+      "owner_secret_scan": {
+        "files_scanned": null,
+        "hits": []
+      },
+      "source_programs_on_owner_host": 0,
+      "ordinary_Run_or_publication_permission_granted": false,
+      "proof_sha256": {
+        "requester.stdout.log": "af59a384955b843fa904186f8223b3a01e269650fd51412cee0136ccce07fa30",
+        "authority.final.private.json": "c506f2e058289f52ecbf6a5af673160a86fa5a1295f761d88021601c2f1f86af",
+        "cleanup.final.json": "33a0b34e13a7c355463c075a69945048e065f0239b8969691b4293d8f663d340",
+        "provider-credential-secret-scan.json": "01e0f169582b2bef2e4a104077b14bfc1f9fca839c69d2e9b7bf3488ac05ec61",
+        "owner-secret-scan.json": "3987b5497d0c0da2922db59e254533e628166d77c3c5c4d960a8e73b42a47cbf",
+        "accounting.final.json": "859b96b8226097dd797808ecbb192dae43f649fea9b8c10b381be32d13b44f1f"
+      },
+      "owner_harness_cleanup_followup_without_new_execution": false
+    }
+  ],
+  "new_actual_provider_calls": 12,
+  "new_conservative_peak_estimated_cost_usd_micros": 42625,
+  "aggregate_call_slots": 33,
+  "aggregate_call_ceiling": 41,
+  "small_acceptance_call_slots": 16,
+  "small_acceptance_call_ceiling": 24,
+  "aggregate_estimated_cost_usd_micros": 140343,
+  "remaining_budget_usd_micros": 424563,
+  "unsettled_reservation_usd_micros": 0,
+  "actual_invoice": "unknown",
+  "Native_success_rate_combined": false,
+  "unique_OSS_PASS_in_remaining_three": 0,
+  "single_service_control_OCI_fixture_PASS": 1,
+  "historical_independent_SVGOMG_PASS_retained_separately": true,
+  "at_ms": 1791247975091
+}

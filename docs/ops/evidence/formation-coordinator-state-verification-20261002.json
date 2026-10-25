@@ -1,0 +1,128 @@
+{
+  "schema": "ato.formation-coordinator-state-functional-proof/1",
+  "helper_code_pin": "e7e75b5249e0f2eaadbf47561a7da6aeaff57a12",
+  "common_Runtime_code_pin": "e185f2d97d869615e23a83f950efb147d317f6b7",
+  "API_pin": "fa825a176b715962351466dc1a7149bec5979c7f",
+  "controller_code_pin": "26eb1fbca13951d39d53b36af4abf73654fcab53",
+  "source_Formation_creation_Runtime_pin": "3ac36fa2739cf8d9555026e93a4ca79905a6d4a7",
+  "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+  "derivation_ref": "sha256:298cb3ac5d58809ba45eb09ef182cbb05ac5fbd1ff55ddeaafbcd8e3c6f153df",
+  "retained_ref": "sha256:5a4563db6cd7a412c84ba31e2bcf123eff81be06d1514be61409fabf133a5f0d",
+  "preregistration_sha256": "ef56ad1a8093ab75aedcfa443d1dd6fe5861f00e01550ffa6e78bcf495ce08ab",
+  "runs": [
+    {
+      "run_id": "state_verify_1",
+      "lease_id": "lease_state_verify_1",
+      "attempt_id": "functional-state-state_verify_1",
+      "fresh_receipt_sha256": "3ef48ecc497f0e376cd149d26bde4978dc382ec67a45255ad8078f973ad5e629",
+      "fully_satisfied": true,
+      "same_K": true,
+      "confirmed_stop_and_cleanup": true,
+      "runtime_egress_bytes": 0,
+      "state_outcome": {
+        "parent_revision_ref": null,
+        "revision_ref": "isrev_01M3X99DCPZR6RDVFKM3VT7XQE",
+        "state_key": "app_data",
+        "writer_fence": 1
+      },
+      "private_working_copy_preserved": true,
+      "binding_sha256": "82fd4088ddf687de05bcf9df4a9bf68a1c115d6ed542d591484fae4eeb17ae63"
+    },
+    {
+      "run_id": "state_verify_2",
+      "lease_id": "lease_state_verify_2",
+      "attempt_id": "functional-state-state_verify_2",
+      "fresh_receipt_sha256": "71c6bad2efb4453649f97a8af62d518138c4cec984ea1c2eebfc03c22fdde604",
+      "fully_satisfied": true,
+      "same_K": true,
+      "confirmed_stop_and_cleanup": true,
+      "runtime_egress_bytes": 0,
+      "state_outcome": {
+        "parent_revision_ref": "isrev_01M3X99DCPZR6RDVFKM3VT7XQE",
+        "revision_ref": "isrev_01M3XA0M6Y8FFWTDCQ2C25ESP5",
+        "state_key": "app_data",
+        "writer_fence": 2
+      },
+      "private_working_copy_preserved": true,
+      "binding_sha256": "23e54a5201048c1f6fc37eaf03dfe9fc8868343f46b21ceaff6340bec0788e2d"
+    }
+  ],
+  "Coordinator_assignment_verified": true,
+  "same_K": true,
+  "paid_provider_calls": 0,
+  "new_inference_calls": 0,
+  "normal_Run_permission": false,
+  "API_producer_seed": false,
+  "deployed": false,
+  "remote_migration": false,
+  "old_UNKNOWN_rerun": false,
+  "source_exploration_state_provisioning_complete": false,
+  "external_fetch_verified": false,
+  "Coordinator_final_metadata": {
+    "slot": {
+      "id": "isslot_01M3X90EER52KQ3VJ54VCF5VNJ",
+      "head_revision_id": "isrev_01M3XA0M6Y8FFWTDCQ2C25ESP5",
+      "writer_epoch": 2,
+      "active_writer_run_id": null,
+      "quarantined_at": null
+    },
+    "grants": [
+      {
+        "run_id": "state_verify_1",
+        "state_key": "app_data",
+        "writer_fence": 1,
+        "start_revision_id": null,
+        "status": "committed"
+      },
+      {
+        "run_id": "state_verify_2",
+        "state_key": "app_data",
+        "writer_fence": 2,
+        "start_revision_id": "isrev_01M3X99DCPZR6RDVFKM3VT7XQE",
+        "status": "committed"
+      }
+    ],
+    "revisions": [
+      {
+        "id": "isrev_01M3X99DCPZR6RDVFKM3VT7XQE",
+        "parent_revision_id": null,
+        "content_digest": "sha256:dc7fa3ae23645b7c37d4f71f0cbd66fc28239b5443e9eb67161d8aa31c7e5a5b",
+        "byte_size": 28672,
+        "committed_by_run_id": "state_verify_1"
+      },
+      {
+        "id": "isrev_01M3XA0M6Y8FFWTDCQ2C25ESP5",
+        "parent_revision_id": "isrev_01M3X99DCPZR6RDVFKM3VT7XQE",
+        "content_digest": "sha256:56dde856d3229deeeb7409182c8a1186ec18047bfa08883a6dd1492f66d212a1",
+        "byte_size": 26624,
+        "committed_by_run_id": "state_verify_2"
+      }
+    ],
+    "scopes": [
+      {
+        "run_id": "state_verify_1",
+        "compute_instance_id": "cinst_state_verification",
+        "lease_id": "lease_state_verify_1",
+        "launch_spec_digest": "sha256:bf2f8b329f928db6f8a2c5461483d544065fb64773953235dc9cb2f1f83ec250"
+      },
+      {
+        "run_id": "state_verify_2",
+        "compute_instance_id": "cinst_state_verification",
+        "lease_id": "lease_state_verify_2",
+        "launch_spec_digest": "sha256:86dd190ffa7e534b935dc043387d8f33fd9b0f2165c133c8a975f12ba4fdfd64"
+      }
+    ]
+  },
+  "state_revision_stored_bytes": 55296,
+  "authorization_boundary_cases_passed": 9,
+  "boundaries_proof_sha256": "6239712f0cb2a217e2e27254cf0357e6c85355771fdf5d9dfcee06f7591f4274",
+  "browser": {
+    "create_edit_pause_sha256": "a322380352174e09e4172ddd08416b402bc3a36722ff5bcb0027cc1192f2be89",
+    "restored_title_pause_and_delete_sha256": "be1bcbfd69ab104c93a14b5fd0cd52193aab5dfc63e95455c4fc82326c6e7f38",
+    "browser_version": "149.0.7827.0",
+    "persistence_after_confirmed_stop": true,
+    "two_prior_delete_harness_failures_preserved": true,
+    "correction": "wait for editor network-idle and confirm through the observed custom-dialog Delete button"
+  },
+  "pass": true
+}

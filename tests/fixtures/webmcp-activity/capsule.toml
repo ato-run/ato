@@ -1,0 +1,35 @@
+schema = 1
+
+[[process]]
+id = "app"
+command = ["python3", "server.py", "--host", "127.0.0.1", "--port", "38182"]
+cwd = "."
+
+[[adapter]]
+target = "app"
+use = "ato.process@1"
+
+[[port]]
+id = "app.browser"
+node = "app"
+protocol = "ato.browser@1"
+role = "server"
+
+[[adapter]]
+port = "app.browser"
+use = "ato.browser@1"
+
+[adapter.config]
+expected_origin = "http://127.0.0.1:38182"
+allowed_non_text_codes = ["ArrowLeft", "ArrowRight", "Enter", "Tab"]
+
+[[port]]
+id = "app.http"
+node = "app"
+protocol = "ato.http@1"
+role = "server"
+address = "127.0.0.1:38182"
+environment = "APP_LISTEN"
+
+[encap]
+materializers = ["ato.replay@1"]

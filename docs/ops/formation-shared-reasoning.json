@@ -1,0 +1,560 @@
+{
+  "schema": "ato.formation-shared-reasoning-ledger/1",
+  "scope": "Codex-first two-OSS prototype append; not 100-app remeasurement",
+  "implemented": true,
+  "acceptance_complete": false,
+  "merged": false,
+  "deployed": false,
+  "remote_migration": false,
+  "pins": {
+    "initial_CLI_and_worker": "fb140026bb555d01f5446cd1a92f04affac4f9b6",
+    "corrected_CLI_and_worker": "688eb4a6484bf8e0237c6265a64aa0d590b16488",
+    "Rust_receipt_authority_WASM": "fb140026bb555d01f5446cd1a92f04affac4f9b6",
+    "API_JS": "4ff88c038e095951e2277b759ac7ae012148e02e"
+  },
+  "same_code_qualification": false,
+  "infrastructure_correction": "SVGOMG input catalog duplicated inventory and hid scripts. Code changed only during stopped infra repair; same Search counters/deadline remained. Both app terminals are non-PASS.",
+  "cases": [
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "source": {
+        "index": 7,
+        "name": "changedetection.io",
+        "repo": "https://github.com/dgtlmoon/changedetection.io",
+        "ref": "0e0566721b1c483dcf7ae548210ee10532d9b181",
+        "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+        "archive_bytes": 6044832,
+        "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/007.tar.gz",
+        "license": "Apache-2.0",
+        "license_file": "LICENSE",
+        "license_sha256": "94819497b44fbfbbc93198af0eb1b20144098a96c10ab577e9a868bab26d3705",
+        "primary_language": "Python",
+        "broad_source_shape": "python-service",
+        "monorepo": false,
+        "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+        "baseline_terminal": "preset_no_match",
+        "baseline_typed_K_pass": false,
+        "explicit_K_newly_supplied": true
+      },
+      "provider": "codex_session",
+      "search_id": "search_b7b07e0e6de8ca11712be25ac94381bb",
+      "contract_ref": "sha256:ba864ae817c507b0b277c2d657390ba25fb7f78ecc9566150fd0a7040be36fb6",
+      "known_D": false,
+      "search_status": "unsatisfied",
+      "stop": {
+        "reason": "no_progress",
+        "status": "not_reached",
+        "stopped_at": "2026-10-01T03:31:10.004Z"
+      },
+      "rounds_consumed": 3,
+      "round_timing": [
+        {
+          "candidates": [],
+          "diagnostics": [
+            "source_inspection_requested"
+          ],
+          "expires_at_ms": 1790825167461,
+          "inspection_requests": [
+            {
+              "digest": "sha256:d78a83439ba820bbd000d14a872befe51381fe067a6e5672cc4708b6de66a423",
+              "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+            },
+            {
+              "digest": "sha256:44fa7457c130e448a6e409ddf1dea056b9af940228cb351ca68866d555c298b6",
+              "file_id": "f_e5972d38da55694585ff779b"
+            }
+          ],
+          "opened_at_ms": 1790824747461,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790825506202,
+          "opened_at_ms": 1790825086202,
+          "outcome": "completed"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790825647461,
+          "opened_at_ms": 1790825359579,
+          "outcome": "completed"
+        }
+      ],
+      "attempts": 0,
+      "generated_D_accepted_in_search": 0,
+      "source_programs_executed": 0,
+      "fresh_receipts": 0,
+      "typed_K_pass": false,
+      "permission_reduction": {
+        "reason": "K_not_reached",
+        "verified": false
+      },
+      "input_files": 4,
+      "response_files": 4,
+      "accepted_session_exchanges": 4,
+      "unaccepted_exchanges": [],
+      "records": [
+        {
+          "input_file": "codex/cells/007/producer.reasoning/r001_s001.input.json",
+          "input_sha256": "sha256:f55ad3128794b34edeef41290f13b3407c51e2d34579e8e5cd8197fa0d85b568",
+          "record_file": "codex/cells/007/producer.reasoning/r001_s001.record.json",
+          "record_sha256": "2ab6327ec92ae9c775a71597225fcda5daa55c917d768e8cf402d400fdca70ba",
+          "output_sha256": "sha256:b1fed7d75c67a1a655ab7e8f59e80bd0bc75530bee07e8ffce8d523845d816f2",
+          "round_seq": 1,
+          "exchange_seq": 1,
+          "output_kinds": [
+            "inspect_source"
+          ],
+          "decline_reasons": [],
+          "inspected": [
+            {
+              "digest": "sha256:d78a83439ba820bbd000d14a872befe51381fe067a6e5672cc4708b6de66a423",
+              "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+            },
+            {
+              "digest": "sha256:44fa7457c130e448a6e409ddf1dea056b9af940228cb351ca68866d555c298b6",
+              "file_id": "f_e5972d38da55694585ff779b"
+            }
+          ],
+          "inspected_bytes": 6766,
+          "inspection_error": null,
+          "bridge_active_elapsed_ms": 126417,
+          "rounds_remaining": 3,
+          "projection": [
+            {
+              "acquired_bytes": 6388,
+              "logical_id": "f_4d7c51b1efe9043e44439a94",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2048
+            },
+            {
+              "acquired_bytes": 3712,
+              "logical_id": "f_60f61ab7a8d1910d86d9fda2",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 1664
+            },
+            {
+              "acquired_bytes": 6065,
+              "logical_id": "f_8fdaff4b9044819ed2555660",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2048
+            },
+            {
+              "acquired_bytes": 8192,
+              "logical_id": "f_b335630551682c19a781afeb",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2048
+            }
+          ]
+        },
+        {
+          "input_file": "codex/cells/007/producer.reasoning/r001_s002.input.json",
+          "input_sha256": "sha256:dc424ac16dd65cfa7f8b9e9a910f9fd7bbe57d0b6771907bb5f9e39bcd0e07c0",
+          "record_file": "codex/cells/007/producer.reasoning/r001_s002.record.json",
+          "record_sha256": "0eff076145df6967e14fc4a9af470b5257a9ddc380ba4805d3e12bc227bc70aa",
+          "output_sha256": "sha256:374596d68bfe6d3cecee29aa76b16b3b20b481af622d6b32280b24cebd5231d7",
+          "round_seq": 1,
+          "exchange_seq": 2,
+          "output_kinds": [
+            "unsupported"
+          ],
+          "decline_reasons": [
+            "unsupported_dependency_operation"
+          ],
+          "inspected": [],
+          "inspected_bytes": 0,
+          "inspection_error": null,
+          "bridge_active_elapsed_ms": 210622,
+          "rounds_remaining": 3,
+          "projection": [
+            {
+              "acquired_bytes": 6388,
+              "logical_id": "f_4d7c51b1efe9043e44439a94",
+              "reason": "slot_or_input_budget",
+              "transmitted_bytes": 0
+            },
+            {
+              "acquired_bytes": 3712,
+              "logical_id": "f_60f61ab7a8d1910d86d9fda2",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2176
+            },
+            {
+              "acquired_bytes": 6065,
+              "logical_id": "f_8fdaff4b9044819ed2555660",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2560
+            },
+            {
+              "acquired_bytes": 8192,
+              "logical_id": "f_b335630551682c19a781afeb",
+              "reason": "slot_or_input_budget",
+              "transmitted_bytes": 0
+            },
+            {
+              "acquired_bytes": 6624,
+              "logical_id": "f_dd2c0eb6ea5cfc6c4bd4eac3",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2560
+            }
+          ]
+        },
+        {
+          "input_file": "codex/cells/007/producer.reasoning/r002_s001.input.json",
+          "input_sha256": "sha256:d80edf7a5428de32f65512591731db4aa5f4f50da7e0ccdb49faca1cf826865a",
+          "record_file": "codex/cells/007/producer.reasoning/r002_s001.record.json",
+          "record_sha256": "07a74be3af6a01a26dc953e2d8f0a906f8c9e4e0aa9f6e7f0f54f09ce0d77ef1",
+          "output_sha256": "sha256:374596d68bfe6d3cecee29aa76b16b3b20b481af622d6b32280b24cebd5231d7",
+          "round_seq": 2,
+          "exchange_seq": 1,
+          "output_kinds": [
+            "unsupported"
+          ],
+          "decline_reasons": [
+            "unsupported_dependency_operation"
+          ],
+          "inspected": [],
+          "inspected_bytes": 0,
+          "inspection_error": null,
+          "bridge_active_elapsed_ms": 270752,
+          "rounds_remaining": 2,
+          "projection": [
+            {
+              "acquired_bytes": 6388,
+              "logical_id": "f_4d7c51b1efe9043e44439a94",
+              "reason": "slot_or_input_budget",
+              "transmitted_bytes": 0
+            },
+            {
+              "acquired_bytes": 3712,
+              "logical_id": "f_60f61ab7a8d1910d86d9fda2",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2176
+            },
+            {
+              "acquired_bytes": 6065,
+              "logical_id": "f_8fdaff4b9044819ed2555660",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2560
+            },
+            {
+              "acquired_bytes": 8192,
+              "logical_id": "f_b335630551682c19a781afeb",
+              "reason": "slot_or_input_budget",
+              "transmitted_bytes": 0
+            },
+            {
+              "acquired_bytes": 6624,
+              "logical_id": "f_dd2c0eb6ea5cfc6c4bd4eac3",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2560
+            }
+          ]
+        },
+        {
+          "input_file": "codex/cells/007/producer.reasoning/r003_s001.input.json",
+          "input_sha256": "sha256:fe686982cde4533153dcf66b447bbcc158a5b93d76024fcabea282c2a4904f98",
+          "record_file": "codex/cells/007/producer.reasoning/r003_s001.record.json",
+          "record_sha256": "3f6a78dab1cb7f5b4393274f08e01e4400206740da09d114df8ef07d3e411c0b",
+          "output_sha256": "sha256:374596d68bfe6d3cecee29aa76b16b3b20b481af622d6b32280b24cebd5231d7",
+          "round_seq": 3,
+          "exchange_seq": 1,
+          "output_kinds": [
+            "unsupported"
+          ],
+          "decline_reasons": [
+            "unsupported_dependency_operation"
+          ],
+          "inspected": [],
+          "inspected_bytes": 0,
+          "inspection_error": null,
+          "bridge_active_elapsed_ms": 107099,
+          "rounds_remaining": 1,
+          "projection": [
+            {
+              "acquired_bytes": 6388,
+              "logical_id": "f_4d7c51b1efe9043e44439a94",
+              "reason": "slot_or_input_budget",
+              "transmitted_bytes": 0
+            },
+            {
+              "acquired_bytes": 3712,
+              "logical_id": "f_60f61ab7a8d1910d86d9fda2",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2176
+            },
+            {
+              "acquired_bytes": 6065,
+              "logical_id": "f_8fdaff4b9044819ed2555660",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2560
+            },
+            {
+              "acquired_bytes": 8192,
+              "logical_id": "f_b335630551682c19a781afeb",
+              "reason": "slot_or_input_budget",
+              "transmitted_bytes": 0
+            },
+            {
+              "acquired_bytes": 6624,
+              "logical_id": "f_dd2c0eb6ea5cfc6c4bd4eac3",
+              "reason": "text_prefix_budget",
+              "transmitted_bytes": 2560
+            }
+          ]
+        }
+      ],
+      "proposal_evidence": [
+        {
+          "outcomes": [
+            {
+              "code": "source_inspection_requested",
+              "inspection_refs": [
+                {
+                  "digest": "sha256:d78a83439ba820bbd000d14a872befe51381fe067a6e5672cc4708b6de66a423",
+                  "file_id": "f_dd2c0eb6ea5cfc6c4bd4eac3"
+                },
+                {
+                  "digest": "sha256:44fa7457c130e448a6e409ddf1dea056b9af940228cb351ca68866d555c298b6",
+                  "file_id": "f_e5972d38da55694585ff779b"
+                }
+              ],
+              "status": "rejected"
+            },
+            {
+              "status": "unsupported"
+            }
+          ],
+          "provenance": {
+            "provider": "fixed"
+          },
+          "raw_output_base64": "eyJpbnNwZWN0aW9uX2hpc3RvcnkiOlt7ImRpZ2VzdCI6InNoYTI1NjpkNzhhODM0MzliYTgyMGJiZDAwMGQxNGE4NzJiZWZlNTEzODFmZTA2N2E2ZTU2NzJjYzQ3MDhiNmRlNjZhNDIzIiwiZmlsZV9pZCI6ImZfZGQyYzBlYjZlYTVjZmM2YzRiZDRlYWMzIn0seyJkaWdlc3QiOiJzaGEyNTY6NDRmYTc0NTdjMTMwZTQ0OGE2ZTQwOWRkZjFkZWEwNTZiOWFmOTQwMjI4Y2IzNTFjYTY4ODY2ZDU1NWMyOThiNiIsImZpbGVfaWQiOiJmX2U1OTcyZDM4ZGE1NTY5NDU4NWZmNzc5YiJ9XSwicHJvcG9zYWxzIjpbeyJraW5kIjoidW5zdXBwb3J0ZWQiLCJyZWFzb24iOiJ1bnN1cHBvcnRlZF9kZXBlbmRlbmN5X29wZXJhdGlvbiJ9XSwic2NoZW1hIjoiYXRvLmZvcm1hdGlvbi1wcm9wb3NhbC8yIn0=",
+          "raw_output_digest": "sha256:ddc4587a1605ff668b508d62999b7404793b9e68c88877eb787029a93a5a42be",
+          "round_seq": 1
+        },
+        {
+          "outcomes": [
+            {
+              "status": "unsupported"
+            }
+          ],
+          "provenance": {
+            "provider": "fixed"
+          },
+          "raw_output_base64": "eyJwcm9wb3NhbHMiOlt7ImtpbmQiOiJ1bnN1cHBvcnRlZCIsInJlYXNvbiI6InVuc3VwcG9ydGVkX2RlcGVuZGVuY3lfb3BlcmF0aW9uIn1dLCJzY2hlbWEiOiJhdG8uZm9ybWF0aW9uLXByb3Bvc2FsLzEifQ==",
+          "raw_output_digest": "sha256:374596d68bfe6d3cecee29aa76b16b3b20b481af622d6b32280b24cebd5231d7",
+          "round_seq": 2
+        },
+        {
+          "outcomes": [
+            {
+              "status": "unsupported"
+            }
+          ],
+          "provenance": {
+            "provider": "fixed"
+          },
+          "raw_output_base64": "eyJwcm9wb3NhbHMiOlt7ImtpbmQiOiJ1bnN1cHBvcnRlZCIsInJlYXNvbiI6InVuc3VwcG9ydGVkX2RlcGVuZGVuY3lfb3BlcmF0aW9uIn1dLCJzY2hlbWEiOiJhdG8uZm9ybWF0aW9uLXByb3Bvc2FsLzEifQ==",
+          "raw_output_digest": "sha256:374596d68bfe6d3cecee29aa76b16b3b20b481af622d6b32280b24cebd5231d7",
+          "round_seq": 3
+        }
+      ],
+      "API_calls": 0,
+      "DecisionProvider_calls": 0,
+      "session_tokens": null,
+      "session_cost_usd_micros": null,
+      "case_elapsed_segments_seconds": [
+        750.852
+      ],
+      "elapsed_limitations": "segments omit stopped/restart intervals; bridge active time is not total Codex inference latency",
+      "result_sha256": "f63feb60d62ac1b881e47eb371387936161b7c31a3146dc4f0219f54586ef348",
+      "functional_acceptance": "not_measured",
+      "persistence": "not_measured",
+      "approval": "not_assessed",
+      "deployed": false
+    },
+    {
+      "index": 57,
+      "name": "SVGOMG",
+      "source": {
+        "index": 57,
+        "name": "SVGOMG",
+        "repo": "https://github.com/jakearchibald/svgomg",
+        "ref": "f925656d40a507c512bf95ee14ad16445a4ad3ed",
+        "archive_sha256": "b9c649ba08a1043d22c0cc5ae6fc5eb09d97c1d2965dbe71aee322c02c126f13",
+        "archive_bytes": 622928,
+        "archive_path": "/home/ubuntu/formation-foundation/.tmp/6b-e-20260930/sources/057.tar.gz",
+        "license": "MIT",
+        "license_file": "LICENSE.md",
+        "license_sha256": "fc238e99233704853d397eb25d538edfd5f2ddb2ad86d903bb33af99753897bb",
+        "primary_language": "JavaScript",
+        "broad_source_shape": "frontend-spa",
+        "monorepo": false,
+        "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+        "baseline_terminal": "network_denied",
+        "baseline_typed_K_pass": false,
+        "explicit_K_newly_supplied": false
+      },
+      "provider": "codex_session",
+      "search_id": "search_4d4a1f9208a3285e5ce90497386dd124",
+      "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+      "known_D": false,
+      "search_status": "exhausted",
+      "stop": {
+        "reason": "budget_exhausted",
+        "status": "not_reached",
+        "stopped_at": "2026-10-01T03:14:07.075Z"
+      },
+      "rounds_consumed": 3,
+      "round_timing": [
+        {
+          "candidates": [],
+          "expires_at_ms": 1790823967036,
+          "opened_at_ms": 1790823547036,
+          "outcome": "timeout"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790824387123,
+          "opened_at_ms": 1790823967123,
+          "outcome": "timeout"
+        },
+        {
+          "candidates": [],
+          "expires_at_ms": 1790824447036,
+          "opened_at_ms": 1790824398680,
+          "outcome": "timeout"
+        }
+      ],
+      "attempts": 0,
+      "generated_D_accepted_in_search": 0,
+      "source_programs_executed": 0,
+      "fresh_receipts": 0,
+      "typed_K_pass": false,
+      "permission_reduction": {
+        "reason": "K_not_reached",
+        "verified": false
+      },
+      "input_files": 3,
+      "response_files": 2,
+      "accepted_session_exchanges": 0,
+      "unaccepted_exchanges": [
+        {
+          "input_file": "codex/cells/057/producer.reasoning/r001_s001.input.json",
+          "input_sha256": "c101a255894c6cb42fa745319ea93a9abf47bbaaf9dd9266f904fe337162d873",
+          "response_delivered": true,
+          "response_sha256": "8900a610a00320b96b8d72d2a8c5d5149e3b9bd64f5c574b76708a3a96194efe",
+          "classification": "late staged response, no accepted record"
+        },
+        {
+          "input_file": "codex/cells/057/producer.reasoning/r002_s001.input.json",
+          "input_sha256": "032cfe7c053d176f76b039c6a6b577f5af655469b6a1454b8112d92f8aa7845b",
+          "response_delivered": true,
+          "response_sha256": "91cc88ad0e89e38abc7e2fb63708668f3c35336ee7eaf1577312f32f206a534c",
+          "classification": "late staged response, no accepted record"
+        },
+        {
+          "input_file": "codex/cells/057/producer.reasoning/r003_s001.input.json",
+          "input_sha256": "1dbc5a6ba1b986be800a1613422498b428d3d71aa0c01b2c2be0f3a95b8b09e9",
+          "response_delivered": false,
+          "response_sha256": null,
+          "classification": "input saved, no response delivered before deadline"
+        }
+      ],
+      "records": [],
+      "proposal_evidence": [
+        {
+          "outcomes": [],
+          "provenance": null,
+          "raw_output_base64": null,
+          "raw_output_digest": null,
+          "round_seq": 1
+        },
+        {
+          "outcomes": [],
+          "provenance": null,
+          "raw_output_base64": null,
+          "raw_output_digest": null,
+          "round_seq": 2
+        },
+        {
+          "outcomes": [],
+          "provenance": null,
+          "raw_output_base64": null,
+          "raw_output_digest": null,
+          "round_seq": 3
+        }
+      ],
+      "API_calls": 0,
+      "DecisionProvider_calls": 0,
+      "session_tokens": null,
+      "session_cost_usd_micros": null,
+      "case_elapsed_segments_seconds": [
+        51.885,
+        644.92
+      ],
+      "elapsed_limitations": "segments omit stopped/restart intervals; bridge active time is not total Codex inference latency",
+      "result_sha256": "1ce2403199ea43a8f53f98f3fafb1f2f3a2aab47b94696da1b084fee878eb72c",
+      "functional_acceptance": "not_measured",
+      "persistence": "not_measured",
+      "approval": "not_assessed",
+      "deployed": false
+    }
+  ],
+  "offline_review": {
+    "path": "offline-review/svgomg-offline-canonical.json",
+    "sha256": "6171b02823f5e83358951cfdb9a12fae09708a8ad874db5acbdd8d9ad7bc14c6",
+    "contract_ref": "sha256:6b2244326026e073d2c7d485434bb4d31d72fc43f06a3bc829c3dbfc6b1666d1",
+    "derivation_ref": "sha256:33e70161a9b0819520312531e78b1e379538ad21f81906b34707b732d7ee151d",
+    "validation": "accepted",
+    "executed": false,
+    "submitted": false,
+    "fresh_receipt": null,
+    "typed_K_pass": false
+  },
+  "totals": {
+    "Codex_unique_PASS_apps": 0,
+    "API_unique_PASS_apps": 0,
+    "first_D_PASS": 0,
+    "repair_PASS": 0,
+    "rounds_consumed": 6,
+    "input_files": 7,
+    "response_files": 6,
+    "accepted_session_exchanges": 4,
+    "inspected_source_files": 2,
+    "inspected_source_bytes": 6766,
+    "valid_generated_D_in_search": 0,
+    "source_programs_executed": 0,
+    "API_calls": 0,
+    "DecisionProvider_calls": 0,
+    "API_actual_cost_usd_micros": 0,
+    "API_reservation_consumed_usd_micros": 0,
+    "API_remaining_usd_micros": 564906,
+    "unresolved_API_reservations": 0,
+    "Codex_session_tokens": null,
+    "Codex_session_cost_usd_micros": null,
+    "cost_per_additional_PASS": null
+  },
+  "API_gate": {
+    "executed": false,
+    "reason": "Codex real OSS fresh same-K PASS gate not satisfied",
+    "max_reservation_usd_micros": 117972,
+    "budget_sufficient": true
+  },
+  "historical": {
+    "original_100_baseline_PASS": 7,
+    "original_100_exploration_PASS": 7,
+    "original_additional_PASS": 0,
+    "ledgers_overwritten": false,
+    "prior_API_SVGOMG_PASS": "separate historical repair append, not Codex-first evidence"
+  },
+  "residual_gaps": [
+    "SVGOMG infra correction investigation exhausted all three rounds with no D attempt; independent new acceptance requires user reply to preserve no-reset constraint.",
+    "changedetection.io unhashed/ranged Python dependencies cannot be lowered through current hash-pinned binary-wheel operation; no bound OCI builder recipe.",
+    "Projection records omission and retains acquired files but may still truncate a manifest/new entrypoint; initial Python entrypoint heuristic picked library App.py.",
+    "Reasoned decline after inspection was followed by two identical declines before no_progress; no additional source evidence or D execution.",
+    "Codex fresh PASS, evidence-repair PASS, permission reduction receipt and independent live API gate are not established in this append."
+  ],
+  "raw_manifest_sha256": "d2d1079e109b3e621a77d881f84e05e4aae2dff9bcd30b38908587f2ac3ff4ac"
+}

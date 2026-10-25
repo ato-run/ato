@@ -1,0 +1,1 @@
+OCI realization uses no workspace files.

@@ -41,8 +41,13 @@ or the worked example in [Computation](concepts/computation.md).
    [Materialization](concepts/materialization.md) — the concepts
 2. [Core architecture](core-architecture.md) — library responsibilities and
    dependency direction
-3. [Accepted RFCs](rfcs/README.md) — normative current architecture
-4. [AGENTS.md](../AGENTS.md) — before changing architecture or implementation
+3. [COOP and Ato](coop.md) — how human/agent collaboration maps onto Ato
+   without becoming a new Semantic Core primitive
+4. [Accepted RFCs](rfcs/README.md) — normative current architecture.
+   Implementation-track drafts (Formation ADR-017–031 and related proposals)
+   are linked from the same index with their draft status; progress states
+   live only in the [Formation roadmap](rfcs/draft/FORMATION_ROADMAP.md).
+5. [AGENTS.md](../AGENTS.md) — before changing architecture or implementation
 
 **Research / theory**
 
@@ -68,7 +73,12 @@ or the worked example in [Computation](concepts/computation.md).
 
 - [Core architecture](core-architecture.md) — library responsibilities and
   dependency direction.
+- [COOP and Ato](coop.md) — non-normative integration model for human/agent
+  shared and parallel work.
 - [Accepted RFCs](rfcs/README.md) — normative current architecture.
+- [Formation roadmap](rfcs/draft/FORMATION_ROADMAP.md) — **draft plan**;
+  the single progress reference for Formation stages (pending rows are not
+  shipped functionality).
 - [Local lifecycle](run.md) — verified CLI behavior.
 - [Capsule bundle](capsule.md) — transport and identity.
 - [Snapshot materialization](snapshot.md) — the limited current snapshot

@@ -1,0 +1,100 @@
+{
+  "schema": "ato.runtime-image-inventory/1",
+  "images": [
+    {
+      "image_digest": "sha256:259e8f0a0c3ec4e94df6b990e36f76a33224b8623f3dcde609c972729b3ba0d5",
+      "base_digests": [
+        "sha256:95a4bd0114d131c2f87bfa63574562aff4693c005fa328fa06bfd4be448704f0",
+        "sha256:6f401ac044ec79bc93fbc11185042af5ab830336925f9e70ddebdbaebc679461"
+      ],
+      "runtime_versions": {
+        "node": "20.20.2",
+        "python": "3.12.7"
+      },
+      "created_from": "formation",
+      "sbom": {
+        "format": "spdx-json",
+        "digest": "sha256:a8e17bf1b679ba53291803d02bcae641bfdb1f15a3d4774df56318603b987772"
+      },
+      "scan": {
+        "tool": "trivy 0.60.0",
+        "status": "findings",
+        "checked_at": "2026-10-20T03:12:04Z",
+        "advisory_refs": [
+          "CVE-2026-111497"
+        ]
+      },
+      "provenance": {
+        "kind": "sigstore",
+        "ref": "bundle:sha256:old"
+      },
+      "derivation_ref": "sha256:fb6a55b77a65c27fc9594d80d3104083f4c76ced5ae3f8546db585011900573c",
+      "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+      "status": "active",
+      "receipt": {
+        "receipt_ref": "sha256:5fc6c7af5339d1107e9d9526491ecc811b6fc755064f30e68f3edfffabcabad6",
+        "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+        "derivation_ref": "sha256:fb6a55b77a65c27fc9594d80d3104083f4c76ced5ae3f8546db585011900573c",
+        "fully_satisfied": true,
+        "observed_at": "2026-10-21T09:00:00Z"
+      },
+      "findings_waiver": {
+        "reason": "CVE-2026-111497: the app serves no attacker-controlled content-encoding; replacement is in progress",
+        "approved_by": "koh0920",
+        "expires_at": "2099-12-31T00:00:00Z"
+      }
+    },
+    {
+      "image_digest": "sha256:97e67a5645969953f1a4cfe2ea75649864ff99789189cdd3f6db03e59f8a8ebf",
+      "base_digests": [
+        "sha256:95a4bd0114d131c2f87bfa63574562aff4693c005fa328fa06bfd4be448704f0",
+        "sha256:6f401ac044ec79bc93fbc11185042af5ab830336925f9e70ddebdbaebc679461"
+      ],
+      "runtime_versions": {
+        "node": "22.23.4",
+        "python": "3.12.7"
+      },
+      "created_from": "formation",
+      "sbom": {
+        "format": "cyclonedx-json",
+        "digest": "sha256:701db6b62008818e5a3cf0b27283c8fa849a6a2ccc4fc5210bc227a1614e37ea"
+      },
+      "scan": {
+        "tool": "trivy 0.60.0",
+        "status": "passed",
+        "checked_at": "2026-10-20T03:12:04Z",
+        "advisory_refs": []
+      },
+      "provenance": {
+        "kind": "registry",
+        "ref": "registry:ghcr.io/ato-source/patch@sha256:new"
+      },
+      "derivation_ref": "sha256:18ca526876d6f37e0a8ffe25d5e39fcc9471962d1e63df71f14c81f330be97e1",
+      "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+      "status": "verified",
+      "receipt": {
+        "receipt_ref": "sha256:1a10c8cca2fbb84143fed50fcce503d5e42d68880aa782a49465b071dc29e0b4",
+        "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+        "derivation_ref": "sha256:18ca526876d6f37e0a8ffe25d5e39fcc9471962d1e63df71f14c81f330be97e1",
+        "fully_satisfied": true,
+        "observed_at": "2026-10-23T12:30:00Z"
+      }
+    }
+  ],
+  "patch_candidates": [
+    {
+      "from_digest": "sha256:259e8f0a0c3ec4e94df6b990e36f76a33224b8623f3dcde609c972729b3ba0d5",
+      "to_digest": "sha256:97e67a5645969953f1a4cfe2ea75649864ff99789189cdd3f6db03e59f8a8ebf",
+      "advisories": [
+        "CVE-2026-111497"
+      ],
+      "rebuild": {
+        "derivation_ref": "sha256:18ca526876d6f37e0a8ffe25d5e39fcc9471962d1e63df71f14c81f330be97e1",
+        "contract_ref": "sha256:79219a80bde4c593c7827219f16ff9a99c579f8b70314245c9a68fcf35847e95",
+        "receipt_ref": "sha256:1a10c8cca2fbb84143fed50fcce503d5e42d68880aa782a49465b071dc29e0b4",
+        "fully_satisfied": true
+      },
+      "decision": "auto_build"
+    }
+  ]
+}

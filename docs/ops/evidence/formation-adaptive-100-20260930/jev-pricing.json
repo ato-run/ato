@@ -1,0 +1,12 @@
+{
+  "schema": "ato.formation-public-price-snapshot/1",
+  "url": "https://docs.typesafe.ai/models",
+  "retrieved_at": "2026-09-30T06:50:18.668359+00:00",
+  "source_html_sha256": "54732f7ba3fc25ff36a028229a01a1d86bf48ddaf2d3449ac8b39dda98fdea9e",
+  "source_html_bytes": 338765,
+  "currency": "USD",
+  "per_million_input": 0.042,
+  "per_million_output": 0,
+  "model": "jev-1.13.0",
+  "basis": "input-only pricing"
+}

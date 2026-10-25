@@ -1,0 +1,90 @@
+{
+  "schema": "ato.formation-coverage-100-ci-base/1",
+  "checked_at": "2026-09-30T04:27:19.250956+00:00",
+  "base_sha": "e494e9375cf1151fc2884d545047dfbdad52c2cc",
+  "checks": [
+    {
+      "name": "deploy",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661620343/job/109717548234"
+    },
+    {
+      "name": "Analyze (python)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661619590/job/109717440597"
+    },
+    {
+      "name": "Analyze (go)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661619590/job/109717440524"
+    },
+    {
+      "name": "Analyze (javascript-typescript)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661619590/job/109717440517"
+    },
+    {
+      "name": "Analyze (actions)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661619590/job/109717440501"
+    },
+    {
+      "name": "Analyze (rust)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661619590/job/109717440382"
+    },
+    {
+      "name": "build",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661620343/job/109717438416"
+    },
+    {
+      "name": "tauri shell (macOS)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661620245/job/109717437492"
+    },
+    {
+      "name": "workspace (windows-latest)",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661620211/job/109717437411"
+    },
+    {
+      "name": "workspace (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661620211/job/109717437366"
+    },
+    {
+      "name": "legacy apps/desktop shim compiles (macOS)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/ato-run/ato/actions/runs/36661620245/job/109717437272"
+    },
+    {
+      "name": "workspace (macos-latest)",
+      "status": "in_progress",
+      "conclusion": null,
+      "url": "https://github.com/ato-run/ato/actions/runs/36661620211/job/109717437125"
+    }
+  ],
+  "base_failures": {
+    "windows": "browser_sandbox.rs Unix-specific API/libc/process_group compile errors",
+    "ubuntu": "hosted_python_and_node_use_the_common_process_runtime: runtime_cannot_contain_build"
+  },
+  "macos": "in_progress in this snapshot; no new/base-reproduced conclusion claimed",
+  "head_ci": "inspect after PR creation; no green assumption",
+  "archive_sha256": "e2cb917b192bd1a06e234000fdc0245c399f5e6c37ec176cd9f1b1ecea4c09c8",
+  "log_hashes": {
+    "base-ubuntu.log": "0773c5c84f2ba6315796dc37c8427cc68702fd284246911cc21b0bee175e3ca1",
+    "base-windows.log": "8b12cde05bc2a8fcb5fb28bdf2f6ba0a5c0a26a28d7f81c735f345364ca5bd49"
+  }
+}
