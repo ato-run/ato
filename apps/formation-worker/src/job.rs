@@ -14,7 +14,9 @@
 //! Publication and durable tenant Runs remain the caller's responsibility.
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ato_formation::authoring::ContractIdentity;
@@ -26,7 +28,7 @@ use ato_formation::preset::{
     apply_contract_identity, candidate_authoring, select_preset, synthesize_authoring_with_identity,
 };
 use ato_formation::request::{AttemptOutcomes, Outcome};
-use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
+use ato_formation::source::{FileVerifiedArchive, SourceClosureRef, SourceError, SourceLimits};
 use ato_formation::verify::{ContractVerification, ContractVerificationReceipt};
 use ato_runtime_attempt::{
     admission::EffectAuthorization,
@@ -44,6 +46,10 @@ use crate::api::{FailureReport, FormationApi, PublishOutcome};
 use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
+mod source_evidence;
+pub(crate) mod source_fetch;
+pub mod source_intake;
+
 /// Fetching a pinned source. A trait so the whole job is testable offline.
 pub trait SourceFetcher {
     /// Bytes of the archive this job's source names.
@@ -53,6 +59,34 @@ pub trait SourceFetcher {
     /// uploaded archive does not — those bytes are the control plane's, and the
     /// worker asks for them by naming the job it is running.
     fn fetch(&self, job_id: &str, source: &serde_json::Value) -> Result<Vec<u8>>;
+
+    /// Compatibility for trusted in-process fixture fetchers. The production
+    /// fetcher overrides this and never allocates an archive-sized Vec.
+    fn fetch_file(
+        &self,
+        job_id: &str,
+        source: &serde_json::Value,
+        work_root: &Path,
+        maximum: u64,
+        deadline: Instant,
+    ) -> Result<(File, String)> {
+        source_fetch::remaining(deadline)?;
+        anyhow::ensure!(
+            maximum > 0 && maximum <= crate::runtime_network::MAX_SOURCE_OBJECT_BYTES,
+            "source transport cap exceeds the existing Runtime object ceiling"
+        );
+        let bytes = self.fetch(job_id, source)?;
+        if bytes.len() as u64 > maximum {
+            return Err(SourceError::LimitExceeded {
+                limit: "archive_bytes",
+            }
+            .into());
+        }
+        let mut file = source_fetch::temporary_file(work_root, maximum, deadline)?;
+        let digest =
+            source_fetch::copy_bounded(std::io::Cursor::new(bytes), &mut file, maximum, deadline)?;
+        source_fetch::rewind(file, digest)
+    }
 }
 
 /// The real fetcher, for every source kind the contract admits.
@@ -63,77 +97,70 @@ pub struct PinnedSourceFetcher {
 }
 
 impl PinnedSourceFetcher {
-    pub fn new(client: reqwest::blocking::Client, api_base: String, token: String) -> Self {
-        Self {
-            client,
+    pub fn new(api_base: String, token: String) -> Result<Self> {
+        Ok(Self {
+            // Source transport must not inherit ambient headers, redirects,
+            // HTTP decoders or the API client's independently owned policy.
+            client: source_fetch::client()?,
             api_base: api_base.trim_end_matches('/').to_owned(),
             token,
+        })
+    }
+
+    fn request(
+        &self,
+        job_id: &str,
+        source: &serde_json::Value,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
+        match source["kind"].as_str() {
+            Some("git_hub") => Ok(self.client.get(source_fetch::github_url(source)?)),
+            // The API still resolves the job-owned upload. Only this fixed
+            // control-plane request receives the Formation bearer credential.
+            Some("uploaded_archive") => {
+                anyhow::ensure!(
+                    !job_id.is_empty()
+                        && job_id.len() <= 160
+                        && job_id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+                    "invalid source archive job id"
+                );
+                Ok(self
+                    .client
+                    .get(format!(
+                        "{}/v1/internal/formation/jobs/{job_id}/source-archive",
+                        self.api_base
+                    ))
+                    .bearer_auth(&self.token))
+            }
+            Some(_) => anyhow::bail!("source kind has no fetcher"),
+            None => anyhow::bail!("source names no kind"),
         }
-    }
-
-    fn github(&self, source: &serde_json::Value) -> Result<Vec<u8>> {
-        let owner = source["owner"].as_str().context("source has no owner")?;
-        let repository = source["repository"]
-            .as_str()
-            .context("source has no repository")?;
-        let commit = source["resolved_commit_sha"]
-            .as_str()
-            .context("source is not pinned")?;
-        // The PINNED commit, never the requested ref. A branch moves, and a
-        // retry that followed it would build something else.
-        let url = format!("https://codeload.github.com/{owner}/{repository}/tar.gz/{commit}");
-        let response = self
-            .client
-            .get(&url)
-            .send()?
-            .error_for_status()
-            .with_context(|| {
-                format!(
-                    "failed to fetch {}",
-                    ato_formation::source::redact_url(&url)
-                )
-            })?;
-        Ok(response.bytes()?.to_vec())
-    }
-
-    /// Bytes the requester already uploaded.
-    ///
-    /// Asked for BY JOB. The worker does not name the upload: the control
-    /// plane reads the job's own source, checks the upload belongs to whoever
-    /// submitted it, and serves the digest the job names. A worker that could
-    /// choose the object would be choosing what it builds.
-    fn uploaded(&self, job_id: &str) -> Result<Vec<u8>> {
-        let url = format!(
-            "{}/v1/internal/formation/jobs/{job_id}/source-archive",
-            self.api_base
-        );
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.token)
-            .send()?
-            .error_for_status()
-            .with_context(|| {
-                format!(
-                    "failed to fetch the uploaded source for {job_id} from {}",
-                    ato_formation::source::redact_url(&url)
-                )
-            })?;
-        Ok(response.bytes()?.to_vec())
     }
 }
 
 impl SourceFetcher for PinnedSourceFetcher {
     fn fetch(&self, job_id: &str, source: &serde_json::Value) -> Result<Vec<u8>> {
-        match source["kind"].as_str() {
-            Some("git_hub") => self.github(source),
-            Some("uploaded_archive") => self.uploaded(job_id),
-            // `existing_source_closure` names a closure that is already
-            // materialized; nothing needs fetching, and reaching here means a
-            // caller asked for bytes that were never going to arrive.
-            Some(other) => anyhow::bail!("source kind {other:?} has no fetcher"),
-            None => anyhow::bail!("source names no kind"),
-        }
+        let mut bytes = Vec::new();
+        source_fetch::download(
+            self.request(job_id, source)?,
+            &mut bytes,
+            crate::runtime_network::MAX_SOURCE_OBJECT_BYTES,
+            Instant::now() + crate::runtime_network::SOURCE_TRANSFER_TIMEOUT,
+        )?;
+        Ok(bytes)
+    }
+
+    fn fetch_file(
+        &self,
+        job_id: &str,
+        source: &serde_json::Value,
+        work_root: &Path,
+        maximum: u64,
+        deadline: Instant,
+    ) -> Result<(File, String)> {
+        let request = self.request(job_id, source)?;
+        source_fetch::download_file(request, work_root, maximum, deadline)
     }
 }
 
@@ -220,6 +247,16 @@ pub fn run_claimed_job_with_ledger(
     operation_catalog_required: bool,
     journal: &dyn AttemptLedger,
 ) -> Result<JobOutcome> {
+    anyhow::ensure!(
+        job["policy"]["policy_version"].as_str()
+            != Some(ato_ipc::formation::SOURCE_ARCHIVE_POLICY_V1)
+            && !job["requested_outputs"]
+                .as_array()
+                .is_some_and(|outputs| outputs
+                    .iter()
+                    .any(|output| output.as_str() == Some("source_archive"))),
+        "source_archive_requires_source_only_executor"
+    );
     let attempt = attempt.clone();
     // Reserve historical execution before fetching source or refusing planning.
     // A redelivery must never overwrite prior uncertainty with a fresh refusal.
@@ -240,24 +277,37 @@ pub fn run_claimed_job_with_ledger(
     let source = &job["source"];
     let subdirectory = source["subdirectory"].as_str().unwrap_or("");
     let job_id = job["job_id"].as_str().context("job names no id")?;
-    let archive = context.fetcher.fetch(job_id, source)?;
-    let archive_digest = digest(&archive);
-    // Both checks, in order. Intact bytes of a DIFFERENT tree pass the first
-    // and must not pass the second.
-    let verified = DownloadedArchive::new(archive)
-        .verify_archive_digest(&archive_digest)?
-        .verify_tree_digest(
-            source["expected_source_tree_digest"].as_str(),
-            context.source_limits,
-        )?;
+    anyhow::ensure!(
+        attempt.job_id == job_id,
+        "formation_source_assignment_mismatch"
+    );
+    let source_deadline = Instant::now()
+        + Duration::from_secs(context.limits.wall_clock_seconds)
+            .min(crate::runtime_network::SOURCE_TRANSFER_TIMEOUT);
+    let mut verified = source_intake::verify_source(
+        context.fetcher,
+        job_id,
+        source,
+        context.work_root,
+        context.source_limits,
+        context.source_limits.max_total_bytes,
+        source_deadline,
+    )?;
     let closure_ref = verified.closure_ref(subdirectory)?;
 
     let attempt_root = context.work_root.join(&attempt.attempt_id);
-    let source_root = verified.materialize(
+    let source_root = verified.materialize_with_guard(
         &attempt_root.join("source"),
         subdirectory,
         context.source_limits,
+        &|| Instant::now() < source_deadline,
     )?;
+    // Measurement is captured from the same verified archive after its exact
+    // subdirectory selection succeeded, before any application/build can edit it.
+    let source_evidence = source_evidence::capture(&verified, subdirectory)?;
+    // The verified tree is now materialized; do not retain its compressed
+    // scratch file throughout the subsequent build and publication lifetime.
+    drop(verified);
 
     if operation_catalog_required {
         let operations = crate::operations::collect(&source_root)?;
@@ -498,6 +548,7 @@ pub fn run_claimed_job_with_ledger(
     let result = compose_result(
         &attempt,
         &closure_ref,
+        &source_evidence,
         &planned,
         &materialization_ref,
         // The artifact's real size, whichever store it went to. Reporting the
@@ -685,6 +736,7 @@ fn persist_hosted_outcome(
 fn compose_result(
     attempt: &BuildAttempt,
     closure_ref: &SourceClosureRef,
+    source_evidence: &source_evidence::FormationSourceEvidenceV1,
     planned: &PlannedCandidate,
 
     materialization_ref: &str,
@@ -777,6 +829,7 @@ fn compose_result(
         "formation_key": formation_key,
         "source_revision_ref": format!("srev_{}", &closure_ref.as_str()[7..23]),
         "source_closure_ref": closure_ref.as_str(),
+        "source_evidence": source_evidence,
         "compute_schema_ref": digest(
             format!("{derivation_ref}|{materialization_ref}").as_bytes(),
         ),
@@ -993,6 +1046,7 @@ status = 200
         compose_result(
             &attempt,
             &closure(),
+            &source_evidence::for_test(),
             planned,
             "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             1024,

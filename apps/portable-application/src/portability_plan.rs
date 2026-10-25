@@ -249,6 +249,7 @@ mod tests {
             bindings: Vec::new(),
             requirements: vec![PortableHttpRequirementSpec {
                 id: "entry".to_owned(),
+                port: None,
                 path: "/".to_owned(),
                 status: 200,
                 body_digest: None,

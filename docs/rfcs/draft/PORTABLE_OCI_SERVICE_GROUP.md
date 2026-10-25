@@ -64,8 +64,32 @@ runtime builds have no field in the model and cannot be expressed.
 A single-step route with any step-scoped field is refused: those fields
 belong to groups only.
 
-Services start in authored order, each after the previous one is ready, and
-stop in reverse order. There is no dependency DAG in v0.
+Services start in their compiled order, each after the previous one is ready,
+and stop in reverse order. The evaluator remains sequential.
+
+### Dependency authoring
+
+`[[derivation.service]]` may state `depends_on = ["database", "worker"]`.
+These are references to services in the same selected route. The authoring
+compiler validates the whole graph, rejects undeclared/repeated/self edges and
+cycles, then chooses a stable topological order using authored order to break
+ties. The existing sequence of BoundSteps carries that order. There is no new
+canonical graph, Kernel primitive, runner protocol, or runtime dependency
+resolution. Every predecessor still passes its existing readiness probe before
+the consumer starts; any component failure still fails the whole group.
+
+Absent or empty `depends_on` retains the original authored sequence exactly.
+An explicit graph that compiles to the same sequence yields the same draft and
+therefore the same bound D. Reordering the actual steps changes D, never K.
+This does not introduce parallel launch or independent component restart.
+The parser bounds dependency analysis to 64 nodes/64 edges per node; existing
+runtime admission still enforces the smaller service-group profile above.
+
+The shorthand does not parse Compose includes/interpolation or add per-component
+HTTP observations to K. Internal Ports retain their existing visibility, and
+only the declared Surface is exposed. Those are separate follow-up gates;
+this addition alone is not multi-component Formation acceptance or a staging
+measurement.
 
 ## Validator report
 
@@ -384,3 +408,62 @@ are not part of Step ③.
 - Sleep inhibition for foreground jobs and private inter-Instance Bindings.
 - IPv6 and DNS-scoped egress, direct MX delivery, general user-selected public
   ports, and production DNS/TLS publication.
+
+## Component-level observations (draft extension)
+
+The additional observation path is described in
+[COMPONENT_CONTRACT_OBSERVATION.md](COMPONENT_CONTRACT_OBSERVATION.md). Internal
+Ports retain their transport and isolation. HTTP observation semantics live in
+the existing Contract verifier; a component's TCP readiness remains distinct
+from K satisfaction.
+
+## Explicit component data placement (draft extension)
+
+`BoundStep.runtimes["oci.input_ids"]` is an OCI Adapter fact, encoded as a
+compact JSON array of safe, sorted, unique IDs. It selects only declared Model
+Set input IDs and the existing reserved `assets` channel. `workspace` is not a
+selector. Unknown IDs, repeated IDs, environment normalization collisions and
+any declared Model Set without an explicit consumer are refused. Multiple
+services may explicitly select the same Model Set; all such mounts are
+read-only. Assets remain operational Instance inputs, not a fabricated
+`BoundInput`, source reference, secret Binding or component-wide broadcast.
+
+The Rust route report and `OciServiceV2` carry optional `input_ids`. An omitted
+field keeps the previous no-data/no-output behavior and canonical bytes;
+`Some([])` explicitly requests no inputs but opts that service into available
+Run-bounded outputs. An explicit `null` is refused. The new capability is
+`runtime_feature=oci_component_data_plane_v1`, advertised only with OCI and the
+trusted HostBoundary mode. The API must require that capability, the existing
+OCI data-plane tuple and active execution authorization, and repeat capability
+checks at the selected Runner fence. A group without any mapping must not
+receive a new Data Grant. Nonempty Assets without an explicit consumer are
+refused, not silently dropped.
+
+The selected-D Rust report and existing lease-bound Data Grant remain the
+authority for Model Set digest correspondence. Runner-private delivery retains
+each logical ID from that Grant alongside its verified cache tree. The Worker
+requires exact equality between delivered IDs and the union of all selectors;
+it never reconstructs IDs from environment strings or ignores extra Grant
+inputs. Existing manifest and object hash verification is unchanged. A selector
+for empty Assets receives an owned empty read-only directory only after the
+actual Grant confirms that the channel is empty; a missing Grant is an error.
+
+Each mapped service gets a filtered data-only context. Existing OCI data mount,
+overlap, path, collision and ownership checks apply. Neither sibling inputs nor
+Runner credentials are added to it. Authored public/secret environment or
+workspace/state mount collisions with the selected data namespace are refused.
+A service without a mapping receives neither data environment nor data mounts.
+A mapped service receives only its own `outputs/<safe-service-id>` directory at
+`ATO_OUTPUT_DIR`, when the Grant permits outputs. HostBoundary output ownership
+requires the service's explicit user to match the trusted workload UID/GID;
+foreign or missing output principals are refused. The global output root is
+never mounted into a component. Output count and byte limits remain one set of
+Run-wide limits; stop-time save preserves the component-relative file keys.
+
+This extends D and its physical Adapter projection only. K, Core structs,
+profiles, receipt success criteria and tables are unchanged. Every required
+component observation must still satisfy the same Rust Contract verifier;
+readiness, one successful component or a delivered model is not group success.
+Local generic admission still refuses Model Sets that it cannot actually
+materialize. Hosted capability admission and actual staging delivery are
+separate rollout gates.

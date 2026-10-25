@@ -407,6 +407,22 @@ fn auto_source_priority_subset_is_valid_canonical_provider_context() {
     )
     .unwrap();
     let request = fresh.proposal_request_v2(&status(&fresh)).unwrap();
+    let repository = request
+        .repository_evidence
+        .as_ref()
+        .expect("automatic repository evidence");
+    assert!(repository.validate());
+    assert!(!repository.runtime_verified);
+    assert!(
+        repository
+            .facts
+            .iter()
+            .any(|fact| fact.file == "package.json")
+    );
+    let encoded_evidence = serde_json::to_string(repository).unwrap();
+    assert!(!encoded_evidence.contains("PROVIDER_KEY") && !encoded_evidence.contains("excluded"));
+    assert_eq!(request.frozen_contract, fresh.request.base_contract);
+
     let mut view = status(&fresh);
     let mut old = view["search_state"]["proposal_round"].clone();
     old["outcome"] = json!("completed");
@@ -657,4 +673,620 @@ fn native_helper_bytes_do_not_block_failure_feedback_or_success_context() {
     assert_eq!(context.successful_derivation_ref, Some(identity));
     assert_eq!(serde_json::to_value(context.previous_plan).unwrap(), plan);
     assert_eq!(context.failures[0].code, "npm_lifecycle_plan_required");
+}
+
+fn raw_github_source(root: &Path) -> (std::path::PathBuf, Vec<u8>, String, String, String) {
+    use std::io::Write;
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut directory = tar::Header::new_gnu();
+    directory.set_entry_type(tar::EntryType::Directory);
+    directory.set_size(0);
+    directory.set_mode(0o755);
+    directory.set_mtime(123);
+    directory.set_cksum();
+    tar.append_data(&mut directory, "repository-0123456789abcdef/", &b""[..])
+        .unwrap();
+    for (name, bytes) in [
+        (
+            "app.py",
+            &b"raise RuntimeError('must never execute during intake')\n"[..],
+        ),
+        ("README.md", &b"Python application: python app.py\n"[..]),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(123);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("repository-0123456789abcdef/{name}"),
+            bytes,
+        )
+        .unwrap();
+    }
+    let tar = tar.into_inner().unwrap();
+    let mut gzip = flate2::GzBuilder::new()
+        .mtime(123)
+        .write(Vec::new(), flate2::Compression::default());
+    gzip.write_all(&tar).unwrap();
+    let bytes = gzip.finish().unwrap();
+    let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let path = root.join("github.tar.gz");
+    std::fs::write(&path, &bytes).unwrap();
+    let verified = FileVerifiedArchive::verify(
+        File::open(&path).unwrap(),
+        &digest,
+        bytes.len() as u64,
+        SourceLimits::default(),
+    )
+    .unwrap();
+    (
+        path,
+        bytes,
+        digest,
+        verified.tree_digest().to_owned(),
+        verified.closure_ref("").unwrap().as_str().to_owned(),
+    )
+}
+
+#[test]
+fn original_github_wrapper_archive_reaches_search_without_retar_or_semantic_relabel() {
+    use crate::job::source_intake::{ArchiveFileFetcher, prepare_source_proposal};
+    let (root, mut template) = prepared(|_| {});
+    let mut explicit_authorization = authorization();
+    explicit_authorization.policy.allow_source_text = true;
+    explicit_authorization.policy.max_source_bytes = 4096;
+    template
+        .enable_candidate_producer(explicit_authorization)
+        .unwrap();
+    let (file, bytes, digest, tree, closure) = raw_github_source(root.path());
+    let mut request = template.request.clone();
+    request.source = SourceTransport {
+        archive_base64: None,
+        content_ref: Some(digest.clone()),
+        archive_bytes: Some(bytes.len() as u64),
+        archive_digest: digest.clone(),
+        closure_ref: closure.clone(),
+    };
+    request.initial_source = Some(InitialSource {
+        archive_digest: digest.clone(),
+        closure_ref: closure.clone(),
+    });
+    let k = request.base_contract.clone();
+    let frozen = frozen_request(&request).unwrap().canonical_bytes().unwrap();
+    let job:ato_ipc::formation::FormationJobV1=serde_json::from_value(json!({
+        "protocol":"ato.formation-job.v1","job_id":"fjob_wrapper_search","request_idempotency_key":"wrapper-search-explicit",
+        "source":{"kind":"uploaded_archive","archive_ref":"formation-source-archive:fjob_source","expected_archive_digest":digest,"expected_source_tree_digest":tree,"subdirectory":""},
+        "requested_outputs":["process_workspace"],"target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},"policy":{"policy_version":"formation-v1","network":"denied","publish_enabled":false}
+    })).unwrap();
+    let sub = prepare_source_proposal(
+        &ArchiveFileFetcher(file),
+        &job,
+        request.clone(),
+        &root.path().join("raw-search"),
+    )
+    .unwrap();
+    assert_eq!(sub.request.base_contract, k);
+    assert_eq!(sub.request.base_contract_ref, k.contract_ref().unwrap());
+    assert_eq!(
+        frozen_request(&sub.request)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        frozen
+    );
+    let mut transported = Vec::new();
+    sub.source_file()
+        .unwrap()
+        .read_to_end(&mut transported)
+        .unwrap();
+    assert_eq!(transported, bytes);
+    let verified = FileVerifiedArchive::verify(
+        sub.source_file().unwrap(),
+        &digest,
+        bytes.len() as u64,
+        SourceLimits::default(),
+    )
+    .unwrap();
+    println!(
+        "raw_github_vector={}",
+        json!({
+            "archive_base64":BASE64.encode(&bytes),"archive_digest":digest,"size_bytes":bytes.len(),
+            "source_tree_digest":tree,"source_closure_ref":closure,
+            "observed_file_count":verified.expanded_file_count(),
+            "observed_uncompressed_bytes":verified.expanded_bytes(),
+        "resolver_contract_version":verified.resolver_contract(),
+            "job":job,"request":request,"canonical_frozen_json":String::from_utf8(frozen.clone()).unwrap()
+        })
+    );
+    assert_eq!(verified.tree_digest(), tree);
+    assert_eq!(
+        verified.archive_format(),
+        ato_formation::source::RAW_TAR_GZIP_FORMAT
+    );
+    let runtime = local::freeze_verified_file(
+        verified,
+        &root.path().join("runtime"),
+        SourceLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(runtime.closure_ref.as_str(), closure);
+    assert!(runtime.root.join("app.py").is_file());
+    assert!(!runtime.root.join("repository-0123456789abcdef").exists());
+    let proposal = sub.proposal_request_v2(&status(&sub)).unwrap();
+    assert!(proposal.repository_evidence.is_some());
+    assert_eq!(proposal.frozen_contract, k);
+    println!(
+        "raw_github_proof archive={digest} tree={tree} closure={closure} bytes={}",
+        bytes.len()
+    );
+    for corruption in [
+        "archive",
+        "tree",
+        "subdir",
+        "closure",
+        "budget",
+        "expanded_budget",
+        "transfer_budget",
+        "K",
+    ] {
+        let mut bad_job = job.clone();
+        let mut bad = request.clone();
+        match corruption {
+            "archive" => {
+                bad.source.archive_digest = format!("sha256:{}", "0".repeat(64));
+            }
+            "tree" => {
+                if let ato_ipc::formation::FormationSourceV1::UploadedArchive(s) =
+                    &mut bad_job.source
+                {
+                    s.expected_source_tree_digest = Some(format!("sha256:{}", "0".repeat(64)));
+                }
+            }
+            "subdir" => {
+                if let ato_ipc::formation::FormationSourceV1::UploadedArchive(s) =
+                    &mut bad_job.source
+                {
+                    s.subdirectory = "child".into();
+                }
+            }
+            "closure" => {
+                bad.source.closure_ref = format!("sha256:{}", "0".repeat(64));
+            }
+            "budget" => {
+                bad.budget.max_attempts = 0;
+            }
+            "expanded_budget" => {
+                bad.budget.max_expanded_bytes = 1;
+            }
+            "transfer_budget" => {
+                bad.budget.max_transfer_bytes = 1;
+            }
+            "K" => {
+                bad.base_contract_ref = format!("sha256:{}", "0".repeat(64));
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            prepare_source_proposal(
+                &ArchiveFileFetcher(root.path().join("github.tar.gz")),
+                &bad_job,
+                bad,
+                &root.path().join(format!("bad-{corruption}"))
+            )
+            .is_err(),
+            "{corruption}"
+        );
+    }
+}
+
+#[test]
+fn explicit_zero_derivation_archive_never_enables_source_manifest_or_known_preset_fallback() {
+    let (root, mut template) =
+        prepared(|p| std::fs::write(p.join("capsule.toml"), "not valid TOML !!!").unwrap());
+    template.enable_candidate_producer(authorization()).unwrap();
+    let mut request = template.request.clone();
+    request
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .policy
+        .max_proposals = 1;
+    request.policy.exploration=Some(serde_json::from_value(json!({
+        "ceiling":{},"max_provider_calls":1,"max_inspections":1,"max_provider_cost_usd_micros":1,
+        "max_provider_input_tokens":1,"max_provider_output_tokens":1
+    })).unwrap());
+    let expected = frozen_request(&request).unwrap().canonical_bytes().unwrap();
+    let verified = FileVerifiedArchive::verify(
+        template.source_file().unwrap(),
+        &request.source.archive_digest,
+        request.source.archive_bytes.unwrap(),
+        SourceLimits::default(),
+    )
+    .unwrap();
+    let sub = prepare_pinned_proposal_submission(
+        verified,
+        request,
+        &root.path().join("explicit-no-fallback"),
+    )
+    .unwrap();
+    assert!(sub.request.authorized_derivations.is_empty());
+    assert_eq!(
+        frozen_request(&sub.request)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        expected
+    );
+}
+
+fn source_handoff_fixture() -> (
+    tempfile::TempDir,
+    Submission,
+    super::super::source_handoff::FormationSourcePointer,
+    super::super::source_handoff::FormationSourceOrigin,
+) {
+    use super::super::source_handoff::{FormationSourceOrigin, FormationSourcePointer};
+    use crate::source_archive::{ArchiveDescriptor, Binding, SourceArchiveOutput};
+    let (root, mut template) = prepared(|_| {});
+    template.enable_candidate_producer(authorization()).unwrap();
+    let (file, bytes, digest, _, closure) = raw_github_source(root.path());
+    let verified = FileVerifiedArchive::verify(
+        File::open(file).unwrap(),
+        &digest,
+        bytes.len() as u64,
+        SourceLimits::default(),
+    )
+    .unwrap();
+    let descriptor = ArchiveDescriptor {
+        archive_format_version: verified.archive_format().into(),
+        source_archive_digest: digest.clone(),
+        size_bytes: bytes.len() as u64,
+        source_tree_digest: verified.tree_digest().into(),
+        resolver_contract_version: verified.resolver_contract().into(),
+        subdirectory: "".into(),
+        source_closure_ref: closure.clone(),
+        observed_file_count: verified.expanded_file_count() as u64,
+        observed_uncompressed_bytes: verified.expanded_bytes(),
+    };
+    let mut request = template.request;
+    request.source = SourceTransport {
+        archive_base64: None,
+        content_ref: Some(digest.clone()),
+        archive_bytes: Some(bytes.len() as u64),
+        archive_digest: digest.clone(),
+        closure_ref: closure.clone(),
+    };
+    request.initial_source = Some(InitialSource {
+        archive_digest: digest,
+        closure_ref: closure,
+    });
+    let submission =
+        prepare_pinned_proposal_submission(verified, request, &root.path().join("handoff"))
+            .unwrap();
+    let binding = Binding {
+        job_id: "fjob_source".into(),
+        attempt_id: "fatt_source".into(),
+        attempt_fence: 1,
+        job_digest: format!("sha256:{}", "1".repeat(64)),
+        archive_descriptor: descriptor,
+    };
+    let pointer = FormationSourcePointer {
+        source_archive_job_id: binding.job_id.clone(),
+        binding_digest: binding.digest().unwrap(),
+    };
+    let origin = FormationSourceOrigin {
+        result: SourceArchiveOutput { kind: "source_archive".into(), status: "source_materialized".into(), binding_digest: pointer.binding_digest.clone(), source_revision_id: "srev_fixture".into(), source_materialization_id: "smat_fixture".into(), job_id: binding.job_id, attempt_id: binding.attempt_id, attempt_fence: binding.attempt_fence, job_digest: binding.job_digest, archive_descriptor: binding.archive_descriptor },
+        source_selection: serde_json::from_value(json!({"kind":"git_hub","owner":"owner","repository":"repo","requested_ref":"main","resolved_commit_sha":"a".repeat(40),"subdirectory":""})).unwrap(),
+    };
+    (root, submission, pointer, origin)
+}
+
+fn source_handoff_accept(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    use std::time::Instant;
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+            Err(e) => panic!("expected request before bounded deadline: {e}"),
+        }
+    }
+}
+fn source_handoff_request(stream: &mut std::net::TcpStream) -> (String, Vec<String>, Value) {
+    use std::io::{BufRead, BufReader};
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut first = String::new();
+    reader.read_line(&mut first).unwrap();
+    let mut headers = Vec::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap();
+        }
+        headers.push(line);
+    }
+    let mut bytes = vec![0; length];
+    reader.read_exact(&mut bytes).unwrap();
+    (first, headers, serde_json::from_slice(&bytes).unwrap())
+}
+fn source_handoff_reply(stream: &mut std::net::TcpStream, status: u16, body: &Value) {
+    let bytes = serde_json::to_vec(body).unwrap();
+    write!(stream, "HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+    stream.write_all(&bytes).unwrap();
+}
+fn source_handoff_no_more_requests(listener: std::net::TcpListener) {
+    use std::time::Instant;
+    listener.set_nonblocking(true).unwrap();
+    let until = Instant::now() + Duration::from_millis(75);
+    while Instant::now() < until {
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "unexpected retry, fallback, or legacy upload"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn source_handoff_posts_exact_pointer_then_unchanged_request_without_reupload_or_budget_reset() {
+    let (_root, sub, pointer, origin) = source_handoff_fixture();
+    let mut archive = Vec::new();
+    sub.source_file()
+        .unwrap()
+        .read_to_end(&mut archive)
+        .unwrap();
+    let mut stopped = status(&sub);
+    stopped["status"] = json!("stopped");
+    stopped["proposal_point"] = Value::Null;
+    stopped["search_state"]["owner_stopped"] = json!(true);
+    println!(
+        "source_handoff_vector={}",
+        json!({"request":sub.request,"pointer":pointer,"origin":origin,
+        "archive_base64":BASE64.encode(archive),"stopped_status":stopped})
+    );
+    let before = serde_jcs::to_vec(&sub.request).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = Client::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "owner-fake-token",
+    )
+    .unwrap();
+    let (p, o, source, request) = (
+        json!(pointer),
+        json!(origin),
+        json!(sub.request.source),
+        json!(sub.request),
+    );
+    let expected_query = format!(
+        "POST /v1/runtime-network/satisfy?source_archive_job_id=fjob_source&binding_digest={} HTTP/1.1\r\n",
+        pointer.binding_digest.replace(':', "%3A")
+    );
+    let server = std::thread::spawn(move || {
+        for replay in [false, true] {
+            let mut stream = source_handoff_accept(&listener);
+            let (line, headers, body) = source_handoff_request(&mut stream);
+            assert_eq!(
+                line,
+                "POST /v1/runtime-network/sources/from-formation HTTP/1.1\r\n"
+            );
+            assert!(
+                headers
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case("authorization: Bearer owner-fake-token\r\n"))
+            );
+            assert_eq!(body, p);
+            source_handoff_reply(
+                &mut stream,
+                201,
+                &json!({"source":source,"source_origin":o,"formation_started":false}),
+            );
+            let mut stream = source_handoff_accept(&listener);
+            let (line, _, body) = source_handoff_request(&mut stream);
+            assert_eq!(line, expected_query);
+            assert_eq!(body, request);
+            assert!(body.get("source_archive_job_id").is_none());
+            assert!(body.get("binding_digest").is_none());
+            source_handoff_reply(
+                &mut stream,
+                if replay { 200 } else { 201 },
+                &json!({"search_id":request["search_id"],"satisfy_id":"satisfy_exact","existing":replay}),
+            );
+        }
+        source_handoff_no_more_requests(listener);
+    });
+    for replay in [false, true] {
+        let answer = client
+            .submit_from_formation_source(&sub, &pointer, &origin)
+            .unwrap();
+        assert_eq!(answer["existing"], replay);
+        assert_eq!(answer["satisfy_id"], "satisfy_exact");
+    }
+    server.join().unwrap();
+    assert_eq!(serde_jcs::to_vec(&sub.request).unwrap(), before);
+}
+
+#[test]
+fn source_handoff_refuses_changed_transfer_before_satisfy() {
+    for field in [
+        "source",
+        "attempt",
+        "binding",
+        "selection",
+        "started",
+        "unknown",
+        "oversize",
+    ] {
+        let (_root, sub, pointer, origin) = source_handoff_fixture();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Client::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "fixture",
+        )
+        .unwrap();
+        let mut reply =
+            json!({"source":sub.request.source,"source_origin":origin,"formation_started":false});
+        match field {
+            "source" => reply["source"]["archive_bytes"] = json!(1),
+            "attempt" => reply["source_origin"]["result"]["attempt_fence"] = json!(2),
+            "binding" => {
+                reply["source_origin"]["result"]["binding_digest"] =
+                    json!(format!("sha256:{}", "a".repeat(64)))
+            }
+            "selection" => {
+                reply["source_origin"]["source_selection"]["resolved_commit_sha"] =
+                    json!("b".repeat(40))
+            }
+            "started" => reply["formation_started"] = json!(true),
+            "unknown" => reply["fully_satisfied"] = json!(true),
+            "oversize" => reply["padding"] = json!("x".repeat(65536)),
+            _ => unreachable!(),
+        }
+        let server = std::thread::spawn(move || {
+            let mut stream = source_handoff_accept(&listener);
+            assert!(
+                source_handoff_request(&mut stream)
+                    .0
+                    .contains("/sources/from-formation ")
+            );
+            source_handoff_reply(&mut stream, 201, &reply);
+            source_handoff_no_more_requests(listener);
+        });
+        assert!(
+            client
+                .submit_from_formation_source(&sub, &pointer, &origin)
+                .is_err(),
+            "{field}"
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn source_handoff_rejects_local_drift_and_expired_deadline_before_any_post() {
+    for field in ["pointer", "request", "measurement", "deadline"] {
+        let (_root, mut sub, mut pointer, mut origin) = source_handoff_fixture();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "fixture",
+        )
+        .unwrap();
+        match field {
+            "pointer" => pointer.source_archive_job_id = "fjob_another".into(),
+            "request" => sub.request.source.archive_bytes = Some(1),
+            "measurement" => {
+                origin.result.archive_descriptor.observed_file_count += 1;
+                pointer.binding_digest = crate::source_archive::Binding {
+                    job_id: origin.result.job_id.clone(),
+                    attempt_id: origin.result.attempt_id.clone(),
+                    attempt_fence: origin.result.attempt_fence,
+                    job_digest: origin.result.job_digest.clone(),
+                    archive_descriptor: origin.result.archive_descriptor.clone(),
+                }
+                .digest()
+                .unwrap();
+                origin.result.binding_digest = pointer.binding_digest.clone();
+            }
+            "deadline" => client = client.with_deadline(1),
+            _ => unreachable!(),
+        }
+        assert!(
+            client
+                .submit_from_formation_source(&sub, &pointer, &origin)
+                .is_err(),
+            "{field}"
+        );
+        source_handoff_no_more_requests(listener);
+    }
+}
+
+#[test]
+fn source_handoff_refused_transfer_or_satisfy_is_not_retried_or_fallen_back() {
+    for stage in ["transfer", "satisfy", "redirect"] {
+        let (_root, sub, pointer, origin) = source_handoff_fixture();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let client = Client::new(&base, "fixture").unwrap();
+        let transfer =
+            json!({"source":sub.request.source,"source_origin":origin,"formation_started":false});
+        let server = std::thread::spawn(move || {
+            let mut stream = source_handoff_accept(&listener);
+            source_handoff_request(&mut stream);
+            if stage == "redirect" {
+                write!(stream,"HTTP/1.1 307 redirect\r\nLocation: {base}/forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            } else if stage == "transfer" {
+                source_handoff_reply(
+                    &mut stream,
+                    409,
+                    &json!({"error":"source_archive_cancelled"}),
+                );
+            } else {
+                source_handoff_reply(&mut stream, 201, &transfer);
+                let mut stream = source_handoff_accept(&listener);
+                source_handoff_request(&mut stream);
+                source_handoff_reply(
+                    &mut stream,
+                    409,
+                    &json!({"error":"formation_effect_unknown"}),
+                );
+            }
+            source_handoff_no_more_requests(listener);
+        });
+        assert!(
+            client
+                .submit_from_formation_source(&sub, &pointer, &origin)
+                .is_err(),
+            "{stage}"
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn legacy_requester_submit_keeps_existing_upload_and_plain_satisfy() {
+    let (_root, sub, _, _) = source_handoff_fixture();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = Client::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "fixture",
+    )
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = source_handoff_accept(&listener);
+        assert_eq!(
+            source_handoff_request(&mut stream).0,
+            "POST /v1/runtime-network/sources HTTP/1.1\r\n"
+        );
+        source_handoff_reply(
+            &mut stream,
+            200,
+            &json!({"upload_id":"upload_existing","status":"ready"}),
+        );
+        let mut stream = source_handoff_accept(&listener);
+        assert_eq!(
+            source_handoff_request(&mut stream).0,
+            "POST /v1/runtime-network/satisfy HTTP/1.1\r\n"
+        );
+        source_handoff_reply(&mut stream, 201, &json!({"satisfy_id":"legacy"}));
+    });
+    assert_eq!(client.submit(&sub).unwrap()["satisfy_id"], "legacy");
+    server.join().unwrap();
 }

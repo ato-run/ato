@@ -25,8 +25,9 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::pixel_gateway::{
-    PixelGatewayConfig, PixelGatewayError, PixelGatewayHandle, SURFACE_ASSERTION_HEADER,
-    SurfaceAccessAuthorizer, start_pixel_gateway,
+    PixelGatewayConfig, PixelGatewayControls, PixelGatewayError, PixelGatewayHandle,
+    SURFACE_ASSERTION_HEADER, SurfaceAccessAuthorizer, start_interactive_pixel_gateway,
+    start_pixel_gateway,
 };
 
 const RFB_3_8_VERSION: &[u8; 12] = b"RFB 003.008\n";
@@ -34,6 +35,10 @@ const SECURITY_TYPE_NONE: u8 = 1;
 const ENCODING_RAW: i32 = 0;
 const MAX_DESKTOP_NAME_BYTES: usize = 4 * 1024;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CAPTURE_KEYS: usize = 32;
+const MAX_CAPTURE_RECTANGLES: usize = 4096;
+const MAX_CAPTURE_MESSAGES: usize = 1024;
+const CAPTURE_PIXEL_FORMAT: [u8; 16] = [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0];
 const WEBSOCKET_BRIDGE_BYTES: usize = 64 * 1024;
 
 struct AbortTaskOnDrop(tokio::task::JoinHandle<()>);
@@ -51,6 +56,12 @@ pub struct RfbFrameInfo {
     pub bytes: usize,
 }
 
+struct RfbServerMetadata {
+    width: u16,
+    height: u16,
+    bytes_per_pixel: usize,
+}
+
 #[derive(Debug, Error)]
 pub enum RfbProbeError {
     #[error("RFB readiness probe timed out")]
@@ -65,6 +76,10 @@ pub enum RfbProbeError {
     SecurityRejected,
     #[error("RFB framebuffer metadata is invalid")]
     InvalidFramebuffer,
+    #[error("RFB capture endpoint must be private loopback")]
+    InvalidPrivateEndpoint,
+    #[error("RFB capture limits or requested dimensions are invalid")]
+    InvalidCaptureRequest,
     #[error("pixel gateway readiness URL is invalid or contains credential material")]
     InvalidGatewayUrl,
     #[error("pixel gateway readiness request headers are invalid")]
@@ -132,7 +147,12 @@ pub fn pixel_gateway_probe_url(public_ready_url: &str) -> Result<String, RfbProb
     };
     url.set_scheme(websocket_scheme)
         .map_err(|_| RfbProbeError::InvalidGatewayUrl)?;
-    url.set_path("/surface");
+    // A Native lease explicitly resolves its common scoped app-frame endpoint.
+    // Preserve it through the Runner mux; rewriting it to the legacy `/surface`
+    // would bypass that reserved route and correctly fail the outer HTTP gate.
+    if url.path() != "/__ato/surface" {
+        url.set_path("/surface");
+    }
     Ok(url.into())
 }
 
@@ -148,6 +168,29 @@ pub async fn start_ready_pixel_gateway(
     let handle = start_pixel_gateway(config, authorizer)
         .await
         .map_err(PixelGatewayReadyError::Start)?;
+    finish_gateway_readiness(handle, request, wait).await
+}
+
+/// Same authenticated readiness and cleanup for an explicitly controlled
+/// isolated producer. Readiness proves transport only, never Contract K.
+pub async fn start_ready_interactive_pixel_gateway(
+    config: PixelGatewayConfig,
+    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+    request: PixelGatewayProbeRequest<'_>,
+    wait: Duration,
+    controls: PixelGatewayControls,
+) -> Result<(PixelGatewayHandle, RfbFrameInfo), PixelGatewayReadyError> {
+    let handle = start_interactive_pixel_gateway(config, authorizer, controls)
+        .await
+        .map_err(PixelGatewayReadyError::Start)?;
+    finish_gateway_readiness(handle, request, wait).await
+}
+
+async fn finish_gateway_readiness(
+    handle: PixelGatewayHandle,
+    request: PixelGatewayProbeRequest<'_>,
+    wait: Duration,
+) -> Result<(PixelGatewayHandle, RfbFrameInfo), PixelGatewayReadyError> {
     match wait_for_authenticated_gateway_frame(request, wait).await {
         Ok(frame) => Ok((handle, frame)),
         Err(probe) => match handle.stop().await {
@@ -170,6 +213,166 @@ pub async fn wait_for_first_rfb_frame(
 
 async fn probe(addr: SocketAddr) -> Result<RfbFrameInfo, RfbProbeError> {
     probe_stream(TcpStream::connect(addr).await?, false).await
+}
+
+/// Performs declared key presses on a private RFB endpoint and returns one
+/// complete framebuffer in canonical row-major little-endian BGRX32 format.
+/// This is operation evidence only: it does not decide Contract satisfaction.
+/// The dimensions must match ServerInit, and one update must cover every pixel
+/// exactly once. Partial updates are never combined across different states.
+pub async fn capture_private_rfb_frame(
+    addr: SocketAddr,
+    width: u16,
+    height: u16,
+    keysyms: &[u32],
+    max_frame_bytes: usize,
+    wait: Duration,
+) -> Result<Vec<u8>, RfbProbeError> {
+    capture_private_rfb_frame_with_settle(
+        addr,
+        width,
+        height,
+        keysyms,
+        max_frame_bytes,
+        Duration::ZERO,
+        wait,
+    )
+    .await
+}
+
+/// Same bounded capture with an authored render-settling interval. The wait is
+/// within the original deadline, cancellable, and never repeats a key or frame.
+#[allow(clippy::too_many_arguments)]
+pub async fn capture_private_rfb_frame_with_settle(
+    addr: SocketAddr,
+    width: u16,
+    height: u16,
+    keysyms: &[u32],
+    max_frame_bytes: usize,
+    settle: Duration,
+    wait: Duration,
+) -> Result<Vec<u8>, RfbProbeError> {
+    if !addr.ip().is_loopback() {
+        return Err(RfbProbeError::InvalidPrivateEndpoint);
+    }
+    let frame_bytes = usize::from(width)
+        .checked_mul(usize::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|bytes| *bytes <= max_frame_bytes)
+        .ok_or(RfbProbeError::InvalidCaptureRequest)?;
+    if width == 0
+        || width > 4096
+        || height == 0
+        || height > 4096
+        || keysyms.len() > MAX_CAPTURE_KEYS
+        || max_frame_bytes == 0
+        || max_frame_bytes > MAX_FRAME_BYTES
+        || wait < Duration::from_millis(1)
+        || wait > Duration::from_secs(30)
+        || settle > Duration::from_secs(1)
+        || settle >= wait
+    {
+        return Err(RfbProbeError::InvalidCaptureRequest);
+    }
+    timeout(wait, async {
+        let mut stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        let metadata = negotiate_rfb_server(&mut stream).await?;
+        if metadata.width != width || metadata.height != height {
+            return Err(RfbProbeError::InvalidFramebuffer);
+        }
+
+        // SetPixelFormat precedes both the inputs and the requested raw update,
+        // so server-native pixel layout cannot change the captured bytes.
+        stream.write_all(&[0, 0, 0, 0]).await?;
+        stream.write_all(&CAPTURE_PIXEL_FORMAT).await?;
+        stream.write_all(&[2, 0, 0, 1]).await?;
+        stream.write_all(&ENCODING_RAW.to_be_bytes()).await?;
+        for keysym in keysyms {
+            for down in [1, 0] {
+                stream.write_all(&[4, down, 0, 0]).await?;
+                stream.write_all(&keysym.to_be_bytes()).await?;
+            }
+        }
+        stream.flush().await?;
+        if !settle.is_zero() {
+            tokio::time::sleep(settle).await;
+        }
+        stream.write_all(&[3, 0, 0, 0, 0, 0]).await?;
+        stream.write_u16(width).await?;
+        stream.write_u16(height).await?;
+        stream.flush().await?;
+
+        for _ in 0..MAX_CAPTURE_MESSAGES {
+            match stream.read_u8().await? {
+                0 => return capture_raw_update(&mut stream, width, height, frame_bytes).await,
+                2 => {} // A bounded number of bell messages carries no data.
+                // Clipboard and all unrequested encodings are outside this
+                // operation; never read or return their potentially private data.
+                _ => return Err(RfbProbeError::UnsupportedProtocol),
+            }
+        }
+        Err(RfbProbeError::UnsupportedProtocol)
+    })
+    .await
+    .map_err(|_| RfbProbeError::Timeout)?
+}
+
+async fn capture_raw_update<S>(
+    stream: &mut S,
+    width: u16,
+    height: u16,
+    frame_bytes: usize,
+) -> Result<Vec<u8>, RfbProbeError>
+where
+    S: AsyncRead + Unpin,
+{
+    let _padding = stream.read_u8().await?;
+    let rectangle_count = usize::from(stream.read_u16().await?);
+    let pixel_count = frame_bytes / 4;
+    if rectangle_count == 0
+        || rectangle_count > MAX_CAPTURE_RECTANGLES
+        || rectangle_count > pixel_count
+    {
+        return Err(RfbProbeError::InvalidFramebuffer);
+    }
+    let mut frame = vec![0_u8; frame_bytes];
+    let mut covered = vec![0_u8; pixel_count.div_ceil(8)];
+    let mut covered_pixels = 0_usize;
+    for _ in 0..rectangle_count {
+        let x = usize::from(stream.read_u16().await?);
+        let y = usize::from(stream.read_u16().await?);
+        let rect_width = usize::from(stream.read_u16().await?);
+        let rect_height = usize::from(stream.read_u16().await?);
+        if stream.read_i32().await? != ENCODING_RAW {
+            return Err(RfbProbeError::UnsupportedProtocol);
+        }
+        if rect_width == 0
+            || rect_height == 0
+            || x + rect_width > usize::from(width)
+            || y + rect_height > usize::from(height)
+        {
+            return Err(RfbProbeError::InvalidFramebuffer);
+        }
+        for row in y..y + rect_height {
+            let start = row * usize::from(width) + x;
+            for pixel in start..start + rect_width {
+                let mask = 1_u8 << (pixel % 8);
+                if covered[pixel / 8] & mask != 0 {
+                    return Err(RfbProbeError::InvalidFramebuffer);
+                }
+                covered[pixel / 8] |= mask;
+            }
+            covered_pixels += rect_width;
+            stream
+                .read_exact(&mut frame[start * 4..(start + rect_width) * 4])
+                .await?;
+        }
+    }
+    if covered_pixels != pixel_count {
+        return Err(RfbProbeError::InvalidFramebuffer);
+    }
+    Ok(frame)
 }
 
 /// Traverses the browser-facing authenticated WebSocket gateway and proves a
@@ -272,10 +475,7 @@ async fn bridge_websocket(
     Ok(())
 }
 
-async fn probe_stream<S>(
-    mut stream: S,
-    prove_input_path: bool,
-) -> Result<RfbFrameInfo, RfbProbeError>
+async fn negotiate_rfb_server<S>(stream: &mut S) -> Result<RfbServerMetadata, RfbProbeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -323,6 +523,25 @@ where
     }
     let mut desktop_name = vec![0_u8; name_len];
     stream.read_exact(&mut desktop_name).await?;
+
+    Ok(RfbServerMetadata {
+        width,
+        height,
+        bytes_per_pixel,
+    })
+}
+
+async fn probe_stream<S>(
+    mut stream: S,
+    prove_input_path: bool,
+) -> Result<RfbFrameInfo, RfbProbeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let metadata = negotiate_rfb_server(&mut stream).await?;
+    let width = metadata.width;
+    let height = metadata.height;
+    let bytes_per_pixel = metadata.bytes_per_pixel;
 
     // A no-button pointer move is harmless but exercises the actual browser
     // input lane. The subsequent frame response proves the ordered RFB stream
@@ -409,15 +628,334 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tokio::{net::TcpListener, time::sleep};
+
+    fn raw_rectangle(x: u16, y: u16, width: u16, height: u16, pixels: &[u8]) -> Vec<u8> {
+        let mut rectangle = Vec::new();
+        for value in [x, y, width, height] {
+            rectangle.extend_from_slice(&value.to_be_bytes());
+        }
+        rectangle.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        rectangle.extend_from_slice(pixels);
+        rectangle
+    }
+
+    fn frame_update(rectangles: &[Vec<u8>]) -> Vec<u8> {
+        let mut update = vec![0, 0];
+        update.extend_from_slice(&(rectangles.len() as u16).to_be_bytes());
+        for rectangle in rectangles {
+            update.extend_from_slice(rectangle);
+        }
+        update
+    }
+
+    async fn capture_fixture(
+        keysyms: Vec<u32>,
+        response: Vec<u8>,
+        keep_open: bool,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        capture_fixture_with_settle(keysyms, response, keep_open, Duration::ZERO, false, None).await
+    }
+
+    async fn capture_fixture_with_settle(
+        keysyms: Vec<u32>,
+        response: Vec<u8>,
+        keep_open: bool,
+        minimum_settle: Duration,
+        expect_cancel: bool,
+        keys_received: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(RFB_3_8_VERSION).await.unwrap();
+            let mut version = [0_u8; 12];
+            stream.read_exact(&mut version).await.unwrap();
+            assert_eq!(&version, RFB_3_8_VERSION);
+            stream.write_all(&[1, SECURITY_TYPE_NONE]).await.unwrap();
+            assert_eq!(stream.read_u8().await.unwrap(), SECURITY_TYPE_NONE);
+            stream.write_u32(0).await.unwrap();
+            assert_eq!(stream.read_u8().await.unwrap(), 1);
+            let mut metadata = vec![0, 2, 0, 2];
+            // The server initially uses a different layout. The capture must
+            // explicitly negotiate its canonical layout instead of assuming it.
+            metadata.extend_from_slice(&[16, 16, 1, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0, 0, 0, 0]);
+            metadata.extend_from_slice(&0_u32.to_be_bytes());
+            stream.write_all(&metadata).await.unwrap();
+
+            let mut format = [0_u8; 20];
+            stream.read_exact(&mut format).await.unwrap();
+            assert_eq!(&format[..4], &[0, 0, 0, 0]);
+            assert_eq!(&format[4..], &CAPTURE_PIXEL_FORMAT);
+            let mut encodings = [0_u8; 8];
+            stream.read_exact(&mut encodings).await.unwrap();
+            assert_eq!(encodings, [2, 0, 0, 1, 0, 0, 0, 0]);
+            for keysym in keysyms {
+                for down in [1, 0] {
+                    let mut event = [0_u8; 8];
+                    stream.read_exact(&mut event).await.unwrap();
+                    assert_eq!(&event[..4], &[4, down, 0, 0]);
+                    assert_eq!(&event[4..], &keysym.to_be_bytes());
+                }
+            }
+            let keys_sent = std::time::Instant::now();
+            if let Some(ready) = keys_received {
+                let _ = ready.send(());
+            }
+            if expect_cancel {
+                assert_eq!(stream.read(&mut [0; 1]).await.unwrap(), 0);
+                return;
+            }
+            let mut request = [0_u8; 10];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [3, 0, 0, 0, 0, 0, 0, 2, 0, 2]);
+            assert!(keys_sent.elapsed() >= minimum_settle);
+            stream.write_all(&response).await.unwrap();
+            if keep_open {
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+        (addr, server)
+    }
+
+    #[tokio::test]
+    async fn declared_settle_runs_keys_once_then_one_update_inside_deadline_and_cancels() {
+        let pixels = [4, 3, 2, 0].repeat(4);
+        let response = frame_update(&[raw_rectangle(0, 0, 2, 2, &pixels)]);
+        let (addr, server) = capture_fixture_with_settle(
+            vec![103],
+            response,
+            false,
+            Duration::from_millis(40),
+            false,
+            None,
+        )
+        .await;
+        let frame = capture_private_rfb_frame_with_settle(
+            addr,
+            2,
+            2,
+            &[103],
+            16,
+            Duration::from_millis(50),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(frame, pixels);
+        server.await.unwrap();
+        for (settle, wait) in [(1001, 1500), (100, 100)] {
+            assert!(matches!(
+                capture_private_rfb_frame_with_settle(
+                    "127.0.0.1:1".parse().unwrap(),
+                    2,
+                    2,
+                    &[103],
+                    16,
+                    Duration::from_millis(settle),
+                    Duration::from_millis(wait)
+                )
+                .await,
+                Err(RfbProbeError::InvalidCaptureRequest)
+            ));
+        }
+        let (keys_sent, keys_seen) = tokio::sync::oneshot::channel();
+        let (addr, server) = capture_fixture_with_settle(
+            vec![103],
+            vec![],
+            false,
+            Duration::ZERO,
+            true,
+            Some(keys_sent),
+        )
+        .await;
+        let task = tokio::spawn(async move {
+            capture_private_rfb_frame_with_settle(
+                addr,
+                2,
+                2,
+                &[103],
+                16,
+                Duration::from_millis(900),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), keys_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let (addr, server) = capture_fixture(vec![103], vec![], true).await;
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            capture_private_rfb_frame_with_settle(
+                addr,
+                2,
+                2,
+                &[103],
+                16,
+                Duration::from_millis(100),
+                Duration::from_millis(200)
+            )
+            .await,
+            Err(RfbProbeError::Timeout)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn capture_sends_fixed_format_then_each_key_once_and_reassembles_full_frame() {
+        let top_left = [1, 2, 3, 0];
+        let top_right = [4, 5, 6, 0];
+        let bottom = [7, 8, 9, 0, 10, 11, 12, 0];
+        let response = frame_update(&[
+            raw_rectangle(0, 1, 2, 1, &bottom),
+            raw_rectangle(1, 0, 1, 1, &top_right),
+            raw_rectangle(0, 0, 1, 1, &top_left),
+        ]);
+        let keys = [0x61, 0xff0d];
+        let (addr, server) = capture_fixture(keys.to_vec(), response, false).await;
+        let frame = capture_private_rfb_frame(addr, 2, 2, &keys, 16, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            frame,
+            [top_left.as_slice(), top_right.as_slice(), &bottom].concat()
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_incomplete_overlapping_and_out_of_bounds_updates() {
+        let cases = [
+            frame_update(&[raw_rectangle(0, 0, 1, 1, &[0; 4])]),
+            frame_update(&[
+                raw_rectangle(0, 0, 2, 1, &[0; 8]),
+                raw_rectangle(0, 0, 2, 1, &[0; 8]),
+            ]),
+            frame_update(&[raw_rectangle(1, 0, 2, 2, &[0; 16])]),
+            frame_update(&[raw_rectangle(0, 0, 0, 2, &[])]),
+            vec![0, 0, 0, 0],
+            vec![0, 0, 0x10, 0x01], // Over the bounded rectangle metadata limit.
+        ];
+        for response in cases {
+            let (addr, server) = capture_fixture(vec![], response, false).await;
+            assert!(matches!(
+                capture_private_rfb_frame(addr, 2, 2, &[], 16, Duration::from_secs(1)).await,
+                Err(RfbProbeError::InvalidFramebuffer)
+            ));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_nonraw_clipboard_and_unbounded_bell_metadata() {
+        let mut nonraw = frame_update(&[raw_rectangle(0, 0, 2, 2, &[])]);
+        nonraw[15] = 1;
+        for response in [nonraw, vec![3], vec![2; MAX_CAPTURE_MESSAGES]] {
+            let (addr, server) = capture_fixture(vec![], response, false).await;
+            assert!(matches!(
+                capture_private_rfb_frame(addr, 2, 2, &[], 16, Duration::from_secs(1)).await,
+                Err(RfbProbeError::UnsupportedProtocol)
+            ));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_timeout_covers_an_incomplete_frame_payload() {
+        let response = frame_update(&[raw_rectangle(0, 0, 2, 2, &[0; 4])]);
+        let (addr, server) = capture_fixture(vec![], response, true).await;
+        let _server_owner = AbortTaskOnDrop(server);
+        assert!(matches!(
+            capture_private_rfb_frame(addr, 2, 2, &[], 16, Duration::from_millis(50)).await,
+            Err(RfbProbeError::Timeout)
+        ));
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_truncated_frame_payload() {
+        let response = frame_update(&[raw_rectangle(0, 0, 2, 2, &[0; 4])]);
+        let (addr, server) = capture_fixture(vec![], response, false).await;
+        assert!(matches!(
+            capture_private_rfb_frame(addr, 2, 2, &[], 16, Duration::from_secs(1)).await,
+            Err(RfbProbeError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_timeout_also_covers_the_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            sleep(Duration::from_secs(5)).await;
+        });
+        let _server_owner = AbortTaskOnDrop(server);
+        assert!(matches!(
+            capture_private_rfb_frame(addr, 2, 2, &[], 16, Duration::from_millis(50)).await,
+            Err(RfbProbeError::Timeout)
+        ));
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_limits_before_connecting() {
+        let addr = "127.0.0.1:9".parse().unwrap();
+        for (width, height, key_count, max_bytes, wait) in [
+            (0, 2, 0, 16, Duration::from_secs(1)),
+            (2, 0, 0, 16, Duration::from_secs(1)),
+            (4097, 2, 0, MAX_FRAME_BYTES, Duration::from_secs(1)),
+            (2, 4097, 0, MAX_FRAME_BYTES, Duration::from_secs(1)),
+            (2, 2, 33, 16, Duration::from_secs(1)),
+            (2, 2, 0, 15, Duration::from_secs(1)),
+            (2, 2, 0, MAX_FRAME_BYTES + 1, Duration::from_secs(1)),
+            (2, 2, 0, 16, Duration::ZERO),
+            (2, 2, 0, 16, Duration::from_secs(31)),
+        ] {
+            assert!(matches!(
+                capture_private_rfb_frame(
+                    addr,
+                    width,
+                    height,
+                    &vec![0; key_count],
+                    max_bytes,
+                    wait
+                )
+                .await,
+                Err(RfbProbeError::InvalidCaptureRequest)
+            ));
+        }
+        assert!(matches!(
+            capture_private_rfb_frame(
+                "192.0.2.1:5900".parse().unwrap(),
+                2,
+                2,
+                &[],
+                16,
+                Duration::from_secs(1)
+            )
+            .await,
+            Err(RfbProbeError::InvalidPrivateEndpoint)
+        ));
+    }
 
     async fn fixture_server(security_types: Vec<u8>) -> SocketAddr {
         fixture_server_with_input(security_types, false).await
     }
 
-    async fn fixture_server_with_input(
+    pub(crate) async fn fixture_server_with_input(
         security_types: Vec<u8>,
         expect_pointer_input: bool,
     ) -> SocketAddr {
@@ -497,6 +1035,8 @@ mod tests {
                 return Err(crate::pixel_gateway::SurfaceAuthorizationError);
             }
             Ok(crate::pixel_gateway::AuthorizedSurfaceAccess {
+                clipboard_paste_until: None,
+                framebuffer_resize_until: None,
                 principal: "user-1".to_string(),
                 grant_id: "probe-grant-1".to_string(),
             })
@@ -555,6 +1095,14 @@ mod tests {
 
     #[test]
     fn public_probe_url_is_token_free_and_secure_except_on_loopback() {
+        assert_eq!(
+            pixel_gateway_probe_url("https://session.example/__ato/surface").unwrap(),
+            "wss://session.example/__ato/surface"
+        );
+        assert_eq!(
+            pixel_gateway_probe_url("http://127.0.0.1:8420/__ato/surface").unwrap(),
+            "ws://127.0.0.1:8420/__ato/surface"
+        );
         assert_eq!(
             pixel_gateway_probe_url("https://session.example/").unwrap(),
             "wss://session.example/surface"
@@ -633,22 +1181,35 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_gateway_probe_failure_stops_listener_and_prevents_ready() {
-        // Authorization fails before the gateway may contact this deliberately
-        // unused private endpoint.
-        let private_rfb_addr = reserved_listen_addr().await;
-        let listen_addr = reserved_listen_addr().await;
-        let ready_url = format!("http://{listen_addr}/");
-        let request = PixelGatewayProbeRequest::new(&ready_url, "http://localhost:5173", "invalid");
+        for interactive in [false, true] {
+            // Authorization fails before the gateway may contact this deliberately
+            // unused private endpoint.
+            let private_rfb_addr = reserved_listen_addr().await;
+            let listen_addr = reserved_listen_addr().await;
+            let ready_url = format!("http://{listen_addr}/");
+            let request =
+                PixelGatewayProbeRequest::new(&ready_url, "http://localhost:5173", "invalid");
 
-        let result = start_ready_pixel_gateway(
-            gateway_config(listen_addr, private_rfb_addr),
-            Arc::new(TestAuthorizer),
-            request,
-            Duration::from_secs(1),
-        )
-        .await;
+            let config = gateway_config(listen_addr, private_rfb_addr);
+            let authorizer = Arc::new(TestAuthorizer);
+            let result = if interactive {
+                start_ready_interactive_pixel_gateway(
+                    config,
+                    authorizer,
+                    request,
+                    Duration::from_secs(1),
+                    PixelGatewayControls {
+                        text_paste: true,
+                        framebuffer_resize: true,
+                    },
+                )
+                .await
+            } else {
+                start_ready_pixel_gateway(config, authorizer, request, Duration::from_secs(1)).await
+            };
 
-        assert!(matches!(result, Err(PixelGatewayReadyError::Probe(_))));
-        assert!(TcpStream::connect(listen_addr).await.is_err());
+            assert!(matches!(result, Err(PixelGatewayReadyError::Probe(_))));
+            assert!(TcpStream::connect(listen_addr).await.is_err());
+        }
     }
 }
