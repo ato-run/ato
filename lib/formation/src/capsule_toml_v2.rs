@@ -158,6 +158,10 @@ struct Application {
 struct Contract {
     #[serde(default)]
     mode: ContractMode,
+    /// The Contract identity the author states. Authoring metadata: it never
+    /// enters the bound Contract bytes, so `K` is unchanged either way.
+    #[serde(default)]
+    identity: Option<String>,
     observation: Vec<HttpObservation>,
 }
 
@@ -512,6 +516,26 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             "contract",
             "portable v0 requires non-empty mode=all observations",
         ));
+    }
+    // `behavioral` is legal and changes nothing in K (this grammar only binds
+    // HTTP observations). `source-bound` cannot be honoured: the portable v0
+    // authored grammar has no way to name a source identity, so accepting it
+    // would claim an identity this frontend cannot build.
+    match document.contract.identity.as_deref() {
+        None | Some("behavioral") => {}
+        Some("source-bound") => {
+            return Err(invalid(
+                "contract.identity",
+                "ato.capsule/2 cannot bind a source identity; use behavioral, or omit the key \
+                 and author a workspace observation in ato.capsule/1",
+            ));
+        }
+        Some(other) => {
+            return Err(invalid(
+                "contract.identity",
+                format!("{other:?} is not a Contract identity; use behavioral, or omit the key"),
+            ));
+        }
     }
     let mut observation_ids = BTreeSet::new();
     let observations = document

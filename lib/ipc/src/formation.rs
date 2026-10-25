@@ -242,6 +242,21 @@ pub struct FormationJobV1 {
     pub authoring: Option<FormationAuthoringV1>,
 }
 
+/// The Contract identity a Formation request asks the build to bind under.
+///
+/// This is request metadata, not part of the Contract: the worker maps it to
+/// its authoring `ContractIdentity`, and `K` keeps its `{schema, requirements}`
+/// shape. Absent means "bind exactly as authored", which is the only value
+/// older requests can express, so their canonical bytes are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FormationContractIdentityV1 {
+    /// `K` must not observe the source tree's identity.
+    Behavioral,
+    /// `K` must observe exactly one workspace input's identity.
+    SourceBound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FormationAuthoringV1 {
@@ -251,6 +266,11 @@ pub struct FormationAuthoringV1 {
     /// Explicit overrides, applied over anything inferred.
     #[serde(default)]
     pub overrides: BTreeMap<String, String>,
+    /// The Contract identity the request asks for. A manifest that states its
+    /// own identity wins; a request that contradicts it is refused rather
+    /// than silently overriding the author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_identity: Option<FormationContractIdentityV1>,
 }
 
 // ──────────────────────────────────────────────────────────────── the results

@@ -90,6 +90,13 @@ pub enum AuthoringError {
     },
     #[error("{field} asks for a captured observation this build cannot resolve: {detail}")]
     CaptureUnresolvable { field: String, detail: String },
+    #[error(
+        "a behavioral Contract must not observe the source identity: requirement {requirement:?} \
+         is {WORKSPACE_CONTRACT_VERIFIER}"
+    )]
+    BehavioralContractHasSourceRequirement { requirement: String },
+    #[error("a source-bound Contract must observe exactly one source identity: {detail}")]
+    SourceBoundContractHasNoSourceRequirement { detail: String },
     #[error("canonicalization failed: {detail}")]
     Canonicalization { detail: String },
 }
@@ -101,6 +108,12 @@ impl AuthoringError {
             Self::Duplicate { .. } => "authoring_duplicate_id",
             Self::Unresolved { .. } => "authoring_unresolved_reference",
             Self::CaptureUnresolvable { .. } => "authoring_capture_unresolvable",
+            Self::BehavioralContractHasSourceRequirement { .. } => {
+                "behavioral_contract_has_source_requirement"
+            }
+            Self::SourceBoundContractHasNoSourceRequirement { .. } => {
+                "source_bound_contract_has_no_source_requirement"
+            }
             Self::Canonicalization { .. } => "authoring_canonicalization_failed",
         }
     }
@@ -156,9 +169,56 @@ pub struct ObservationDraft {
     pub requirement: RequirementDraft,
 }
 
+/// What the author says the Contract's identity depends on.
+///
+/// This is authoring intent, not part of the Contract: [`BoundContract`] keeps
+/// its `{schema, requirements}` shape, so stating an identity adds nothing to
+/// `K`. It only lets `bind` refuse a draft whose statements contradict the
+/// identity it claims — which is why an absent value means "bind exactly as
+/// authored" and is byte-identical to every document written before this
+/// field existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContractIdentity {
+    /// Nothing was stated. Bind the requirements exactly as authored.
+    #[default]
+    Unspecified,
+    /// `K` must not observe the source tree's identity: the same Contract holds
+    /// for any source that behaves the same way.
+    Behavioral,
+    /// `K` must observe exactly one workspace input's identity: this source
+    /// tree, and only this one.
+    SourceBound,
+}
+
+impl ContractIdentity {
+    /// The spelling used by the authoring grammars and the job wire format.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Behavioral => "behavioral",
+            Self::SourceBound => "source-bound",
+        }
+    }
+
+    /// Whether the author stated an identity at all.
+    pub fn is_explicit(self) -> bool {
+        !matches!(self, Self::Unspecified)
+    }
+}
+
+impl std::fmt::Display for ContractIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The author's proposed identity boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContractDraft {
+    /// An explicit statement checked against the requirements by `bind`.
+    /// Never digested.
+    pub identity: ContractIdentity,
     pub requirements: Vec<ObservationDraft>,
 }
 
@@ -884,11 +944,66 @@ fn bind_contract(
              state at least one condition",
         ));
     }
+    validate_identity(draft.identity, &requirements, derivation)?;
 
     Ok(BoundContract {
         schema: BOUND_CONTRACT_SCHEMA.to_owned(),
         requirements,
     })
+}
+
+/// An explicit identity must match what the requirements actually observe.
+///
+/// Only an explicit statement is checked. `Unspecified` is today's behaviour
+/// (bind whatever was authored), and tightening it here would reinterpret
+/// every document that never mentioned an identity.
+fn validate_identity(
+    identity: ContractIdentity,
+    requirements: &[BoundRequirement],
+    derivation: &BoundDerivation,
+) -> Result<(), AuthoringError> {
+    let source_requirements = requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == WORKSPACE_CONTRACT_VERIFIER)
+        .collect::<Vec<_>>();
+    match identity {
+        ContractIdentity::Unspecified => Ok(()),
+        ContractIdentity::Behavioral => match source_requirements.first() {
+            Some(requirement) => Err(AuthoringError::BehavioralContractHasSourceRequirement {
+                requirement: requirement.id.clone(),
+            }),
+            None => Ok(()),
+        },
+        ContractIdentity::SourceBound => {
+            let [requirement] = source_requirements.as_slice() else {
+                return Err(AuthoringError::SourceBoundContractHasNoSourceRequirement {
+                    detail: format!(
+                        "found {} source-identity observations; a source-bound Contract \
+                             observes exactly one",
+                        source_requirements.len()
+                    ),
+                });
+            };
+            let resolved_digest = requirement
+                .digest
+                .as_deref()
+                .is_some_and(|digest| !digest.is_empty());
+            let binds_declared_input = requirement.input.as_deref().is_some_and(|input| {
+                derivation
+                    .inputs
+                    .iter()
+                    .any(|declared| declared.id == input)
+            });
+            if !resolved_digest || !binds_declared_input {
+                return Err(AuthoringError::SourceBoundContractHasNoSourceRequirement {
+                    detail: "the source-identity observation must bind a declared workspace \
+                                 input to a resolved digest"
+                        .to_owned(),
+                });
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -904,6 +1019,7 @@ mod tests {
     fn minimal(provenance: AuthoringProvenance) -> AuthoringDraft {
         AuthoringDraft {
             contract: ContractDraft {
+                identity: ContractIdentity::Unspecified,
                 requirements: vec![ObservationDraft {
                     id: "root".to_owned(),
                     requirement: RequirementDraft::Http(HttpRequirement {

@@ -378,9 +378,10 @@ pub fn preset_overrides(preset: AppPreset) -> Vec<(&'static str, String)> {
 // canonicalizes to the same ContractRef and the same DerivationRef.
 
 use crate::authoring::{
-    AuthoringDraft, AuthoringProvenance, BROWSER_PROTOCOL, ContractDraft, DerivationDraft,
-    EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft, InputIdentityRequirement,
-    ObservationDraft, Observed, PortDraft, RequirementDraft, StepDraft, WORKSPACE_PROTOCOL,
+    AuthoringDraft, AuthoringProvenance, BROWSER_PROTOCOL, ContractDraft, ContractIdentity,
+    DerivationDraft, EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft,
+    InputIdentityRequirement, ObservationDraft, Observed, PortDraft, RequirementDraft, StepDraft,
+    WORKSPACE_PROTOCOL,
 };
 
 /// The input id a Preset gives the source tree.
@@ -412,6 +413,24 @@ pub const PRESET_SOURCE_OBSERVATION_ID: &str = "source-identity";
 /// not something the author chose to preserve, and putting it in the digest
 /// would make a policy change rewrite every Capsule identity.
 pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
+    synthesize_authoring_with_identity(preset, ContractIdentity::SourceBound)
+}
+
+/// Synthesize the authoring pair under an explicit Contract identity.
+///
+/// `Behavioral` drops the source-identity observation, so two different source
+/// trees that behave the same way produce the same Contract. `SourceBound`
+/// keeps today's two observations. `Unspecified` is not a preset identity: a
+/// preset always states one, and the absence of a request means the historical
+/// source-bound preset (`Unspecified` is normalized to `SourceBound`).
+pub fn synthesize_authoring_with_identity(
+    preset: AppPreset,
+    identity: ContractIdentity,
+) -> AuthoringDraft {
+    let identity = match identity {
+        ContractIdentity::Unspecified => ContractIdentity::SourceBound,
+        explicit => explicit,
+    };
     let (root, spa_fallback) = match preset {
         AppPreset::SingleHtml | AppPreset::StaticFiles => (None, false),
         AppPreset::NodeStatic => (Some(NODE_STATIC_OUTPUT_ROOT.to_owned()), true),
@@ -419,27 +438,29 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
         // a typo'd asset URL.
         AppPreset::SingleJsx => (Some(SINGLE_JSX_OUTPUT_ROOT.to_owned()), false),
     };
+    let mut requirements = vec![ObservationDraft {
+        id: PRESET_ROOT_OBSERVATION_ID.to_owned(),
+        requirement: RequirementDraft::Http(HttpRequirement {
+            port: PRESET_PORT_ID.to_owned(),
+            method: "GET".to_owned(),
+            path: "/".to_owned(),
+            status: 200,
+            body_digest: None,
+        }),
+    }];
+    if identity == ContractIdentity::SourceBound {
+        requirements.push(ObservationDraft {
+            id: PRESET_SOURCE_OBSERVATION_ID.to_owned(),
+            requirement: RequirementDraft::InputIdentity(InputIdentityRequirement {
+                input: PRESET_INPUT_ID.to_owned(),
+                digest: Observed::Capture,
+            }),
+        });
+    }
     AuthoringDraft {
         contract: ContractDraft {
-            requirements: vec![
-                ObservationDraft {
-                    id: PRESET_ROOT_OBSERVATION_ID.to_owned(),
-                    requirement: RequirementDraft::Http(HttpRequirement {
-                        port: PRESET_PORT_ID.to_owned(),
-                        method: "GET".to_owned(),
-                        path: "/".to_owned(),
-                        status: 200,
-                        body_digest: None,
-                    }),
-                },
-                ObservationDraft {
-                    id: PRESET_SOURCE_OBSERVATION_ID.to_owned(),
-                    requirement: RequirementDraft::InputIdentity(InputIdentityRequirement {
-                        input: PRESET_INPUT_ID.to_owned(),
-                        digest: Observed::Capture,
-                    }),
-                },
-            ],
+            identity,
+            requirements,
         },
         derivation: DerivationDraft {
             runtime_port_operations: vec![],
@@ -500,6 +521,29 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
             preset: preset.id(),
         },
     }
+}
+
+/// Re-state an already synthesized preset draft under an identity.
+///
+/// Used where one preset draft is built from another (`node-static/v2` starts
+/// from the `NodeStatic` draft and replaces its D). The requirements are edited
+/// exactly as `synthesize_authoring_with_identity` would have built them, so a
+/// draft restated this way is the same draft that identity would have produced.
+pub fn apply_contract_identity(
+    mut draft: AuthoringDraft,
+    identity: ContractIdentity,
+) -> AuthoringDraft {
+    match identity {
+        ContractIdentity::Unspecified => {}
+        ContractIdentity::Behavioral => {
+            draft.contract.requirements.retain(|observation| {
+                !matches!(observation.requirement, RequirementDraft::InputIdentity(_))
+            });
+            draft.contract.identity = ContractIdentity::Behavioral;
+        }
+        ContractIdentity::SourceBound => draft.contract.identity = ContractIdentity::SourceBound,
+    }
+    draft
 }
 
 pub(crate) mod node_static_v2;
