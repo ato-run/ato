@@ -1,0 +1,44 @@
+"""Source A: http.server threading server with a request handler class.
+
+The response bytes are the fixture's frozen identity:
+
+    {"service":"transformation-v0","status":"ok"}\n
+
+Source B implements the same response with a different stdlib code path
+(socketserver + raw request parsing), so the two sources are different
+Derivations under the same Contract. The listen port comes from the Runtime's
+existing ATO_ENDPOINT_APP_HTTP_PORT injection, exactly like the known-good
+process fixtures.
+"""
+
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BODY = b'{"service":"transformation-v0","status":"ok"}\n'
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "transformation-v0-a/1"
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's API
+        if self.path != "/":
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(BODY)))
+        self.end_headers()
+        self.wfile.write(BODY)
+
+    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+        # The fixture is observed over loopback; keep its stderr quiet.
+        pass
+
+
+def main() -> None:
+    port = int(os.environ.get("ATO_ENDPOINT_APP_HTTP_PORT", "8000"))
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
