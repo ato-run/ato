@@ -17,6 +17,7 @@ path = "."
 
 [contract]
 mode = "all"
+identity = "behavioral"
 
 [[contract.observation]]
 id = "root"
