@@ -114,6 +114,9 @@ enum Commands {
     Pack(PackArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Derive and verify a candidate Derivation against an existing .capsule's
+    /// frozen Contract K. Writes local candidate artifacts; never publishes.
+    Reform(ReformArgs),
     /// Import immutable model objects into this host's verified cache.
     ModelSet {
         #[command(subcommand)]
@@ -282,6 +285,22 @@ struct RunArgs {
     /// Write the shared Contract verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ReformArgs {
+    /// Existing portable .capsule whose canonical Contract K is frozen.
+    capsule: PathBuf,
+    /// New source directory to build the candidate Derivation from.
+    source: PathBuf,
+    /// New directory for candidate.capsule, receipt.json and report.json.
+    /// Refused when it already exists; nothing outside it is written.
+    #[arg(long)]
+    out: PathBuf,
+    /// Select one declared candidate DerivationRef when the new source yields
+    /// several. Without it, one derivation is used and several are an error.
+    #[arg(long)]
+    derivation: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -605,6 +624,7 @@ pub fn run() -> Result<()> {
         Commands::Encap(args) => encap(args),
         Commands::Pack(args) => pack(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::Reform(args) => run_reform(args),
         Commands::ModelSet { command } => model_cache::execute(command),
         Commands::App { command } => match command {
             AppCommands::Import(args) => import_local_application(args),
@@ -2365,6 +2385,312 @@ fn run_portable_application(
         (Err(original), Ok(())) => Err(original),
         (Ok(()), stopped) => stopped,
     }
+}
+
+/// One HTTP observation, reduced to the facts a transformation report may
+/// repeat. Full evidence stays in the receipt.
+#[derive(Debug, serde::Serialize)]
+struct TransformationObservationV1 {
+    id: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_sha256: Option<String>,
+}
+
+/// What the receipt's existing execution evidence says about the runtime.
+#[derive(Debug, serde::Serialize)]
+struct TransformationRuntimeV1 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_executable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_version: Option<String>,
+}
+
+/// Sidecar report for one transformation candidate. This schema is ours; the
+/// Contract verification receipt keeps its existing schema and authority.
+#[derive(Debug, serde::Serialize)]
+struct TransformationReportV1 {
+    schema: &'static str,
+    /// `candidate` (K preserved, not yet run), `accepted` (fully satisfied) or
+    /// `rejected` (K mismatch/source-bound/verification failure).
+    status: &'static str,
+    frozen_bundle_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frozen_contract_ref: Option<String>,
+    old_derivation_refs: Vec<String>,
+    old_source_closure_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_bundle_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_derivation_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_source_closure_ref: Option<String>,
+    k_preserved: bool,
+    fully_satisfied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_versions: Option<TransformationRuntimeV1>,
+    observations: Vec<TransformationObservationV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    started_at_unix_ms: u64,
+    finished_at_unix_ms: u64,
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn transformation_observations(
+    receipt: &ContractVerificationReceipt,
+) -> Vec<TransformationObservationV1> {
+    receipt
+        .observations
+        .iter()
+        .map(|observation| TransformationObservationV1 {
+            id: observation.id.clone(),
+            outcome: match observation.outcome {
+                ato_formation::verify::ReceiptOutcome::Satisfied => "satisfied",
+                ato_formation::verify::ReceiptOutcome::Deferred => "deferred",
+                ato_formation::verify::ReceiptOutcome::Failed => "failed",
+            },
+            status: observation
+                .evidence
+                .as_ref()
+                .and_then(|evidence| evidence.status),
+            body_sha256: observation
+                .evidence
+                .as_ref()
+                .and_then(|evidence| evidence.body_sha256.clone()),
+        })
+        .collect()
+}
+
+fn write_transformation_report(out: &Path, report: &TransformationReportV1) -> Result<()> {
+    let path = out.join("report.json");
+    fs::write(&path, serde_json::to_vec_pretty(report)?)
+        .with_context(|| format!("write transformation report {}", path.display()))
+}
+
+/// `ato reform <existing.capsule> <new-source> --out <dir>`: build a candidate
+/// Derivation from a NEW source under the OLD bundle's frozen Contract, then
+/// run it through the existing portable attempt so the existing verifier is the
+/// only judge of K. Nothing is published, activated or selected implicitly.
+fn run_reform(args: ReformArgs) -> Result<()> {
+    use ato_portable_application::transformation::{
+        TRANSFORMATION_REPORT_SCHEMA, build_transformation_candidate,
+        inspect_frozen_transform_target,
+    };
+
+    if args.out.exists() {
+        bail!(
+            "reform output already exists: {} (refusing to overwrite a candidate directory)",
+            args.out.display()
+        );
+    }
+    let frozen_bytes = fs::read(&args.capsule)
+        .with_context(|| format!("read frozen Capsule {}", args.capsule.display()))?;
+    let frozen_transport = bundle_sha256(&frozen_bytes);
+    fs::create_dir_all(&args.out)
+        .with_context(|| format!("create reform output {}", args.out.display()))?;
+    let started_at_unix_ms = unix_millis();
+
+    // The frozen bundle is inspected separately so a refusal can still be
+    // reported with the old K/D identity. Inspection never executes anything.
+    let frozen = inspect_frozen_transform_target(&frozen_bytes).ok();
+    let candidate = match build_transformation_candidate(
+        &frozen_bytes,
+        &args.source,
+        args.derivation.as_deref(),
+    ) {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            // K mismatch / source-bound / selection refusals: no
+            // candidate.capsule is written and nothing is executed.
+            let report = TransformationReportV1 {
+                schema: TRANSFORMATION_REPORT_SCHEMA,
+                status: "rejected",
+                frozen_bundle_sha256: frozen_transport,
+                frozen_contract_ref: frozen.as_ref().map(|f| f.contract_ref.clone()),
+                old_derivation_refs: frozen
+                    .as_ref()
+                    .map(|f| f.derivation_refs.clone())
+                    .unwrap_or_default(),
+                old_source_closure_refs: frozen
+                    .as_ref()
+                    .map(|f| f.source_closure_refs.clone())
+                    .unwrap_or_default(),
+                new_bundle_sha256: None,
+                new_derivation_ref: None,
+                new_source_closure_ref: None,
+                k_preserved: false,
+                fully_satisfied: false,
+                receipt_ref: None,
+                runtime_versions: None,
+                observations: Vec::new(),
+                error: Some(error.to_string()),
+                started_at_unix_ms,
+                finished_at_unix_ms: unix_millis(),
+            };
+            write_transformation_report(&args.out, &report)?;
+            return Err(error.into());
+        }
+    };
+
+    // K is preserved (build_transformation_candidate proved it); only now does
+    // a candidate artifact exist.
+    let candidate_path = args.out.join("candidate.capsule");
+    fs::write(&candidate_path, &candidate.bytes)
+        .with_context(|| format!("write candidate capsule {}", candidate_path.display()))?;
+    let candidate_transport = bundle_sha256(&candidate.bytes);
+
+    // The report can be read while the candidate is still running: write the
+    // pre-execution state first (K preserved, not yet run) and replace it with
+    // the final verdict below. No receipt exists at this point.
+    write_transformation_report(
+        &args.out,
+        &TransformationReportV1 {
+            schema: TRANSFORMATION_REPORT_SCHEMA,
+            status: "candidate",
+            frozen_bundle_sha256: frozen_transport.clone(),
+            frozen_contract_ref: Some(candidate.contract_ref.clone()),
+            old_derivation_refs: candidate.old_derivation_refs.clone(),
+            old_source_closure_refs: candidate.old_source_closure_refs.clone(),
+            new_bundle_sha256: Some(candidate_transport.clone()),
+            new_derivation_ref: Some(candidate.derivation_ref.clone()),
+            new_source_closure_ref: Some(candidate.source_closure_ref.clone()),
+            k_preserved: candidate.k_preserved,
+            fully_satisfied: false,
+            receipt_ref: None,
+            runtime_versions: None,
+            observations: Vec::new(),
+            error: None,
+            started_at_unix_ms,
+            finished_at_unix_ms: unix_millis(),
+        },
+    )?;
+
+    // The candidate is an ordinary portable bundle; the existing attempt and
+    // verifier decide K from real observations.
+    let runtime_dir = tempfile::Builder::new()
+        .prefix("ato-reform-")
+        .tempdir_in(&args.out)
+        .with_context(|| format!("create reform runtime directory in {}", args.out.display()))?;
+    let runtime_root = runtime_dir.path().to_path_buf();
+    let bindings = BTreeMap::new();
+    let attempt = start_and_verify_portable_application(
+        &candidate.bytes,
+        candidate.bundle.clone(),
+        &candidate.derivation_ref,
+        &runtime_root,
+        None,
+        PortableRuntimeState {
+            bindings: Some(&bindings),
+            ..PortableRuntimeState::default()
+        },
+    );
+
+    let mut receipt_bytes: Option<Vec<u8>> = None;
+    let mut receipt: Option<ContractVerificationReceipt> = None;
+    let mut run_error: Option<String> = None;
+    match attempt {
+        Ok(started) => {
+            let runtime = started.runtime;
+            match started.receipt.canonical_bytes() {
+                Ok(bytes) => {
+                    receipt_bytes = Some(bytes);
+                    receipt = Some(started.receipt);
+                }
+                Err(error) => run_error = Some(format!("{error:#}")),
+            }
+            let stopped = runtime.stop_recorded(Some(&runtime_root));
+            if let Err(error) = stopped {
+                run_error = Some(match run_error {
+                    Some(previous) => format!("{previous}; stop failed: {error:#}"),
+                    None => format!("stop failed: {error:#}"),
+                });
+            }
+        }
+        Err(error) => {
+            run_error = Some(format!("{error:#}"));
+            // A verification failure still leaves the canonical receipt the
+            // attempt wrote before refusing the hand-off; keep it as evidence.
+            let path = runtime_root.join("verification-receipt.json");
+            if let Ok(bytes) = fs::read(&path) {
+                receipt = serde_json::from_slice(&bytes).ok();
+                receipt_bytes = Some(bytes);
+            }
+        }
+    }
+    drop(runtime_dir);
+
+    if let Some(bytes) = &receipt_bytes {
+        let path = args.out.join("receipt.json");
+        fs::write(&path, bytes)
+            .with_context(|| format!("write candidate receipt {}", path.display()))?;
+    }
+    let fully_satisfied = receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt.fully_satisfied);
+    let accepted = fully_satisfied && run_error.is_none();
+    let report = TransformationReportV1 {
+        schema: TRANSFORMATION_REPORT_SCHEMA,
+        status: if accepted { "accepted" } else { "rejected" },
+        frozen_bundle_sha256: frozen_transport,
+        frozen_contract_ref: Some(candidate.contract_ref.clone()),
+        old_derivation_refs: candidate.old_derivation_refs.clone(),
+        old_source_closure_refs: candidate.old_source_closure_refs.clone(),
+        new_bundle_sha256: Some(candidate_transport),
+        new_derivation_ref: Some(candidate.derivation_ref.clone()),
+        new_source_closure_ref: Some(candidate.source_closure_ref.clone()),
+        k_preserved: candidate.k_preserved,
+        fully_satisfied,
+        receipt_ref: receipt_bytes.as_deref().map(bundle_sha256),
+        runtime_versions: receipt.as_ref().and_then(|receipt| {
+            receipt
+                .execution
+                .as_ref()
+                .map(|execution| TransformationRuntimeV1 {
+                    runtime_executable: execution.runtime_executable.clone(),
+                    runtime_version: execution.runtime_version.clone(),
+                })
+        }),
+        observations: receipt
+            .as_ref()
+            .map(transformation_observations)
+            .unwrap_or_default(),
+        error: run_error.clone(),
+        started_at_unix_ms,
+        finished_at_unix_ms: unix_millis(),
+    };
+    write_transformation_report(&args.out, &report)?;
+
+    println!("Frozen K: {}", candidate.contract_ref);
+    println!("Candidate D: {}", candidate.derivation_ref);
+    println!("New source closure: {}", candidate.source_closure_ref);
+    println!(
+        "Status: {} (fully_satisfied: {fully_satisfied})",
+        report.status
+    );
+    println!("Candidate: {}", candidate_path.display());
+    if receipt_bytes.is_some() {
+        println!("Receipt: {}", args.out.join("receipt.json").display());
+    }
+    println!("Report: {}", args.out.join("report.json").display());
+
+    if !accepted {
+        if let Some(error) = run_error {
+            bail!("candidate verification did not pass: {error}");
+        }
+        bail!("candidate verification did not fully satisfy the frozen Contract");
+    }
+    Ok(())
 }
 
 struct StartedPortableApplication {
