@@ -1,0 +1,23 @@
+# Derivation-candidate manifest: NO [contract] section. The frozen Contract
+# from the baseline bundle is the only K; this source contributes code only.
+schema = "ato.capsule/2"
+
+[application]
+title = "Stateful transformation candidate"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derivation]]
+id = "app"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
