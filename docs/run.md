@@ -10,6 +10,7 @@ ato resume <capsule-selector> [--branch <name>]
 ato stop <capsule>
 ato encap <capsule-selector> --materialize <id>... -o <file.capsule>
 ato run <file.capsule>
+ato reform <existing.capsule> <new-source-dir> --out <dir> [--derivation <sha256:...>]
 ```
 
 `init` reads an explicit `capsule.toml`, seals the initial Computation, creates
@@ -20,6 +21,15 @@ Record onto a new branch.
 `encap` is the portable Materialization boundary. `run` verifies the bundle,
 selects a compatible restore-capable Materialization, resolves Bindings, and
 starts an ephemeral Run without advancing an authored branch.
+
+`reform` builds a candidate Derivation from a new source directory under an
+existing `.capsule`'s frozen Contract K, then verifies it through the same
+portable attempt and receipt as `run`. It refuses before building when K is
+source-bound (`ato.contract.workspace@1`), and refuses before executing when
+the new source derives a different K. A new `--out` directory receives
+`candidate.capsule`, `receipt.json` and a `report.json` sidecar
+(`ato.transformation-candidate/1`); the input bundle and its receipts are never
+modified, and nothing is published or activated.
 
 There are no current lifecycle commands for `lock`, `decap`, or `snapshot`.
 `ato run .` and `ato run github.com/owner/repository` belong to the superseded
