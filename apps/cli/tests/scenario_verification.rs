@@ -159,9 +159,15 @@ fn failure_of(observation: &Value) -> &str {
 
 /// The runtime scratch survives a failed Run (kept under `ATO_HOME/cache`);
 /// its receipt is the attempt's own evidence, never a published receipt.
-fn latest_runtime_receipt(home: &Path) -> (Value, PathBuf) {
+fn latest_runtime_receipt_for_derivation(
+    home: &Path,
+    derivation_ref: &str,
+) -> (Value, PathBuf) {
     let cache = home.join("cache");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    // Two negative Runs in this test can share a Contract and differ only by
+    // Derivation; choosing by mtime would race them. The receipt names the D
+    // it covers, so select on that identity.
+    let mut matches: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     if let Ok(entries) = fs::read_dir(&cache) {
         for entry in entries.flatten() {
             if !entry
@@ -175,18 +181,27 @@ fn latest_runtime_receipt(home: &Path) -> (Value, PathBuf) {
             if !receipt.is_file() {
                 continue;
             }
+            let value = read_json(&receipt);
+            if value["derivation_ref"] != derivation_ref {
+                continue;
+            }
             let Ok(modified) = receipt.metadata().and_then(|metadata| metadata.modified()) else {
                 continue;
             };
-            if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
-                newest = Some((modified, receipt));
-            }
+            matches.push((modified, receipt));
         }
     }
-    let (_, path) =
-        newest.expect("a failed Run leaves its attempt receipt under the runtime scratch");
+    matches.sort_by_key(|(modified, _)| *modified);
+    let (_, path) = matches
+        .pop()
+        .expect("a failed Run leaves its attempt receipt under the runtime scratch");
     let value = read_json(&path);
     (value, path)
+}
+
+fn derivation_of(bundle: &ato_objects::PortableApplicationBundle) -> String {
+    assert_eq!(bundle.index.derivations.len(), 1, "one route");
+    bundle.index.derivations[0].clone()
 }
 
 fn transcript_beside(receipt: &Path) -> PathBuf {
@@ -330,7 +345,11 @@ fn a_scenario_contract_is_executed_verified_and_reformable() {
         !bad_receipt_path.exists(),
         "a failed ato run must not publish a verification receipt"
     );
-    let (bad_receipt, bad_attempt_receipt) = latest_runtime_receipt(&home);
+    let bad_derivation = derivation_of(&decode_portable(
+        &fs::read(&bad_bundle_path).expect("bad bundle"),
+    ));
+    let (bad_receipt, bad_attempt_receipt) =
+        latest_runtime_receipt_for_derivation(&home, &bad_derivation);
     assert_eq!(bad_receipt["fully_satisfied"], false);
     let bad_observation = scenario_observation(&bad_receipt);
     assert_eq!(bad_observation["outcome"], "failed");
@@ -371,7 +390,11 @@ fn a_scenario_contract_is_executed_verified_and_reformable() {
         !isolation_receipt_path.exists(),
         "a failed ato run must not publish a verification receipt"
     );
-    let (isolation_receipt, isolation_attempt_receipt) = latest_runtime_receipt(&home);
+    let isolation_derivation = derivation_of(&decode_portable(
+        &fs::read(&isolation_bundle_path).expect("isolation bundle"),
+    ));
+    let (isolation_receipt, isolation_attempt_receipt) =
+        latest_runtime_receipt_for_derivation(&home, &isolation_derivation);
     assert_eq!(isolation_receipt["fully_satisfied"], false);
     let isolation_failure = failure_of(scenario_observation(&isolation_receipt)).to_owned();
     assert!(
