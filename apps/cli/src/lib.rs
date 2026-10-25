@@ -2430,6 +2430,40 @@ fn copy_scenario_sidecars(runtime_root: &Path, destination: &Path) -> Result<()>
     Ok(())
 }
 
+/// The refusal a receipt states, including the verifier's typed code.
+///
+/// `"did not fully satisfy observation <id>"` alone says *which* requirement
+/// failed but not *why*, even though the receipt already carries the deciding
+/// code (`scenario_step_failed: <step>: <reason>`,
+/// `input_identity_mismatch: ...`). Dropping it made the reform/transformation
+/// report state less than the evidence it was built from and forced the reader
+/// to re-run the candidate to learn the reason.
+fn contract_refusal_message(receipt: &ContractVerificationReceipt) -> String {
+    let Some(observation) = receipt.observations.iter().find(|observation| {
+        !matches!(
+            observation.outcome,
+            ato_formation::verify::ReceiptOutcome::Satisfied
+        )
+    }) else {
+        return "runtime Contract verification did not fully satisfy an unrecorded observation"
+            .to_owned();
+    };
+    match observation
+        .failure
+        .as_deref()
+        .filter(|failure| !failure.is_empty())
+    {
+        Some(failure) => format!(
+            "runtime Contract verification did not fully satisfy observation {}: {failure}",
+            observation.id
+        ),
+        None => format!(
+            "runtime Contract verification did not fully satisfy observation {}",
+            observation.id
+        ),
+    }
+}
+
 fn run_portable_application(
     args: RunArgs,
     bundle_bytes: &[u8],
@@ -2497,18 +2531,7 @@ fn run_portable_application(
         }
         println!("URL: {}", runtime.base_url());
         if !receipt.fully_satisfied {
-            let failure = receipt
-                .observations
-                .iter()
-                .find(|observation| {
-                    !matches!(
-                        observation.outcome,
-                        ato_formation::verify::ReceiptOutcome::Satisfied
-                    )
-                })
-                .map(|observation| observation.id.as_str())
-                .unwrap_or("unknown");
-            bail!("runtime Contract verification did not fully satisfy observation {failure}");
+            bail!("{}", contract_refusal_message(&receipt));
         }
         if args.no_open {
             return Ok(());
@@ -2995,18 +3018,7 @@ fn start_portable_attempt(
         if let Some(receipt) = &outcome.attempt.receipt
             && !receipt.fully_satisfied
         {
-            let failure = receipt
-                .observations
-                .iter()
-                .find(|observation| {
-                    !matches!(
-                        observation.outcome,
-                        ato_formation::verify::ReceiptOutcome::Satisfied
-                    )
-                })
-                .map(|observation| observation.id.as_str())
-                .unwrap_or("unknown");
-            bail!("runtime Contract verification did not fully satisfy observation {failure}");
+            bail!("{}", contract_refusal_message(receipt));
         }
         return Err(outcome.error.unwrap_or_else(|| {
             anyhow::anyhow!(
@@ -3732,6 +3744,88 @@ fn runtime_binding_values(bindings: Vec<(String, String)>) -> Result<BTreeMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn receipt_with(
+        observations: Vec<ato_formation::verify::ReceiptObservation>,
+    ) -> ContractVerificationReceipt {
+        ContractVerificationReceipt {
+            schema: ato_formation::verify::CONTRACT_VERIFICATION_RECEIPT_SCHEMA.to_owned(),
+            bundle_sha256: None,
+            contract_ref: format!("sha256:{}", "a".repeat(64)),
+            derivation_ref: format!("sha256:{}", "b".repeat(64)),
+            target: ato_formation::verify::VerificationTarget {
+                kind: VerificationTargetKind::CliLocal,
+            },
+            execution: None,
+            observations,
+            fully_satisfied: false,
+        }
+    }
+
+    fn observation(
+        id: &str,
+        outcome: ato_formation::verify::ReceiptOutcome,
+        failure: Option<&str>,
+    ) -> ato_formation::verify::ReceiptObservation {
+        ato_formation::verify::ReceiptObservation {
+            id: id.to_owned(),
+            outcome,
+            evidence: None,
+            deferred_by: None,
+            failure: failure.map(ToOwned::to_owned),
+        }
+    }
+
+    /// A transformation report is built from the receipt; the verifier's typed
+    /// code (`scenario_step_failed: step: reason`) is the reason the reader
+    /// needs, and the generic sentence alone loses it.
+    #[test]
+    fn a_failed_observation_contributes_its_typed_code_to_the_refusal() {
+        let receipt = receipt_with(vec![
+            observation(
+                "crud",
+                ato_formation::verify::ReceiptOutcome::Failed,
+                Some(
+                    "scenario_step_failed: unauthorized-read: status_mismatch: status 200; expected 401",
+                ),
+            ),
+            observation(
+                "root",
+                ato_formation::verify::ReceiptOutcome::Satisfied,
+                None,
+            ),
+        ]);
+        let message = contract_refusal_message(&receipt);
+        assert!(
+            message.contains("observation crud:"),
+            "the failing observation is named: {message}"
+        );
+        assert!(
+            message.contains(
+                "scenario_step_failed: unauthorized-read: status_mismatch: status 200; expected 401"
+            ),
+            "the typed failure code travels with the refusal: {message}"
+        );
+        assert!(
+            !message.contains("observation root"),
+            "a satisfied observation is not the refusal: {message}"
+        );
+    }
+
+    /// A deferred requirement has no failure code; the sentence must stay the
+    /// same as before rather than growing an empty `: ` suffix.
+    #[test]
+    fn a_deferred_observation_keeps_the_generic_refusal() {
+        let receipt = receipt_with(vec![observation(
+            "crud",
+            ato_formation::verify::ReceiptOutcome::Deferred,
+            None,
+        )]);
+        assert_eq!(
+            contract_refusal_message(&receipt),
+            "runtime Contract verification did not fully satisfy observation crud"
+        );
+    }
 
     #[test]
     fn confirmed_stop_with_scratch_failure_releases_but_does_not_ack_success() {
