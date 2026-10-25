@@ -278,6 +278,20 @@ const TERMINAL_REPORT_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
 ];
 
+/// Native readiness report budget.
+///
+/// `POST /v1/runner-leases/{id}/ready` is not a bookkeeping write for a native
+/// workload: the control plane runs its own synchronous Surface activation
+/// probe, with a multi-second budget, and answers `503` + `Retry-After` while
+/// the Surface cannot be reached yet. A single short attempt lost that race by
+/// construction, so each attempt now gets a budget larger than the server's
+/// probe and a bounded retry runs inside a total bound.
+const NATIVE_READY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
+const NATIVE_READY_TOTAL_BUDGET: Duration = Duration::from_secs(20);
+const NATIVE_READY_MAX_ATTEMPTS: usize = 3;
+const NATIVE_READY_FALLBACK_RETRY_DELAY: Duration = Duration::from_secs(1);
+const NATIVE_READY_MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
+
 /// Why a control-plane call failed — the worker's reaction depends on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommErrorKind {
@@ -316,6 +330,125 @@ fn classify_reqwest(error: &reqwest::Error) -> CommErrorKind {
     }
     // DNS, TLS and body errors: no definitive answer arrived.
     CommErrorKind::Transient
+}
+
+/// Per-attempt and total budget for the native readiness report.
+#[derive(Debug, Clone, Copy)]
+struct NativeReadyBudget {
+    attempt_timeout: Duration,
+    total: Duration,
+    max_attempts: usize,
+}
+
+impl NativeReadyBudget {
+    /// The production budget. `attempt_timeout` exceeds the control plane's own
+    /// Surface probe so a server-side probe cannot be mistaken for a Runner
+    /// timeout; `total` bounds how long readiness may delay the lease's
+    /// execution-authority accounting. In the normal `503` case each response
+    /// returns after the server's probe, so three attempts still fit the total;
+    /// only a hanging server truncates the last attempt.
+    const NATIVE: Self = Self {
+        attempt_timeout: NATIVE_READY_ATTEMPT_TIMEOUT,
+        total: NATIVE_READY_TOTAL_BUDGET,
+        max_attempts: NATIVE_READY_MAX_ATTEMPTS,
+    };
+}
+
+/// Report native readiness until the control plane has decided, not merely
+/// until the first write returns.
+///
+/// Retries only what the API documents as retryable: `503` (honouring
+/// `Retry-After`) and transport timeout/connect failures. Every other status is
+/// definitive and returned immediately. Re-sending the same report is safe
+/// because the control plane replays the activation for the same request rather
+/// than running it twice.
+fn report_native_ready_until(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    url: &str,
+    report: &ReadyReport<'_>,
+    budget: NativeReadyBudget,
+) -> Result<()> {
+    let started = Instant::now();
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 1..=budget.max_attempts {
+        let Some(remaining) = budget.total.checked_sub(started.elapsed()) else {
+            break;
+        };
+        if remaining.is_zero() {
+            break;
+        }
+        let attempt_timeout = budget.attempt_timeout.min(remaining);
+        let response = client
+            .post(url)
+            .bearer_auth(token)
+            .timeout(attempt_timeout)
+            .json(report)
+            .send();
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(());
+                }
+                let retry_after = retry_after_delay(&response);
+                drop(response);
+                let error = anyhow::anyhow!(
+                    "the control plane refused the native ready report: HTTP {status}"
+                );
+                if status != reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    || attempt == budget.max_attempts
+                {
+                    return Err(error);
+                }
+                last_error = Some(error);
+                let delay = bounded_retry_delay(
+                    retry_after.unwrap_or(NATIVE_READY_FALLBACK_RETRY_DELAY),
+                    started,
+                    budget.total,
+                );
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+            }
+            Err(error) => {
+                let kind = classify_reqwest(&error);
+                let error = anyhow::Error::new(error)
+                    .context("the native ready report did not reach the control plane");
+                if kind != CommErrorKind::Transient || attempt == budget.max_attempts {
+                    return Err(error);
+                }
+                last_error = Some(error);
+                let delay =
+                    bounded_retry_delay(NATIVE_READY_FALLBACK_RETRY_DELAY, started, budget.total);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("the native ready report exceeded its total budget before any attempt")
+    }))
+}
+
+/// `Retry-After` as a whole-second delay. The API sends whole seconds; an
+/// unparseable value falls back to the bounded default rather than inventing a
+/// wait the server did not ask for.
+fn retry_after_delay(response: &reqwest::blocking::Response) -> Option<Duration> {
+    let value = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    let seconds: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(
+        seconds.min(NATIVE_READY_MAX_RETRY_DELAY.as_secs()),
+    ))
+}
+
+fn bounded_retry_delay(preferred: Duration, started: Instant, total: Duration) -> Duration {
+    preferred.min(total.saturating_sub(started.elapsed()))
 }
 
 /// Bounded-exponential backoff with jitter for control-plane polling. One
@@ -2735,11 +2868,14 @@ impl ConnectedWorker {
             },
             control: None,
         };
-        self.api.report_ready_with_budget(
-            &lease.id,
-            ready,
-            native_lane.then_some(Duration::from_millis(500)),
-        )?;
+        if native_lane {
+            // A native Surface is the one case where the control plane must
+            // reach the workload before it can accept readiness; the bounded
+            // retry is what gives its probe time to answer.
+            self.api.report_native_ready(&lease.id, ready)?;
+        } else {
+            self.api.report_ready(&lease.id, ready)?;
+        }
         if let Some(network) = network_authorization {
             let runtime_launch::lease::ActiveWorkload::Oci(launched) = &active.launched else {
                 bail!("network authorization was attached to a non-group workload")
@@ -5067,28 +5203,24 @@ impl HttpRunnerApi {
     }
 
     fn report_ready(&self, lease_id: &str, report: ReadyReport<'_>) -> Result<()> {
-        self.report_ready_with_budget(lease_id, report, None)
+        self.post_control_plane(
+            format!("{}/v1/runner-leases/{lease_id}/ready", self.base),
+            &report,
+        )
     }
 
-    fn report_ready_with_budget(
-        &self,
-        lease_id: &str,
-        report: ReadyReport<'_>,
-        budget: Option<Duration>,
-    ) -> Result<()> {
+    /// The control plane answers a native readiness report only after its own
+    /// Surface activation probe, so this waits for that decision under a
+    /// bounded retry instead of failing on the first short attempt.
+    fn report_native_ready(&self, lease_id: &str, report: ReadyReport<'_>) -> Result<()> {
         let url = format!("{}/v1/runner-leases/{lease_id}/ready", self.base);
-        if let Some(budget) = budget {
-            // Bounded live-workload report. Retrying must not extend its
-            // independently renewable execution authority window.
-            self.authorized(self.client.post(url))
-                .timeout(budget)
-                .json(&report)
-                .send()?
-                .error_for_status()?;
-            Ok(())
-        } else {
-            self.post_control_plane(url, &report)
-        }
+        report_native_ready_until(
+            &self.client,
+            &self.token,
+            &url,
+            &report,
+            NativeReadyBudget::NATIVE,
+        )
     }
 
     pub fn persist_computation_head(
@@ -7795,3 +7927,198 @@ mod native_dispatch_tests;
 
 #[cfg(test)]
 mod explicit_placement_tests;
+
+/// The native readiness report is the one control-plane call whose answer
+/// depends on a server-side probe of the workload. These tests pin the retry
+/// contract without a real API: `503`/timeout are retried inside the budget,
+/// a definitive status fails immediately, and a fast answer sends exactly one
+/// request (so browser/terminal interaction is never delayed by retrying).
+#[cfg(test)]
+mod native_ready_budget_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
+
+    /// One scripted `(delay, status, retry_after)` response. The last entry
+    /// repeats if the client asks again.
+    type Script = (Duration, u16, Option<&'static str>);
+
+    struct ScriptedServer {
+        url: String,
+        requests: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ScriptedServer {
+        fn start(script: Vec<Script>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted server");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let url = format!(
+                "http://{}/v1/runner-leases/lease/ready",
+                listener.local_addr().expect("local addr")
+            );
+            let requests = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&requests);
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                let mut index = 0usize;
+                while !stopping.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let (delay, status, retry_after) = script[index.min(script.len() - 1)];
+                            index += 1;
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            std::thread::spawn(move || {
+                                let mut reader =
+                                    BufReader::new(stream.try_clone().expect("clone stream"));
+                                loop {
+                                    let mut line = String::new();
+                                    match reader.read_line(&mut line) {
+                                        Ok(0) => break,
+                                        Ok(_) if line == "\r\n" => break,
+                                        Ok(_) => {}
+                                        Err(_) => break,
+                                    }
+                                }
+                                std::thread::sleep(delay);
+                                let mut response = format!(
+                                    "HTTP/1.1 {status} scripted\r\nContent-Length: 2\r\nConnection: close\r\n"
+                                );
+                                if let Some(retry_after) = retry_after {
+                                    response.push_str(&format!("Retry-After: {retry_after}\r\n"));
+                                }
+                                response.push_str("\r\n{}");
+                                let mut stream = stream;
+                                // The client may already have timed out: a late
+                                // write failing is the expected outcome there.
+                                let _ = stream.write_all(response.as_bytes());
+                            });
+                        }
+                        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                url,
+                requests,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for ScriptedServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn report<'a>() -> ReadyReport<'a> {
+        ReadyReport {
+            execution_id: "execution",
+            ready_url: None,
+            local_port: None,
+            execution: None,
+            port_mapping: None,
+            surface_controls: None,
+            control: None,
+        }
+    }
+
+    /// Short budgets keep the tests about the retry decision, not wall time.
+    fn test_budget() -> NativeReadyBudget {
+        NativeReadyBudget {
+            attempt_timeout: Duration::from_millis(300),
+            total: Duration::from_secs(4),
+            max_attempts: 3,
+        }
+    }
+
+    fn report_once(server: &ScriptedServer, budget: NativeReadyBudget) -> Result<()> {
+        report_native_ready_until(
+            &reqwest::blocking::Client::new(),
+            "token",
+            &server.url,
+            &report(),
+            budget,
+        )
+    }
+
+    #[test]
+    fn a_503_is_retried_after_retry_after_and_then_succeeds() {
+        let server = ScriptedServer::start(vec![
+            (Duration::ZERO, 503, Some("1")),
+            (Duration::ZERO, 200, None),
+        ]);
+        let started = Instant::now();
+        report_once(&server, test_budget()).expect("503 then 200 is a success");
+        assert_eq!(server.requests(), 2, "the 503 must be retried exactly once");
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "Retry-After: 1 must be honoured, not ignored"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_attempt_is_retried_and_then_succeeds() {
+        let server = ScriptedServer::start(vec![
+            (Duration::from_millis(900), 200, None),
+            (Duration::ZERO, 200, None),
+        ]);
+        report_once(&server, test_budget()).expect("a timed-out attempt is retried");
+        assert_eq!(
+            server.requests(),
+            2,
+            "the slow first answer must not fail the report"
+        );
+    }
+
+    #[test]
+    fn a_definitive_refusal_is_not_retried() {
+        let server = ScriptedServer::start(vec![(Duration::ZERO, 400, None)]);
+        let started = Instant::now();
+        report_once(&server, test_budget()).expect_err("400 is definitive");
+        assert_eq!(server.requests(), 1, "4xx must not be retried");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a definitive refusal must return immediately"
+        );
+    }
+
+    #[test]
+    fn a_fast_success_sends_exactly_one_request() {
+        let server = ScriptedServer::start(vec![(Duration::ZERO, 200, None)]);
+        report_once(&server, test_budget()).expect("200 is a success");
+        assert_eq!(
+            server.requests(),
+            1,
+            "a fast answer must not delay interactive actions with a retry"
+        );
+    }
+
+    #[test]
+    fn retries_stop_at_the_total_budget_or_the_attempt_cap() {
+        let server = ScriptedServer::start(vec![(Duration::ZERO, 503, Some("0"))]);
+        report_once(&server, test_budget()).expect_err("a permanent 503 is not success");
+        assert_eq!(
+            server.requests(),
+            test_budget().max_attempts,
+            "bounded retry must stop at its attempt cap"
+        );
+    }
+}
