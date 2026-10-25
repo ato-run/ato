@@ -646,3 +646,67 @@ async fn startup_timeout_during_stalled_capture_never_exposes_surface() {
     assert!(!root.path().join("oci-runtime/terminal.sock").exists());
     no_owned_resources(&owner);
 }
+
+#[test]
+fn surface_allowlist_is_the_lease_origin_plus_only_the_runners_own_https_ingress() {
+    // Exactly the authored Lease origin when the Runner publishes no ingress.
+    let lease_only = config();
+    assert_eq!(
+        super::surface_allowed_origins(
+            lease_only.origin.clone(),
+            lease_only.public_base_origin.as_deref()
+        ),
+        std::collections::BTreeSet::from(["https://staging.ato.run".to_string()])
+    );
+
+    // The Runner's own published ingress is additive, never a replacement, and
+    // is normalized exactly as a browser serializes `Origin`.
+    for (configured, expected) in [
+        ("https://runner.example", "https://runner.example"),
+        ("https://runner.example/", "https://runner.example"),
+        ("https://RUNNER.example", "https://runner.example"),
+        ("https://runner.example:443", "https://runner.example"),
+        ("https://runner.example:8443", "https://runner.example:8443"),
+        (
+            "https://runner.example/ingress/slot-1",
+            "https://runner.example",
+        ),
+    ] {
+        let mut candidate = config();
+        candidate.public_base_origin = Some(configured.into());
+        assert_eq!(
+            super::surface_allowed_origins(
+                candidate.origin.clone(),
+                candidate.public_base_origin.as_deref()
+            ),
+            std::collections::BTreeSet::from([
+                "https://staging.ato.run".to_string(),
+                expected.to_string(),
+            ]),
+            "configured {configured}"
+        );
+    }
+
+    // Non-https or unparseable ingress values are ignored: a downgraded or
+    // malformed public address must never enter the exact-match allowlist.
+    for rejected in [
+        "http://runner.example",
+        "ws://runner.example",
+        "wss://runner.example",
+        "runner.example",
+        "not-a-url",
+        "",
+        "javascript:alert(1)",
+    ] {
+        let mut candidate = config();
+        candidate.public_base_origin = Some(rejected.into());
+        assert_eq!(
+            super::surface_allowed_origins(
+                candidate.origin.clone(),
+                candidate.public_base_origin.as_deref()
+            ),
+            std::collections::BTreeSet::from(["https://staging.ato.run".to_string()]),
+            "unexpectedly allowed {rejected}"
+        );
+    }
+}
