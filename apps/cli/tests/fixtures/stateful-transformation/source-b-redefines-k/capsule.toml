@@ -1,0 +1,35 @@
+# Negative fixture: a candidate manifest that tries to redefine K. It declares
+# a different root observation, so `ato reform` must refuse it before building.
+schema = "ato.capsule/2"
+
+[application]
+title = "Stateful transformation candidate that redefines K"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+identity = "behavioral"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 201
+
+[[derivation]]
+id = "app"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
