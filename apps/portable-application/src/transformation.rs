@@ -272,8 +272,8 @@ pub fn build_transformation_candidate(
     // Its `[contract]`, when present, is a DECLARATION to compare — never the
     // origin of the bundle's K.
     let spec = crate::authored_derivation_candidate_spec(source_root)?;
-    if !spec.requirements.is_empty() {
-        let declared = crate::http_contract_from_requirements(&spec.requirements)?;
+    if !spec.requirements.is_empty() || !spec.scenarios.is_empty() {
+        let declared = crate::contract_from_spec(&spec)?;
         let declared_ref = contract_ref(&declared)?;
         if declared_ref != frozen.contract_ref
             || canonical_contract(&declared)? != canonical_contract(&frozen.contract)?
@@ -290,9 +290,16 @@ pub fn build_transformation_candidate(
     }
 
     // The bundle root IS the frozen Contract object; the builder binds the new
-    // source's Derivation against it and refuses an incompatible route.
-    let (candidate_bytes, candidate_bundle) =
-        crate::build_derivation_candidate_bundle(source_root, &spec, &frozen.contract)?;
+    // source's Derivation against it and refuses an incompatible route. Any
+    // `ato.scenario/1` object the frozen K pins is carried from the frozen
+    // bundle, never re-derived from the new source.
+    let frozen_bundle = decode_frozen_bundle(frozen_bundle_bytes)?;
+    let (candidate_bytes, candidate_bundle) = crate::build_derivation_candidate_bundle(
+        source_root,
+        &spec,
+        &frozen.contract,
+        &frozen_bundle,
+    )?;
     if candidate_bundle.index.root_contract_ref != frozen.contract_ref {
         return Err(refusal(
             CANDIDATE_CONTRACT_MISMATCH,
@@ -366,9 +373,10 @@ mod tests {
 
     use ato_computation::ContentRef;
     use ato_formation::authoring::{
-        BOUND_CONTRACT_SCHEMA, BoundDerivation, BoundRequirement, WORKSPACE_CONTRACT_VERIFIER,
-        WORKSPACE_PROTOCOL,
+        BOUND_CONTRACT_SCHEMA, BoundDerivation, BoundRequirement, SCENARIO_CONTRACT_VERIFIER,
+        WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL,
     };
+    use ato_formation::scenario::ScenarioV1;
     use ato_objects::{
         PortableBundleObjectDescriptor, PortableBundleObjectKind, PortableBundlePayload,
         encode_portable_application_bundle,
@@ -454,6 +462,106 @@ default = "pure"
 "#;
         fs::write(dir.path().join("capsule.toml"), manifest).expect("capsule.toml");
         fs::write(dir.path().join("app.py"), app).expect("app.py");
+        dir
+    }
+
+    const SCENARIO_CRUD: &str = r#"{
+  "schema": "ato.scenario/1",
+  "verifier_version": 1,
+  "isolation": { "fresh_instance": true, "network": "candidate-only" },
+  "limits": { "step_timeout_ms": 5000, "total_timeout_ms": 60000, "max_body_bytes": 1048576 },
+  "steps": [
+    { "id": "login", "request": { "method": "POST", "path": "/login", "body_b64": "e30=" },
+      "expect": { "status": 200 } },
+    { "id": "create", "request": { "method": "POST", "path": "/items" },
+      "expect": { "status": 201 }, "capture": [ { "name": "item", "json_pointer": "/id" } ] },
+    { "id": "read", "request": { "method": "GET", "path": "/items/${item}" },
+      "expect": { "status": 200 } }
+  ]
+}"#;
+
+    /// A frozen source whose K pins a scenario object.
+    fn scenario_source() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Scenario transformation fixture"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+identity = "behavioral"
+
+[[contract.observation]]
+id = "crud"
+use = "ato.contract.scenario@1"
+port = "app.http"
+scenario = "scenarios/crud.json"
+
+[[derivation]]
+id = "python-a"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
+"#;
+        fs::write(dir.path().join("capsule.toml"), manifest).expect("capsule.toml");
+        fs::write(dir.path().join("app.py"), "print('old')\n").expect("app.py");
+        fs::create_dir_all(dir.path().join("scenarios")).expect("scenarios");
+        fs::write(dir.path().join("scenarios/crud.json"), SCENARIO_CRUD).expect("scenario");
+        dir
+    }
+
+    fn candidate_declaring_scenario(scenario: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Scenario candidate"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+identity = "behavioral"
+
+[[contract.observation]]
+id = "crud"
+use = "ato.contract.scenario@1"
+port = "app.http"
+scenario = "scenarios/crud.json"
+
+[[derivation]]
+id = "python-a"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
+"#;
+        fs::write(dir.path().join("capsule.toml"), manifest).expect("capsule.toml");
+        fs::write(dir.path().join("app.py"), "print('new')\n").expect("app.py");
+        fs::create_dir_all(dir.path().join("scenarios")).expect("scenarios");
+        fs::write(dir.path().join("scenarios/crud.json"), scenario).expect("scenario");
         dir
     }
 
@@ -803,6 +911,79 @@ env = { ROUTE_VARIANT = "b" }
         assert_eq!(
             error.transformation_code(),
             Some(FROZEN_BUNDLE_NOT_PORTABLE_APPLICATION)
+        );
+    }
+    #[test]
+    fn a_frozen_scenario_contract_is_carried_to_the_candidate() {
+        let frozen_source = scenario_source();
+        let frozen = frozen_bytes(frozen_source.path());
+        let frozen_target = inspect_frozen_transform_target(&frozen).expect("frozen target");
+        assert!(
+            frozen_target
+                .contract
+                .requirements
+                .iter()
+                .any(|requirement| requirement.verifier == SCENARIO_CONTRACT_VERIFIER),
+            "the fixture's K pins a scenario"
+        );
+
+        // The candidate manifest omits `[contract]`: the frozen scenario
+        // object must still travel, because K names it.
+        let new_source = derivation_candidate_without_contract("print('new')\n");
+        let candidate =
+            build_transformation_candidate(&frozen, new_source.path(), None).expect("candidate");
+        assert!(candidate.k_preserved);
+        assert_eq!(candidate.contract_ref, frozen_target.contract_ref);
+        assert_eq!(
+            candidate.bundle.index.root_contract_ref,
+            frozen_target.contract_ref
+        );
+        assert_eq!(
+            contract_object_bytes(&candidate.bundle),
+            serde_jcs::to_vec(&frozen_target.contract).expect("canonical frozen K"),
+            "the candidate carries the frozen Contract bytes"
+        );
+
+        let routes = validate_all_derivations(&candidate.bundle)
+            .expect("the candidate validates against the frozen K object");
+        let route = &routes[0];
+        assert_eq!(route.scenarios.len(), 1);
+        let frozen_requirement = frozen_target
+            .contract
+            .requirements
+            .iter()
+            .find(|requirement| requirement.verifier == SCENARIO_CONTRACT_VERIFIER)
+            .expect("scenario requirement");
+        assert_eq!(
+            route.scenarios[0].scenario_ref.as_str(),
+            frozen_requirement.digest.as_deref().unwrap()
+        );
+        let scenario = ScenarioV1::parse_json(SCENARIO_CRUD.as_bytes()).unwrap();
+        assert_eq!(route.scenarios[0].scenario, scenario);
+    }
+
+    #[test]
+    fn a_candidate_may_declare_the_same_frozen_scenario() {
+        let frozen_source = scenario_source();
+        let frozen = frozen_bytes(frozen_source.path());
+        let new_source = candidate_declaring_scenario(SCENARIO_CRUD);
+        let candidate =
+            build_transformation_candidate(&frozen, new_source.path(), None).expect("candidate");
+        assert!(candidate.k_preserved);
+        validate_all_derivations(&candidate.bundle).expect("validates");
+    }
+
+    #[test]
+    fn a_candidate_cannot_redefine_the_frozen_scenario() {
+        let frozen_source = scenario_source();
+        let frozen = frozen_bytes(frozen_source.path());
+        let different = SCENARIO_CRUD.replace(r#""status": 201"#, r#""status": 202"#);
+        let new_source = candidate_declaring_scenario(&different);
+        let error = build_transformation_candidate(&frozen, new_source.path(), None)
+            .expect_err("must refuse a different scenario");
+        assert_eq!(
+            error.transformation_code(),
+            Some(CANDIDATE_CONTRACT_MISMATCH)
         );
     }
 }

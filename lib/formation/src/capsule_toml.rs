@@ -38,8 +38,9 @@ use crate::authoring::{
     AuthoringDraft, AuthoringError, AuthoringProvenance, BROWSER_PROTOCOL, ContractDraft,
     ContractIdentity, DerivationDraft, EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft,
     InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
-    PortDraft, RequirementDraft, RuntimeDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StateDraft,
-    StepDraft, StepNetwork, WORKSPACE_PROTOCOL, malformed,
+    PortDraft, RequirementDraft, RuntimeDraft, SCENARIO_CONTRACT_VERIFIER,
+    STATE_FILESYSTEM_PROTOCOL, ScenarioRequirement, StateAccess, StateDraft, StepDraft,
+    StepNetwork, WORKSPACE_PROTOCOL, malformed,
 };
 
 /// The file an author writes, at the root of the source they upload.
@@ -55,6 +56,7 @@ pub const LEGACY_STORE_SCHEMA_KEY: &str = "schema_version";
 /// The contract verifiers an author may name, spelled as the `use` key.
 const USE_HTTP_CONTRACT: &str = "ato.contract.http@1";
 const USE_WORKSPACE_CONTRACT: &str = "ato.contract.workspace@1";
+const USE_SCENARIO_CONTRACT: &str = SCENARIO_CONTRACT_VERIFIER;
 
 /// The only address a workload may bind for anything outside to reach it.
 const REQUIRED_BIND: &str = "0.0.0.0";
@@ -253,7 +255,8 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
     };
     let requirements: Vec<_>=draft.contract.requirements.iter().map(|r|match &r.requirement {
         RequirementDraft::Http(h)=>json!({"id":r.id,"use":USE_HTTP_CONTRACT,"port":h.port,"method":h.method,"path":h.path,"expect":{"status":h.status,"body_digest":h.body_digest.as_ref().map(&observed)}}),
-        RequirementDraft::InputIdentity(i)=>json!({"id":r.id,"use":USE_WORKSPACE_CONTRACT,"input":i.input,"expect":{"digest":observed(&i.digest)}})
+        RequirementDraft::InputIdentity(i)=>json!({"id":r.id,"use":USE_WORKSPACE_CONTRACT,"input":i.input,"expect":{"digest":observed(&i.digest)}}),
+        RequirementDraft::Scenario(s)=>json!({"id":r.id,"use":USE_SCENARIO_CONTRACT,"port":s.port,"scenario":observed(&s.scenario)})
     }).collect();
     let mut contract_doc = json!({"require":requirements});
     // Only an explicit identity is written. A document that never stated one
@@ -726,7 +729,9 @@ fn read_contract(
             only(
                 require,
                 "contract.require",
-                &["id", "use", "port", "method", "path", "input", "expect"],
+                &[
+                    "id", "use", "port", "method", "path", "input", "expect", "scenario",
+                ],
             )?;
             let id = required_str(require, "id", "contract.require")?;
             let verifier = required_str(require, "use", "contract.require")?;
@@ -740,6 +745,12 @@ fn read_contract(
 
             let requirement = match verifier.as_str() {
                 USE_HTTP_CONTRACT => {
+                    if require.contains_key("scenario") {
+                        return Err(malformed(
+                            what.clone(),
+                            "an HTTP requirement does not take `scenario`",
+                        ));
+                    }
                     only(
                         expect,
                         &format!("{what}.expect"),
@@ -794,7 +805,40 @@ fn read_contract(
                         body_digest,
                     })
                 }
+                USE_SCENARIO_CONTRACT => {
+                    // A scenario requirement states a port and a content
+                    // reference, and nothing else: the steps live in the
+                    // object the reference names, not in the Contract.
+                    if require.contains_key("method")
+                        || require.contains_key("path")
+                        || require.contains_key("input")
+                    {
+                        return Err(malformed(
+                            what.clone(),
+                            "a scenario requirement states only `port` and `scenario`",
+                        ));
+                    }
+                    only(expect, &format!("{what}.expect"), &[])?;
+                    let raw = required_str(require, "scenario", &what)?;
+                    if raw == "capture" {
+                        return Err(malformed(
+                            format!("{what}.scenario"),
+                            "a scenario is content-addressed; state its sha256 reference, \
+                             not \"capture\"",
+                        ));
+                    }
+                    RequirementDraft::Scenario(ScenarioRequirement {
+                        port: required_str(require, "port", &what)?,
+                        scenario: Observed::Stated(raw),
+                    })
+                }
                 USE_WORKSPACE_CONTRACT => {
+                    if require.contains_key("scenario") {
+                        return Err(malformed(
+                            what.clone(),
+                            "a workspace requirement does not take `scenario`",
+                        ));
+                    }
                     only(expect, &format!("{what}.expect"), &["digest"])?;
                     let digest = match expect.get("digest") {
                         Some(Value::String(value)) if value == "capture" => Observed::Capture,
@@ -817,7 +861,8 @@ fn read_contract(
                         format!("{what}.use"),
                         format!(
                             "{other:?} is not a verifier this build can decide; \
-                             use {USE_HTTP_CONTRACT} or {USE_WORKSPACE_CONTRACT}"
+                             use {USE_HTTP_CONTRACT}, {USE_WORKSPACE_CONTRACT} or \
+                             {USE_SCENARIO_CONTRACT}"
                         ),
                     ));
                 }
