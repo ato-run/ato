@@ -143,6 +143,7 @@ fn runner_capabilities(
         // Runner until it understands v3 AND has a writable volume store.
         if persistent_volumes {
             capabilities.push(runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE);
+            capabilities.push(runtime_launch::volume::RUNNER_SINGLE_OCI_VOLUME_FEATURE);
         }
         if network_controls {
             capabilities.push("network=ato.tcp-egress@1");
@@ -4969,6 +4970,7 @@ struct NativeSurfaceControlsReport {
     framebuffer_resize: bool,
 }
 impl NativeSurfaceControlsReport {
+    #[cfg(any(unix, test))]
     fn from_ready(controls: netd::pixel_gateway::PixelGatewayControls) -> Option<Self> {
         (controls.text_paste || controls.framebuffer_resize).then_some(Self {
             clipboard_paste: controls.text_paste,

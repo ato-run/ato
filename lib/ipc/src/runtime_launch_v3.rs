@@ -30,9 +30,6 @@ use crate::runtime_launch_v2::{
 pub const RUNTIME_LAUNCH_SPEC_V3_PROTOCOL: &str = "ato.runtime-launch-spec.v3";
 
 /// `svol_` + a Crockford ULID. Opaque: a storage identity, not a digest.
-const VOLUME_REF_PREFIX: &str = "svol_";
-const ULID_LEN: usize = 26;
-const MAX_REVISION_REF_LEN: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,23 +66,10 @@ pub enum StateBackingV3 {
     RunnerVolume(RunnerVolumeBackingV3),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunnerVolumeBackingV3 {
-    pub volume_ref: String,
-    /// The capacity the control plane admitted this volume for. The Runner
-    /// refuses to start when it cannot offer it.
-    pub capacity_bytes: u64,
-    /// Seed for a volume that does not exist yet, unpacked exactly once.
-    /// Ignored for a volume that does: an existing volume is newer than any
-    /// revision, and re-seeding it would silently roll data back.
-    ///
-    /// Always serialized, including when null, for the same reason as
-    /// `StateAttachmentV1::revision_ref`: Rust and TypeScript must
-    /// canonicalize the same spec into the same bytes.
-    #[serde(default)]
-    pub initialize_from_revision_ref: Option<String>,
-}
+/// The v3 name for the shared Runner-volume backing. One struct, one
+/// canonical encoding: v1/v2 single-OCI volume attachments and v3 service
+/// group attachments must agree byte for byte on what a volume is.
+pub use crate::runtime_launch::RunnerVolumeBacking as RunnerVolumeBackingV3;
 
 impl StateAttachmentV3 {
     pub fn runner_volume(&self) -> &RunnerVolumeBackingV3 {
@@ -95,25 +79,8 @@ impl StateAttachmentV3 {
     }
 }
 
-/// True for `svol_<ULID>` and nothing else — the only shape a Runner will
-/// turn into a directory name.
-pub fn is_volume_ref(value: &str) -> bool {
-    value.strip_prefix(VOLUME_REF_PREFIX).is_some_and(|ulid| {
-        ulid.len() == ULID_LEN
-            && ulid.bytes().all(|byte| {
-                byte.is_ascii_digit()
-                    || (byte.is_ascii_uppercase() && !matches!(byte, b'I' | b'L' | b'O' | b'U'))
-            })
-    })
-}
-
-fn is_revision_ref(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_REVISION_REF_LEN
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':'))
-}
+/// One definition of a volume ref / revision ref for every protocol.
+pub use crate::runtime_launch::{is_revision_ref, is_volume_ref};
 
 fn volume_error(field: impl Into<String>) -> RuntimeLaunchSpecError {
     RuntimeLaunchSpecError::InvalidStateVolume {
@@ -148,6 +115,9 @@ impl RuntimeLaunchSpecV3 {
                     mount_target: attachment.mount_target.clone(),
                     access: attachment.access,
                     writer_fence: Some(attachment.writer_fence),
+                    // The derived v2 view never carries backing: v3 keeps it
+                    // on its own attachment, and this view is not digested.
+                    backing: None,
                 })
                 .collect(),
             lifecycle: self.lifecycle.clone(),

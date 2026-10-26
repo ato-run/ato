@@ -31,6 +31,12 @@ use ato_ipc::runtime_launch_v3::is_volume_ref;
 /// usable volume root.
 pub const RUNNER_PERSISTENT_VOLUME_FEATURE: &str = "runtime_feature=runner_persistent_volume_v1";
 
+/// A Runner that can back a **single-container OCI** Run's state slot with a
+/// volume (a v1/v2 launch spec whose attachment names the volume), not only a
+/// v3 service group. Advertised separately so the control plane never sends a
+/// v1 volume attachment to a Runner that would reject the field.
+pub const RUNNER_SINGLE_OCI_VOLUME_FEATURE: &str = "runtime_feature=runner_volume_single_oci_v1";
+
 const METADATA_SCHEMA: &str = "ato.runner-volume/1";
 const METADATA_FILE: &str = "metadata.json";
 const DATA_DIR: &str = "data";
