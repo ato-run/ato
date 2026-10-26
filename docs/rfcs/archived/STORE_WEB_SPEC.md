@@ -12,6 +12,11 @@ related:
 
 # Store Web Specification
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 ## 1. 目的
 
 `apps/ato-store-web` は Ato Store の Web GUI を提供する。

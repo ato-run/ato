@@ -11,3 +11,6 @@ Language of the preserved document: English.
 <a id="regression-checks"></a>
 <a id="stage-boundary"></a>
 <a id="final-hardening-worker-report--actual-receiver--durable-stop"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="final-hardening-worker-report-→-actual-receiver-→-durable-stop"></a>

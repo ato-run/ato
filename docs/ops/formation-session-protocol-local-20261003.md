@@ -12,3 +12,8 @@ Language of the preserved document: Japanese / English.
 <a id="入力待ちの限定メタデータ別測定"></a>
 <a id="期限後の保存済み応答照合別測定"></a>
 <a id="session公開入力の限定投影別測定"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="session公開入力の限定投影（別測定）"></a>
+<a id="入力待ちの限定メタデータ（別測定）"></a>
+<a id="期限後の保存済み応答照合（別測定）"></a>

@@ -11,3 +11,6 @@ Language of the preserved document: Japanese / English.
 <a id="追加承認されたmeasurement-03"></a>
 <a id="supplemental-04-復旧は確認campaign内のcleanupは未成立"></a>
 <a id="supplemental-05-実unknownとfresh-native照合を40分内で完了"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="supplemental-04-復旧は確認、campaign内のcleanupは未成立"></a>

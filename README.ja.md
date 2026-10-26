@@ -50,3 +50,8 @@ accepted RFC、Draft、実装、配備結果は別々に確認します。Draft�
 <a id="capsuletoml-の例"></a>
 <a id="プロジェクトのスコープ"></a>
 <a id="現在の実装状態"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="capsule-run-replay-continue"></a>
+<a id="core-kernel-と-adapter"></a>
+<a id="設計原則：everything-can-be-a-capsule"></a>

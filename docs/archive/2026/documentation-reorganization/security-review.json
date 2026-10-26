@@ -1,6 +1,6 @@
 {
   "baseline": "0c93d81a7f86140868fbe84efb63538360a9cba1",
-  "text_files_and_archive_members_scanned": 3522,
+  "text_files_and_archive_members_scanned": 3527,
   "binary_files_or_members_not_text_scanned": 16,
   "privacy_indicators": {
     "email": 242,
@@ -55,5 +55,6 @@
     "credential-assignment": 15,
     "openai-token": 2
   },
-  "review": "17 historical demo/default-value or input-policy-label matches; no live credential established or tested. Values omitted."
+  "new_credential_pattern_signatures_since_initial_review": 0,
+  "review": "Historical example/default or input-policy matches; no live credential established or tested; no values reproduced."
 }

@@ -3,6 +3,11 @@
 Date: 2026-10-26. Baseline: dev
 `0c93d81a7f86140868fbe84efb63538360a9cba1`.
 
+The [new-developer acceptance review](REVIEW-ACCEPTANCE.md) records the
+follow-up browser and executable-example checks, fixes to the initial PR,
+external reference coverage, and the still-failing code CI gates. Read it
+with this initial organization report.
+
 ## Inventory and disposition
 
 [inventory.tsv](inventory.tsv) classifies 997 baseline files: all tracked docs
@@ -84,8 +89,8 @@ The baseline contained 126 unresolved local references; the final audit has 33,
 a reduction of 93. All current entry-point/guide/specification links resolve. Historical references
 without an established replacement remain explicitly inventoried. Code paths
 are not redirected to unrelated current files merely because basenames match.
-External URLs are counted but were not fetched, and rendered Docsify behavior
-was not browser-tested.
+The initial audit counted external URLs without fetching them. The follow-up
+review inspected GitHub references and exercised the rendered Docsify paths.
 
 The ECC docs-governance read-only audit was also run. It reports real legacy
 Markdown failures plus heuristic warnings for inline examples, schema strings,
@@ -95,7 +100,7 @@ just to satisfy default filenames.
 
 ## Sensitive data and evidence
 
-The bounded text/archive pattern scan inspected 3,522 text files/members and
+The initial bounded text/archive pattern scan inspected 3,522 text files/members and
 five tar.gz archives without extracting or executing them. Sixteen binary
 files/members were outside text inspection. Seventeen pattern matches were
 reviewed as historical example/default values or input-policy labels; no live
@@ -125,6 +130,6 @@ action. Main already contained release #1588 at the recorded baseline and dev
 contained its back-sync #1589; neither proves this new documentation is on main.
 
 No application behavior, wire/schema, accepted RFC, deployment, migration or
-feature flag is changed. Application builds/runtime smokes were not rerun for
-documentation maintenance. Verification covers references, source-backed command
-signatures, classification, raw-evidence integrity and change scope.
+feature flag is changed. The initial organization pass did not run application builds or smokes. The
+acceptance follow-up built the CLI and verified the corrected first example;
+its scope and the code CI failures are recorded in the linked review.

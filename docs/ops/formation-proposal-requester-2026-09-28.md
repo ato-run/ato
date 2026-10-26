@@ -16,3 +16,6 @@ Language of the preserved document: English.
 <a id="rollout-state"></a>
 <a id="final-hardening-review--response-headers-fixed-browser-ci-hold-retained"></a>
 <a id="browser-failure-is-not-a-baseline-failure"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="final-hardening-review-response-headers-fixed-browser-ci-hold-retained"></a>

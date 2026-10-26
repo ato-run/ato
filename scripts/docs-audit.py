@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlsplit
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--ref', help='Read a Git snapshot instead of the working tree')
 parser.add_argument('--output', required=True, help='JSON report path, relative to checkout')
+parser.add_argument('--allow-historical-from', help='Allow only the exact historical failures in a reviewed audit report')
 args = parser.parse_args()
 root = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip())
 os.chdir(root)
@@ -87,7 +88,10 @@ for src, raw in texts.items():
             fragment = ''
         else:
             target = os.path.normpath(os.path.join(os.path.dirname(src), unquote(u.path))) if u.path else src
-            if u.path.startswith('/'): target = unquote(u.path).lstrip('/')
+            if u.path.startswith('/'):
+                # Docsify sidebars use absolute routes within the docs site.
+                prefix = 'docs/' if src in ['docs/_sidebar.md', 'docs/rfcs/_sidebar.md'] else ''
+                target = prefix + unquote(u.path).lstrip('/')
             fragment = unquote(u.fragment)
         checked += 1
         exists = target in files or any(p.startswith(target.rstrip('/') + '/') for p in files)
@@ -111,4 +115,19 @@ output = Path(args.output)
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
 print(json.dumps({k: v for k, v in report.items() if k not in ['failures', 'limitations']}, ensure_ascii=False))
+if args.allow_historical_from:
+    known = json.loads(Path(args.allow_historical_from).read_text())
+    def failure_key(item):
+        return (item['source'], item['url'], item['target'], item['reason'])
+    allowed = collections.Counter(failure_key(item) for item in known['failures'] if item['scope'] == 'historical')
+    remaining = allowed.copy()
+    unexpected = []
+    for item in failures:
+        key = failure_key(item)
+        if item['scope'] != 'historical' or remaining[key] == 0:
+            unexpected.append(item)
+        else:
+            remaining[key] -= 1
+    print(json.dumps({'reviewed_historical_failures': sum(allowed.values()), 'unexpected_failures': len(unexpected)}))
+    raise SystemExit(1 if unexpected else 0)
 raise SystemExit(1 if failures else 0)

@@ -9,3 +9,6 @@ Language of the preserved document: English.
 <a id="combined-native--modelset--oci-component-regression--2026-10-24"></a>
 <a id="existing-fresh-root-native-gui--files-exact-regression"></a>
 <a id="source-requester-integration"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="existing-fresh-root-native-gui-files-exact-regression"></a>

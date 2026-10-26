@@ -8,3 +8,6 @@ Language of the preserved document: Japanese / English.
 <!-- Compatibility anchors for existing inbound links. -->
 <a id="formation-agent-session受入--2026-10-04"></a>
 <a id="session権限開始境界の追補"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="session権限・開始境界の追補"></a>

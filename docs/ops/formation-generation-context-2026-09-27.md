@@ -14,3 +14,6 @@ Language of the preserved document: English.
 <a id="actual-acceptance"></a>
 <a id="single-live-v2-observation--no-retry"></a>
 <a id="remaining-5b-gate"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="single-live-v2-observation-no-retry"></a>

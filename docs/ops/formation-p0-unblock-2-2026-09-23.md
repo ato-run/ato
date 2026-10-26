@@ -14,3 +14,8 @@ Language of the preserved document: English.
 <a id="tests"></a>
 <a id="cleanup"></a>
 <a id="follow-ups-not-in-this-change"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="acceptance-searxng-upstream-unmodified"></a>
+<a id="k0-mode-all-no-browser-contract"></a>
+<a id="k1-browser-contract-once-x86_64"></a>

@@ -13,3 +13,6 @@ Language of the preserved document: English.
 <a id="executed-5-apps"></a>
 <a id="permission-recovery-denominators"></a>
 <a id="next-bounded-acceptance"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_84-applications-without-a-valid-generated-d"></a>

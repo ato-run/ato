@@ -14,3 +14,6 @@ Language of the preserved document: English.
 <a id="known-data-contamination-staging-only-remediated"></a>
 <a id="cleanup-for-a-contaminated-instance"></a>
 <a id="__ato_instance_state_v1"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="bridge-cache-policy-the-version-is-in-the-path"></a>

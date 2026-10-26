@@ -16,3 +16,6 @@ Language of the preserved document: English.
 <a id="restore-external-effect-hold"></a>
 <a id="connection-ownership-and-clean-fixed-address-handover"></a>
 <a id="follow-up-verification"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="boundary-follow-up-2026-09-20"></a>

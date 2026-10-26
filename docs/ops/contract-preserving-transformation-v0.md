@@ -14,3 +14,12 @@ Language of the preserved document: Japanese / English.
 <a id="5-evidence-schema"></a>
 <a id="6-ci"></a>
 <a id="7-主張しないこと"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_1-何を証明するか"></a>
+<a id="_2-フィクスチャ"></a>
+<a id="_3-negative-matrix"></a>
+<a id="_4-再現手順（linux）"></a>
+<a id="_5-evidence-schema"></a>
+<a id="_6-ci"></a>
+<a id="_7-主張しないこと"></a>

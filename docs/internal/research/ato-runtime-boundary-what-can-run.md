@@ -1,5 +1,10 @@
 # ato で何が動かせるのか: 実行境界メモ
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 > 作成: 2026-05-02
 > 目的: 「ato で何が動くのか」と「ato-desktop でどう見せられるのか」の境界を、現行 spec と実装断片に基づいて整理する。
 

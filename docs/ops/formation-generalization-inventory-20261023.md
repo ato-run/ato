@@ -18,3 +18,11 @@ Language of the preserved document: Japanese / English.
 <a id="2026-10-24-phase16-更新"></a>
 <a id="2026-10-24-phase17-更新"></a>
 <a id="2026-10-24-phase1821-更新"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_2026-10-24-phase16-更新"></a>
+<a id="_2026-10-24-phase17-更新"></a>
+<a id="_2026-10-24-phase1821-更新"></a>
+<a id="_2026-10-24-続行時点の差分台帳"></a>
+<a id="pr分割・検証gate"></a>
+<a id="関連pr・issue"></a>

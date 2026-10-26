@@ -1,5 +1,10 @@
 # Monorepo 統合計画 — `ato-cli` × `ato-desktop`
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 > **Status:** Approved (2026-04-26)
 > **Successor location:** `ato-run/ato/docs/monorepo-consolidation-plan.md` (新リポジトリ作成後に移管)
 > **Pairs with:** [`v0.5-distribution-plan.md`](v0.5-distribution-plan.md), [`specs/CCP_SPEC.md`](specs/CCP_SPEC.md)

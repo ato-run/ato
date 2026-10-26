@@ -14,3 +14,6 @@ Language of the preserved document: English.
 <a id="next-measured-generic-gap-not-implemented-here"></a>
 <a id="ci-classification-not-a-green-claim"></a>
 <a id="final-compatibility-review-and-remeasurement"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="canonical-route-authority"></a>

@@ -14,3 +14,6 @@ Language of the preserved document: English.
 <a id="output-ownership-fix-after-review-of-de1d2d35"></a>
 <a id="findings"></a>
 <a id="what-changed-design-formation_source_oci"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="negatives-each-with-its-own-session-all-left-0-session-root-cgroup-process-mount-loop-device-and-published-nothing"></a>

@@ -13,3 +13,6 @@ Language of the preserved document: English.
 <a id="fixed-versus-live-not-a-performance-win"></a>
 <a id="verification-and-investigations"></a>
 <a id="remaining-gates--no-deployment"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="remaining-gates-no-deployment"></a>

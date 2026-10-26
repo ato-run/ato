@@ -18,3 +18,9 @@ Language of the preserved document: English.
 <a id="next-generic-gaps-ranked-from-evidence-not-implemented"></a>
 <a id="1441-ci-classification-at-merge"></a>
 <a id="reproduction"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_1441-ci-classification-at-merge"></a>
+<a id="_5050-terminal-results"></a>
+<a id="actual-incremental-effect-of-6b-a-6b-b-original-20-known-d"></a>
+<a id="original-20-regression-comparison-6a-→-current"></a>

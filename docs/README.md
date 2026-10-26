@@ -66,6 +66,9 @@ all baseline docs attachments and repository-wide prose. The
 [retention assessment](archive/2026/documentation-reorganization/EVIDENCE-RETENTION.md)
 and [audit report](archive/2026/documentation-reorganization/REPORT.md)
 record classifications, duplicates, link checks and unresolved limitations.
+The [acceptance review](archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md)
+checks the newcomer reading paths, actual first example, external references
+and code CI separately.
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="60-second-model"></a>
@@ -75,3 +78,6 @@ record classifications, duplicates, link checks and unresolved limitations.
 <a id="theory"></a>
 <a id="implementation-and-protocol-details"></a>
 <a id="historical-material"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_60-second-model"></a>

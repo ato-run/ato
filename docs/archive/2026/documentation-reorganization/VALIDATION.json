@@ -25,7 +25,17 @@
     "active_link_failures": 0,
     "historical_unresolved_references": 33,
     "resolved_reference_occurrences": 93,
-    "scope": "all repository Markdown paths and fragments, including component docs"
+    "scope": "all repository Markdown paths and fragments, including component docs",
+    "follow_up_final": {
+      "snapshot": "working-tree",
+      "markdown_files": 917,
+      "local_links_checked": 1678,
+      "external_links_not_fetched": 1067,
+      "symbolic_links_not_resolved": 0,
+      "failures_by_scope": {
+        "historical": 33
+      }
+    }
   },
   "compatibility": {
     "pages": 215,
@@ -44,7 +54,8 @@
       "Concepts": 12,
       "Operations": 6
     },
-    "audit_script_syntax": "passed"
+    "audit_script_syntax": "passed",
+    "snapshot": "initial organization pass, before intentional docs/index.html correction"
   },
   "governance_audit": {
     "baseline_broken_markdown_reports": 95,
@@ -53,9 +64,49 @@
     "warnings": 11,
     "result": "nonzero: historical references and heuristic path warnings; not a full clean pass"
   },
-  "application_checks": "not run: documentation-only",
-  "rendered_docsify": "not browser-tested",
+  "application_checks": "CLI build and corrected static first example executed; no full workspace pass claimed",
+  "rendered_docsify": "browser-tested on docs-only local preview; representative existing public URL also checked",
   "external_urls": "not fetched",
   "dev_merge": "pending review",
-  "main_documentation_merge": "not performed; separate release action"
+  "main_documentation_merge": "not performed; separate release action",
+  "follow_up_acceptance": {
+    "reading_paths": {
+      "current_markdown_nodes_reachable_without_entering_history": 105,
+      "failures_on_current_paths": [],
+      "remaining_historical_occurrences": 33,
+      "historical_owners_explicitly_labelled": 13
+    },
+    "integrity": {
+      "old_paths_http_checked": 215,
+      "old_paths_http_and_bytes_passed": 215,
+      "github_style_original_anchors": 1195,
+      "missing_original_anchors": [],
+      "accepted_rfc_files_unchanged": 8,
+      "non_markdown_docs_unchanged": 314,
+      "non_markdown_docs_intentionally_changed": [
+        "docs/index.html"
+      ]
+    },
+    "moved_body_comparison": {
+      "files_checked": 215,
+      "normalization": "remove added status/language banners, ignore Markdown target URLs and whitespace",
+      "unexpected_body_differences": []
+    },
+    "docsify_aliases": {
+      "files_considered": 222,
+      "additional_aliases": 236
+    },
+    "documentation_gate_negative_tests": {
+      "known_historical_allowed": true,
+      "new_active_rejected": true,
+      "additional_historical_occurrence_rejected": true,
+      "new_historical_target_rejected": true
+    },
+    "site_routing_regression_cases": 8,
+    "readme_smoke_fully_satisfied": true,
+    "readme_smoke_platform": "macOS local",
+    "code_compile_gate": "fails identically on head and dev base; no bypass",
+    "dev_merge": "not performed: code CI failing",
+    "main_release_pr_1588": "already merged; cannot append commits"
+  }
 }

@@ -15,3 +15,6 @@ Language of the preserved document: English.
 <a id="expected-green-output"></a>
 <a id="after-green"></a>
 <a id="staging-first"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="prerequisites-the-754-gates-all-required-for-a-real-run"></a>
