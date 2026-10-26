@@ -549,7 +549,19 @@ fn serve(args: &[String]) -> Result<()> {
 
     // Once, at startup. A host that cannot contain a build must refuse to
     // serve rather than accept jobs and fail them one at a time.
-    require_containment()?;
+    if args.iter().any(|arg| arg == "--portable-host-boundary") {
+        let uid = flag(args, "--workload-uid")
+            .context("--workload-uid is required")?
+            .parse()?;
+        let gid = flag(args, "--workload-gid")
+            .context("--workload-gid is required")?
+            .parse()?;
+        ato_runtime_attempt::launch::host_boundary::enable(
+            ato_runtime_attempt::launch::host_boundary::HostBoundary { uid, gid },
+        )?;
+    } else {
+        require_containment()?;
+    }
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(900))
@@ -827,6 +839,9 @@ fn serve(args: &[String]) -> Result<()> {
         // The in-flight job has been executed and reported; a stop that arrived
         // while it ran is honoured before the next claim.
         *lock(&state.current_attempt) = None;
+        if args.iter().any(|arg| arg == "--stop-after-job") {
+            break;
+        }
     }
 
     let directive = lock(&state.directive).clone();
@@ -862,6 +877,12 @@ fn serve(args: &[String]) -> Result<()> {
             heartbeat,
         )?;
         unreachable!("drain_to_quiescent exits the process");
+    }
+
+    if args.iter().any(|arg| arg == "--stop-after-job") && !STOP_REQUESTED.load(Ordering::SeqCst) {
+        state.heartbeat_stopped.store(true, Ordering::SeqCst);
+        let _ = heartbeat.join();
+        return Ok(());
     }
 
     // SIGTERM/SIGINT without a drain request: the in-flight job has finished

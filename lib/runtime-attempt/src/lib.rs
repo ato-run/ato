@@ -31,6 +31,7 @@ pub mod execution_facts;
 pub mod executor;
 pub mod exploration_realizer;
 pub mod formation_realizer;
+pub mod host_resources;
 pub mod journal;
 pub mod launch;
 pub mod native_launch;
