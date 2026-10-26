@@ -1667,9 +1667,13 @@ impl ConnectedWorker {
                     .to_string(),
             )
             .env_clear()
+            // Operator image PATH includes its pinned Python/CUDA toolchains.
+            // Preserve that one non-secret setting while clearing credentials.
             .env(
                 "PATH",
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                std::env::var_os("PATH").unwrap_or_else(|| {
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()
+                }),
             )
             .env("LANG", "C.UTF-8")
             .env("HOME", &root)
