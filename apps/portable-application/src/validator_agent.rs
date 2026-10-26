@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_formation::authoring::{ClientAddressTransport, HTTP_PROTOCOL, StateAccess};
@@ -57,6 +57,13 @@ pub enum ValidatorRunOutcome {
     HostedVerified {
         bundle_id: String,
         fully_satisfied: bool,
+    },
+    /// The attempt could not be observed (relay unreachable past its budget,
+    /// or a terminal relay rejection). The app was never judged; the control
+    /// plane records an interrupted attempt, which a wake may retry.
+    HostedAbandoned {
+        bundle_id: String,
+        failure_code: String,
     },
     Exported {
         export_id: String,
@@ -174,14 +181,46 @@ impl ValidatorAgent {
         // observation is decided against.
         let (_, validated) = validate_bytes_for_derivation(&bytes, selected_derivation_ref)?;
         let spec = validated.attempt_spec(job.instance_snapshot_ref.as_deref());
+        // Observations go through the Hosted relay, so a Run that is briefly
+        // unreachable is a retryable condition of the relay — not the app's
+        // Contract failing and not a reason to kill this agent. Retry inside
+        // the job's remaining budget; when it runs out, report the attempt as
+        // abandoned so the control plane can judge it honestly.
+        let deadline = retry_deadline(&job, Duration::from_secs(6 * 60));
         let mut http = Vec::new();
         for required in required_http_observations(&spec) {
-            let observed = self.api.observe(
-                &job,
-                &required.port_id,
-                HTTP_OBSERVATION_METHOD,
-                &required.path,
-            )?;
+            let observed = match with_retry(deadline, || {
+                self.api.observe(
+                    &job,
+                    &required.port_id,
+                    HTTP_OBSERVATION_METHOD,
+                    &required.path,
+                )
+            }) {
+                Ok(observed) => observed,
+                Err(failure) => {
+                    let code = if failure.retryable {
+                        "observation_unreachable"
+                    } else {
+                        "observation_rejected"
+                    };
+                    // A failed report must not crash the agent either: the job
+                    // will be requeued after its claim expires, and the next
+                    // pass verifies again.
+                    if let Err(report_error) =
+                        self.api.report_runtime_failure(&job, code, &failure.reason)
+                    {
+                        eprintln!(
+                            "[validator] could not report abandonment for {}: {report_error:#}",
+                            job.job_id
+                        );
+                    }
+                    return Ok(ValidatorRunOutcome::HostedAbandoned {
+                        bundle_id: job.bundle_id.clone(),
+                        failure_code: code.to_owned(),
+                    });
+                }
+            };
             http.push(RuntimeHttpObservation::from_response(
                 observed.port,
                 observed.method,
@@ -310,8 +349,17 @@ impl ValidatorAgent {
 
     pub fn run_forever(&self) -> Result<()> {
         loop {
-            if self.run_once()? == ValidatorRunOutcome::Idle {
-                thread::sleep(self.poll_interval);
+            // One job's failure is not the agent's death sentence. It used to
+            // be: a single 500 from the observation relay exited the process,
+            // leaving the job claimed and the attempt to be judged as
+            // interrupted minutes later. Log, back off, keep serving.
+            match self.run_once() {
+                Ok(ValidatorRunOutcome::Idle) => thread::sleep(self.poll_interval),
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("[validator] job failed, continuing: {error:#}");
+                    thread::sleep(self.poll_interval);
+                }
             }
         }
     }
@@ -1275,11 +1323,12 @@ impl HttpValidatorApi {
         port: &str,
         method: &str,
         path: &str,
-    ) -> Result<HostedObservation> {
-        let observe_url = job
-            .observe_url
-            .as_deref()
-            .context("runtime job omitted observe_url")?;
+    ) -> std::result::Result<HostedObservation, RetryableFailure> {
+        let Some(observe_url) = job.observe_url.as_deref() else {
+            return Err(RetryableFailure::terminal(
+                "runtime job omitted observe_url",
+            ));
+        };
         let response = self
             .claimed(
                 self.client.get(self.url(observe_url)).query(&[
@@ -1289,8 +1338,13 @@ impl HttpValidatorApi {
                 ]),
                 &job.claim_id,
             )
-            .send()?;
-        let wire = decode_json::<HostedObservationWire>(response, "hosted observation")?;
+            .send()
+            .map_err(|error| classify_send_error(&error))?;
+        if let Some(failure) = classify_status(response.status(), response.headers()) {
+            return Err(failure);
+        }
+        let wire = decode_json::<HostedObservationWire>(response, "hosted observation")
+            .map_err(|error| RetryableFailure::terminal(format!("{error:#}")))?;
         Ok(HostedObservation {
             port: wire.port,
             method: wire.method,
@@ -1298,8 +1352,43 @@ impl HttpValidatorApi {
             status: wire.status,
             body: base64::engine::general_purpose::STANDARD
                 .decode(wire.body_base64)
-                .context("hosted observation body is not canonical base64")?,
+                .map_err(|error| {
+                    RetryableFailure::terminal(format!(
+                        "hosted observation body is not canonical base64: {error}"
+                    ))
+                })?,
         })
+    }
+
+    /// Tell the control plane that this attempt cannot be observed. The API
+    /// terminalizes the attempt as `interrupted` (retryable by a wake) with our
+    /// typed code — the app's Contract was never judged, so it must not be
+    /// reported as failed.
+    fn report_runtime_failure(
+        &self,
+        job: &ValidationJob,
+        code: &str,
+        message: &str,
+    ) -> Result<()> {
+        let path = format!(
+            "/v1/capsule-bundles/runtime-verification-jobs/{}/fail",
+            job.job_id
+        );
+        let response = self
+            .claimed(
+                self.client
+                    .post(self.url(&path))
+                    .json(&serde_json::json!({ "code": code, "message": message })),
+                &job.claim_id,
+            )
+            .send()?;
+        if !response.status().is_success() {
+            bail!(
+                "runtime verifier fail report returned {}",
+                response.status()
+            );
+        }
+        Ok(())
     }
 
     fn ack_runtime(
@@ -1376,6 +1465,11 @@ struct ValidationJob {
     claim_id: String,
     #[allow(dead_code)]
     claim_expires_at: String,
+    /// Remaining time before the control plane judges the attempt expired.
+    /// Computed by the API from the job deadline so the agent needs no clock
+    /// parsing of its own. Absent on an older API: the local cap below applies.
+    #[serde(default)]
+    retry_budget_ms: Option<u64>,
     bundle_id: String,
     transport_digest: String,
     size_bytes: u64,
@@ -1416,6 +1510,104 @@ struct HostedObservationWire {
     body_base64: String,
     #[allow(dead_code)]
     instance_id: String,
+}
+
+/// Why one HTTP call could not produce a verdict, and whether waiting could
+/// change that. The distinction is the whole point: a surface that is briefly
+/// unreachable is not the app's failure, and it must not be recorded as one.
+#[derive(Debug)]
+struct RetryableFailure {
+    retryable: bool,
+    retry_after: Option<Duration>,
+    reason: String,
+}
+
+impl RetryableFailure {
+    fn terminal(reason: impl Into<String>) -> Self {
+        Self {
+            retryable: false,
+            retry_after: None,
+            reason: reason.into(),
+        }
+    }
+
+    fn retryable(reason: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            retryable: true,
+            retry_after,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// The header the relay uses to ask for a pause, parsed without a date library:
+/// it is either delta-seconds or an HTTP-date we do not need to honour exactly.
+fn retry_after_from(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let seconds = raw.trim().parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds.min(30)))
+}
+
+fn classify_status(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> Option<RetryableFailure> {
+    if status.is_success() {
+        return None;
+    }
+    let code = status.as_u16();
+    let retryable = matches!(code, 408 | 425 | 429) || status.is_server_error();
+    Some(if retryable {
+        RetryableFailure::retryable(
+            format!("relay returned {status}"),
+            retry_after_from(headers),
+        )
+    } else {
+        RetryableFailure::terminal(format!("relay returned {status}"))
+    })
+}
+
+fn classify_send_error(error: &reqwest::Error) -> RetryableFailure {
+    // Timeouts and connection failures mean "try again while the surface comes
+    // up"; anything else (bad request construction) will not improve.
+    if error.is_timeout() || error.is_connect() || error.is_request() {
+        RetryableFailure::retryable(format!("relay transport error: {error}"), None)
+    } else {
+        RetryableFailure::terminal(format!("relay request failed: {error}"))
+    }
+}
+
+fn retry_deadline(job: &ValidationJob, fallback: Duration) -> Instant {
+    let budget = job
+        .retry_budget_ms
+        .map(|ms| Duration::from_millis(ms.min(10 * 60_000)))
+        .unwrap_or(fallback);
+    Instant::now() + budget
+}
+
+/// Retry a relay call that may be transiently unavailable. Bounded by the
+/// job's remaining budget: after that, the attempt is reported as abandoned
+/// rather than retried forever. No unbounded loop, no fixed sleep storm.
+fn with_retry<T>(
+    deadline: Instant,
+    mut attempt: impl FnMut() -> Result<T, RetryableFailure>,
+) -> Result<T, RetryableFailure> {
+    let mut backoff = Duration::from_millis(250);
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(failure) if !failure.retryable => return Err(failure),
+            Err(failure) => {
+                let pause = failure.retry_after.unwrap_or(backoff).min(Duration::from_secs(5));
+                if Instant::now() + pause >= deadline {
+                    return Err(RetryableFailure {
+                        retryable: true,
+                        retry_after: None,
+                        reason: format!("{} (retry budget exhausted)", failure.reason),
+                    });
+                }
+                thread::sleep(pause);
+                backoff = (backoff * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
 }
 
 struct HostedObservation {
