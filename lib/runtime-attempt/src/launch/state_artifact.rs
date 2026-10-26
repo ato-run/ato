@@ -14,7 +14,7 @@
 //! already uses — the Runner holds no R2 binding and learns no bucket name.
 
 use std::collections::BTreeSet;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -89,10 +89,24 @@ pub fn state_artifact_digest(bytes: &[u8]) -> String {
 /// are state, and leaving them in would mint a new revision on every commit.
 /// The mode is reduced to one bit, whether the owner may execute, which is the
 /// only part a restored tree needs to honour.
+///
+/// One file on disk is deliberately not state either: the "-shm" shared-memory
+/// cache of a WAL-mode SQLite database (see is_sqlite_shared_memory below). A
+/// database in WAL mode keeps its durable bytes in "<db>" and "<db>-wal"; both
+/// are packed, and a restore from just those two recovers every committed row.
 pub fn pack_state_tree(root: &Path) -> Result<StateArtifact> {
     let mut files = BTreeSet::new();
     let mut directories = BTreeSet::new();
     collect_entries(root, root, &mut files, &mut directories)?;
+    // Dropped BEFORE the digest is computed, so that two snapshots of
+    // byte-identical durable state address the same revision. SQLite rewrites
+    // the cache merely because someone read the database — no write, no commit
+    // — so packing it would make a state revision's identity depend on how
+    // often the app had been looked at since its last write.
+    let files: BTreeSet<PathBuf> = files
+        .into_iter()
+        .filter(|relative| !is_sqlite_shared_memory(root, relative))
+        .collect();
 
     let mut bytes = Vec::new();
     {
@@ -369,6 +383,46 @@ fn collect_entries(
         }
     }
     Ok(())
+}
+
+/// Is this entry the shared-memory cache of a SQLite database beside it?
+///
+/// SQLite names the cache "<database>-shm" and keeps it next to the database
+/// file, so the NAME alone is not evidence: a state file that merely ends in
+/// "-shm" is state like any other and must be packed. Both conditions are
+/// required here — a sibling named "<database>" exists AND it carries the
+/// SQLite file header — so this drops bytes only when it is provably a cache.
+///
+/// What is dropped is safe to drop: the cache is rebuilt by SQLite from the
+/// database and its "-wal" on the next open, and a restore from those two
+/// recovers every committed row (see the tests at the end of this file).
+fn is_sqlite_shared_memory(root: &Path, relative: &Path) -> bool {
+    /// The first 16 bytes of every SQLite 3 database file.
+    const SQLITE_FILE_HEADER: &[u8] = b"SQLite format 3\0";
+
+    let Some(name) = relative.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    let Some(database_name) = name.strip_suffix("-shm") else {
+        return false;
+    };
+    if database_name.is_empty() {
+        return false;
+    }
+    // `collect_entries` has already refused every symlink in this tree, so a
+    // sibling that is a file is the database SQLite would cache, not a link out
+    // of the attachment.
+    let database = root.join(relative.with_file_name(database_name));
+    if !database.is_file() {
+        return false;
+    }
+    let mut header = [0u8; SQLITE_FILE_HEADER.len()];
+    match std::fs::File::open(&database).and_then(|mut file| file.read_exact(&mut header)) {
+        Ok(()) => header == SQLITE_FILE_HEADER,
+        // A shorter or unreadable sibling cannot be a database; keep the entry
+        // rather than silently drop something this function does not understand.
+        Err(_) => false,
+    }
 }
 
 #[cfg(unix)]
@@ -935,6 +989,93 @@ pub fn materialize_working_copy(
     unpack_state_tree(&bytes, digest, destination)
 }
 
+/// Fixtures for a SQLite database left in the on-disk state a WAL-mode app
+/// leaves behind, driven through the "sqlite3" CLI.
+///
+/// Deliberately not a linked SQLite: the crate has no SQLite dependency, and
+/// the property under test is about FILES on disk, not about an API. Nothing
+/// here is production code.
+#[cfg(test)]
+pub(crate) mod sqlite_wal {
+    use std::path::Path;
+    use std::process::Command;
+
+    /// The "sqlite3" program to drive, or None when this host has none.
+    ///
+    /// The tests that need a real WAL file skip, and say so, on a host without
+    /// the CLI: pack_state_tree itself needs no SQLite, and a Runner image
+    /// without it still packs state correctly.
+    pub(crate) fn cli() -> Option<String> {
+        for candidate in ["/usr/bin/sqlite3", "sqlite3"] {
+            let found = Command::new(candidate)
+                .arg("-version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
+            if found {
+                return Some(candidate.to_owned());
+            }
+        }
+        None
+    }
+
+    fn run(program: &str, database: &Path, arguments: &[&str]) -> String {
+        let output = Command::new(program)
+            .arg(database)
+            .args(arguments)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run {program}: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Run STATEMENT against DATABASE and return stdout without its final
+    /// newline.
+    pub(crate) fn query(program: &str, database: &Path, statement: &str) -> String {
+        run(program, database, &[statement]).trim_end().to_owned()
+    }
+
+    /// Create DATABASE in WAL mode holding ROWS, and leave a NON-EMPTY "-wal"
+    /// beside it.
+    ///
+    /// A committed write lands in the WAL, and the connection that made it ends
+    /// without checkpointing (".dbconfig no_ckpt_on_close"), which is what a
+    /// snapshot of a stopped app actually finds on disk: a small database file,
+    /// the committed rows in the "-wal", and a "-shm" cache.
+    pub(crate) fn create(program: &str, database: &Path, rows: &[(&str, &str)]) {
+        let mut sql = String::from(
+            "PRAGMA journal_mode=WAL;\nPRAGMA wal_autocheckpoint=0;\nCREATE TABLE memos (id TEXT PRIMARY KEY, content TEXT NOT NULL);\n",
+        );
+        for (id, content) in rows {
+            sql.push_str(&format!(
+                "INSERT INTO memos (id, content) VALUES ('{id}', '{content}');\n"
+            ));
+        }
+        run(
+            program,
+            database,
+            &["-cmd", ".dbconfig no_ckpt_on_close on", sql.as_str()],
+        );
+    }
+
+    /// "id|content" for every row, in id order.
+    pub(crate) fn rows(program: &str, database: &Path) -> String {
+        query(
+            program,
+            database,
+            "SELECT id || '|' || content FROM memos ORDER BY id;",
+        )
+    }
+
+    pub(crate) fn integrity(program: &str, database: &Path) -> String {
+        query(program, database, "PRAGMA integrity_check;")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -1218,5 +1359,178 @@ mod tests {
             .permissions()
             .mode();
         assert!(plain & 0o111 == 0, "a data file must not become executable");
+    }
+
+    /// The entry names an artifact carries, in the order it carries them.
+    fn packed_names(artifact: &StateArtifact) -> Vec<String> {
+        let mut archive = tar::Archive::new(Cursor::new(artifact.bytes()));
+        archive
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .path()
+                    .expect("path")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_wal_mode_database_round_trips_with_every_committed_row() {
+        let Some(sqlite3) = sqlite_wal::cli() else {
+            eprintln!(
+                "skipping a_wal_mode_database_round_trips_with_every_committed_row: this host has no sqlite3 CLI"
+            );
+            return;
+        };
+        let source = tempfile::tempdir().expect("tempdir");
+        let database = source.path().join("memos_prod.db");
+        sqlite_wal::create(
+            &sqlite3,
+            &database,
+            &[
+                ("m1", "hello world"),
+                ("m2", "second memo"),
+                ("m3", "third memo"),
+            ],
+        );
+
+        // The state a stopped memos-style app leaves behind: every committed row
+        // is in the WAL, not in the database file, and the shared-memory cache
+        // sits beside them.
+        let wal = source.path().join("memos_prod.db-wal");
+        let shm = source.path().join("memos_prod.db-shm");
+        let wal_bytes = std::fs::read(&wal).expect("read the wal");
+        assert!(
+            !wal_bytes.is_empty(),
+            "the fixture must leave a non-empty WAL"
+        );
+        assert!(
+            shm.is_file(),
+            "the fixture must leave the shared-memory cache"
+        );
+
+        let artifact = pack_state_tree(source.path()).expect("packs");
+        let names = packed_names(&artifact);
+        assert!(
+            names.iter().any(|name| name == "memos_prod.db"),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "memos_prod.db-wal"),
+            "{names:?}"
+        );
+        // The cache is not state: SQLite rebuilds it from the two files above.
+        assert!(
+            !names.iter().any(|name| name.ends_with("-shm")),
+            "{names:?}"
+        );
+
+        let restored = tempfile::tempdir().expect("tempdir");
+        let target = restored.path().join("state");
+        unpack_state_tree(artifact.bytes(), artifact.digest(), &target).expect("unpacks");
+
+        // The durable bytes came back; the ephemeral cache did not.
+        assert_eq!(
+            std::fs::read(target.join("memos_prod.db-wal")).expect("read"),
+            wal_bytes
+        );
+        assert!(!target.join("memos_prod.db-shm").exists());
+        // Nothing was lost and nothing was invented, so repacking addresses the
+        // same revision even though the restored tree carries no cache.
+        assert_eq!(
+            pack_state_tree(&target).expect("repacks").digest(),
+            artifact.digest()
+        );
+
+        // Opened with SQLite, the restored database has every committed row: the
+        // rows live in the WAL, so a restore that dropped the "-wal" would find
+        // no table at all rather than a smaller one.
+        let restored_database = target.join("memos_prod.db");
+        assert_eq!(
+            sqlite_wal::rows(&sqlite3, &restored_database),
+            "m1|hello world\nm2|second memo\nm3|third memo"
+        );
+        assert_eq!(sqlite_wal::integrity(&sqlite3, &restored_database), "ok");
+        assert_eq!(
+            sqlite_wal::query(&sqlite3, &restored_database, "PRAGMA journal_mode;"),
+            "wal"
+        );
+    }
+
+    #[test]
+    fn the_sqlite_shared_memory_cache_does_not_change_the_state_address() {
+        let Some(sqlite3) = sqlite_wal::cli() else {
+            eprintln!(
+                "skipping the_sqlite_shared_memory_cache_does_not_change_the_state_address: this host has no sqlite3 CLI"
+            );
+            return;
+        };
+        let source = tempfile::tempdir().expect("tempdir");
+        sqlite_wal::create(
+            &sqlite3,
+            &source.path().join("memos_prod.db"),
+            &[("m1", "hello")],
+        );
+        let packed = pack_state_tree(source.path()).expect("packs");
+
+        // A different cache for byte-identical durable state: what a mere READ
+        // of the database leaves behind, and what a cache from another moment
+        // looks like. It must not become part of the revision's identity.
+        let shm = source.path().join("memos_prod.db-shm");
+        let size = std::fs::metadata(&shm).expect("stat the cache").len();
+        std::fs::write(&shm, vec![0xa5u8; size as usize]).expect("overwrite the cache");
+        assert_eq!(
+            pack_state_tree(source.path()).expect("repacks").digest(),
+            packed.digest(),
+            "a cache that is not durable state must not mint a new revision"
+        );
+    }
+
+    #[test]
+    fn a_file_that_only_ends_in_shm_is_still_state() {
+        // The name alone is not evidence. A user file called "report-shm" is
+        // state, and so is a "-shm" beside something that is not a database:
+        // dropping either would silently lose what the app wrote.
+        let source = tempfile::tempdir().expect("tempdir");
+        write(source.path(), "report", "the report");
+        write(source.path(), "report-shm", "not a cache");
+        write(source.path(), "orphan-shm", "no database beside it");
+        write(source.path(), "notes.db", "sqlite-bytes");
+        write(
+            source.path(),
+            "notes.db-shm",
+            "a cache of something that is not a database",
+        );
+
+        let artifact = pack_state_tree(source.path()).expect("packs");
+        let names = packed_names(&artifact);
+        for expected in [
+            "report",
+            "report-shm",
+            "orphan-shm",
+            "notes.db",
+            "notes.db-shm",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "{expected} missing from {names:?}"
+            );
+        }
+
+        let restored = tempfile::tempdir().expect("tempdir");
+        let target = restored.path().join("state");
+        unpack_state_tree(artifact.bytes(), artifact.digest(), &target).expect("unpacks");
+        assert_eq!(
+            std::fs::read_to_string(target.join("report-shm")).expect("read"),
+            "not a cache"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes.db-shm")).expect("read"),
+            "a cache of something that is not a database"
+        );
     }
 }
