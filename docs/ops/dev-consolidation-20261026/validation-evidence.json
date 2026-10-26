@@ -1,17 +1,17 @@
 {
-  "recorded_at": "2026-10-26T05:14:58.820477+00:00",
+  "recorded_at": "2026-10-26T05:33:20.166386+00:00",
   "complete": false,
   "production_mutations": 0,
   "main_pushes_by_this_task": 0,
-  "code_validation_sha": "4d43ad44d9e565699f9e2e52b1f0e6353b2bee57",
+  "code_validation_sha": "bff38ed818858c99c153e66bfc3f77b1f88289ff",
   "heads": {
     "ato": {
       "main": "585e86c5222836d41e9d8359178d37ac06f712b9",
-      "dev": "4d43ad44d9e565699f9e2e52b1f0e6353b2bee57"
+      "dev": "2853dcc8767c7584b496915e126dae9da72d4866"
     },
     "ato-api": {
       "main": "d05ecbbd5d5574373abcad500ded7aab9970f250",
-      "dev": "6e178c901c0a028b121a4fc18841a4d03e13702d"
+      "dev": "16d1c53da0c7c4f53ca6989cc6981a58fedbec06"
     },
     "ato-pwa": {
       "main": "83635a90c076d97e635c0ea59d985294aa3ed44c",
@@ -92,6 +92,42 @@
       "headRefOid": "5a8e3eb427193ed001ccb23a6aa713af5c0121e8",
       "mergeCommit": {
         "oid": "6e178c901c0a028b121a4fc18841a4d03e13702d"
+      }
+    },
+    {
+      "repo": "ato",
+      "number": 1583,
+      "url": "https://github.com/ato-run/ato/pull/1583",
+      "headRefOid": "334df072a83781556c8fefb2daff5a19ee5ee3c9",
+      "mergeCommit": {
+        "oid": "a8da6c90b84674c9851f7a5cf5c3d26c42b4e716"
+      }
+    },
+    {
+      "repo": "ato",
+      "number": 1584,
+      "url": "https://github.com/ato-run/ato/pull/1584",
+      "headRefOid": "a1b5a96fe6a7e04c5e6f4ebfe6a14b32db3276b2",
+      "mergeCommit": {
+        "oid": "2853dcc8767c7584b496915e126dae9da72d4866"
+      }
+    },
+    {
+      "repo": "ato-api",
+      "number": 893,
+      "url": "https://github.com/ato-run/ato-api/pull/893",
+      "headRefOid": "e8d6c8246f97db5b918aa146da21356009877a34",
+      "mergeCommit": {
+        "oid": "9a09d38de8d965ac5ec6ea585a5d51c02584a425"
+      }
+    },
+    {
+      "repo": "ato-api",
+      "number": 896,
+      "url": "https://github.com/ato-run/ato-api/pull/896",
+      "headRefOid": "3fb53612702dab05d7ef12b4375b56d8c61e48b5",
+      "mergeCommit": {
+        "oid": "16d1c53da0c7c4f53ca6989cc6981a58fedbec06"
       }
     }
   ],
@@ -197,6 +233,12 @@
       "stopped_at": null
     },
     {
+      "kind": "run",
+      "id": "run_01M5VATJGAEF53HZR5NS9FZE03",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
       "kind": "lease",
       "id": "01M5TXC7ABEZAEABPPR9RRK31K",
       "status": "stopped",
@@ -291,6 +333,12 @@
       "id": "01M5V9W6NPK1P68MXPW3F3JA31",
       "status": "stopped",
       "stopped_at": "2026-10-26T05:11:02.218Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5VATJGAX93XCPFYK0E364SG",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T05:27:47.471Z"
     }
   ],
   "source_replay_after_upload_expiry": {
@@ -1990,7 +2038,7 @@
     }
   },
   "native": {
-    "started_at": "2026-10-26T05:10:33.419Z",
+    "started_at": "2026-10-26T05:27:07.928Z",
     "bundle": "bnd_01M5PS38FRC82DE9CXF4PK3YZQ",
     "derivation": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
     "runner": "01M5PDZZKS0115690TRHHAM5MM",
@@ -2014,8 +2062,8 @@
         "ok": true,
         "detail": {
           "status": "verified",
-          "expected_run": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
-          "actual_run": "run_01M5V9W6NPBQQ7GA17AB4SZ95F"
+          "expected_run": "run_01M5VATJGAEF53HZR5NS9FZE03",
+          "actual_run": "run_01M5VATJGAEF53HZR5NS9FZE03"
         }
       },
       {
@@ -2050,12 +2098,12 @@
         "name": "io",
         "ok": true,
         "detail": {
-          "initial": "status\r\nstatus:1,120,40,1,985762599\r\nEND",
+          "initial": "status\r\nstatus:1,120,40,1,985862605\r\nEND",
           "go1": "go\r\n2\r\nEND",
-          "status1": "status\r\nstatus:2,120,40,1,985762599\r\nEND",
-          "resize": "status\r\nstatus:2,100,30,1,985762599\r\nEND",
+          "status1": "status\r\nstatus:2,120,40,1,985862605\r\nEND",
+          "resize": "status\r\nstatus:2,100,30,1,985862605\r\nEND",
           "go2": "go\r\n3\r\nEND",
-          "status2": "status\r\nstatus:3,100,30,1,985762599\r\nEND"
+          "status2": "status\r\nstatus:3,100,30,1,985862605\r\nEND"
         }
       },
       {
@@ -2066,7 +2114,7 @@
           "120",
           "40",
           "1",
-          "985762599"
+          "985862605"
         ]
       },
       {
@@ -2077,7 +2125,7 @@
           "100",
           "30",
           "1",
-          "985762599"
+          "985862605"
         ]
       },
       {
@@ -2089,21 +2137,21 @@
             "120",
             "40",
             "1",
-            "985762599"
+            "985862605"
           ],
           [
             "2",
             "100",
             "30",
             "1",
-            "985762599"
+            "985862605"
           ],
           [
             "3",
             "100",
             "30",
             "1",
-            "985762599"
+            "985862605"
           ]
         ]
       },
@@ -2116,21 +2164,21 @@
             "120",
             "40",
             "1",
-            "985762599"
+            "985862605"
           ],
           [
             "2",
             "100",
             "30",
             "1",
-            "985762599"
+            "985862605"
           ],
           [
             "3",
             "100",
             "30",
             "1",
-            "985762599"
+            "985862605"
           ]
         ]
       },
@@ -2153,27 +2201,27 @@
     "production_mutations": 0,
     "owner": "Sjw3iAzUbGSdtcOI09PWyMPNGPfNFHHN",
     "other": "9NnR9p6cCtrnT2WnKprMjbWO975qJVOY",
-    "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+    "run_id": "run_01M5VATJGAEF53HZR5NS9FZE03",
     "import_ids": {
-      "import_id": "pai_01M5V9W6J80C0EGQFM50FEZY0P",
+      "import_id": "pai_01M5VATJCW4GMMK7XQSTR36SN9",
       "bundle_id": "bnd_01M5PS38FRC82DE9CXF4PK3YZQ",
       "root_contract_ref": "sha256:25f299f6beca849785c63e3aaab40655f18eb201d6a5cb01085fb58561e1ca71",
       "application_ref": "sha256:484b05c11150c90c3632858853b0527651da191cc2c7f16e2a3bea5f6a3b6c49",
       "selected_derivation_ref": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
-      "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
-      "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+      "run_id": "run_01M5VATJGAEF53HZR5NS9FZE03",
+      "lease_id": "01M5VATJGAX93XCPFYK0E364SG",
       "workspace_materialization_ref": "sha256:e8d8e7e58d2535bf46a5eb15a149424e17ab1beeeeb99c3332521b4aac3c1a0e",
       "instance_snapshot_ref": null
     },
-    "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+    "lease_id": "01M5VATJGAX93XCPFYK0E364SG",
     "verification": {
-      "import_id": "pai_01M5V9W6J80C0EGQFM50FEZY0P",
+      "import_id": "pai_01M5VATJCW4GMMK7XQSTR36SN9",
       "bundle_id": "bnd_01M5PS38FRC82DE9CXF4PK3YZQ",
       "root_contract_ref": "sha256:25f299f6beca849785c63e3aaab40655f18eb201d6a5cb01085fb58561e1ca71",
       "application_ref": "sha256:484b05c11150c90c3632858853b0527651da191cc2c7f16e2a3bea5f6a3b6c49",
       "selected_derivation_ref": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
-      "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
-      "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+      "run_id": "run_01M5VATJGAEF53HZR5NS9FZE03",
+      "lease_id": "01M5VATJGAX93XCPFYK0E364SG",
       "workspace_materialization_ref": "sha256:e8d8e7e58d2535bf46a5eb15a149424e17ab1beeeeb99c3332521b4aac3c1a0e",
       "instance_snapshot_ref": null,
       "verification_status": "verified",
@@ -2182,14 +2230,14 @@
         "contract_ref": "sha256:25f299f6beca849785c63e3aaab40655f18eb201d6a5cb01085fb58561e1ca71",
         "derivation_ref": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
         "execution": {
-          "attempt_id": "pav_01M5V9W7K93E1SA6FR0BRKMHTD",
-          "container_id": "7be8e27b1b961a6643a7e9e669da5d51521b26b8ca716c577de37decec6ea43d",
+          "attempt_id": "pav_01M5VATKH600VHPSTHG9HAB2YY",
+          "container_id": "426ed11270ac3a5027166b6fada68e02bbf1ea3844e0bd28b3b79acb06e4bef2",
           "endpoint": "https://ubuntu-sugamo.tail934987.ts.net",
           "image": "docker.io/library/python@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280",
-          "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+          "lease_id": "01M5VATJGAX93XCPFYK0E364SG",
           "platform": "linux/amd64",
           "realization": "native_oci_container",
-          "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+          "run_id": "run_01M5VATJGAEF53HZR5NS9FZE03",
           "runtime_executable": "docker"
         },
         "fully_satisfied": true,
@@ -2211,188 +2259,188 @@
         }
       }
     },
-    "surface_host": "01m5v9w9r3qtcmf6m3tfyb2wdc.stg-app.ato.run",
+    "surface_host": "01m5vattgw7az659s6105t642d.stg-app.ato.run",
     "terminal": {
-      "initial": "status\r\nstatus:1,120,40,1,985762599\r\nEND",
+      "initial": "status\r\nstatus:1,120,40,1,985862605\r\nEND",
       "go1": "go\r\n2\r\nEND",
-      "status1": "status\r\nstatus:2,120,40,1,985762599\r\nEND",
-      "resize": "status\r\nstatus:2,100,30,1,985762599\r\nEND",
+      "status1": "status\r\nstatus:2,120,40,1,985862605\r\nEND",
+      "resize": "status\r\nstatus:2,100,30,1,985862605\r\nEND",
       "go2": "go\r\n3\r\nEND",
-      "status2": "status\r\nstatus:3,100,30,1,985762599\r\nEND"
+      "status2": "status\r\nstatus:3,100,30,1,985862605\r\nEND"
     },
     "network": [
       {
         "event": "Network.webSocketCreated",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketWillSendHandshakeRequest",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketHandshakeResponseReceived",
-        "requestId": "41260.14",
+        "requestId": "53363.14",
         "status": 101
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.14"
-      },
-      {
-        "event": "Network.webSocketClosed",
-        "requestId": "41260.14"
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketCreated",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
+      },
+      {
+        "event": "Network.webSocketClosed",
+        "requestId": "53363.14"
       },
       {
         "event": "Network.webSocketWillSendHandshakeRequest",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketHandshakeResponseReceived",
-        "requestId": "41260.16",
+        "requestId": "53363.16",
         "status": 101
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameReceived",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketFrameSent",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       },
       {
         "event": "Network.webSocketClosed",
-        "requestId": "41260.16"
+        "requestId": "53363.16"
       }
     ],
-    "finished_at": "2026-10-26T05:11:02.851Z",
+    "finished_at": "2026-10-26T05:27:48.009Z",
     "pass": true
   },
   "state": {
