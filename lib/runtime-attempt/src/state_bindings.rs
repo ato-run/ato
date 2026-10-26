@@ -213,6 +213,7 @@ mod tests {
                     mount_target: "/data".into(),
                     access: StateAccessV1::ReadWrite,
                     writer_fence: Some(7),
+                    backing: None,
                 },
                 slot: BoundState {
                     id: "app.data".into(),
