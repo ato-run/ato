@@ -947,9 +947,20 @@ fn a_run_whose_contract_fails_keeps_nothing_running() {
         stderr.contains("did not fully satisfy observation root"),
         "{stderr}"
     );
-    // An explicitly requested receipt preserves failure evidence, never a
-    // successful handoff. The attempt is finished and its endpoint is stopped.
-    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    // A refused Run publishes no acceptance receipt. Its immutable internal
+    // verdict remains available for diagnostics, with no live endpoint.
+    assert!(!receipt_path.exists(), "a refused Run published a receipt");
+    let runtime_root = fs::read_dir(home.path().join("cache"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("ato-portable-run-"))
+        })
+        .expect("the refused attempt retains its runtime evidence");
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(runtime_root.join("verification-receipt.json")).unwrap())
+            .unwrap();
     assert_eq!(receipt["schema"], "ato.contract-verification-receipt/1");
     assert_eq!(receipt["fully_satisfied"], false);
     assert_eq!(receipt["contract_ref"], bundle.index.root_contract_ref);

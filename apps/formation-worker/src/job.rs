@@ -46,7 +46,7 @@ use crate::api::{FailureReport, FormationApi, PublishOutcome};
 use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
-mod source_evidence;
+pub(crate) mod source_evidence;
 pub(crate) mod source_fetch;
 pub mod source_intake;
 
@@ -339,6 +339,39 @@ pub fn run_claimed_job_with_ledger(
         Some(text) => Some(text.to_owned()),
         None => read_capsule_toml(&source_root).map_err(FormationFailure::from)?,
     };
+    // ── schema routing ──────────────────────────────────────────────────────
+    // `ato.capsule/2` has a frontend of its own: it declares a portable
+    // application instead of intent to plan. Reading only the discriminator
+    // keeps the v1 path below byte-for-byte identical, and a document that
+    // declares an unknown schema still reaches the v1 parser, which refuses it
+    // as `unsupported_capsule_schema`.
+    if let Some(text) = authored_toml.as_deref()
+        && crate::v2_frontend::owns(text).map_err(anyhow::Error::new)?
+    {
+        return crate::v2_frontend::run(crate::v2_frontend::V2Request {
+            api: context.api,
+            attempt: &attempt,
+            manifest: text,
+            source_root: &source_root,
+            attempt_root: &attempt_root,
+            work_root: context.work_root,
+            shim: context.shim,
+            closure_ref: &closure_ref,
+            source_evidence: &source_evidence,
+            compute_id,
+            capsule_revision_id,
+            triple: job["target"]["triple"]
+                .as_str()
+                .unwrap_or("x86_64-linux-gnu"),
+            network_policy: job["policy"]["network"].as_str().unwrap_or("denied"),
+            requested_derivation: job
+                .get("authoring")
+                .and_then(|authoring| authoring.get("derivation_ref"))
+                .and_then(|value| value.as_str()),
+            permit: Some(permit),
+        });
+    }
+
     let draft = match authored_toml {
         Some(text) => {
             let mut draft = parse_capsule_toml(&text).map_err(FormationFailure::from)?;
@@ -664,7 +697,7 @@ pub struct HostedAttemptFailure {
     cause: Option<anyhow::Error>,
 }
 impl HostedAttemptFailure {
-    fn new(
+    pub(crate) fn new(
         code: &str,
         stage: &str,
         record: AttemptRecordState,
@@ -686,7 +719,10 @@ impl HostedAttemptFailure {
             attempt_failure: None,
         }
     }
-    fn with_failure(mut self, failure: Option<ato_formation::request::AttemptFailure>) -> Self {
+    pub(crate) fn with_failure(
+        mut self,
+        failure: Option<ato_formation::request::AttemptFailure>,
+    ) -> Self {
         self.attempt_failure = failure;
         self
     }
@@ -713,7 +749,7 @@ impl AttemptExecutor for HostedBuildExecutor {
     }
 }
 
-fn persist_hosted_outcome(
+pub(crate) fn persist_hosted_outcome(
     root: &Path,
     attempt: &ato_formation::request::FormationAttempt,
     outcomes: &AttemptOutcomes,

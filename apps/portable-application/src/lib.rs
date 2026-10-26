@@ -48,6 +48,7 @@ mod native_terminal_authoring_tests;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
+pub mod portable_run;
 pub mod source_oci;
 pub mod transformation;
 pub mod validator_agent;
