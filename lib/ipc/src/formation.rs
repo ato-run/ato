@@ -180,6 +180,10 @@ pub enum RequestedOutputV1 {
     /// Source-only physical output. No application build, Contract seal,
     /// ComputeSchema or runtime launch is authorized by this request.
     SourceArchive,
+    /// A sealed `ato.capsule/2` source compiled by the shared bundle builder
+    /// into one `ato.portable-application/1` wire v3 bundle. Additive: v1 jobs
+    /// never request it, and its absence leaves their bytes unchanged.
+    PortableApplication,
 }
 
 pub const SOURCE_ARCHIVE_POLICY_V1: &str = "formation-source-archive-v1";
@@ -312,6 +316,9 @@ pub enum MaterializationKindV1 {
     StaticWeb,
     ProcessWorkspace,
     Oci,
+    /// One `ato.portable-application/1` wire v3 bundle
+    /// (`application/vnd.ato.portable-application.v3`).
+    PortableApplication,
 }
 
 /// The canonical facts a ComputeSchema is minted from.
@@ -894,3 +901,10 @@ fn sha256_ref(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
+
+/// Media type of the sealed `ato.portable-application/1` wire v3 bundle a
+/// `portable_application` materialization carries.
+pub const PORTABLE_APPLICATION_MEDIA_TYPE: &str = "application/vnd.ato.portable-application.v3";
+
+/// The only portable-application bundle profile this build emits or accepts.
+pub const PORTABLE_APPLICATION_PROFILE: &str = "ato.portable-application/1";
