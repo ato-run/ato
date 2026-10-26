@@ -30,7 +30,7 @@ use ato_formation::request::{
 };
 use ato_formation::verify::{ContractVerification, RuntimeHttpObservation};
 
-use crate::admission::{EffectAuthorization, admit_with_model_delivery, effects_name};
+use crate::admission::{EffectAuthorization, admit_with_realizer_capabilities, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
 use crate::build_sandbox::NetworkPolicy;
 use crate::executor::ExecutedCandidate;
@@ -208,11 +208,12 @@ pub fn run_reserved_attempt(
         }
     };
 
-    if let Some(failure) = admit_with_model_delivery(
+    if let Some(failure) = admit_with_realizer_capabilities(
         spec,
         request.authorization,
         request.browser,
         realizer.delivers_model_sets(),
+        realizer.admits_host_requirements(),
     )
     .or_else(|| realizer.admit(request.profile))
     {
