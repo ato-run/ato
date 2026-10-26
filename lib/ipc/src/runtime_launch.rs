@@ -272,6 +272,63 @@ pub enum StateAccessV1 {
     ReadWrite,
 }
 
+/// `svol_<ULID>` and nothing else — the only shape a Runner turns into a
+/// directory name. Shared by every protocol that names a volume so the check
+/// cannot differ between a group spec and a single-OCI spec.
+pub const RUNNER_VOLUME_REF_PREFIX: &str = "svol_";
+const RUNNER_VOLUME_ULID_LEN: usize = 26;
+
+pub fn is_volume_ref(value: &str) -> bool {
+    value
+        .strip_prefix(RUNNER_VOLUME_REF_PREFIX)
+        .is_some_and(|ulid| {
+            ulid.len() == RUNNER_VOLUME_ULID_LEN
+                && ulid.bytes().all(|byte| {
+                    byte.is_ascii_digit()
+                        || (byte.is_ascii_uppercase() && !matches!(byte, b'I' | b'L' | b'O' | b'U'))
+                })
+        })
+}
+
+/// A revision reference is opaque to the Runner but bounded: it is persisted,
+/// digested and used as a file name component by the state artifact store.
+pub fn is_revision_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':'))
+}
+
+/// A Runner-local persistent volume behind a state slot.
+///
+/// Defined here (the v1 module) because every protocol that can name a volume
+/// must canonicalise it identically; `runtime_launch_v3` re-exports it, so a
+/// v3 spec and a v1/v2 spec with a volume backing share ONE definition rather
+/// than two drifting copies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerVolumeBacking {
+    pub volume_ref: String,
+    /// The capacity the control plane admitted this volume for.
+    pub capacity_bytes: u64,
+    /// Seed for a volume that does not exist yet, unpacked exactly once.
+    /// Ignored for a volume that does: re-seeding would roll data back.
+    /// Always serialized, including when null, for canonical-byte stability.
+    #[serde(default)]
+    pub initialize_from_revision_ref: Option<String>,
+}
+
+/// What a state attachment's bytes live in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StateBackingV1 {
+    /// A Runner-local volume: the data directory itself is mounted, never a
+    /// copy. Only a Runner advertising the single-OCI volume feature may
+    /// receive one.
+    RunnerVolume(RunnerVolumeBacking),
+}
+
 /// A request to attach durable state. Logical only: which revision, and where
 /// it should appear inside the guest. The working-copy path that satisfies it
 /// is created on the Runner and never travels.
@@ -301,6 +358,11 @@ pub struct StateAttachmentV1 {
     /// P2 populates it. Absent means no writer generation has been assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer_fence: Option<u64>,
+    /// ABSENT for every revision-backed attachment, which keeps the canonical
+    /// bytes (and therefore the digest) of every existing v1/v2 spec exactly
+    /// what it was. Present only for a Runner-local volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing: Option<StateBackingV1>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,6 +615,33 @@ impl RuntimeLaunchSpecV1 {
                 return Err(RuntimeLaunchSpecError::MountConflict {
                     target: attachment.mount_target.clone(),
                 });
+            }
+            // A volume attachment is a writer: the data directory itself is
+            // mounted, so a read-only volume attachment is a contradiction the
+            // executor would have to resolve by copying.
+            if let Some(StateBackingV1::RunnerVolume(volume)) = attachment.backing.as_ref() {
+                let field = |suffix: &str| RuntimeLaunchSpecError::InvalidStateVolume {
+                    field: format!(
+                        "state_attachments[{}].backing.{suffix}",
+                        attachment.state_key
+                    ),
+                };
+                if attachment.access != StateAccessV1::ReadWrite {
+                    return Err(field("access"));
+                }
+                if !is_volume_ref(&volume.volume_ref) {
+                    return Err(field("volume_ref"));
+                }
+                if volume.capacity_bytes == 0 {
+                    return Err(field("capacity_bytes"));
+                }
+                if volume
+                    .initialize_from_revision_ref
+                    .as_deref()
+                    .is_some_and(|seed| !is_revision_ref(seed))
+                {
+                    return Err(field("initialize_from_revision_ref"));
+                }
             }
         }
 

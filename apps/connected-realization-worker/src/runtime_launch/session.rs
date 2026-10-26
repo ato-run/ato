@@ -295,6 +295,7 @@ while True:
                 mount_target: "/data".to_owned(),
                 access: StateAccessV1::ReadWrite,
                 writer_fence,
+                backing: None,
             }],
             endpoints: vec![EndpointV1 {
                 name: "http".to_owned(),
@@ -670,6 +671,7 @@ while True:
             mount_target: "/data".to_owned(),
             access: StateAccessV1::ReadWrite,
             writer_fence: Some(fence),
+            backing: None,
         }]
     }
 
@@ -1089,6 +1091,7 @@ while True:
             mount_target: "/data".to_owned(),
             access: StateAccessV1::ReadWrite,
             writer_fence: Some(1),
+            backing: None,
         }];
         oci_run(case, spec, context, &attachments, port, "/", network)
     }

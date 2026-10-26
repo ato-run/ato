@@ -510,6 +510,19 @@ pub enum RuntimeLaunchSpec {
     },
 }
 
+/// The volume backing on a shared (v1/v2) attachment, if any.
+fn runner_volume_of<'a>(
+    attachments: &'a [StateAttachmentV1],
+    state_key: &str,
+) -> Option<&'a RunnerVolumeBackingV3> {
+    attachments
+        .iter()
+        .find(|attachment| attachment.state_key == state_key)
+        .and_then(|attachment| match attachment.backing.as_ref()? {
+            crate::runtime_launch::StateBackingV1::RunnerVolume(volume) => Some(volume),
+        })
+}
+
 impl RuntimeLaunchSpec {
     pub fn parse(raw: &str) -> Result<Self, RuntimeLaunchSpecError> {
         #[derive(Deserialize)]
@@ -572,16 +585,18 @@ impl RuntimeLaunchSpec {
         }
     }
 
-    /// The Runner-local volume behind a state key, when this is a v3 Run.
-    /// `None` means the key is revision-backed (or absent).
+    /// The Runner-local volume behind a state key, for any protocol that can
+    /// name one: v3 carries it on its own attachment type, v1/v2 on the shared
+    /// `StateAttachmentV1::backing`. `None` means revision-backed (or absent).
     pub fn runner_volume(&self, state_key: &str) -> Option<&RunnerVolumeBackingV3> {
         match self {
+            Self::V1(spec) => runner_volume_of(&spec.state_attachments, state_key),
+            Self::V2(spec) => runner_volume_of(&spec.state_attachments, state_key),
             Self::V3 { spec, .. } => spec
                 .state_attachments
                 .iter()
                 .find(|attachment| attachment.state_key == state_key)
                 .map(StateAttachmentV3::runner_volume),
-            Self::V1(_) | Self::V2(_) => None,
         }
     }
 
