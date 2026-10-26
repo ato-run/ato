@@ -8,8 +8,8 @@ devへの統合、95 PRの包含確認とClose、staging検証を実施した。
 
 | Repo | 実装検証・配備対象のdev SHA | 統合 |
 |---|---|---|
-| ato | `4d43ad44d9e565699f9e2e52b1f0e6353b2bee57` | #1576、#1580。#1575のGate A、#1531の残文書、CLI失敗Receipt回帰を吸収。別セッション#1579のK/Dヘッダー・publication修正も包含 |
-| ato-api | `6e178c901c0a028b121a4fc18841a4d03e13702d` | #890、#892、#894。#889のcapsule/2受理、Digest別Source承認UI、bootstrap同期、同一bundleの所有者内重複処理 |
+| ato | `bff38ed818858c99c153e66bfc3f77b1f88289ff` | #1576、#1580。#1575のGate A、#1531の残文書、CLI失敗Receipt回帰を吸収。別セッション#1579のK/Dヘッダー・publication修正も包含 |
+| ato-api | `16d1c53da0c7c4f53ca6989cc6981a58fedbec06` | #890、#892、#894。#889のcapsule/2受理、Digest別Source承認UI、bootstrap同期、同一bundleの所有者内重複処理 |
 | ato-pwa | `33febac1717bb4c8a5d66e4ea87e5d12ae4d27c1` | 本作業でコード変更なし。進行中の別セッションのdev更新を保持し、最新配信・typecheck/build/Vitestを確認 |
 | ato-contents | `main d13cb5f…`、devなし | 15 branch headはmainに包含。変更なし |
 
@@ -21,8 +21,8 @@ Source承認画面は既存の管理API・step-up・CSP/CSRF境界へ接続し�
 
 | 対象 | 結果 | 条件・制限 |
 |---|---|---|
-| Rust Linux Workspace | PASS | 統合済み4d43ad44、cargo check --workspace --all-targets --locked、cargo test --workspace --no-fail-fast --locked、cargo fmt --all -- --check、cargo clippy --workspace --all-targets --all-features --locked -- -D warningsが全て終了0 |
-| Rust test集計 | PASS | 各harness出力の単純合計2406 PASS / 0 FAIL / 37既存ignored。子harnessを含むためunique test数とは扱わない。skip追加なし |
+| Rust Linux Workspace | PASS | 追加修正込みbff38ed81、cargo check --workspace --all-targets --locked、cargo test --workspace --no-fail-fast --locked、cargo fmt --all -- --check、cargo clippy --workspace --all-targets --all-features --locked -- -D warningsが全て終了0 |
+| Rust test集計 | PASS | 各harness出力の単純合計2408 PASS / 0 FAIL / 37既存ignored。子harnessを含むためunique test数とは扱わない。skip追加なし |
 | macOS Runtime | PASS | symlink化TMPDIRをcanonicalな親に直したfixtureで197 PASS / 0 FAIL。symlink拒否などの保護は維持 |
 | Frozen K / Scenario / Source安全性 | PASS（Linux suite） | 候補によるK再定義、Scenario失敗、Digest・traversal・symlink・展開上限の正負例を既存全Workspace内で検証。実機HTTPの検証とは区別 |
 | API | PASS（関連群） | typecheck、capsule/2/Source UI/認証等315 tests、最新関連4 files 65 tests、重複修正8 testsが成功。重複を含むため合算しない。全API test群の成功とは主張しない |
@@ -34,7 +34,7 @@ Source承認画面は既存の管理API・step-up・CSP/CSRF境界へ接続し�
 
 | Component | 実commit / version | 確認 |
 |---|---|---|
-| API | `6e178c90` / `94e9eab6-8ba6-44e3-a67a-e37007b1a988` | safe deploy script、active version一致、36 secrets保持、health200 |
+| API | `16d1c53d` / `6dab6a21-1521-4aef-8ce4-3b20b059c51a` | safe deploy script、active version一致、36 secrets保持、health200 |
 | Admin | `6e178c90` / `2fd15741-7c30-4c13-b61b-549d54f8d454` | safe deploy script、active version一致、3 secrets保持 |
 | PWA | `33febac1` / `c37203b4-dd6a-4b30-a3b0-966a36121eef` | 別セッションの配備を確認。実配信index-2mT3TY-t.js、SHA256 289dbf01edf0968c3af4ba7f60461fdd7fafcc1f2b3c34f76a275103b45b307f、staging API originとcommit marker一致 |
 | Formation Worker 2 units | `4d43ad44`、clean、build_id=dev-combined-4d43ad44 | immutable candidateへ更新。ato-formation-worker PID3515303、managed-stg PID3515331。旧候補・他セッションのdrop-inは保持 |
@@ -79,7 +79,7 @@ v1 Source: Archive4f6e…から初回schema csch_01M5V53V48DY4NQGP64GB5XPFS、�
 
 ## 回収・残留
 
-本作業が作成した16 Runと16 LeaseをD1で照合し、非終端0件。Source/旧Receipt/Instance/State volumeは継続と監査のため保持した。State fixtureは同一InstanceでStop後に新しいprocessを起動しcounter3を復元した。同一process継続の確認はStopを挟まないReconnect試験で行った。
+本作業が作成した17 Runと17 LeaseをD1で照合し、非終端0件。Source/旧Receipt/Instance/State volumeは継続と監査のため保持した。State fixtureは同一InstanceでStop後に新しいprocessを起動しcounter3を復元した。同一process継続の確認はStopを挟まないReconnect試験で行った。
 
 共有slotが別セッションのRun run_01M5V95TBKN469MCQ0NWNQ853R / Lease01M5V95TBKKMS8QP182X8YNNNYで使用中だったため、初回の最終Terminal再試行はcapacity拒否となった。そのRunを停止せず、解放後の再試行に成功。最終Docker読取は開始時の4 Containerだけで、本作業のContainer残留0件。Production Formation WorkerのPID2809237と起動時刻は開始前後で一致。
 
@@ -95,3 +95,11 @@ v1 Source: Archive4f6e…から初回schema csch_01M5V53V48DY4NQGP64GB5XPFS、�
 | P2 / 設計確認 | [ato #1577](https://github.com/ato-run/ato/issues/1577) | local-only namespace/WASI/Desktop差分を依存付きで個別評価。devへ無理にCherry-pickしない |
 
 OPENの詳細分類、関連CLOSED223件、95件の包含根拠、追加PRは[PR-INVENTORY.md](PR-INVENTORY.md)。raw logs・各PRの全commit/patch・branch/worktree snapshotはworkspace `.tmp/dev-consolidation-20261026/evidence/`。機密を含まない再検証用IDとReceiptは[validation-evidence.json](validation-evidence.json)へ保存した。
+
+## 最終追加差分の検証
+
+文書PR #1584のmerge時に、別セッションのValidator #1583（334df072…）とAPI #896（16d1c53d…）がdevに統合された。relayの一時503に対する有限retry、ready後のclaim、fence付きのtyped abandonmentが一組の契約となる。APIはtypecheckと関連15 tests PASS、staging active6dab6a21へsafe deployし36 secrets保持・health200。反映後のNative Terminalも14 checks PASS。
+
+Validatorのintegration13 testsは成功したが、全targetチェックで旧ValidationJob fixture3件にretry_budget_msがないcompile errorを発見。既存のfallbackを表すNoneを明示して修正し、fmtを揃えた。修正コードbff38ed81でLinux全Workspace check/tests/fmt/clippyがすべて終了0。変更はfixtureと書式であり、新たなskipはない。Formation Workerの動作コードは4d43ad44のまま。稼働中独立Validatorのbinary SHA256は5d094a8048dd71499bdea196bfbff33206715fe779b8c6f5f77f77bacb40bd84（/usr/local/bin/ato-portable-validator-1571-5d094a8048dd）。Source commitの直接埋込みはなく、稼働binaryとGit commitを混同しない。
+
+共有portable flagは復元後に他セッションによる再有効化を検出したため、portable項目だけを再度OFFへ戻し、終了時のreadbackもOFFを確認。その他の共有設定は保持。Source永続再利用P0は引き続き未達であり、#1571/#1572の完成もこのretry修正だけでは主張しない。
