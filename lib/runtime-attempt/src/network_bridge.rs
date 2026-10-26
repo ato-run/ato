@@ -449,7 +449,7 @@ mod deny_bridge_tests {
         let root = tempfile::Builder::new()
             .prefix("n")
             .rand_bytes(2)
-            .tempdir()
+            .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
             .unwrap();
         let socket = root.path().join("e");
         let bridge = super::HostBridge::deny(&socket).unwrap();
