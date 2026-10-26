@@ -246,6 +246,8 @@ httpd.serve_forever()
 
 struct HostedJob {
     job: Value,
+    /// Relay 503s to inject before the surface answers.
+    observe_503: u32,
     bundle: Vec<u8>,
     surface_port: String,
     requirement_ids: Vec<String>,
@@ -259,6 +261,10 @@ struct Recorded {
     observations: Vec<(String, String, String)>,
     ack: Option<Value>,
     verification_status: Option<String>,
+    /// Relay 503s still to inject before the surface is "up".
+    observe_503_left: u32,
+    /// Typed failure reports the verifier sent instead of an ack.
+    failure_reports: Vec<Value>,
 }
 
 struct HostedApi {
@@ -284,7 +290,10 @@ impl HostedApi {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let stopped = Arc::new(AtomicBool::new(false));
-        let recorded = Arc::new(Mutex::new(Recorded::default()));
+        let recorded = Arc::new(Mutex::new(Recorded {
+            observe_503_left: job.observe_503,
+            ..Recorded::default()
+        }));
         let thread = {
             let stopped = stopped.clone();
             let recorded = recorded.clone();
@@ -444,6 +453,17 @@ fn route(
             if fenced() {
                 return (409, "application/json", br#"{"error":"fenced"}"#.to_vec());
             }
+            {
+                let mut recorded = recorded.lock().unwrap();
+                if recorded.observe_503_left > 0 {
+                    recorded.observe_503_left -= 1;
+                    return (
+                        503,
+                        "application/json",
+                        br#"{"error":"surface_not_reachable"}"#.to_vec(),
+                    );
+                }
+            }
             let method = request
                 .query
                 .get("method")
@@ -507,6 +527,14 @@ fn route(
                 "body_base64": base64::engine::general_purpose::STANDARD.encode(body),
                 "instance_id": "ins_fixture",
             }))
+        }
+        ("POST", path) if path == format!("{job_path}/fail") => {
+            if fenced() {
+                return (409, "application/json", br#"{"error":"fenced"}"#.to_vec());
+            }
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            recorded.lock().unwrap().failure_reports.push(body);
+            json_body(json!({ "reported": true }))
         }
         ("POST", path) if path == format!("{job_path}/ack") => {
             if fenced() {
@@ -662,6 +690,10 @@ struct JobShape {
     selected_derivation_ref: Option<String>,
     instance_snapshot_ref: Option<String>,
     transport_digest: Option<String>,
+    /// Relay 503s to inject before the surface answers (retry coverage).
+    observe_503: u32,
+    /// The control plane's computed retry budget for this attempt.
+    retry_budget_ms: Option<u64>,
 }
 
 impl JobShape {
@@ -670,6 +702,8 @@ impl JobShape {
             selected_derivation_ref: Some(fixture.route.derivation_ref.to_string()),
             instance_snapshot_ref: None,
             transport_digest: None,
+            observe_503: 0,
+            retry_budget_ms: None,
         }
     }
 }
@@ -677,6 +711,7 @@ impl JobShape {
 struct CaseResult {
     outcome: Result<ValidatorRunOutcome, String>,
     receipt: Option<Value>,
+    failure_reports: Vec<Value>,
     verification_status: Option<String>,
     observations: Vec<(String, String, String)>,
     endpoint: Option<String>,
@@ -708,6 +743,7 @@ fn run_case(name: &str, fixture: &Fixture, served: Served, shape: JobShape) -> C
         "job_id": job_id,
         "claim_id": format!("claim_{name}"),
         "claim_expires_at": "2026-09-25T00:10:00.000Z",
+        "retry_budget_ms": shape.retry_budget_ms,
         "bundle_id": format!("bnd_{name}"),
         "transport_digest": shape
             .transport_digest
@@ -734,6 +770,7 @@ fn run_case(name: &str, fixture: &Fixture, served: Served, shape: JobShape) -> C
     let api = HostedApi::start(
         HostedJob {
             job,
+            observe_503: shape.observe_503,
             bundle: fixture.bytes.clone(),
             surface_port: fixture.route.application.surfaces[0].port.clone(),
             requirement_ids: fixture
@@ -761,6 +798,7 @@ fn run_case(name: &str, fixture: &Fixture, served: Served, shape: JobShape) -> C
     let result = CaseResult {
         outcome,
         receipt: recorded.ack.map(|ack| ack["receipt"].clone()),
+        failure_reports: recorded.failure_reports.clone(),
         verification_status: recorded.verification_status,
         observations: recorded.observations,
         endpoint,
@@ -958,6 +996,63 @@ fn assert_refused(result: &CaseResult, message: &str) {
 }
 
 // ── A–H ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn i1_a_transient_relay_503_is_retried_until_the_surface_answers() {
+    // The surface takes a moment to come up: two 503s, then the real answer.
+    // A retry inside the attempt's budget is the correct response; treating it
+    // as an app failure would manufacture evidence nobody observed.
+    let fixture = multi_fixture(PortableRealizationKind::LocalProcess);
+    let result = run_case(
+        "i1_transient_observations",
+        &fixture,
+        Served::AsBundled,
+        JobShape {
+            observe_503: 2,
+            retry_budget_ms: Some(15_000),
+            ..JobShape::of(&fixture)
+        },
+    );
+    let receipt = assert_verified(&fixture, &result, "i1_transient_observations");
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert!(
+        result.failure_reports.is_empty(),
+        "a retried observation must not be reported as abandonment: {:?}",
+        result.failure_reports
+    );
+}
+
+#[test]
+fn i2_an_observation_that_never_answers_is_reported_as_abandoned() {
+    // The relay stays unreachable past the attempt's budget. The verifier must
+    // NOT ack a failed Contract: it reports a typed failure so the control
+    // plane records an interrupted attempt, and it keeps serving.
+    let fixture = multi_fixture(PortableRealizationKind::LocalProcess);
+    let result = run_case(
+        "i2_abandoned_observation",
+        &fixture,
+        Served::AsBundled,
+        JobShape {
+            observe_503: 99,
+            retry_budget_ms: Some(700),
+            ..JobShape::of(&fixture)
+        },
+    );
+    match result.outcome {
+        Ok(ValidatorRunOutcome::HostedAbandoned {
+            failure_code,
+            bundle_id: _,
+        }) => assert_eq!(failure_code, "observation_unreachable"),
+        other => panic!("expected an abandoned attempt, got {other:?}"),
+    }
+    assert!(result.receipt.is_none(), "an unobserved attempt acks no receipt");
+    assert_eq!(result.failure_reports.len(), 1, "one typed report");
+    assert_eq!(
+        result.failure_reports[0]["code"], "observation_unreachable",
+        "{:?}",
+        result.failure_reports[0]
+    );
+}
 
 #[test]
 fn a_static_hosted_observation_is_verified() {
