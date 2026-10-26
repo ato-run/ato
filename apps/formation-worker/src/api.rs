@@ -374,6 +374,41 @@ impl FormationApi {
         Ok(())
     }
 
+    /// Register the sealed portable bundle a v2 Formation produced.
+    ///
+    /// Create-once by transport digest: the control plane verifies the bytes,
+    /// stores them through the existing validator path and answers the
+    /// `capsule_bundles.id` a Hosted Run later imports. Nothing about K is
+    /// decided here — the receipt published with the result is the verdict.
+    pub fn publish_portable_bundle(
+        &self,
+        attempt_id: &str,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<String> {
+        let response: serde_json::Value = self
+            .client
+            .put(format!(
+                "{}/v1/internal/formation/attempts/{attempt_id}/portable-bundle/{digest}",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .header(
+                "content-type",
+                ato_ipc::formation::PORTABLE_APPLICATION_MEDIA_TYPE,
+            )
+            .body(bytes.to_vec())
+            .send()?
+            .error_for_status()
+            .context("failed to register the portable bundle artifact")?
+            .json()?;
+        response
+            .get("bundle_id")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .context("portable bundle registration named no bundle_id")
+    }
+
     pub fn publish_artifact(&self, bytes: &[u8]) -> Result<String> {
         if bytes.len() <= Self::PART_BYTES {
             let response: serde_json::Value = self
