@@ -1,5 +1,8 @@
 # Connected Runner
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > **Historical document.** This describes the pre-Computation Connected Runner
 > product and CLI. The current `ato` CLI in this repository does not expose
 > these commands. It is not current architecture authority.

@@ -1,8 +1,11 @@
 # Formation exploration: frozen 100 OSS arm
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 100/100 actual terminals. Baseline **7/100** → exploration **7/100**, absolute gain **+0**. No new functional acceptance.
 
-Runtime code `10473525efa26416ef63025dbb5003c910a43c70`, receiver `b20bba7ab9daf282f8d5b1e22affe549ad3492a3`, Rust authority `eb73dff36d15a829e8358d310dbb4106562b344d`. Immutable binary hashes, provider configuration, source pins/licenses and ceilings are in [preregistration](formation-exploration-100-plan.json). The first 16 cells use the original preregistration; the documented transport-only correction precedes continuation.
+Runtime code `10473525efa26416ef63025dbb5003c910a43c70`, receiver `b20bba7ab9daf282f8d5b1e22affe549ad3492a3`, Rust authority `eb73dff36d15a829e8358d310dbb4106562b344d`. Immutable binary hashes, provider configuration, source pins/licenses and ceilings are in [preregistration](../../../ops/formation-exploration-100-plan.json). The first 16 cells use the original preregistration; the documented transport-only correction precedes continuation.
 
 This is a new condition arm. All frozen source pins and existing K are preserved; the 81 baseline inputs without K receive the previously authorized explicit source-bound static K template. New Runtime/adapter code and the externally frozen exploration ceiling also differ from the historical Infer/network-denied baseline. The gain is not an isolated LLM causal estimate. Historical ledgers are unchanged.
 
@@ -188,17 +191,16 @@ Cell60 separately exceeded the 120-second static source-capture observer wait be
 
 Superset (73) hit the actual unchanged core source-object archive cap before Search/model/Runtime. Its original untyped core error is explicitly classified as source_archive_cap_exceeded by the harness, not represented as a typed Coordinator or fabricated Runtime result. No cap increase, source modification or application rerun occurred. Other completed application terminals remain untouched.
 
-Raw evidence is retained on `oci-linux-test` under `/home/ubuntu/formation-foundation/.tmp/exploration-100-run`, with per-file hashes in [manifest](formation-exploration-100-raw-manifest.json). Frozen archives, all receiver namespaces, worker state, receipts and product journals remain retained. Wall interval `2026-09-30T12:48:59.773970+00:00` → `2026-09-30T16:08:24.394228+00:00` includes the infrastructure interruption.
+Raw evidence is retained on `oci-linux-test` under `/home/ubuntu/formation-foundation/.tmp/exploration-100-run`, with per-file hashes in [manifest](../../../ops/formation-exploration-100-raw-manifest.json). Frozen archives, all receiver namespaces, worker state, receipts and product journals remain retained. Wall interval `2026-09-30T12:48:59.773970+00:00` → `2026-09-30T16:08:24.394228+00:00` includes the infrastructure interruption.
 
-[Resource and archive hashes](formation-exploration-100-resource.json) confirm all immutable binaries and receiver objects after the wave. Disk free remained 84,832,514,048 bytes; 1,205 raw files are preserved in a 24,582,590-byte archive with SHA-256 `9fba90019da0b4705202006db1676bab43ff83314837c133c4daf8ed6bf81268`. No state, evidence or frozen source was deleted.
+[Resource and archive hashes](../../../ops/formation-exploration-100-resource.json) confirm all immutable binaries and receiver objects after the wave. Disk free remained 84,832,514,048 bytes; 1,205 raw files are preserved in a 24,582,590-byte archive with SHA-256 `9fba90019da0b4705202006db1676bab43ff83314837c133c4daf8ed6bf81268`. No state, evidence or frozen source was deleted.
 
-[Task-wide budget summary](formation-exploration-budget-summary.json): small stage plus this wave estimated $0.710158, conservative charge $2.784926, remaining conservative reservation $0.722202, unresolved reservations0. These are token-based estimates and frozen ceiling accounting, not invoice receipts.
+[Task-wide budget summary](../../../ops/formation-exploration-budget-summary.json): small stage plus this wave estimated $0.710158, conservative charge $2.784926, remaining conservative reservation $0.722202, unresolved reservations0. These are token-based estimates and frozen ceiling accounting, not invoice receipts.
 
 ## Status
 
 Implemented in the unmerged exploration branches; measured on the exact immutable runtime set above. Fresh receipt is verified only for submitted K/D/attempt. Submission is `k_reached_awaiting_assessment`, `approval=not_assessed`, `deployed=false`; normal verified-route authorization is not created. Post-submission assessment must bind D digest in a separate workflow.
 
-Rust/API checks and existing CI failures are in [verification](formation-exploration-verification.json). Ubuntu CI passed; Windows unchanged Unix API failure is exact-base reproduced; macOS process activation failed in CI with an unresolved cause; local head3/base1 PASS does not establish a base-reproduced FAIL. API CI jobs did not start because of billing; local typecheck and 200 tests passed. CI is not reported green.
+Rust/API checks and existing CI failures are in [verification](../../../ops/formation-exploration-verification.json). Ubuntu CI passed; Windows unchanged Unix API failure is exact-base reproduced; macOS process activation failed in CI with an unresolved cause; local head3/base1 PASS does not establish a base-reproduced FAIL. API CI jobs did not start because of billing; local typecheck and 200 tests passed. CI is not reported green.
 
 No deployment, remote migration, source rewrite, per-app override, permission ceiling expansion, #1421 operation or new browser acceptance occurred. Source-OCI remains a separately connected capability; the unbound builder recipe in this arm is not an automatic OCI success. Historical WBO image-build evidence and unexecuted Vikunja preregistration are unchanged.
-

@@ -1,5 +1,8 @@
 # Wheel metadata header boundary — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The generic dependency seal operation scanned every METADATA line for Name and
 Version. A valid description body could therefore be mistaken for a duplicate
 identity. Core metadata uses email headers and permits the description after a

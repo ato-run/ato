@@ -1,5 +1,8 @@
 # Formation: Codex-first shared reasoning prototype
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 今回のappendは**未完了**。CodexとAPIが共通で使う入力・inspection・型付き出力・durable journalを実装した。Codex自身の推論による実OSSのfresh same-K PASSはまだない。旧100件のbaseline 7/100、exploration 7/100、追加0と、以前のAPI SVGOMG修正成功appendは変更していない。今回の値を旧100件へ加算しない。
 
 ## 固定条件とコード

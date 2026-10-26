@@ -1,5 +1,8 @@
 # Runtime readiness deadline classification — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 At Runtime pin `b7c322e70d28a986581e6f60fb6d716309e5a6c8`, the preregistered
 source-owned Node setup control fixture passed the same frozen K normally.
 With a six-second Search deadline, setup entered, the app never started,
@@ -26,7 +29,7 @@ Original provisional status and dispatch 0 are preserved. The corrected
 collector reads `exploration_stop_json`, rather than the legacy termination
 column; this collector repair restarted only the read-only Coordinator.
 
-Public metadata [proof](evidence/formation-runtime-script-deadline-20261002.json)
+Public metadata [proof](../../../ops/evidence/formation-runtime-script-deadline-20261002.json)
 SHA-256 `cc84aeb2b30aab4970622d8f97faf249ee9160eece8e0486d5502d3b02a06497`;
 private report-recovery proof SHA-256
 `857efa94f638839d392a24812f8eb0f7f883db1aa35e2a65ef9c4490bf127467`.

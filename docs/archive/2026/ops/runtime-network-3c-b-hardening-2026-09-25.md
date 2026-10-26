@@ -1,5 +1,8 @@
 # 3c-b final archive hardening — 2026-09-25
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Implemented and Linux-validated for re-review; unmerged, undeployed.
 [ato #1403](https://github.com/ato-run/ato/pull/1403), paired with
 [API #691](https://github.com/ato-run/ato-api/pull/691); integration record
@@ -114,7 +117,7 @@ about deployed Cloudflare plan ingress limits.
   requester work directories, plus dedicated Rust scratch, are empty. D1/R2,
   sources, outputs and logs remain for inspection; no shared toolchain cleanup.
 
-[Machine-readable proof](runtime-network-3c-b-hardening-2026-09-25.json) contains
+[Machine-readable proof](../../../ops/runtime-network-3c-b-hardening-2026-09-25.json) contains
 actual attempt/receipt/budget results, identity comparison, source/binary hashes
 and cleanup counts. Hosted/Chrome/Python/Node/P0 results from the prior integrated
 record were not rerun by this archive-only follow-up. No past success or identity

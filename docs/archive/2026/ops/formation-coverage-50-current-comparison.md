@@ -1,5 +1,8 @@
 # Formation historical 50 → current 50
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Historical `c4c285f3e9a751975286ccd78ba49e76e483fa83` → current `e494e9375cf1151fc2884d545047dfbdad52c2cc`. Same repo/ref/archive/license identities; historical files remain unchanged.
 
 | Classification | Apps |
@@ -83,4 +86,4 @@ Regressions to fix: 0. Reproducibility is one actual current-wave invocation per
 
 The JSON includes both K/D ref sets, execution/verification/retention reach and observation hashes. Current and historical receipts differ in fresh attempt identity and endpoints; those changes do not imply a semantic regression. Functional evidence and persistence remain separate.
 
-[Comparison JSON](formation-coverage-50-current-comparison.json) · [Current 100-app report](formation-coverage-100.md)
+[Comparison JSON](../../../ops/formation-coverage-50-current-comparison.json) · [Current 100-app report](formation-coverage-100.md)

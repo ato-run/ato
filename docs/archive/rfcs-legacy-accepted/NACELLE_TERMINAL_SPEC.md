@@ -637,7 +637,7 @@ nacelle は nono を crate 依存として追加しない。コードパター�
 
 - [NACELLE_SPEC.md](NACELLE_SPEC.md) — nacelle エンジン仕様
 - [DESKTOP_SPEC.md](DESKTOP_SPEC.md) — ato-desktop 仕様
-- [ADR-005: Secrets Management](../../specs/ADR-005-secrets-management-architecture.md) — シークレット管理
+- [ADR-005: Secrets Management](ADR-005-secrets-management-architecture.md) — シークレット管理
 - [CAPSULE_SPEC.md](CAPSULE_SPEC.md) — Capsule 仕様（capsule.toml）
 - [CAPSULE_IPC_SPEC.md](CAPSULE_IPC_SPEC.md) — IPC 仕様
 

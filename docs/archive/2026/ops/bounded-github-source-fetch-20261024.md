@@ -1,5 +1,8 @@
 # Bounded source acquisition verification — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Branch: `feat/bounded-github-source-fetch`.
 Base: `feat/formation-repository-automation`,
 `2f6ad830bdd950773526ae589e054c314ad618cb` (Draft PR #1510).
@@ -9,7 +12,7 @@ were applied. The job now streams compressed bytes into an owned anonymous
 file and reuses `FileVerifiedArchive`; the same monotonic deadline also guards
 verification and materialization. No new dependency, API schema, migration,
 semantic identity, or environment flag is introduced. See the
-[transport contract](../rfcs/draft/BOUNDED_FORMATION_SOURCE_TRANSFER.md).
+[transport contract](../../../rfcs/draft/BOUNDED_FORMATION_SOURCE_TRANSFER.md).
 
 ## Local validation
 

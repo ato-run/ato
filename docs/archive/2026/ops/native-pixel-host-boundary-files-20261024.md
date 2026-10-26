@@ -1,5 +1,8 @@
 # Native Pixel + Instance files under a root HostBoundary Runner
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Date: 2026-10-24. CPU-only Linux Docker acceptance; no installed/shared Runner,
 service, API/PWA deployment, runtime flag, production credential or paid resource
 was changed. This child is based on integration/native-files-managed-v1

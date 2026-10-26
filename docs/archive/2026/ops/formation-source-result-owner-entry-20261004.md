@@ -1,5 +1,8 @@
 # Source Resultからの明示的な機能検証
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Ato #1481のRust Source Result authority → API #731の保存・登録 → このowner CLIの順で利用する。Session/Skill #1479 → #1480 → 受入 #1485とは別トラック。API配備・remote migration・通常Run許可・公開は含まない。
 
 通常のSource探索の固定Kに対するfresh PASSとretained publicationが保存されると、APIがRust検証済みのSource Resultを保存する。仮のSource InstanceやCapsule identityは作らない。owner認証の `GET /v1/runtime-network/exploration/:searchId/source-result` は、Rustが選んだsubmissionのattemptからその記録を読む。最新artifactを代用せず、保存途中の中断は同じPASSの記録から補う。owner値、ticket、capability、入力値は返さない。

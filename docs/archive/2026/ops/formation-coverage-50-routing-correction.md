@@ -1,5 +1,8 @@
 # 6b-C appendix — npm v1 routing correction (LibreChat)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Claim: restored npm v1 compatibility lost in #1440.** A regression
 correction, not a coverage improvement and not a new capability. The 50-app
 ledger ([formation-coverage-50](formation-coverage-50.md)) is unchanged; its

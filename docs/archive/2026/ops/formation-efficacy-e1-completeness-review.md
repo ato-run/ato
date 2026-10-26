@@ -1,5 +1,8 @@
 # E1 aggregation completeness correction
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Review base: PR #1417 head `e4ae9d3117003b553c416661d7e480c5d9d2e6b4`.
 Scope: aggregation correctness only; no new efficacy experiment or hypothesis.
 

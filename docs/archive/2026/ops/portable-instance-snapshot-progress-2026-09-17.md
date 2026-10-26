@@ -1,5 +1,8 @@
 # Portable Instance snapshot progress — 2026-09-17
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Scope
 
 Initial snapshot for this record:

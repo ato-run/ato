@@ -1,5 +1,8 @@
 # Gmail API Support Desk acceptance — 2026-09-20
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Result
 
 Chatwoot CE plus the Gmail API Bridge is implemented on the existing Draft

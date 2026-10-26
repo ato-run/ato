@@ -1,5 +1,8 @@
 # CI依存を含むreview unitのnative確認
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID `formation-post-ci-dependency-20261003-01`。CI #1478をlocal mergeした
 Sessionとstateの自然なGitHub Actionsを確認した。manual rerunは0。
 後続の文書commitへ成功pinを付け替えない。
@@ -13,7 +16,7 @@ Sessionとstateの自然なGitHub Actionsを確認した。manual rerunは0。
 APIの13失敗名は保存済みexact base `02a9e58b` / head `9b483d4a`の両方と一致し、
 新しい失敗名は0。別main `9e003190`との比較は別pinのまま残した。
 現在のexact baseで再実行した結果とは扱わない。
-[機械記録](evidence/formation-post-ci-dependency-20261003.json)に各run/step、
+[機械記録](../../../ops/evidence/formation-post-ci-dependency-20261003.json)に各run/step、
 log/metadata hash、保存した失敗名と比較先を残した。
 
 これはnative CLI CIであり、実Codex/Claude Codeの探索受入ではない。

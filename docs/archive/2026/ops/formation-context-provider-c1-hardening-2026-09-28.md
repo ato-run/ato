@@ -1,5 +1,8 @@
 # c1 review hardening: claim boundary
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Reviewed parent: `0e35d54dd4551cbc9e60d8dbd2029ad44f72a23f` (#1420).
 Base: `660dbf6eaedc3384017137f1f20282a359d423aa`.
 

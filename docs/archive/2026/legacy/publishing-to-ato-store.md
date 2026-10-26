@@ -1,5 +1,8 @@
 # Publishing your app to the Ato Store
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > **Superseded workflow.** The manifest/lock/package paths in this historical
 > guide predate the Computation cutover. Do not treat them as normative; use
 > the accepted Repository Workspace and Object Bundle RFCs.

@@ -1,0 +1,59 @@
+{
+  "baseline": "0c93d81a7f86140868fbe84efb63538360a9cba1",
+  "text_files_and_archive_members_scanned": 3522,
+  "binary_files_or_members_not_text_scanned": 16,
+  "privacy_indicators": {
+    "email": 242,
+    "ipv4": 669,
+    "local-user-path": 2582,
+    "signed-url-indicator": 1
+  },
+  "files_or_members_with_privacy_indicators": {
+    "email": 26,
+    "ipv4": 262,
+    "local-user-path": 276,
+    "signed-url-indicator": 1
+  },
+  "archives": [
+    {
+      "path": "docs/ops/evidence/formation-adaptive-100-20260930/catalog-evidence.tar.gz",
+      "members_inspected": 673,
+      "bytes_read": 477819,
+      "oversized_members_skipped": 0
+    },
+    {
+      "path": "docs/ops/evidence/formation-adaptive-100-20260930/raw-evidence.tar.gz",
+      "members_inspected": 584,
+      "bytes_read": 2417008,
+      "oversized_members_skipped": 0
+    },
+    {
+      "path": "docs/ops/evidence/formation-autonomous-20261001/raw-evidence.tar.gz",
+      "members_inspected": 324,
+      "bytes_read": 3535135,
+      "oversized_members_skipped": 0
+    },
+    {
+      "path": "docs/ops/evidence/formation-coverage-100-20260930/ci-base-evidence.tar.gz",
+      "members_inspected": 3,
+      "bytes_read": 420451,
+      "oversized_members_skipped": 0
+    },
+    {
+      "path": "docs/ops/evidence/formation-coverage-100-20260930/raw-evidence.tar.gz",
+      "members_inspected": 721,
+      "bytes_read": 2237076,
+      "oversized_members_skipped": 0
+    }
+  ],
+  "limits": [
+    "Pattern scan, not proof of absence. Images/PDF pixels were not OCR scanned.",
+    "Personal-data indicators include public attribution, example addresses and private-host metadata; no values reproduced here.",
+    "No archives extracted or executed. Member and total expansion bounds enforced."
+  ],
+  "credential_pattern_match_counts": {
+    "credential-assignment": 15,
+    "openai-token": 2
+  },
+  "review": "17 historical demo/default-value or input-policy-label matches; no live credential established or tested. Values omitted."
+}

@@ -1,8 +1,11 @@
 # Formation 5b-c1: context/2 provider integration, offline verification
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Exact base: `660dbf6eaedc3384017137f1f20282a359d423aa` (origin/main after #1419).
 Branch: `feat/formation-context-provider-v3`.
-Design: [ADR-040](../rfcs/draft/ADR-040-formation-context-provider-v3.md).
+Design: [ADR-040](../../../rfcs/draft/ADR-040-formation-context-provider-v3.md).
 
 ## State separation
 

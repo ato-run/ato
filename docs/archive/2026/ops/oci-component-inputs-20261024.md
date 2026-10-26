@@ -1,5 +1,8 @@
 # OCI component input placement — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Scope: child of single OCI ModelSet support (PR1535 production
 `a4e167c921e5dc76d58ac523deb4e27ef0e007c0`). No provider, staging, secret, flag
 or shared service mutation. The accepted authority is the selected-D Rust

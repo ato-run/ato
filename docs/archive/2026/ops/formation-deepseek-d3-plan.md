@@ -1,5 +1,8 @@
 # Formation DeepSeek D3 — preregistration (NOT EXECUTED)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## State
 
 - D2-C #1427 merged after exact-head admin approval; no protection rules changed.
@@ -70,7 +73,7 @@ G2 failure evidence cannot be pre-recorded: it must come from its real known-D a
 ## Verification
 
 - D2-C integrated head: M0–M13 all PASS; C2 fixed 15 groups all PASS, fixed calls=12/model calls=0; selected Rust **654/0/1**, receiver **312/0**, Clippy/fmt/diff PASS.
-- Integrated-head CI: CodeQL PASS; Rust failures matched exact current base on each OS. CLI Windows/macOS matched current-main Rust signatures; no identical main CLI workflow existed. Overall CI was red, not described as green. No new connected-worker/D2-C regression. See [D2 ledger](formation-deepseek-d2-final-integration.json).
+- Integrated-head CI: CodeQL PASS; Rust failures matched exact current base on each OS. CLI Windows/macOS matched current-main Rust signatures; no identical main CLI workflow existed. Overall CI was red, not described as green. No new connected-worker/D2-C regression. See [D2 ledger](../../../ops/formation-deepseek-d2-final-integration.json).
 - D3 implementation pin: selected Rust **658 PASS / 0 FAIL / 1 existing ignored**, Clippy/fmt/diff PASS; 8 offline Python tests PASS; real Rust offline freeze independently reproduced all six projections.
 - Clean exact ato/API + exact WASM + fresh public-price snapshot + fixture/context preflight PASS. Fourteen injected plan/pin/price/journal/context/order failures rejected, 0 calls.
 - Added mock HTTP coverage: length/other/missing finish, wrong/missing model, input/output over-cap; persistent next-cell stop after restart. Existing claim-loss/completion-loss mock tests remain PASS.

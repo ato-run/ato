@@ -1,5 +1,8 @@
 # Expired Search reporting — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The actual isolated owner-input Search
 search_43b7abcf28ad5453e27ff9245a4a43ab used an explicitly preregistered
 60-second fault-test deadline (defaults remain 30 minutes / 10 minutes).

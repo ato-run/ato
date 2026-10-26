@@ -1,5 +1,8 @@
 # Run file delivery into single-container OCI
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The existing Data Plane delivered authorized Instance Assets/Model Sets and
 resolved an output directory, but the common OCI projection ignored both.
 This connects those existing runtime-private inputs to the common single OCI

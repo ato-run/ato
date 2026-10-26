@@ -1,5 +1,8 @@
 # RunPod初回503の調査と起動準備・診断の修正
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 対象はDraft API #760 / Rust #1493。追加のPod作成、GPU実行、デプロイ、remote migration、マージ、本番反映を行わない調査・ローカル修正。
 
 検証した実装commitはAPI `27c0dee88db29c1a7416c314a5c186dd73cd6c6f`、Rust共通runtime `1fa65053d7d4724d6f6e775b9134577e2867d48b`、Sample `97474b8ee000fc290a86384d1d7146594e57af63`。以後の記録commitは文書のみ。

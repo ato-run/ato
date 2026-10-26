@@ -1,5 +1,8 @@
 # Formation 5a live Jev completion gate — 2026-09-26
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Implemented and locally/integration verified; 5a completion gate closed.**
 5a-a and 5a-b are merged. No deployment, remote D1 migration, staging or
 production change, feature flag, or persistent provider-key configuration was
@@ -25,7 +28,7 @@ Actual Coordinator (production Runtime Network routes, Miniflare local D1/R2,
 `formation_search` requester on `oci-linux-test`. The new acceptance-only
 `jev` mode calls the existing `JevDecisionProvider`, `serve_decision` and
 Requester receipt authority without replacing them. The harness is
-[`formation-live-jev.py`](../../scripts/acceptance/formation-live-jev.py).
+[`formation-live-jev.py`](../../../../scripts/acceptance/formation-live-jev.py).
 
 The paired arms used byte-identical source, K and ordered candidate D set.
 The harness asserted equality of fixture digest, ContractRef, candidate refs,
@@ -78,7 +81,7 @@ Both searches executed D1 FAIL then D2 PASS; both final receipts have
 Each spent exactly one decision, two attempts, 14336 transfer bytes, 4778
 expanded bytes and 6656 stored bytes; all reservations settled to zero.
 The complete paired ledger, including selected choices, usage, ceilings and
-attempt identities, is [formation-live-jev-2026-09-26.json](formation-live-jev-2026-09-26.json).
+attempt identities, is [formation-live-jev-2026-09-26.json](../../../ops/formation-live-jev-2026-09-26.json).
 
 Cost is an **estimate**, not a billing receipt: 1612 × $0.042 / 1,000,000,
 with free output tokens, per the official model price checked 2026-09-26.

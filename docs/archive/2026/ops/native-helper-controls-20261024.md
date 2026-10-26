@@ -1,5 +1,8 @@
 # Trusted Native helper controls — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Scope and immutable boundaries
 
 Child of Native framebuffer boundary PR #1540, code base `90746ed9566d3640164e480668e4d838d4de5555`.

@@ -1,7 +1,10 @@
 # E2 preregistration — prospective holdout efficacy evaluation
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Registered before **any E2 model call, Runtime efficacy cell or oracle run**,
-2026-09-28. [Immutable machine-readable registration](formation-efficacy-e2-plan.json)
+2026-09-28. [Immutable machine-readable registration](../../../ops/formation-efficacy-e2-plan.json)
 fixes the ato/API SHAs, harness commit, artifact/prompt/code/fixture digests,
 the exact ordered cell-key set, all budgets and the gate.
 

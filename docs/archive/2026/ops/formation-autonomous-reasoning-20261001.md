@@ -1,5 +1,8 @@
 # Formation Codex-first探索の実装と受入記録 — 2026-10-01
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 実Coordinator・実Linux Runtimeで、SVGOMGのknown Dなし → 実行FAIL → CodexによるD修正 → fresh same-K PASSが成立した。同じ初期情報・共通protocolを使うDeepSeekの実API探索でも、known Dなしからfresh same-K PASSが成立した。changedetection.ioとKuttは具体的な依存処理の能力不足で停止した。**全面的な受入は未完了**。成功Dは`k_reached_awaiting_assessment`として保存され、通常Runの許可・公開・配備には変換していない。
 
 Draft PR: [Ato #1452](https://github.com/ato-run/ato/pull/1452)、[API #712](https://github.com/ato-run/ato-api/pull/712)。merge、staging/production deploy、remote migration、flag変更は実施していない。APIの追加migrationは隔離したlocal D1だけに適用した。
@@ -19,7 +22,7 @@ Draft PR: [Ato #1452](https://github.com/ato-run/ato/pull/1452)、[API #712](htt
 
 ## フェーズ別の最終契約と実装状態
 
-規範的な今回の設計は[draft ADR-042](../rfcs/draft/ADR-042-formation-autonomous-reasoning.md)。以下はtargetと現行実装を分けた記録であり、未実装を利用可能とは扱わない。
+規範的な今回の設計は[draft ADR-042](../../../rfcs/draft/ADR-042-formation-autonomous-reasoning.md)。以下はtargetと現行実装を分けた記録であり、未実装を利用可能とは扱わない。
 
 | フェーズ | 契約・今回の変更 | 実測・制約 |
 |---|---|---|
@@ -100,7 +103,7 @@ provider側では実TCP transport testsで503初回＋3 retryの4 dispatch、429
 - Atoの最終code head `a1e2f30c8ac5f289dbdcaffbabc63c05202ceef1`の[CI](https://github.com/ato-run/ato/actions/runs/36846491772): Ubuntu PASS、macOS/Windows FAIL。macOSはInstance worker activation、Windowsは既存Unix参照の13 compile errors。開始時の比較head `b3327e159dff92d0e23ad1887848efe50f6509df`の[CI](https://github.com/ato-run/ato/actions/runs/36813243845)でも同じ失敗分類を確認。全CI成功とは報告しない。
 - API `fcbdf8881f3e61bfed7ca4375b9e937adad29d65`の[CI](https://github.com/ato-run/ato-api/actions/runs/36829455062): activity-control-plane/instance-state-sync FAIL、full-serial SKIP。CORS/Activitiesの対象2 test filesは今回変更前のexact head `f00fa300142d45434be2417db2f7ae415517255e`と変更後headを同条件で検証し、どちらも13 FAIL/40 PASS。coop-presence WebSocket handshakeのCI失敗はbrowser base比較未実施。課金由来ではない。
 
-ローカルの[Worker test出力](evidence/formation-autonomous-20261001/worker-tests.txt)、[deadline clippy](evidence/formation-autonomous-20261001/deadline-clippy.txt)、[Ato CI](evidence/formation-autonomous-20261001/ato-ci-a1.txt)、[API CI](evidence/formation-autonomous-20261001/api-ci-fcb.txt)、[API base](evidence/formation-autonomous-20261001/api-base-tests.txt)／[head比較](evidence/formation-autonomous-20261001/api-head-tests.txt)を保存した。証跡追補headの新CIは、この記録時点では実行中。PR baseはAtoがf3e715ab（stacked docs/formation-adaptive-100）、APIが最新mainの2dceb36b。両PRはDraft/mergeableで、上記の比較headをPR baseの代わりには扱わない。
+ローカルの[Worker test出力](../../../ops/evidence/formation-autonomous-20261001/worker-tests.txt)、[deadline clippy](../../../ops/evidence/formation-autonomous-20261001/deadline-clippy.txt)、[Ato CI](../../../ops/evidence/formation-autonomous-20261001/ato-ci-a1.txt)、[API CI](../../../ops/evidence/formation-autonomous-20261001/api-ci-fcb.txt)、[API base](../../../ops/evidence/formation-autonomous-20261001/api-base-tests.txt)／[head比較](../../../ops/evidence/formation-autonomous-20261001/api-head-tests.txt)を保存した。証跡追補headの新CIは、この記録時点では実行中。PR baseはAtoがf3e715ab（stacked docs/formation-adaptive-100）、APIが最新mainの2dceb36b。両PRはDraft/mergeableで、上記の比較headをPR baseの代わりには扱わない。
 
 ## 実行pin・証跡
 
@@ -116,7 +119,7 @@ provider側では実TCP transport testsで503初回＋3 retryの4 dispatch、429
 
 WASM SHA-256: `c9d0246a943e801a6e818e083bcab778b69216ba3509de3a09d9f6776e6bb29c`。native Linux/aarch64、bwrap+Landlock、Node22.14.0/npm10.9.2/Python3.12.7。最終code head `a1e2f30c8ac5f289dbdcaffbabc63c05202ceef1`。実測以降はnonsecretのembedding禁止をartifact guardへ接続し、Coordinator HTTP/source転送のtimeoutを凍結Search/roundの残時間で絞った。遅いHTTP bodyと期限後の非送信を実TCPで検証した。該当tests/clippy済み、この2変更のnative OSS再測定は未実施。実測と最終headの差を隠さない。
 
-[構造化ledger](formation-autonomous-reasoning-20261001.json)、[raw manifest](evidence/formation-autonomous-20261001/raw-manifest.json)、[保存されたinput/output/receipt/usage](evidence/formation-autonomous-20261001/raw-evidence.tar.gz)。323証跡files＋manifest/66 accepted stepのinput/output digestを照合した。archive SHA-256: `c091950d136cb7662c57ed8890af2ab058a954e06685580d0dc8b52f77bc5ca5`。statusはowner scope/私有inventoryを省いたprojectionで、元status SHAも保存する。credential store/key、値、registration ID/assignmentのowner記録はexportしない。
+[構造化ledger](../../../ops/formation-autonomous-reasoning-20261001.json)、[raw manifest](../../../ops/evidence/formation-autonomous-20261001/raw-manifest.json)、[保存されたinput/output/receipt/usage](../../../ops/evidence/formation-autonomous-20261001/raw-evidence.tar.gz)。323証跡files＋manifest/66 accepted stepのinput/output digestを照合した。archive SHA-256: `c091950d136cb7662c57ed8890af2ab058a954e06685580d0dc8b52f77bc5ca5`。statusはowner scope/私有inventoryを省いたprojectionで、元status SHAも保存する。credential store/key、値、registration ID/assignmentのowner記録はexportしない。
 
 旧`formation-coverage-100.json`のSHA-256は`560302a51a04fc08d9868a8dfb84bc2ac58666e14a0ee3533f181e502c98d45c`のまま。旧100件・shared prototype・失敗測定・UNKNOWN・予算履歴は上書きしていない。
 

@@ -2,7 +2,7 @@
 
 > **Status:** Approved (2026-04-26)
 > **Successor location:** `ato-run/ato/docs/monorepo-consolidation-plan.md` (新リポジトリ作成後に移管)
-> **Pairs with:** [`v0.5-distribution-plan.md`](../../../docs/v0.5-distribution-plan.md), [`specs/CCP_SPEC.md`](specs/CCP_SPEC.md)
+> **Pairs with:** [`v0.5-distribution-plan.md`](v0.5-distribution-plan.md), [`specs/CCP_SPEC.md`](specs/CCP_SPEC.md)
 
 「コード管理は統合」「実行モデルは Desktop > CLI を死守」の二軸を物理的に強制する設計。前者だけ動かして後者は触らない、を構造的に縛る。
 

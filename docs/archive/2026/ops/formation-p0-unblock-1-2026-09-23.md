@@ -1,5 +1,8 @@
 # Formation P0 unblock 1 — acceptance (2026-09-23)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Two primitives from the P0 baseline (`formation-p0-benchmark-2026-09-23.md`),
 then upstream searxng re-run unmodified:
 

@@ -1,5 +1,8 @@
 # Formation retained state — 分離したレビュー単位の検証
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID `formation-retained-state-review-local-20261003-01`。実装pin
 `c8761b01dadf0dd5c816857dd53aa343dfbc3276`、macOS arm64、Rust 1.96.0。
 実測時のSourceはこの分離worktree。後続の記録commitへpinを付け替えない。

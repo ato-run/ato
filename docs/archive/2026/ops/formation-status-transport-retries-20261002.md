@@ -1,5 +1,8 @@
 # Durable retry limits for Requester status reads
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: Ato `87501e2fc88cd986759ba403dc4e60db53b31c57` (application code
 `3ac36fa2739cf8d9555026e93a4ca79905a6d4a7`), API
 `fa825a176b715962351466dc1a7149bec5979c7f`. Receipt authority is unchanged.

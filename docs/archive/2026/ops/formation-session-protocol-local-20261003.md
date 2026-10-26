@@ -1,5 +1,8 @@
 # Formation共通Sessionのローカル検証
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID: `formation-session-protocol-local-20261003-01`。2026-10-03、macOS arm64、Rust 1.96.0。
 
 実装pinはAto `6985e0ef23b1dfb203f68d78e7e74dbefeeb0aac`（clean tree）。baseはDraft #1476の`31a6d6b4d6df03a7463058ea38f87b7ff1e525a3`。この記録の追加commitへ、実行pinを付け替えない。

@@ -1,5 +1,8 @@
 # Formation provider split — partial implementation checkpoint
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Date: 2026-09-28. **Historical first-slice checkpoint, superseded by the
 [core-semantics correction](formation-producer-core-correction-2026-09-28.md).**
 The typed producer return, implicit-base Propose behavior and CI uncertainty
@@ -26,7 +29,7 @@ Original-document correspondence is now verified from the downloaded full
 See the [correction record](formation-producer-core-correction-2026-09-28.md)
 for hashes and phase correspondence. The earlier hosted URL access limitation
 no longer applies. The original documents and historical ADR-037–040 are not
-edited. The [Formation companion](../rfcs/draft/Formation.md) remains a
+edited. The [Formation companion](../../../rfcs/draft/Formation.md) remains a
 repository mapping, not a replacement for the original note.
 
 ## Roadmap before / after

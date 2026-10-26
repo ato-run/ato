@@ -1,5 +1,8 @@
 # Formation 2f — implementation starting point
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Baseline and scope
 
 Base: `de4e4fc3645abfc5d2f6d0f62f2bfc0a95d9427b`, the merge of #1405.

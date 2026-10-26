@@ -36,7 +36,7 @@ related:
 - `manifest_hash` と `payload_hash` の二重ハッシュで改ざん耐性を持つ。
 
 参照: legacy distribution artifactの
-[`CAPSULE_FORMAT_V2.md`](../archived/CAPSULE_FORMAT_V2.md), `SIGNATURE_SPEC.md`
+[`CAPSULE_FORMAT_V2.md`](../../rfcs/archived/CAPSULE_FORMAT_V2.md), `SIGNATURE_SPEC.md`
 
 ## 3. 環境変数の扱い（reconstructed baseline）
 

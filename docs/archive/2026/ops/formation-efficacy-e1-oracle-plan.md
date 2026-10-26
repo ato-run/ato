@@ -1,5 +1,8 @@
 # Post-E1 fixture-label audit (not a fourth efficacy arm)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 E1's 60-cell comparison is complete and immutable. Neither B nor C executed the
 intended positive alternatives in E04/E06/E07. To avoid claiming those labels
 were Runtime-verified when they were only syntax-checked, register this separate

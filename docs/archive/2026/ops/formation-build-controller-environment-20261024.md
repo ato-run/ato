@@ -1,5 +1,8 @@
 # Formation build controller environment boundary
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The build controller must clear its environment before starting bubblewrap,
 in addition to bubblewrap clearing the eventual workload environment. Linux
 bubblewrap keeps a PID-1 reaper inside its PID namespace. Its initial process

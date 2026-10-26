@@ -1,5 +1,8 @@
 # Formation — WBO isolated online build (6b-D2 follow-up)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Verdict (2026-09-30, user decision)
 
 WBO is closed at **B as a typed terminal under the current security profile**:
@@ -39,7 +42,7 @@ The 500 MiB condition must not be restated later as a PASS.
 
 
 Expectations were fixed before any execution in
-[formation-wbo-expectations.json](formation-wbo-expectations.json).
+[formation-wbo-expectations.json](../../../ops/formation-wbo-expectations.json).
 There was no deploy, no remote migration and no model call; #1421 is untouched.
 
 ## Implementation (branch `feat/formation-source-oci-online`)

@@ -1,5 +1,8 @@
 # Source-owned Runtime setup deadline regression — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Kutt's source-owned `migrate` → `start` path revealed that the trusted Node
 Runtime preparation helper could begin another script after the original
 execution deadline. The parent Runtime already bounded launch/readiness and

@@ -1,5 +1,8 @@
 # Formation v0 owner input — 2026-10-01
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Depends on Ato #1455 and the companion API owner-input change. The merged-main
 base remains `8fca0f4b78b1bed92eae21823e5c5f7207058271`. Prompt 11 adds the new
 binding capabilities; versions 1–10 and their pending public capability views

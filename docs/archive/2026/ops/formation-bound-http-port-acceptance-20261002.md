@@ -1,5 +1,8 @@
 # Source-backed private HTTP Port acceptance
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Source-owned setup may require an HTTP interaction after launch and before the
 unchanged frozen K can pass. The typed execution plan names an inspected Source
 basis, logical Port, GET/POST template, protected input references, accepted
@@ -33,7 +36,7 @@ execution pin.
 
 ## Actual Coordinator/Runtime controls
 
-[Public control proof](evidence/formation-bound-http-controls-20261002.json)
+[Public control proof](../../../ops/evidence/formation-bound-http-controls-20261002.json)
 SHA-256: `df3fa0d0fdb39fd40d61d15fd20263d9bf7b696c2a1fa5b52b6a9e33d899b935`.
 These owned fixtures use preregistered fixed exchanges; they do not add an OSS
 app success or an autonomous provider acceptance.
@@ -49,7 +52,7 @@ zero encrypted values after owner cleanup. The initial capability-admission
 failure is preserved. A separate scope-outside trial interrupted by the old
 measurement parser is also preserved; it is not counted as a completed control.
 
-[Interrupted trial's actual UNKNOWN proof](evidence/formation-bound-http-interrupted-unknown-20261002.json)
+[Interrupted trial's actual UNKNOWN proof](../../../ops/evidence/formation-bound-http-interrupted-unknown-20261002.json)
 SHA-256: `fd99fbc71ec584fa8c4dc74ef014fbe2b45d44c943e92a4ccd4d14011f019c2b`.
 Attempt `01M3XJH1NBDEZ64P48D0ND1BPK` was claimed at
 `2026-10-02T05:48:52.922Z` and became UNKNOWN on the read at
@@ -61,7 +64,7 @@ producer evidence hashes remained unchanged. Old WBO UNKNOWN was not rerun.
 
 ## Kutt Source acceptance
 
-[Public Kutt proof](evidence/formation-kutt-private-http-20261002.json)
+[Public Kutt proof](../../../ops/evidence/formation-kutt-private-http-20261002.json)
 SHA-256: `a13564af2466aabf300c882b1809fb081a6bbec5329088290e9a81ed8d1d622f`.
 
 Source: Kutt 3.2.6, commit `279b491b53bbd01fbae70f603222526962772061`;

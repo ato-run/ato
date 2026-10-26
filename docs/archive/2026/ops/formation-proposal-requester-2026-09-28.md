@@ -1,5 +1,8 @@
 # CandidateProducer C2 — fixed requester actual acceptance
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 2026-09-28. **Fixed path implemented and locally/integration verified.** C2 is
 under review, not merged/deployed. This is not general LLM efficacy evidence.
 The historical A/B and E1/E2 ledgers remain historical, not current status.
@@ -20,7 +23,7 @@ The historical A/B and E1/E2 ledgers remain historical, not current status.
 - #1421 remains open at `dc0fba4e0ecdd585985320551b52b72768002a5c`, unchanged
   and unexecuted; never a CandidateProducer blocker.
 
-[Original Formation correspondence](../rfcs/draft/Formation.md): Phase 3 → 5a
+[Original Formation correspondence](../../../rfcs/draft/Formation.md): Phase 3 → 5a
 Decision, Phase 4 → 5b Candidate Generation, Phase 5 → 5c adaptive loop;
 6a/b/c remain additional coverage tracks. Original source and ADR-037–040 were
 not rewritten. Only Verifier decides K. DecisionProvider cannot generate D;
@@ -28,7 +31,7 @@ CandidateProducer cannot judge K. Escalate is still absent (5c scope).
 
 ## Implemented requester boundaries
 
-See the [requester contract](../rfcs/draft/FORMATION_PROPOSAL_REQUESTER.md).
+See the [requester contract](../../../rfcs/draft/FORMATION_PROPOSAL_REQUESTER.md).
 
 - Explicit `enable_candidate_producer` re-verifies the frozen archive digest
   and source closure, extracts a private inventory, and checks every authorized
@@ -77,7 +80,7 @@ Final hardened run: `1790576069513738409`; 15 scenarios cover P0–P11, zero-D, 
 failures, unsupported and L1–L3. **All assertions passed; 12 fixed invocations
 in total, 0 external/live model calls.**
 
-The [machine-readable evidence](formation-proposal-requester-2026-09-28.json)
+The [machine-readable evidence](../../../ops/formation-proposal-requester-2026-09-28.json)
 contains actual attempts, receipts, immutable K, raw completion/outcomes,
 independent recipes, provider requests, finite decisions, exact source hashes
 and binary hashes. Complete original result JSONs are retained beneath the

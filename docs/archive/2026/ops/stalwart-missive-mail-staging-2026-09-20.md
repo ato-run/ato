@@ -1,5 +1,8 @@
 # Stalwart + Missive staging acceptance — 2026-09-20
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This record covers the private staging acceptance for one durable Ato Instance
 containing Stalwart, Govcraft Missive, and a generic fixed-target transport
 Adapter. It does not approve production, Discover, Public Try sending, public

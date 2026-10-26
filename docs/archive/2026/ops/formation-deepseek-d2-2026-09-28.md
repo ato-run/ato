@@ -1,5 +1,8 @@
 # Formation D2-C acceptance — 2026-09-28
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This is **mock-provider integration**, not live DeepSeek efficacy. Live calls
 **0**, spend **$0**, no API key read. D3 G0–G5 and model preregistration have
 not started. No D2-C merge/deploy, remote migration or #1421 change.
@@ -65,7 +68,7 @@ Receipt `ato.contract-verification-receipt/1`: fully_satisfied=true,
 GET `/health` HTTP 200, observed body SHA256
 `e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999`.
 The full M0/M12/M13 receipts and exact evidence hashes are in the
-[machine ledger](formation-deepseek-d2-2026-09-28.json).
+[machine ledger](../../../ops/formation-deepseek-d2-2026-09-28.json).
 
 ## Source, transport and cost controls verified
 

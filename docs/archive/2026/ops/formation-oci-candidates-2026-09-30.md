@@ -1,5 +1,8 @@
 # OCI candidate comparison — three existing source pins
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **No candidate selected; zero online builds or image pulls.** This is a static
 survey of File Browser, Kutt and changedetection.io only. It does not requalify
 the other 41 service repositories or revise the old D1/coverage results.
@@ -60,7 +63,7 @@ used; no model call or model credential read occurred.
 
 ## Registry metadata and size limits
 
-[Metadata evidence](formation-oci-candidates-registry-2026-09-30.json) records
+[Metadata evidence](../../../ops/formation-oci-candidates-registry-2026-09-30.json) records
 full root/platform digests and layer descriptors for both platforms on
 2026-09-30. Only HTTPS auth.docker.io and registry-1.docker.io were contacted:
 anonymous token plus manifest GETs, redirects refused, 62,759 response-body
@@ -75,7 +78,7 @@ archive or the 5 GiB build disk, nor the dependency-inclusive 500 MiB transfer
 condition. No final image/artifact exists for these pins, so final/archive size
 is explicitly unknown. No build-failure or functional-success count is assigned.
 
-[Full candidate facts](formation-oci-candidates-2026-09-30.json) retain archive /
+[Full candidate facts](../../../ops/formation-oci-candidates-2026-09-30.json) retain archive /
 Dockerfile digests, CMD/ENTRYPOINT/WorkingDir/USER, dependencies, state, port and
 uncertainties. ENTRYPOINT-only and VOLUME-external state remain generic design
 candidates; this survey does not establish a complete app that those two changes

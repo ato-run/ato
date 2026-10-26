@@ -1,5 +1,8 @@
 # Formation 6b-D2 hardening — pinned base graph, release on every path, private session
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## State
 
 **implemented · unit-tested · offline actual verified.** Host: `ubuntu-sugamo`
@@ -9,11 +12,11 @@ never granted. The first offline ledger ([formation-source-oci-d2](formation-sou
 is kept as recorded; this ledger supersedes its builder boundary only.
 
 - Code `6eea43ca8d7b`, `ato` sha256 `acb68668adae50bf…`. Raw data:
-  [JSON](formation-source-oci-d2-hardening.json), produced by
+  [JSON](../../../ops/formation-source-oci-d2-hardening.json), produced by
   `scripts/acceptance/source-oci/summarize.py` from `run-all.sh` output.
 - Host daemon before/after: images 68, containers 5, volumes 67 (unchanged).
 
-## What changed (design: [FORMATION_SOURCE_OCI](../rfcs/draft/FORMATION_SOURCE_OCI.md))
+## What changed (design: [FORMATION_SOURCE_OCI](../../../rfcs/draft/FORMATION_SOURCE_OCI.md))
 
 1. **Base graph before load.** `index.json` must name exactly the pinned root.
    Ato then selects the one linux/amd64 manifest from the root index, checks

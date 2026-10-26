@@ -1,5 +1,8 @@
 # Process artifact transport — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Trial 11 at Ato 5143a6dcbdad02c340a050e01906d16ae2a6ded9 / API
 4af64035203e767088edf70bcbb5ab42c9c38b3b built changedetection.io's three
 sdists (feedgen, jstyleson, websockets), hash-installed 168 completed wheels,

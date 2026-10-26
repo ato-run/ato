@@ -1,5 +1,8 @@
 # Bounded RFB noVNC encoding compatibility
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Date: 2026-10-24. Parent: Resize boundary #1540,
 `90746ed9566d3640164e480668e4d838d4de5555`.
 Code/tests/RFC: `2dd517711dfbb00be003dc764eedee4696cc9a96`.

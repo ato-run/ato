@@ -1,5 +1,8 @@
 # Explicit runtime placement — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Change and source
 
 - Frozen PR base: `integration/explicit-runtime-placement-base`,

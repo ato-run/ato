@@ -1,5 +1,8 @@
 # Explicit source provenance in the existing Requester client
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Date: 2026-10-24. Base is frozen `integration/source-request-base-v1` at
 `6251745338a2601e744e7788f14ad5ad3f5cea0d`. It is not advanced by this child.
 This change uses the existing `proposal_search` example and Requester engine;

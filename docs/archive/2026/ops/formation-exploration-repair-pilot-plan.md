@@ -1,5 +1,8 @@
 # Preregistered D-conversion repair pilot
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Runtime/CLI `fb6f6bb76d13d0bcef1d64346b623cde0f6b255c`; API JS
 `b20bba7ab9daf282f8d5b1e22affe549ad3492a3`; receipt authority built from the
 same repair Runtime pin. Native binary hashes and WASM hash are in the two

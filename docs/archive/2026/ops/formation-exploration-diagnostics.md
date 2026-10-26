@@ -1,5 +1,8 @@
 # Exploration D-conversion diagnosis
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Offline append to `formation-exploration-100.json`; no source, original result,
 round limit, prompt, runtime or model was changed to produce this analysis.
 Runtime `10473525efa26416ef63025dbb5003c910a43c70`, API
