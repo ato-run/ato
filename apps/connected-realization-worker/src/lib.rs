@@ -4969,6 +4969,7 @@ struct NativeSurfaceControlsReport {
     framebuffer_resize: bool,
 }
 impl NativeSurfaceControlsReport {
+    #[cfg(any(unix, test))]
     fn from_ready(controls: netd::pixel_gateway::PixelGatewayControls) -> Option<Self> {
         (controls.text_paste || controls.framebuffer_resize).then_some(Self {
             clipboard_paste: controls.text_paste,
