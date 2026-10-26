@@ -1045,7 +1045,10 @@ fn i2_an_observation_that_never_answers_is_reported_as_abandoned() {
         }) => assert_eq!(failure_code, "observation_unreachable"),
         other => panic!("expected an abandoned attempt, got {other:?}"),
     }
-    assert!(result.receipt.is_none(), "an unobserved attempt acks no receipt");
+    assert!(
+        result.receipt.is_none(),
+        "an unobserved attempt acks no receipt"
+    );
     assert_eq!(result.failure_reports.len(), 1, "one typed report");
     assert_eq!(
         result.failure_reports[0]["code"], "observation_unreachable",

@@ -1,6 +1,6 @@
 # PR-INVENTORY — dev統合棚卸し（2026-10-26）
 
-更新: 2026-10-26T05:13:12.095895+00:00。GitHubを正本とし、調査時点のOPEN 113件、CLOSED・未マージ223件を記録。最終OPEN 19件。95件を包含証跡付きでClose。機能の未達条件はVALIDATION.mdのIssueへ記録。
+更新: 2026-10-26T05:33:20.222874+00:00。GitHubを正本とし、調査時点のOPEN 113件、CLOSED・未マージ223件を記録。最終OPEN 19件。95件を包含証跡付きでClose。機能の未達条件はVALIDATION.mdのIssueへ記録。
 
 Productionへの配備、mainへのpush、admin bypass、branch/worktree削除は実施しない。取り込み済みPRのCloseはdev昇格の整理であり、mainやProductionへの昇格ではない。
 
@@ -8,8 +8,8 @@ Productionへの配備、mainへのpush、admin bypass、branch/worktree削除�
 
 | Repo | main | dev | 備考 |
 |---|---|---|---|
-| ato | `585e86c5222836d41e9d8359178d37ac06f712b9` | `4d43ad44d9e565699f9e2e52b1f0e6353b2bee57` | OPEN 40 |
-| ato-api | `d05ecbbd5d5574373abcad500ded7aab9970f250` | `6e178c901c0a028b121a4fc18841a4d03e13702d` | OPEN 56 |
+| ato | `585e86c5222836d41e9d8359178d37ac06f712b9` | `2853dcc8767c7584b496915e126dae9da72d4866` | OPEN 40 |
+| ato-api | `d05ecbbd5d5574373abcad500ded7aab9970f250` | `16d1c53da0c7c4f53ca6989cc6981a58fedbec06` | OPEN 56 |
 | ato-pwa | `83635a90c076d97e635c0ea59d985294aa3ed44c` | `33febac1717bb4c8a5d66e4ea87e5d12ae4d27c1` | OPEN 14 |
 | ato-contents | `d13cb5f0d92f3d6e1e834bdb5dc260ecb9c67859` | `なし` | OPEN 0 |
 | ato-e2e | `なし` | `なし` | OPEN 0 |
@@ -417,6 +417,10 @@ Source stack: ato #1517→#1519→#1520→#1527→#1529→#1531、API #847→#85
 | [ato-api #890](https://github.com/ato-run/ato-api/pull/890) | feat(formation): devへcapsule/2受理とDigest別Source承認画面を統合 | `integration/dev-source-approval-console-20261026` → `dev` | MERGED | head `bbed8e28790874e9e1d3cceda81ae1f51d73267e` / merge `4dbd770a090a74a8ea560f467fe7a9c1642c36cc` |
 | [ato-api #892](https://github.com/ato-run/ato-api/pull/892) | fix(schema): 並行統合されたmigration集合へbootstrapを合わせる | `integration/dev-source-approval-console-20261026` → `dev` | MERGED | head `5a348c1ed2b4eff7cc4b2d7a17a9988388ac9d12` / merge `b52e8874c29ec704e1c7572917d56fcd97cb2460` |
 | [ato-api #894](https://github.com/ato-run/ato-api/pull/894) | fix(formation): 同一bundleの異なる保存経路を重複として扱う | `integration/dev-source-approval-console-20261026` → `dev` | MERGED | head `5a8e3eb427193ed001ccb23a6aa713af5c0121e8` / merge `6e178c901c0a028b121a4fc18841a4d03e13702d` |
+| [ato #1583](https://github.com/ato-run/ato/pull/1583) | fix(validator): retry transient relay failures and never die on one job (#1571 P0) | `fix/1571-validator-retry` → `dev` | MERGED | head `334df072a83781556c8fefb2daff5a19ee5ee3c9` / merge `a8da6c90b84674c9851f7a5cf5c3d26c42b4e716` |
+| [ato #1584](https://github.com/ato-run/ato/pull/1584) | docs(ops): dev統合棚卸し・staging検証と未達条件を保存 | `integration/dev-consolidation-20261026` → `dev` | MERGED | head `a1b5a96fe6a7e04c5e6f4ebfe6a14b32db3276b2` / merge `2853dcc8767c7584b496915e126dae9da72d4866` |
+| [ato-api #893](https://github.com/ato-run/ato-api/pull/893) | fix(formation): dedupe a portable bundle already stored by the import path (#1570 Gate A) | `fix/1570-portable-bundle-dedupe` → `dev` | MERGED | head `e8d6c8246f97db5b918aa146da21356009877a34` / merge `9a09d38de8d965ac5ec6ea585a5d51c02584a425` |
+| [ato-api #896](https://github.com/ato-run/ato-api/pull/896) | fix(verification): retryable observe relay + claim ordering + typed verifier failure (#1571 P0) | `fix/1571-verify-observe-order` → `dev` | MERGED | head `3fb53612702dab05d7ef12b4375b56d8c61e48b5` / merge `16d1c53da0c7c4f53ca6989cc6981a58fedbec06` |
 
 #1575 / API #889のheadはdevに包含され、GitHub上もMERGEDとなった。#1579は関連セッションの修正で、#1580のdev統合時に包含を確認。本作業の通常マージはato #1576/#1580、API #890/#892/#894。admin bypassは未使用。
 
