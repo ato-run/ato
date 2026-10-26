@@ -232,7 +232,13 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
     //    resolves to nothing is worse than a result that was never published.
     let artifact_ref = request
         .api
-        .publish_portable_bundle(&attempt.attempt_id, &transport, &bundle_bytes)
+        .publish_portable_bundle(
+            &attempt.attempt_id,
+            &transport,
+            validated.contract_ref.as_str(),
+            &derivation_ref,
+            &bundle_bytes,
+        )
         .map_err(|error| {
             HostedAttemptFailure::new(
                 CAPSULE_V2_BUNDLE_PUBLICATION_FAILED,
@@ -627,7 +633,18 @@ fn compose_result(
         },
         "deterministic_inputs_digest": deterministic_inputs_digest,
         "verification_receipt": receipt,
-        "outcomes": outcomes,
+        // The portable attempt never publishes; this frontend does, and it has
+        // already registered the bundle under `artifact_ref` before composing
+        // this result. A `succeeded` Hosted result must say so: the control
+        // plane refuses a success whose publication is `not_applicable`, and
+        // that refusal is right — an artifact nobody could name is not a
+        // published one.
+        "outcomes": {
+            "seal": outcomes.seal.clone(),
+            "runtime_verification": outcomes.runtime_verification.clone(),
+            "cleanup": outcomes.cleanup.clone(),
+            "publication": ato_formation::request::Outcome::succeeded(),
+        },
         "formation_kind": "portable_v2",
         "schema_profile": ato_ipc::formation::PORTABLE_APPLICATION_PROFILE,
         "portable_bundle_sha256": transport,
