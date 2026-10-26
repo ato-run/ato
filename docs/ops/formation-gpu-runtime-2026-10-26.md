@@ -11,3 +11,29 @@ The shared attempt admission remains closed for host requirements unless its exe
 The API must account for immutable model cache bytes in addition to its usual container disk floor and declared scratch. The existing storage price ceiling still applies. This physical capacity projection does not rewrite the sealed Contract or Derivation.
 
 Local checks: Formation library 173 tests; measured-host unit tests 12; worker role and incomplete sandbox identity tests; actual bundle quarantine followed by a GPU admission refusal; common admission regression tests. These are free tests, not real GPU acceptance.
+
+## Staging rollout and live CPU evidence
+
+The clean Linux build at `a9c39128938b4a0527709d7e8ba351db9bc6d49d`
+(build ID `formation-gpu-a9c39128`) was published and hash-verified:
+
+- Formation worker: `3f9fbc6b8d7de67a79a8e0b588e0d19d1f94ed36eafce57e647d9ca8795b34b6`
+- Connected worker: `912509fffe5c6dcc70477008c058d88d3130e66985143df52dc0a0d7a9b83212`
+
+Both staging CPU Formation units on ubuntu-sugamo were gracefully stopped
+(exit 75) and started with the candidate plus an expected digest. The managed
+worker heartbeat reports the matching clean build and active lifecycle. The
+production unit, old binaries and lifecycle history were preserved.
+
+Actual PWA intake of the approved eight-file Wan sample produced the same
+previously accepted bundle (`929aa3dc…`), a typed `gpu_host_unavailable` refusal
+and no successful CPU Formation result. The API reported GPU verification
+available. The PWA then displayed explicit operator/owner RunPod choices for
+verification, with a separate choice required for later app execution. Only
+Cancel was selected; no GPU provision or binding was created.
+
+This validates source intake, canonical candidate preservation, CPU refusal,
+configuration and UI cancellation. GPU model delivery/execution/cleanup still
+require paid-machine acceptance and were not claimed as verified here.
+Full deployment and reconciliation record lives in ato-api
+`docs/ops/formation-gpu-staging-2026-10-26.md` (PR #902).
