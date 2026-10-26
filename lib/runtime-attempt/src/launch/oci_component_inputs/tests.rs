@@ -29,7 +29,7 @@ fn model(root: &Path, id: &str) -> ResolvedReadOnlyInput {
 
 #[test]
 fn explicit_consumers_only_receive_their_readonly_inputs_and_independent_outputs() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::launch::test_temp_dir();
     let mut group = group();
     group.services[0].input_ids = Some(vec!["models".into()]);
     let input = model(root.path(), "models");
@@ -98,7 +98,7 @@ fn explicit_consumers_only_receive_their_readonly_inputs_and_independent_outputs
 
 #[test]
 fn no_grant_unassigned_missing_or_colliding_inputs_fail_before_output_creation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::launch::test_temp_dir();
     let mut group = group();
     group.services[0].input_ids = Some(vec!["models".into()]);
     let input = model(root.path(), "models");
@@ -139,7 +139,7 @@ fn no_grant_unassigned_missing_or_colliding_inputs_fail_before_output_creation()
 
 #[test]
 fn legacy_none_cannot_ignore_any_grant_and_empty_assets_needs_actual_delivery() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::launch::test_temp_dir();
     let mut group = group();
     assert!(validate(&group, &context(root.path())).is_ok());
     assert!(validate(&group, &context(root.path()).with_data_grant_present(true)).is_err());
@@ -165,7 +165,7 @@ fn legacy_none_cannot_ignore_any_grant_and_empty_assets_needs_actual_delivery() 
 #[cfg(unix)]
 #[test]
 fn output_symlink_and_input_overlap_are_rejected_without_removing_foreign_files() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::launch::test_temp_dir();
     let mut group = group();
     group.services[0].input_ids = Some(vec!["models".into()]);
     let input = model(root.path(), "models");

@@ -7,6 +7,9 @@
 //! untrusted build could reach through it.
 
 use anyhow::{Context, Result, anyhow};
+
+#[cfg(test)]
+mod readiness_tests;
 use ato_runtime_attempt::journal::AttemptRecordState;
 use serde::{Deserialize, Serialize};
 
@@ -516,52 +519,93 @@ impl FormationApi {
         compute_id: &str,
         capsule_revision_id: &str,
     ) -> Result<PublishOutcome> {
-        let response = self
-            .client
-            .post(format!("{}/v1/internal/formation/results", self.base))
-            .bearer_auth(&self.token)
-            .json(&serde_json::json!({
-                "result": result,
-                "compute_id": compute_id,
-                "capsule_revision_id": capsule_revision_id,
-            }))
-            .send()?;
-        let status = response.status();
-        let body: serde_json::Value = response.json().unwrap_or_default();
-        if status.is_success() {
-            // 200 is not acceptance. A shadow run answers 200 with
-            // `registered: false` — it validated the result, compared it and
-            // threw it away — and reading that as success is how a lane that
-            // registers nothing comes to look like a lane that works.
-            if body.get("registered").and_then(serde_json::Value::as_bool) == Some(false) {
-                return Ok(PublishOutcome::NotRegistered {
-                    mode: body
-                        .get("mode")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    reason: body
-                        .get("reason")
+        self.publish_result_with_readiness_wait(
+            result,
+            compute_id,
+            capsule_revision_id,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(1),
+        )
+    }
+
+    fn publish_result_with_readiness_wait(
+        &self,
+        result: &serde_json::Value,
+        compute_id: &str,
+        capsule_revision_id: &str,
+        budget: std::time::Duration,
+        interval: std::time::Duration,
+    ) -> Result<PublishOutcome> {
+        let started = std::time::Instant::now();
+        let mut announced_wait = false;
+        loop {
+            let response = self
+                .client
+                .post(format!("{}/v1/internal/formation/results", self.base))
+                .bearer_auth(&self.token)
+                .json(&serde_json::json!({
+                    "result": result,
+                    "compute_id": compute_id,
+                    "capsule_revision_id": capsule_revision_id,
+                }))
+                .send()?;
+            let status = response.status();
+            let body: serde_json::Value = response.json().unwrap_or_default();
+            // Registration queues the ordinary Rust bundle validator. Its ack may
+            // arrive after the first result POST. Retry only this pending state,
+            // with the identical result and fence; every other refusal is final.
+            // The API keeps checking ownership, validation and the current fence
+            // on every request. No success is published before its acceptance.
+            if status == reqwest::StatusCode::CONFLICT
+                && result["formation_kind"] == "portable_v2"
+                && body["error"] == "portable_bundle_artifact_not_ready"
+                && started.elapsed() < budget
+            {
+                if !announced_wait {
+                    eprintln!(
+                        "[formation] job={} bundle validator pending; waiting before registering the same fenced result",
+                        result["job_id"].as_str().unwrap_or("unknown")
+                    );
+                    announced_wait = true;
+                }
+                std::thread::sleep(interval.min(budget.saturating_sub(started.elapsed())));
+                continue;
+            }
+            if status.is_success() {
+                // 200 is not acceptance. A shadow run answers 200 with
+                // `registered: false` — it validated the result, compared it and
+                // threw it away — and reading that as success is how a lane that
+                // registers nothing comes to look like a lane that works.
+                if body.get("registered").and_then(serde_json::Value::as_bool) == Some(false) {
+                    return Ok(PublishOutcome::NotRegistered {
+                        mode: body
+                            .get("mode")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                        reason: body
+                            .get("reason")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    });
+                }
+                return Ok(PublishOutcome::Accepted {
+                    compute_schema_id: body
+                        .get("compute_schema_id")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_owned(),
                 });
             }
-            return Ok(PublishOutcome::Accepted {
-                compute_schema_id: body
-                    .get("compute_schema_id")
+            return Ok(PublishOutcome::Refused {
+                code: body
+                    .get("error")
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
+                    .unwrap_or("unknown")
                     .to_owned(),
             });
         }
-        Ok(PublishOutcome::Refused {
-            code: body
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
-        })
     }
 }
 

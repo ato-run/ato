@@ -166,6 +166,7 @@ impl NativePixelConfig {
             anyhow::bail!("Native Pixel requires Linux")
         }
     }
+    #[cfg(unix)]
     fn requested_controls(&self) -> netd::pixel_gateway::PixelGatewayControls {
         netd::pixel_gateway::PixelGatewayControls {
             text_paste: self.text_paste,
