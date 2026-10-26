@@ -7,12 +7,14 @@ alone does not establish that Contract.
 
 ## Package explicit portable input
 
-Use `ato pack <source-dir> -o <output.capsule>` for reviewed explicit authoring
-input. The [static example](getting-started.md) uses `ato.capsule/1`;
+Use `ato pack <source-dir> -o <output.capsule>` for reviewed
 [portable authoring v2](../rfcs/draft/PORTABLE_APPLICATION_AUTHORING_V2.md)
-declares `schema = "ato.capsule/2"` for bounded process/OCI application routes,
-state and observations. These grammars are distinct. Reuse the
-[existing samples](../../samples/) rather than mixing their fields.
+input declaring `schema = "ato.capsule/2"`. The
+[Getting Started guide](getting-started.md) separates running a supplied static
+bundle from packaging the current authored process example. The current
+`pack` frontend does not accept the older `ato.capsule/1` source grammar.
+Reuse the [authored example](../../samples/portable-multi-process-authored/capsule.toml)
+and the v2 input reference rather than mixing fields from historical samples.
 
 Run the resulting bundle with `ato run <bundle> --no-open
 --verification-receipt <receipt.json>`. If it declares multiple Ds, supply

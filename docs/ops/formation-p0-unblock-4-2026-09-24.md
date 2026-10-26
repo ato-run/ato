@@ -17,3 +17,7 @@ Language of the preserved document: English.
 <a id="tests"></a>
 <a id="cleanup"></a>
 <a id="re-run-after-rebasing-onto-1390-2026-09-24"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="homepage-gethomepagehomepaged1c1ee7a1ef0ab3d749fa59bed054632f26710dc"></a>
+<a id="uptime-kuma-louislamuptime-kumae62702d868a0b072c6e1870e5278762319637f04"></a>

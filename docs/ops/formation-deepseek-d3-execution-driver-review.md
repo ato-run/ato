@@ -12,3 +12,6 @@ Language of the preserved document: English.
 <a id="control-design"></a>
 <a id="cells-and-evidence"></a>
 <a id="offline-verification-not-live-integration"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="detected-mismatch-blocking-exact-request-evidence"></a>

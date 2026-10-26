@@ -12,3 +12,7 @@ Language of the preserved document: Japanese / English.
 <a id="ci"></a>
 <a id="実受入の継続条件"></a>
 <a id="実source受入と独立api--2026-10-04続報"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="native-loader-tool-fixture"></a>
+<a id="実source受入と独立api-2026-10-04続報"></a>

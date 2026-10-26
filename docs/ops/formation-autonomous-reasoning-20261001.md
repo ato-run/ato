@@ -16,3 +16,10 @@ Language of the preserved document: Japanese / English.
 <a id="実行pin証跡"></a>
 <a id="未完了未検証"></a>
 <a id="api費用と100件再測定"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="credential・変数の検証"></a>
+<a id="実oss・api測定"></a>
+<a id="実行pin・証跡"></a>
+<a id="接続異常・restart"></a>
+<a id="未完了・未検証"></a>

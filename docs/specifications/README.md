@@ -6,6 +6,13 @@ a maintainer decision. Do not infer the normative contract from merged code.
 
 ## Accepted specifications
 
+These RFCs describe the computation-root architecture. Their unqualified
+identity and CLI statements conflict with later portable-application code;
+[M1 and M2](../rfcs/draft/DOCUMENTATION_AUTHORITY_MISMATCHES.md) track that
+unresolved scope/adoption question. Do not apply those statements as a formal
+specification of the application profile. That profile's implementation
+contracts remain in the separate draft section below.
+
 | Specification | Owns |
 |---|---|
 | [Computation Architecture](../rfcs/accepted/COMPUTATION_ARCHITECTURE.md) | semantic values, canonical identity and Evolution |

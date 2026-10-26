@@ -1,8 +1,8 @@
 {
   "snapshot": "working-tree",
-  "markdown_files": 916,
-  "local_links_checked": 1642,
-  "external_links_not_fetched": 1060,
+  "markdown_files": 917,
+  "local_links_checked": 1678,
+  "external_links_not_fetched": 1067,
   "symbolic_links_not_resolved": 0,
   "failures_by_scope": {
     "historical": 33

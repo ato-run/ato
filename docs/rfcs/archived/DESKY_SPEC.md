@@ -1,5 +1,10 @@
 # Desky Product & Architecture Spec
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 **Status:** Draft v0.1
 **Last Updated:** 2026-04-05
 **Target:** Desky Phase 1 (Electron MVP), Phase 2 (Pure Rust + Wry)

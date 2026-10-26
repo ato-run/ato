@@ -15,3 +15,8 @@ Language of the preserved document: Japanese / English.
 <a id="language--source-shape分布"></a>
 <a id="原本hash状態"></a>
 <a id="ci"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="language-source-shape分布"></a>
+<a id="usage、cost、reservation"></a>
+<a id="原本・hash・状態"></a>

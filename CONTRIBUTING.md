@@ -5,10 +5,12 @@ and [Core Concepts](docs/concepts/application-contracts.md). Read
 [AGENTS.md](AGENTS.md) and the applicable component instructions before
 changing code. The workspace above this repository has additional instructions.
 
-Normal development integrates through `dev`; use a separate feature/fix branch
-and an independent PR. Check the current branch, HEAD, remote and worktree
-state. Preserve other tasks' uncommitted work. Main promotion is a separate
-release action, and merge permission does not imply deployment permission.
+Use a separate feature/fix branch and an independent PR. Check the current
+integration policy in the repository and owning workspace before selecting
+a base; legacy `dev` work and the newer `stg` release flow must not be confused.
+Check branch, HEAD, remote and worktree state, and preserve other tasks'
+uncommitted work. Main promotion requires a separately reviewed release
+candidate, and merge permission does not imply deployment permission.
 
 Check [accepted specs](docs/specifications/README.md) first. Reuse existing
 services, types, adapters and verifier authority. An important behavior lacking

@@ -14,3 +14,10 @@ Language of the preserved document: English.
 <a id="5-stop"></a>
 <a id="fail-closed-checks-no-silent-cpu-fallback"></a>
 <a id="status"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_1-diagnose-read-only-dockerless"></a>
+<a id="_2-provision-dockerless"></a>
+<a id="_3-run-a-vulkan-native-inference-capsule"></a>
+<a id="_4-verify"></a>
+<a id="_5-stop"></a>

@@ -14,3 +14,7 @@ Language of the preserved document: English.
 <a id="suites"></a>
 <a id="not-covered"></a>
 <a id="amendment-sibling-browser-sandbox-x86_64-apparmor-restricted-host"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="real-verifier-on-the-linux-runtime-ato-form-verify-browser-contained"></a>
+<a id="sandbox-tests-browser_verifier_containment_v1-real-node-chrome-oci"></a>

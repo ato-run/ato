@@ -12,3 +12,6 @@ Language of the preserved document: English.
 <a id="source-transport-and-cost-controls-verified"></a>
 <a id="c2-fixed-regression-all-15-groups-pass-again"></a>
 <a id="local-regressions--ci--limits"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="local-regressions-ci-limits"></a>

@@ -15,3 +15,7 @@ Language of the preserved document: English.
 <a id="local-verification"></a>
 <a id="delivery-state-and-next-boundary"></a>
 <a id="ci-observation-not-a-local-regression-result"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="not-implemented-not-verified-end-to-end"></a>
+<a id="roadmap-before-after"></a>

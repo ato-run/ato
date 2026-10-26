@@ -1,4 +1,5 @@
 status	path
+A	.github/workflows/docs-ci.yml
 A	CONTRIBUTING.md
 M	README.ja.md
 M	README.md
@@ -13,13 +14,17 @@ A	docs/archive/2026/README.md
 A	docs/archive/2026/documentation-reorganization/EVIDENCE-RETENTION.md
 A	docs/archive/2026/documentation-reorganization/PLAN.md
 A	docs/archive/2026/documentation-reorganization/REPORT.md
+A	docs/archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md
 A	docs/archive/2026/documentation-reorganization/VALIDATION.json
+A	docs/archive/2026/documentation-reorganization/ci-review.json
 A	docs/archive/2026/documentation-reorganization/duplicates.json
+A	docs/archive/2026/documentation-reorganization/external-references.json
 A	docs/archive/2026/documentation-reorganization/file-changes.tsv
 A	docs/archive/2026/documentation-reorganization/inventory.tsv
 A	docs/archive/2026/documentation-reorganization/link-audit-baseline.json
 A	docs/archive/2026/documentation-reorganization/link-audit.json
 A	docs/archive/2026/documentation-reorganization/moves.tsv
+A	docs/archive/2026/documentation-reorganization/onboarding-smoke.json
 A	docs/archive/2026/documentation-reorganization/security-review.json
 A	docs/archive/2026/legacy/MIGRATION_MATRIX.md
 A	docs/archive/2026/legacy/capsule-v1-migration.md
@@ -230,6 +235,7 @@ A	docs/archive/2026/ops/static-web-instance-state-lane.md
 A	docs/archive/2026/ops/step10-process-personal-app-acceptance.md
 A	docs/archive/2026/ops/trilium-notes-staging-2026-09-20.md
 M	docs/archive/README.md
+M	docs/archive/rfcs-legacy-accepted/ADR-005-secrets-management-architecture.md
 M	docs/archive/rfcs-legacy-accepted/CAPSULE_DEPENDENCY_CONTRACTS.md
 M	docs/archive/rfcs-legacy-accepted/NACELLE_SPEC.md
 M	docs/archive/rfcs-legacy-accepted/NACELLE_TERMINAL_SPEC.md
@@ -248,6 +254,7 @@ M	docs/archive/rfcs-legacy-draft/HASH_AND_PROVENANCE_POLICY.md
 M	docs/archive/rfcs-legacy-draft/LICENSE_SPEC.md
 M	docs/archive/rfcs-legacy-draft/REFACTOR_LAYER_PROPOSAL.md
 M	docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md
+M	docs/archive/rfcs-legacy-draft/run-install-semantics.md
 M	docs/capsule-v1-migration.md
 M	docs/capsule.md
 A	docs/concepts/application-contracts.md
@@ -265,12 +272,14 @@ A	docs/guides/derivation-transformation.md
 A	docs/guides/formation.md
 A	docs/guides/getting-started.md
 A	docs/guides/runner-hosting.md
+M	docs/index.html
 M	docs/internal/README.md
 M	docs/internal/dashboards/TODO.md
 M	docs/internal/dashboards/v0.5-readiness-dashboard.md
 M	docs/internal/plans/monorepo-consolidation-plan.md
 M	docs/internal/research/ato-runtime-boundary-what-can-run.md
 M	docs/internal/research/capsulize-vikunja-memos-libretranslate.md
+M	docs/internal/research/research_phase13a_sandbox_best_practices_20260429.md
 M	docs/internal/testing-isolation.md
 A	docs/operations/README.md
 A	docs/operations/formation-worker-build-identity.md
@@ -488,13 +497,16 @@ M	docs/ops/static-web-instance-state-lane.md
 M	docs/ops/step10-process-personal-app-acceptance.md
 M	docs/ops/trilium-notes-staging-2026-09-20.md
 M	docs/publishing-to-ato-store.md
+M	docs/ready-state/backend-matrix.md
 M	docs/rfcs/README.md
+M	docs/rfcs/_sidebar.md
 M	docs/rfcs/archived/CAPSULE_FORMAT_V2.md
 M	docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md
 M	docs/rfcs/archived/DESKY_SPEC.md
 M	docs/rfcs/archived/EXECUTION_IDENTITY_SPEC.md
 M	docs/rfcs/archived/IDENTITY_SPEC.md
 M	docs/rfcs/archived/MULTI_WEBVIEW_SPEC.md
+M	docs/rfcs/archived/STORE_WEB_SPEC.md
 M	docs/rfcs/archived/SYNC_SPEC.md
 M	docs/rfcs/archived/WASM_RUNTIME_SPEC.md
 A	docs/rfcs/draft/DOCUMENTATION_AUTHORITY_MISMATCHES.md
@@ -509,3 +521,4 @@ M	docs/theory/capsule-process-model.md
 M	extensions/providers/nacelle/README.md
 M	extensions/providers/nacelle/samples/simple-todo/README.md
 A	scripts/docs-audit.py
+A	scripts/docs-site-check.mjs
