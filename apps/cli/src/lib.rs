@@ -10,7 +10,6 @@ mod formation_verify;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;
-mod portable_attempt;
 mod portable_dependency;
 
 pub mod activity_client;
@@ -2902,6 +2901,20 @@ fn start_portable_attempt(
     use ato_runtime_attempt::build_sandbox::NetworkPolicy;
     use ato_runtime_attempt::journal::AttemptJournal;
 
+    // What this host, not the bundle, decides: where declared external
+    // objects are cached, and which executable applies a portable sandbox
+    // policy. The executor is shared with the hosted Formation worker, so
+    // these no longer come from the CLI's own globals.
+    let cache_root = ato_home()?.join("cache");
+    let sandbox_shim = std::env::current_exe()
+        .context("locate ato sandbox shim")?
+        .canonicalize()
+        .context("canonicalize ato sandbox shim")?;
+    let portable_run_context = ato_portable_application::portable_run::PortableRunContext {
+        cache_root: &cache_root,
+        sandbox_shim: &sandbox_shim,
+        sandbox_subcommand: "__portable-sandbox-exec",
+    };
     let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
     // A local Instance's Run is the attempt; `ato run` starts a new one.
     let fresh = format!(
@@ -2952,13 +2965,14 @@ fn start_portable_attempt(
             interrupt: shutdown,
             control: None,
         },
-        &portable_attempt::PortableBundleExecutor {
+        &ato_portable_application::portable_run::PortableBundleExecutor {
             bundle,
             validated,
             runtime_root,
             static_state: runtime_state.static_state,
             filesystem_state: runtime_state.filesystem_state,
             binding_environment,
+            context: &portable_run_context,
         },
         &AttemptJournal::new(ato_home()?.join("attempt-records")),
     );
@@ -3058,25 +3072,6 @@ fn start_portable_attempt(
     })
 }
 
-#[derive(Debug, Clone)]
-struct PortableStateMount {
-    id: String,
-    host_path: PathBuf,
-    guest_path: String,
-}
-
-#[derive(Debug, Clone)]
-struct PortableInputMount {
-    env_name: String,
-    host_path: PathBuf,
-    guest_path: String,
-}
-
-struct PortableProcessMounts<'a> {
-    state: &'a [PortableStateMount],
-    inputs: &'a [PortableInputMount],
-}
-
 #[derive(Default)]
 struct PortableRuntimeState<'a> {
     restored_snapshot_ref: Option<&'a str>,
@@ -3142,7 +3137,7 @@ impl PortableLocalRuntime {
     fn local_storage(&self) -> Result<Option<BTreeMap<String, String>>> {
         match self
             .live
-            .downcast_ref::<portable_attempt::PortableStaticCandidate>()
+            .downcast_ref::<ato_portable_application::portable_run::PortableStaticCandidate>()
         {
             Some(candidate) => candidate.local_storage(),
             None => Ok(None),
@@ -3159,425 +3154,6 @@ impl PortableLocalRuntime {
             None => Ok(()),
         }
     }
-}
-
-fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
-    if let Ok(output) = Command::new("uv")
-        .args(["python", "find", version])
-        .env("UV_PYTHON_DOWNLOADS", "never")
-        .output()
-        && output.status.success()
-    {
-        let path = String::from_utf8(output.stdout)?.trim().to_owned();
-        if !path.is_empty() {
-            let executable = executable_path(&path).unwrap_or_else(|| PathBuf::from(&path));
-            return verified_python(&executable.display().to_string(), version);
-        }
-    }
-    let provisioned_root = PathBuf::from("/opt/ato/toolchains/python");
-    if let Ok(entries) = std::fs::read_dir(&provisioned_root) {
-        let mut candidates = entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|candidate| {
-                candidate == version || candidate.starts_with(&format!("{version}."))
-            })
-            .collect::<Vec<_>>();
-        candidates.sort();
-        for candidate in candidates.into_iter().rev() {
-            let executable = provisioned_root.join(candidate).join("bin").join("python3");
-            if executable.is_file() {
-                return verified_python(&executable.display().to_string(), version);
-            }
-        }
-    }
-    for executable in ["python3", "python"] {
-        let Ok(output) = Command::new(executable).arg("--version").output() else {
-            continue;
-        };
-        let reported = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if output.status.success() && python_version_matches(&reported, version) {
-            let selected = executable_path(executable)
-                .unwrap_or_else(|| PathBuf::from(executable))
-                .display()
-                .to_string();
-            return verified_python(&selected, version);
-        }
-    }
-    bail!(
-        "selected derivation requires Python {version}; install that runtime with `uv python install {version}`"
-    )
-}
-
-fn executable_path(executable: &str) -> Option<PathBuf> {
-    let candidate = PathBuf::from(executable);
-    if candidate.components().count() > 1 && candidate.is_file() {
-        return Some(candidate);
-    }
-    std::env::var_os("PATH").and_then(|search| {
-        std::env::split_paths(&search)
-            .map(|directory| directory.join(executable))
-            .find(|path| path.is_file())
-    })
-}
-
-fn python_version_matches(reported: &str, required: &str) -> bool {
-    reported
-        .trim()
-        .strip_prefix("Python ")
-        .is_some_and(|actual| actual == required || actual.starts_with(&format!("{required}.")))
-}
-
-fn verified_python(executable: &str, version: &str) -> Result<(String, String)> {
-    let output = Command::new(executable)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("inspect selected Python executable {executable}"))?;
-    let reported = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if !output.status.success() || !python_version_matches(&reported, version) {
-        bail!(
-            "selected Python executable {executable} does not satisfy {version}: {}",
-            reported.trim()
-        );
-    }
-    let identity = Command::new(executable)
-        .args([
-            "-c",
-            "import os,sys; print(os.path.realpath(sys.executable))",
-        ])
-        .output()
-        .with_context(|| format!("resolve selected Python executable {executable}"))?;
-    let resolved = String::from_utf8(identity.stdout)?.trim().to_owned();
-    if !identity.status.success() || resolved.is_empty() || !PathBuf::from(&resolved).is_file() {
-        bail!("selected Python executable {executable} did not resolve to a file");
-    }
-    Ok((resolved, reported.trim().to_owned()))
-}
-
-fn resolve_portable_state_mounts(
-    route: &ValidatedPortableApplication,
-    runtime_root: &Path,
-    persistent: Option<&BTreeMap<String, PathBuf>>,
-) -> Result<Vec<PortableStateMount>> {
-    if let Some(persistent) = persistent
-        && persistent.len() != route.derivation.state.len()
-    {
-        bail!("local Instance filesystem state does not match the selected Derivation");
-    }
-    route
-        .derivation
-        .state
-        .iter()
-        .map(|state| {
-            let host_path = match persistent {
-                Some(paths) => paths.get(&state.id).cloned().with_context(|| {
-                    format!("local Instance filesystem state `{}` is missing", state.id)
-                })?,
-                None => {
-                    let path = runtime_root.join("state").join(&state.id);
-                    fs::create_dir_all(&path).with_context(|| {
-                        format!("create portable filesystem state {}", path.display())
-                    })?;
-                    path
-                }
-            };
-            let host_path = host_path.canonicalize().with_context(|| {
-                format!(
-                    "canonicalize portable filesystem state {}",
-                    host_path.display()
-                )
-            })?;
-            if !host_path.is_dir() {
-                bail!(
-                    "portable filesystem state `{}` is not a directory",
-                    state.id
-                );
-            }
-            Ok(PortableStateMount {
-                id: state.id.clone(),
-                host_path,
-                guest_path: state.mount.clone(),
-            })
-        })
-        .collect()
-}
-
-fn portable_process_sandbox_command(
-    workspace: &std::path::Path,
-    runtime_root: &std::path::Path,
-    executable: &str,
-    workload: &[String],
-    host_port: u16,
-    working_dir: &str,
-    mounts: PortableProcessMounts<'_>,
-) -> Result<Vec<String>> {
-    let state_mounts = mounts.state;
-    let input_mounts = mounts.inputs;
-    #[cfg(not(target_os = "linux"))]
-    let _ = working_dir;
-    let workspace = workspace
-        .canonicalize()
-        .context("canonicalize portable workspace")?;
-    let runtime_root = runtime_root
-        .canonicalize()
-        .context("canonicalize portable runtime directory")?;
-    let executable = PathBuf::from(executable)
-        .canonicalize()
-        .with_context(|| format!("canonicalize portable runtime {executable}"))?;
-    let interpreter_root = executable
-        .parent()
-        .and_then(std::path::Path::parent)
-        .context("portable runtime has no readable installation root")?
-        .to_path_buf();
-    if !state_mounts.is_empty() {
-        #[cfg(target_os = "linux")]
-        {
-            return portable_process_bwrap_command(
-                &workspace,
-                &runtime_root,
-                &interpreter_root,
-                workload,
-                host_port,
-                working_dir,
-                mounts,
-            );
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            bail!(
-                "local process runtime admission failed: declared filesystem state requires a Linux bubblewrap sandbox"
-            );
-        }
-    }
-    let system_roots = [
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/lib",
-        "/lib64",
-        "/etc",
-        "/dev",
-        "/proc",
-        "/System",
-        "/Library",
-        "/private/var/db",
-        "/opt",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .filter(|path| path.exists());
-    let policy = SandboxPolicy::new()
-        .allow_read_write([runtime_root.clone()])
-        .allow_read_only(
-            [workspace, interpreter_root]
-                .into_iter()
-                .chain(system_roots)
-                .chain(input_mounts.iter().map(|input| input.host_path.clone())),
-        )
-        .with_network(false)
-        .allow_tcp_bind([host_port]);
-    let policy_path = runtime_root.join("sandbox-policy.json");
-    fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
-        .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
-    let shim = std::env::current_exe()
-        .context("locate ato sandbox shim")?
-        .canonicalize()
-        .context("canonicalize ato sandbox shim")?;
-    let mut command = vec![
-        shim.display().to_string(),
-        "__portable-sandbox-exec".to_owned(),
-        "--policy".to_owned(),
-        policy_path.display().to_string(),
-        "--".to_owned(),
-    ];
-    command.extend(workload.iter().cloned());
-    Ok(command)
-}
-
-#[cfg(target_os = "linux")]
-fn portable_process_bwrap_command(
-    workspace: &Path,
-    runtime_root: &Path,
-    interpreter_root: &Path,
-    workload: &[String],
-    host_port: u16,
-    working_dir: &str,
-    mounts: PortableProcessMounts<'_>,
-) -> Result<Vec<String>> {
-    let state_mounts = mounts.state;
-    let input_mounts = mounts.inputs;
-    let bwrap = executable_path("bwrap")
-        .context("local process runtime admission failed: `bwrap` is not on PATH")?;
-    let shim = std::env::current_exe()
-        .context("locate ato sandbox shim")?
-        .canonicalize()
-        .context("canonicalize ato sandbox shim")?;
-    let guest_working_dir = if working_dir == "." {
-        "/app".to_owned()
-    } else {
-        format!("/app/{working_dir}")
-    };
-    let policy = SandboxPolicy::new()
-        .allow_read_write(
-            state_mounts
-                .iter()
-                .map(|state| PathBuf::from(&state.guest_path))
-                .chain([PathBuf::from("/tmp")]),
-        )
-        .allow_read_only(
-            [
-                PathBuf::from("/app"),
-                PathBuf::from("/.ato"),
-                interpreter_root.to_path_buf(),
-                PathBuf::from("/usr"),
-                PathBuf::from("/bin"),
-                PathBuf::from("/sbin"),
-                PathBuf::from("/lib"),
-                PathBuf::from("/lib64"),
-                PathBuf::from("/etc"),
-                PathBuf::from("/dev"),
-                PathBuf::from("/proc"),
-            ]
-            .into_iter()
-            .chain(
-                input_mounts
-                    .iter()
-                    .map(|input| PathBuf::from(&input.guest_path)),
-            ),
-        )
-        .with_network(false)
-        .allow_tcp_bind([host_port]);
-    let policy_path = runtime_root.join("sandbox-policy.json");
-    fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
-        .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
-
-    let mut command = vec![
-        bwrap.display().to_string(),
-        "--unshare-all".to_owned(),
-        "--share-net".to_owned(),
-        "--die-with-parent".to_owned(),
-        "--new-session".to_owned(),
-        "--proc".to_owned(),
-        "/proc".to_owned(),
-        "--dev".to_owned(),
-        "/dev".to_owned(),
-        "--tmpfs".to_owned(),
-        "/tmp".to_owned(),
-    ];
-    for (source, target, required) in [
-        ("/bin", "/bin", false),
-        ("/sbin", "/sbin", false),
-        ("/lib", "/lib", false),
-        ("/lib64", "/lib64", false),
-        ("/usr", "/usr", true),
-        ("/etc/resolv.conf", "/etc/resolv.conf", false),
-        ("/etc/hosts", "/etc/hosts", false),
-        ("/etc/ssl", "/etc/ssl", false),
-    ] {
-        command.extend([
-            if required {
-                "--ro-bind"
-            } else {
-                "--ro-bind-try"
-            }
-            .to_owned(),
-            source.to_owned(),
-            target.to_owned(),
-        ]);
-    }
-    if !interpreter_root.starts_with("/usr") {
-        command.extend([
-            "--ro-bind".to_owned(),
-            interpreter_root.display().to_string(),
-            interpreter_root.display().to_string(),
-        ]);
-    }
-    command.extend([
-        "--ro-bind".to_owned(),
-        workspace.display().to_string(),
-        "/app".to_owned(),
-    ]);
-    for state in state_mounts {
-        command.extend([
-            "--bind".to_owned(),
-            state.host_path.display().to_string(),
-            state.guest_path.clone(),
-        ]);
-    }
-    if !input_mounts.is_empty() {
-        command.extend(["--dir".to_owned(), "/ato-inputs".to_owned()]);
-    }
-    for input in input_mounts {
-        command.extend([
-            "--ro-bind".to_owned(),
-            input.host_path.display().to_string(),
-            input.guest_path.clone(),
-        ]);
-    }
-    command.extend([
-        "--dir".to_owned(),
-        "/.ato".to_owned(),
-        "--ro-bind".to_owned(),
-        shim.display().to_string(),
-        "/.ato/ato".to_owned(),
-        "--ro-bind".to_owned(),
-        policy_path.display().to_string(),
-        "/.ato/sandbox-policy.json".to_owned(),
-        "--chdir".to_owned(),
-        guest_working_dir,
-        "/.ato/ato".to_owned(),
-        "__portable-sandbox-exec".to_owned(),
-        "--policy".to_owned(),
-        "/.ato/sandbox-policy.json".to_owned(),
-        "--".to_owned(),
-    ]);
-    command.extend(workload.iter().cloned());
-    Ok(command)
-}
-
-fn endpoint_port_env_name(port_id: &str) -> String {
-    format!(
-        "ATO_ENDPOINT_{}_PORT",
-        port_id
-            .chars()
-            .map(|character| if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    )
-}
-
-fn state_path_env_name(state_id: &str) -> String {
-    format!(
-        "ATO_STATE_PATH_{}",
-        state_id
-            .chars()
-            .map(|character| if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    )
-}
-
-fn parse_runtime_limit(runtimes: &BTreeMap<String, String>, key: &str) -> Result<u64> {
-    runtimes
-        .get(key)
-        .with_context(|| format!("OCI route omitted {key}"))?
-        .parse()
-        .with_context(|| format!("OCI route has invalid {key}"))
 }
 
 fn open_browser(url: &str) -> Result<()> {
