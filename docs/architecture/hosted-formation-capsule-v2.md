@@ -1,5 +1,8 @@
 # Hosted Formation of `ato.capsule/2` sources (Gate A)
 
+> Implementation explanation with dated measurements. Language: en.
+> This page does not adopt a specification or certify current deployment.
+
 - Issue: ato#1570. Design spike: `.tmp/1570-20261026/DESIGN-SPIKE.md` (working notes).
 - Branch: `feat/1570-hosted-formation-capsule-v2`, based on `dev` `287fe65ef`.
 - Status: **Gate A implemented and measured locally on Linux.** Gate B (executing

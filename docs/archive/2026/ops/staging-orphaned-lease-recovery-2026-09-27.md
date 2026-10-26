@@ -1,5 +1,8 @@
 # Staging orphaned lease recovery — 2026-09-27
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Symptom
 
 The portable Trilium App (`cinst_01M2YH7FDA5Q37911BKY5C10BF`,

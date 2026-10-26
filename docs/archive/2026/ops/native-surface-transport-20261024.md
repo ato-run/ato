@@ -1,5 +1,8 @@
 # Native transport acceptance — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This test connects the real guest Agent PTY (PR #1512) and real TigerVNC to
 the common `ato-native-surface-gateway` (PR #1507), with the execution-scoped
 per-Runner assertion boundary from #1511. It does not issue a Contract receipt.

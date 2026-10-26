@@ -1,5 +1,8 @@
 # Formation 5a-b — finite exploration actions verification ledger (2026-09-26)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Implementation ledger, not a deployment record. Design: ADR-036. No deploy,
 remote migration (0302), feature flag, workflow change or CI rerun.
 

@@ -1,5 +1,8 @@
 # B1 Formation Service v1 — acceptance closeout
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Status: B1 implementation and acceptance are COMPLETE. B1 rollout is NOT.**
 
 These are different claims and this document keeps them apart:
@@ -16,7 +19,7 @@ After this record, B1 is closed. Further work on Formation is a new,
 explicitly-scoped change — not "adding to B1".
 
 The detailed evidence lives in
-[`b1-formation-staging-acceptance.md`](./b1-formation-staging-acceptance.md);
+[`b1-formation-staging-acceptance.md`](b1-formation-staging-acceptance.md);
 this is the record you read first.
 
 ---

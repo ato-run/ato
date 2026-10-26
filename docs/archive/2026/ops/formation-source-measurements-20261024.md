@@ -1,5 +1,8 @@
 # Formation source measurement evidence — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Branch: `feat/formation-source-measured-receipt`.
 Base: Draft Rust #1517, `feat/bounded-github-source-fetch`,
 `e226642544195d59e4b1f391bd4b7a8c96783d86`.
@@ -13,7 +16,7 @@ against the actual file rather than using only the acquired digest as expectatio
 No extra fetch, archive-sized allocation, storage upload, receipt schema, dependency
 or sidecar was introduced. K/D/closure algorithms and old golden bytes are intact.
 
-See [contract and detected mismatch](../rfcs/draft/FORMATION_SOURCE_MEASUREMENTS.md).
+See [contract and detected mismatch](../../../rfcs/draft/FORMATION_SOURCE_MEASUREMENTS.md).
 The removed legacy snapshot SourceMaterializationReceipt producer is not restored.
 Actual `ato.source-resolver.v1/v2` measurements are never aliased to the historical
 `ato.capsule-program-source-projection/v1` identity. The receiving API must accept

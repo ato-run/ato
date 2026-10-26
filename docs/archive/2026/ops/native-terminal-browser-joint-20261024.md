@@ -1,5 +1,8 @@
 # Owned Terminal browser joint acceptance — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Scope and source
 
 This is a test-only joint fixture: real Chrome and the production PWA xterm

@@ -51,6 +51,14 @@ it does not approve a draft or attest to deployment.
 
 ## Validation and delivery
 
+Plan refinement after command verification: five apparent host runbooks
+(`connected-runner-max-slots`, `native-inference-vulkan-gpu-runbook`,
+`sglang-cuda-host`, `pocketllm-demo-host`, `staging-snapshot-builder-sugamo`)
+invoke the retired `ato runner` surface. Archive them alongside the other
+historical ops records instead of promoting them as current procedures.
+The final `moves.tsv` and inventory reflect five current operating procedures,
+two architecture pages, and 208 archived pages (215 moves total).
+
 - Compare local Markdown paths and heading fragments before and after the
   change, including compatibility anchors. Repair active navigation; catalogue
   unresolved historical references without inventing replacement evidence.

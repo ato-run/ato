@@ -1,5 +1,8 @@
 # B1 Formation — staging acceptance record
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Executed 2026-09-03 against real staging. No fake control plane: real
 `staging.api.ato.run`, real D1, real R2, real `runner_leases`, a real Connected
 Realization Worker and a real build sandbox on `ubuntu-sugamo`.

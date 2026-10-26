@@ -38,10 +38,10 @@ specification is separately renamed and re-audited.
 
 Two formerly accepted documents are no longer active authorities:
 
-- [Capsule Artifact Format v2](../archived/CAPSULE_FORMAT_V2.md) defines a
+- [Capsule Artifact Format v2](../../rfcs/archived/CAPSULE_FORMAT_V2.md) defines a
   legacy Ato distribution artifact whose layout conflicts with Protocol Bundle
   v1.
-- [Capsule v1 Execution Identity and Snapshot Model](../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
+- [Capsule v1 Execution Identity and Snapshot Model](../../rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
   is superseded by the Semantic Core and remains only as an implementation-
   compatibility reference.
 

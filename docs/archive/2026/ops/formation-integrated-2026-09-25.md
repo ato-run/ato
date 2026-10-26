@@ -1,5 +1,8 @@
 # Formation sequential integration — 2026-09-25
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 One sequential track inherited existing verification, completed 2e-b, then
 3c-b, then integrated them. No second parallel track/task was created.
 Implementation and targeted Linux integration are complete; the full Chrome
@@ -48,8 +51,8 @@ See [2e-b comparison](formation-2e-b-ownership-2026-09-25.md).
 ## Source transport boundary
 
 See [3c-b evidence](runtime-network-3c-b-2026-09-25.md), its
-[receipt/attempt JSON](runtime-network-3c-b-2026-09-25.json), and
-[ADR-032](../rfcs/draft/ADR-032-runtime-network-source-objects.md).
+[receipt/attempt JSON](../../../ops/runtime-network-3c-b-2026-09-25.json), and
+[ADR-032](../../../rfcs/draft/ADR-032-runtime-network-source-objects.md).
 Archive byte SHA-256 is transport identity; resolver tree closure is source
 identity. Ready requires actual stored size/hash verification. Owner grant,
 assigned Runtime, claim, expiry and fence authorize source access, not digest
@@ -118,7 +121,7 @@ follow-up, not an unlimited-object loophole.
 
 ## Cleanup and remaining work
 
-[Cleanup audit](formation-integrated-cleanup-2026-09-25.json): no owned
+[Cleanup audit](../../../ops/formation-integrated-cleanup-2026-09-25.json): no owned
 workload/Chrome/Coordinator processes remained; all baseline/branch scratch
 and all Runtime/Requester work directories were empty. Dedicated local
 Coordinator and SSH tunnel were stopped; newly generated token files were
@@ -138,7 +141,7 @@ is claimed.
 
 The source-only follow-up is recorded separately in
 [hardening acceptance](runtime-network-3c-b-hardening-2026-09-25.md) and its
-[JSON evidence](runtime-network-3c-b-hardening-2026-09-25.json). At baseline
+[JSON evidence](../../../ops/runtime-network-3c-b-hardening-2026-09-25.json). At baseline
 `2a5d0bf9`, a PAX size of 65536 with ordinary size 0 bypassed the 1 KiB cap:
 64 KiB was materialized while usage reported zero. Adding a large GNU longname
 after that file also bypassed the raw metadata scan, reaching the cooked path

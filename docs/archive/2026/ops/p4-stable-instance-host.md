@@ -1,5 +1,8 @@
 # P4 — Stable Instance Host, automatic wake/sleep, and Schema Update
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Status: implemented and unit-verified. NOT yet verified end to end from a
 browser.** The blocking step is named at the bottom.
 

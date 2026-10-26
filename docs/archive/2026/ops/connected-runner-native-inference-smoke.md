@@ -1,5 +1,8 @@
 # Connected Runner native-inference smoke (#754 gate)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 A repeatable, on-demand smoke that verifies a native-inference capsule
 (`ato-run/local-llm-chat`) runs on a **Connected Runner** through the
 `#149`/`#763` contract. This is the **final gate for #754** (Store/community
@@ -7,7 +10,7 @@ registration) — register the capsule only after this is GREEN.
 
 It makes no production changes: it dispatches **one** run and stops it.
 
-- Script: [`scripts/smoke-connected-native-inference.sh`](../../scripts/smoke-connected-native-inference.sh)
+- Script: [`scripts/smoke-connected-native-inference.sh`](../../../../scripts/smoke-connected-native-inference.sh)
 - Manual workflow: `.github/workflows/connected-native-inference-smoke.yml`
   (`workflow_dispatch` only — never runs on push/PR)
 

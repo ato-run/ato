@@ -1,7 +1,10 @@
 # Formation 5b-b — bounded source evidence acceptance
 
-Date: 2026-09-27. [Machine-readable ledger](formation-generation-context-2026-09-27.json).
-Design: [ADR-038](../rfcs/draft/ADR-038-formation-generation-context.md).
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
+Date: 2026-09-27. [Machine-readable ledger](../../../ops/formation-generation-context-2026-09-27.json).
+Design: [ADR-038](../../../rfcs/draft/ADR-038-formation-generation-context.md).
 
 ## Status and stack
 

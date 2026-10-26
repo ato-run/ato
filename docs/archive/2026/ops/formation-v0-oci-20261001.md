@@ -1,5 +1,8 @@
 # Formation v0 OCI proposal integration — 2026-10-01
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Depends on the control change in Ato #1453. The fixed merged main remains
 `8fca0f4b78b1bed92eae21823e5c5f7207058271`.
 

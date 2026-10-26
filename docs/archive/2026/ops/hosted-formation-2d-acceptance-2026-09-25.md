@@ -1,5 +1,8 @@
 # Hosted common attempt: stage 2d acceptance
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Based on main `722f07610365d96d2432dbde29439e8c217c94e6`. Network receipt
 WASM stage 3a is an independent PR. API v1/v2 receiver: ato-api#688; that receiver
 must be available before v2 worker rollout. No deployment or migration was done.

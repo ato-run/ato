@@ -1,5 +1,8 @@
 # Single OCI Model Set profile acceptance — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: a5f3105849d467fd7cfcc57975ff1e9fdf74ac54.
 Branch: feat/portable-oci-model-inputs. API companion: fix/oci-model-data-admission.
 

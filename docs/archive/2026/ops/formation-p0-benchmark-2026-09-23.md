@@ -1,5 +1,8 @@
 # P0 20 Apps Formation Benchmark — baseline (2026-09-23)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Machine-readable: `formation-p0-benchmark-2026-09-23.json` (same directory).
 
 ## Result in one paragraph

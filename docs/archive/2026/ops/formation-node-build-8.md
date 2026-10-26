@@ -1,5 +1,8 @@
 # Formation 6b-A — canonical Node build route and eight-app remeasurement
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## State and exact pins
 
 - Docs correspondence #1439: head `d626202de2320779de9538cbf6c2044bf8654d0a`,
@@ -23,7 +26,7 @@
 
 ## Canonical route / authority
 
-[Versioned contract](../rfcs/draft/FORMATION_NODE_STATIC_V2.md).
+[Versioned contract](../../../rfcs/draft/FORMATION_NODE_STATIC_V2.md).
 `node-static/v1` remains npm; old canonical K/D and execution-plan goldens pass.
 The separate `node-static/v2` known-D frontend emits exact Node + pnpm/Yarn
 requirements and explicit typed `process exec install → exec build → browser
@@ -67,7 +70,7 @@ path on isolated Linux with a fresh target directory and clean pinned source.
 All archive hashes were checked before the first invocation. Producer and
 DecisionProvider OFF, network denied, max attempts 4, no app-specific D.
 Full repo/ref/archive hashes, raw observations and binary hashes are in
-[JSON ledger](formation-node-build-8.json); [plan](formation-node-build-8-plan.json).
+[JSON ledger](../../../ops/formation-node-build-8.json); [plan](../../../ops/formation-node-build-8-plan.json).
 
 Every old terminal was `preset_node_static_needs_lockfile`:
 

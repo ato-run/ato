@@ -1,9 +1,12 @@
 # D3 v2 live acceptance — 5b completion
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Executed 2026-09-29 UTC. **G0–G5 all PASS**, six DeepSeek calls, zero retries,
 zero fallback, no prompt/fixture/model changes. This closes **5b: bounded
 general-LLM Candidate Generation integration**, not general efficacy or rollout.
-The paired [JSON ledger](formation-deepseek-d3-results.json) contains exact
+The paired [JSON ledger](../../../ops/formation-deepseek-d3-results.json) contains exact
 RequestEvidence, raw assistant bytes/hash, provenance, usage, outcomes, D refs,
 attempt IDs, Runtime IDs and actual Verifier receipts.
 

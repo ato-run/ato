@@ -1,5 +1,8 @@
 # Formation 6b-E — current-main 100-app preregistration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Preregistered; no current-wave app measurement at this commit.** No capability change.
 
 Ato `e494e9375cf1151fc2884d545047dfbdad52c2cc`; API `dcc3049a69051ed6d1c7819580ed1e171815c34c`. Both live main pins matched the expected values. #1449 merge is the Ato pin. Historical `c4c285f3` results and the original 50 source/license identities remain unchanged.
@@ -10,7 +13,7 @@ One Linux/aarch64 local Runtime, Ubuntu 24.04.4 LTS, rustc/Cargo 1.96.0, bwrap+l
 
 A source normalized; B K; C D; D admitted/start evidence; E actual realization; F actual Rust Verifier; G fresh fully_satisfied same-K/D receipt; H retained ref plus physical hash inventory. I is unmeasured in this wave. An HTTP 200 is not functional acceptance. The earlier 2048/reveal.js append stays separate.
 
-Primary classes and their precedence are fixed in [classify-100.py](../../scripts/acceptance/coverage/classify-100.py). CandidateProducer-solvable remains a separate false/unknown/true hypothesis, never a primary class. Source errors map to adapter; network_denied maps to effect/policy. All raw errors/timeouts are retained and explained, never silently converted to success. Infra reruns require independent confirmation; app-terminal reruns are forbidden.
+Primary classes and their precedence are fixed in [classify-100.py](../../../../scripts/acceptance/coverage/classify-100.py). CandidateProducer-solvable remains a separate false/unknown/true hypothesis, never a primary class. Source errors map to adapter; network_denied maps to effect/policy. All raw errors/timeouts are retained and explained, never silently converted to success. Infra reruns require independent confirmation; app-terminal reruns are forbidden.
 
 Historical comparison records terminal, K/D refs, execution, receipt and retention; unchanged / diagnostic_refinement / reach_improvement / regression / newly_verified. Findings do not trigger repairs in this wave. No deploy, migration, credential reread or #1421 change. Future model reservation 4,513,388 USD micros is unused.
 
@@ -81,7 +84,7 @@ GitHub canonically redirects `lynn/hello-wordl` to `lynn/hello`; the returned re
 | 99 | [Radarr](https://github.com/Radarr/Radarr) | `develop` | `c90668a52066` | GPL-3.0 | C# | dotnet-service | yes |
 | 100 | [Sonarr](https://github.com/Sonarr/Sonarr) | `v5-develop` | `a8a82905e7ce` | GPL-3.0 | C# | dotnet-service | yes |
 
-Full commits, archive SHA256, license file SHA256, Dockerfile paths, manifests and layout basis are in [plan JSON](formation-coverage-100-plan.json). Existing 50 identities are copied from the unchanged 20/50 plans; no historical result is added to the new denominator.
+Full commits, archive SHA256, license file SHA256, Dockerfile paths, manifests and layout basis are in [plan JSON](../../../ops/formation-coverage-100-plan.json). Existing 50 identities are copied from the unchanged 20/50 plans; no historical result is added to the new denominator.
 
 Source-to-OCI exists as generic capability (#1446/#1448), not automatic baseline coverage. WBO remains image/artifact PASS with start refused and C/D/E unreached. Vikunja remains unexecuted. Neither contributes a success to this wave.
 

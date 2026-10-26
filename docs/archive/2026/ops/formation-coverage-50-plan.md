@@ -1,12 +1,15 @@
 # Formation 6b-C — 20 → 50 coverage preregistration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: **measurement designed, preregistered**. The 30 new apps were chosen,
 pinned and license-reviewed before any Formation result for them was seen.
 Not yet measured at this commit.
 
 - Measurement code: merged main `c4c285f3` (#1441). Only harness/docs differ;
   the harness refuses to run if any Rust source differs from that pin.
-- Original 20: [6a plan](formation-coverage-20-plan.json) unchanged (same
+- Original 20: [6a plan](../../../ops/formation-coverage-20-plan.json) unchanged (same
   archives, hashes re-checked). The 6a ledger is not overwritten.
 - Policy: existing `coverage_baseline` → `local::run`, Contract inferred from
   source (authored `capsule.toml` or existing presets), CandidateProducer OFF,
@@ -60,7 +63,7 @@ Not yet measured at this commit.
 
 Expected shapes come from prior knowledge of each project, not Formation
 output. Full refs, archive/license hashes, framework family and rationale are
-in [JSON](formation-coverage-50-plan.json). Distribution (new 30): static 2,
+in [JSON](../../../ops/formation-coverage-50-plan.json). Distribution (new 30): static 2,
 Vite/static frontend 3, workspace frontend 1, Node service 3, Node monorepo 1,
 Python simple 1, Python web 2, Python AI 2, Go 5, Rust 2, multi-service 4,
 PHP 2, JVM 1, .NET 1. Quotas were not forced.

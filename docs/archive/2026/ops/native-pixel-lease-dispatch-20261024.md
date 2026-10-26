@@ -1,5 +1,8 @@
 # Default-off owned Pixel lease dispatch — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This child of #1530 connects the existing connected Runner lease actor to the
 owned GUI producer. No shared Runner installation, flag change, staging
 execution, paid GPU, operator API key or production operation was performed.

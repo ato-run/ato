@@ -30,13 +30,13 @@ Capsule C42
 ├─ source reconstruction
 ├─ process checkpoint         (model/future)
 ├─ container checkpoint       (model/future)
-├─ VM snapshot                (model/future)
+├─ VM snapshot                (backend-specific implementation)
 └─ remote live state          (model/future)
 ```
 
 The Capsule identity and Materialization identity are separate. Adding,
 replacing, or removing a compatible Materialization does not create a new
-Capsule — Replay reconstructing `C42` and a hypothetical future VM-snapshot
+Capsule — Replay reconstructing `C42` and a compatible VM-snapshot
 restore of `C42` would both be *the same Capsule*, realized two different
 ways. Conversely, two artifacts with similar bytes do not prove that they
 realize the same Capsule.
@@ -62,13 +62,15 @@ type in the current codebase.
 
 ## Current implementation
 
-- `ato.replay@1` is restore-capable and reconstructs a target — such as
-  `C42` — by applying the required Record chain through live Adapters. This
-  is what powers `ato run build-error.capsule` in the README example today.
-- `ato.snapshot@1` captures and verifies a workspace/filesystem artifact with
-  an exact host compatibility contract. It is currently verify-only — it
-  cannot yet restore a point on its own.
-- General process checkpoints, VM snapshots, cross-host resume, and automatic
-  equivalence between heterogeneous Materializations are model/future work.
+- Replay is restore-capable through live Adapters and verified Record chains.
+- Workspace snapshot materializers capture and verify artifacts; their restore
+  capability remains verify-only.
+- The generic VM snapshot materializer reports restore support through an
+  injected backend and RunnerCapabilities. This does not prove arbitrary host,
+  process or distributed capture support.
+- Portable Instance snapshots use a separate bounded saved-data profile.
 
-See the accepted [Materialization RFC](../rfcs/accepted/MATERIALIZATION.md).
+See [Snapshot materialization](../snapshot.md) for code references and current
+limits. The accepted [Materialization RFC](../rfcs/accepted/MATERIALIZATION.md)
+remains the computation-root authority; implementation-track VM/portable
+contracts are still drafts.

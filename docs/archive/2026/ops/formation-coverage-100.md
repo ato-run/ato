@@ -1,5 +1,8 @@
 # Formation 6b-E — current-main 100-app measurement
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Measured **100/100 actual terminals**, **7 fresh typed-K PASS**, **0 new functional acceptances**, and **0 observed regressions**.
 The completion gate counts measured outcomes. It does not establish 100 usable applications or a functional success rate.
 
@@ -7,7 +10,7 @@ The completion gate counts measured outcomes. It does not establish 100 usable a
 
 - ato: `e494e9375cf1151fc2884d545047dfbdad52c2cc` (main observed and frozen before the wave)
 - ato-api: `dcc3049a69051ed6d1c7819580ed1e171815c34c`; #1449 merge: `e494e9375cf1151fc2884d545047dfbdad52c2cc`
-- Preregistration: `b9737c173cbdbb1005b8fa6fec301a599ee30ce4`, pushed before the first invocation; [100 identities and source/license hashes](formation-coverage-100-plan.json), [selection rationale](formation-coverage-100-plan.md)
+- Preregistration: `b9737c173cbdbb1005b8fa6fec301a599ee30ce4`, pushed before the first invocation; [100 identities and source/license hashes](../../../ops/formation-coverage-100-plan.json), [selection rationale](formation-coverage-100-plan.md)
 - Started: `2026-09-30T04:09:10.411590+00:00`; completed: `2026-09-30T04:21:18.050733+00:00`
 - Host: oci-linux-test, Ubuntu 24.04.4, Linux/aarch64, Rust/Cargo 1.96.0, local bwrap+landlock, toolchains `/opt/ato/toolchains`
 - Disk available: 128,212,877,312 → 128,143,462,400 bytes; preregistered minimum 64 GiB
@@ -126,19 +129,19 @@ Progress is compared per app, not by adding old 50 results to new 50. Ref-only/d
 
 ## Generic capability history and remaining work
 
-#1446/#1448 provide generic explicit source-to-OCI isolation/materialization. They were not invoked by this automatic baseline. WBO image build and verified OCI artifact PASS remain separate; start stops at runtime_policy_capability_required, C/D/E unreached, functional 0. Vikunja remains preregistered and unexecuted; its prerequisite blocker is not a build failure. [Historical append](formation-coverage-50-source-oci-append.json).
+#1446/#1448 provide generic explicit source-to-OCI isolation/materialization. They were not invoked by this automatic baseline. WBO image build and verified OCI artifact PASS remain separate; start stops at runtime_policy_capability_required, C/D/E unreached, functional 0. Vikunja remains preregistered and unexecuted; its prerequisite blocker is not a build failure. [Historical append](../../../ops/formation-coverage-50-source-oci-append.json).
 
 Regressions to fix: 0. No capabilities or regressions were fixed in this measurement PR. The measured distribution informs whether to proceed to 6c or separately address one generic blocker. No implementation choice is made here.
 
 ## Evidence and status
 
-[Machine ledger](formation-coverage-100.json), [raw manifest](evidence/formation-coverage-100-20260930/raw-manifest.json), [raw evidence archive](evidence/formation-coverage-100-20260930/raw-evidence.tar.gz). The archive preserves stdout/stderr, each typed result, attempt journals, fresh receipts, retained bundle manifests/inventories, start times, process results, build log and source-identity check. Full frozen sources, bundles and state remain on the measurement host.
+[Machine ledger](../../../ops/formation-coverage-100.json), [raw manifest](../../../ops/evidence/formation-coverage-100-20260930/raw-manifest.json), [raw evidence archive](../../../ops/evidence/formation-coverage-100-20260930/raw-evidence.tar.gz). The archive preserves stdout/stderr, each typed result, attempt journals, fresh receipts, retained bundle manifests/inventories, start times, process results, build log and source-identity check. Full frozen sources, bundles and state remain on the measurement host.
 
 Raw results SHA256: `af90c583c64529aa1909d9ce7135643ea6d3236f543a9a1720e997f805de2fe9`. Evidence archive SHA256: `890ec59520ccb37ce789b8e5d5c0fa5c9e28c406b52a4a1daa5d6521608a330a`.
 
 No infra failures, untyped failures, hard timeouts or reruns. All 100 terminals are classified. No host-wide prune or state/evidence deletion.
 
-CI is not assumed green. At exact base `e494e937`, Windows Rust compilation fails on Unix-only browser_sandbox APIs and Ubuntu fails `hosted_python_and_node_use_the_common_process_runtime` at `runtime_cannot_contain_build`. [Base CI snapshot and log hashes](evidence/formation-coverage-100-20260930/ci-base.json) and [logs](evidence/formation-coverage-100-20260930/ci-base-evidence.tar.gz) preserve that evidence. macOS was still running in the snapshot. Head checks require live PR inspection; no unobserved head failure is called base-reproduced. Rust/Cargo/workflow code is unchanged in this PR.
+CI is not assumed green. At exact base `e494e937`, Windows Rust compilation fails on Unix-only browser_sandbox APIs and Ubuntu fails `hosted_python_and_node_use_the_common_process_runtime` at `runtime_cannot_contain_build`. [Base CI snapshot and log hashes](../../../ops/evidence/formation-coverage-100-20260930/ci-base.json) and [logs](../../../ops/evidence/formation-coverage-100-20260930/ci-base-evidence.tar.gz) preserve that evidence. macOS was still running in the snapshot. Head checks require live PR inspection; no unobserved head failure is called base-reproduced. Rust/Cargo/workflow code is unchanged in this PR.
 
 - Implemented: no new Formation capability; preregistered measurement/reporting scripts only.
 - Measured: 100 upstream applications, one current code/policy/runtime condition.

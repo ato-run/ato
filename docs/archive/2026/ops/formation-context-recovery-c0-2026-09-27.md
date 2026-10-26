@@ -1,9 +1,12 @@
 # Formation 5b-c0 — offline bounded information recovery
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: `c9fc25fea5ed474c3d24ab64750645190b0f608a` (fetched origin/main).
 Branch: `feat/formation-context-recovery-c0`.
-Design: [ADR-039](../rfcs/draft/ADR-039-formation-context-recovery.md).
-Machine-readable observations: [offline cells](formation-context-recovery-c0-2026-09-27.json).
+Design: [ADR-039](../../../rfcs/draft/ADR-039-formation-context-recovery.md).
+Machine-readable observations: [offline cells](../../../ops/formation-context-recovery-c0-2026-09-27.json).
 
 ## State separation
 

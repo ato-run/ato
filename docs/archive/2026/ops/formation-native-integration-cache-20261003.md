@@ -1,5 +1,8 @@
 # Formation統合SourceとCargo targetの照合
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定IDは `formation-native-integration-cache-20261003-01`。2026-10-03、macOS arm64、Rust 1.96.0。測定したclean Source pinはAto `8bb3a2b1dd1a3ab3b8e10da270ed9a627d53c0ec`。この文書追加commitへ測定pinを付け替えない。
 
 統合Sourceには `functional_acceptance`、共通HTTP型の追加field、`legacy_exploration_supported` が存在し、同じworktreeのFormation crateを依存先としていた。Source差分を修正せず、統合worktree専用targetではRuntimeのHTTPテスト7件とWorker libテスト100件が成功した。
@@ -41,6 +44,6 @@
 3. headの呼び出し側Sourceだけmtimeを更新すると、依存は `Fresh` のまま呼び出し側をcompileし、追加関数が見つからずE0425・exit 101となった。
 4. fixture target内の依存packageだけcleanすると、headの依存Sourceをcompileし、同じcheckが成功した。
 
-これにより、別worktreeで同じtargetを共有した際の古いpath依存artifact再利用という条件を再現した。元の失敗時に使われた個別artifactを特定した証拠ではない。fixtureのSource bytes、手順、target、各ログhashを [機械記録](evidence/formation-native-integration-cache-20261003.json) に保存した。
+これにより、別worktreeで同じtargetを共有した際の古いpath依存artifact再利用という条件を再現した。元の失敗時に使われた個別artifactを特定した証拠ではない。fixtureのSource bytes、手順、target、各ログhashを [機械記録](../../../ops/evidence/formation-native-integration-cache-20261003.json) に保存した。
 
 新たな実Codex/Claude Codeの探索、PWAからRuntimeへの入力resume、OSSの機能・保存・再起動は実施していない。独立有料推論API call、実受入Runtime attemptは0。Search/K/D、UNKNOWN、既存receipt・台帳の変更、配備、remote migration、flag変更、通常Run許可も行っていない。

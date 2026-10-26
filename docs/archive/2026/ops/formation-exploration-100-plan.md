@@ -1,5 +1,8 @@
 # Bounded autonomous Formation exploration — preregistration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This is a new code/policy arm. The historical 6b-E baseline (7/100 typed-K) and
 6b-F ledgers are unchanged. The same 100 repository commits, archive hashes,
 licenses and source-bound StaticFiles K templates are reused. The previously

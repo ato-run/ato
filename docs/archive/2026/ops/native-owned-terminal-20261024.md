@@ -1,5 +1,8 @@
 # Owned Native Terminal execution — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This is an isolated CPU Linux Docker acceptance of a guarded execution primitive.
 It is not a shared Hosted Runner/staging deployment, public launch capability,
 Formation end-to-end completion, GPU allocation or operator-key test.

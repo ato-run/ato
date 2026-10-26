@@ -1,5 +1,8 @@
 # Formation known-D vs adaptive — paired100
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **baseline7 → adaptive7、追加PASS0。** source100件は同じ。既存K19件同一、81件は承認済みの静的K明示追加で、model-driven K gainは0。known-D再測定は100/100 terminal／D ref一致。generated D10（baseline Dなしから9）、新規execution2、generated-D PASS0、regression0。
 
 表のgenerated DはValidator登録済み、executionはactual Runtime attestationを要する。catalog gapはroot-only authorizationによる公開catalogの空集合という範囲つき分類。known phase→zero-known-D Requesterの2段で、前段refusalは別rawにあり、第二model contextへは入っていない。API searchは12件のみ。
@@ -107,4 +110,4 @@
 | 99 | Radarr | preset_node_static_v2_manager_config | operation_catalog_gap | yes | 0 | no | 0/0 |
 | 100 | Sonarr | preset_node_static_v2_manager_config | operation_catalog_gap | yes | 0 | no | 0/0 |
 
-[完全比較JSON](formation-known-vs-adaptive-100.json)は全source pin、before/after K/D refs、funnel、reach booleansを保持する。[結果・cost・証拠](formation-adaptive-100.md)。historical baseline／functional appendを書き換えていない。
+[完全比較JSON](../../../ops/formation-known-vs-adaptive-100.json)は全source pin、before/after K/D refs、funnel、reach booleansを保持する。[結果・cost・証拠](formation-adaptive-100.md)。historical baseline／functional appendを書き換えていない。

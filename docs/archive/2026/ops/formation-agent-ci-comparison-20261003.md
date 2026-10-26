@@ -1,5 +1,8 @@
 # Formation agent CI comparison — 2026-10-03
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Measurement ID: `formation-agent-ci-20261003-01`. This is a new comparison and
 CI fix record, separate from all prior OSS exploration measurements. It does
 not change their execution pins, Search states, receipts, or budget ledgers.
@@ -9,7 +12,7 @@ The exact PR baselines were Ato `3b284210` → `31a6d6b4` (#1476) and API
 1.96.0 throughout. API comparisons used the CI's exact Node 22.23.3; the
 official archive SHA-256 was verified. The host was macOS 15.8.1 arm64.
 
-See the [machine-readable evidence](evidence/formation-agent-ci-comparison-20261003.json)
+See the [machine-readable evidence](../../../ops/evidence/formation-agent-ci-comparison-20261003.json)
 for exact commands, failure names, log paths and SHA-256 values.
 
 | Boundary | Before | Change and local result | Remaining evidence |

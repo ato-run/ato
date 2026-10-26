@@ -1,5 +1,8 @@
 # Local Formation Phase 1 — Linux acceptance (2026-09-23)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > Finalization re-run (exact Derivation execution, Runtime cwd, bounded
 > output) is at the end of this file and supersedes the port behaviour
 > described in the first run.

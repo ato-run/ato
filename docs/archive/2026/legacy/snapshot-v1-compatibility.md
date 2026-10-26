@@ -1,9 +1,12 @@
 # Snapshot v1 Compatibility Contract
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > **Historical implementation contract.** This document describes the former
 > Ready-State product path. Snapshot v1 is a physical realization format, not
 > Capsule identity or a current Semantic Core primitive. Use
-> [Materialization](concepts/materialization.md) for the current model.
+> [Materialization](../../../concepts/materialization.md) for the current model.
 
 > **Snapshot v1 is a sealed ready-state path for no-binding, single-process web
 > apps. It is not a general VM hosting product.**

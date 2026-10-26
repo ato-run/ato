@@ -1,5 +1,8 @@
 # Runtime Network 3c-b acceptance — 2026-09-25
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: implemented and locally/Linux validated; not merged or deployed.
 PRs: [ato #1403](https://github.com/ato-run/ato/pull/1403) and
 [ato-api #691](https://github.com/ato-run/ato-api/pull/691).

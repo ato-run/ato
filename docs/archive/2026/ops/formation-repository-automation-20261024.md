@@ -1,5 +1,8 @@
 # Repository evidence in automatic Formation — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The requester now supplies the bounded source-only execution evidence scanner to
 the existing source-authorized Proposal v2 provider request. The source is the
 frozen workspace, not mutable GitHub content or receiver-provided text. Facts,

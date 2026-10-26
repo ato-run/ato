@@ -1,5 +1,8 @@
 # Bounded exploration: actual provider and Runtime acceptance
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Implemented in the unmerged exploration branches; not deployed. The machine
 ledger records exact K/D/attempt/receipt, raw evidence hashes and provider facts.
 No fixture is an upstream OSS coverage or functional-acceptance success.

@@ -1,5 +1,8 @@
 # Formation Producer network profile: failed OS gates and fail-closed preflight
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Nativeのloopback限定通信とpublic provider通信は未成立。実装pin
 `237bac3637688730dd98188bbc5ef2727ccc367b`は、有効なrelay要求を
 `blocked_scope_wider_than_loopback`、public provider要求を
@@ -19,7 +22,7 @@ receipt、台帳を変更していない。後続integrationへ測定pinを付�
 | `20261003-06` | `237bac3637688730dd98188bbc5ef2727ccc367b` | PASS_FAIL_CLOSED_PREFLIGHT_ONLY | default prepare/verify、relay/provider要求の公開前拒否、既存output保全を確認。OS fixtureを再実行していない。 |
 
 public package digest、profile/runner digest、保存した失敗boolと診断predicateは
-[JSON evidence](evidence/formation-producer-network-profile-20261003.json)に記録した。
+[JSON evidence](../../../ops/evidence/formation-producer-network-profile-20261003.json)に記録した。
 03では失敗記録を自動生成する前にharnessが終了した事実も残す。04/05の失敗を
 新実装で成功へ読み替えない。
 

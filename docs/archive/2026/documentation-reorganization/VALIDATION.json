@@ -1,0 +1,61 @@
+{
+  "baseline": "0c93d81a7f86140868fbe84efb63538360a9cba1",
+  "link_audit": {
+    "baseline": {
+      "snapshot": "0c93d81a7f86140868fbe84efb63538360a9cba1",
+      "markdown_files": 682,
+      "local_links_checked": 779,
+      "external_links_not_fetched": 1060,
+      "symbolic_links_not_resolved": 0,
+      "failures_by_scope": {
+        "active": 9,
+        "historical": 117
+      }
+    },
+    "final": {
+      "snapshot": "working-tree",
+      "markdown_files": 916,
+      "local_links_checked": 1642,
+      "external_links_not_fetched": 1060,
+      "symbolic_links_not_resolved": 0,
+      "failures_by_scope": {
+        "historical": 33
+      }
+    },
+    "active_link_failures": 0,
+    "historical_unresolved_references": 33,
+    "resolved_reference_occurrences": 93,
+    "scope": "all repository Markdown paths and fragments, including component docs"
+  },
+  "compatibility": {
+    "pages": 215,
+    "original_heading_and_explicit_anchors": 1195,
+    "missing": []
+  },
+  "integrity": {
+    "accepted_rfc_files_unchanged": 8,
+    "non_markdown_docs_files_unchanged": 315,
+    "non_markdown_docs_files_changed": [],
+    "inventory_files": 997,
+    "categories": {
+      "Archive": 782,
+      "Guides": 91,
+      "Specifications": 106,
+      "Concepts": 12,
+      "Operations": 6
+    },
+    "audit_script_syntax": "passed"
+  },
+  "governance_audit": {
+    "baseline_broken_markdown_reports": 95,
+    "final_broken_markdown_reports": 29,
+    "other_heuristic_failures": 29,
+    "warnings": 11,
+    "result": "nonzero: historical references and heuristic path warnings; not a full clean pass"
+  },
+  "application_checks": "not run: documentation-only",
+  "rendered_docsify": "not browser-tested",
+  "external_urls": "not fetched",
+  "dev_merge": "pending review",
+  "main_documentation_merge": "not performed; separate release action"
+}

@@ -1,5 +1,8 @@
 # P3 Dynamic Compute — staging acceptance record
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Executed 2026-09-03 against real staging. No fake control plane anywhere: real
 `staging.api.ato.run`, real D1, real R2, real `runner_leases`, a real
 Connected Realization Worker on `ubuntu-sugamo`, real `bwrap`, real CPython.

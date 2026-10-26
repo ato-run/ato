@@ -1,5 +1,8 @@
 # Formation foundation track — working verification ledger
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This is an implementation ledger, not a completion declaration. No deployment,
 remote migrations, flags, workflows or manual CI reruns are part of this track.
 
@@ -78,7 +81,7 @@ All of this is implemented/local integration evidence, not merged or deployed.
 
 Stack: ato `feat/formation-durable-search-state` on #1407; ato-api
 `feat/formation-durable-search-state` on api#692 (migration 0300, local only).
-Design: [ADR-034](../rfcs/draft/ADR-034-formation-search-state.md).
+Design: [ADR-034](../../../rfcs/draft/ADR-034-formation-search-state.md).
 Implemented and locally/integration verified; unmerged and undeployed.
 
 ### Actual acceptance (real Coordinator restarts, real Rust Runtime)

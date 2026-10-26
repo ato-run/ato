@@ -1,5 +1,8 @@
 # Final placement/validation repair acceptance preregistration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Freeze `2ad8c108b58a170a8673663d03ad8c7eaa6988fa` (CLI, Runtime,
 Rust receipt authority), API JS `b20bba7ab9daf282f8d5b1e22affe549ad3492a3`.
 Run **SVGOMG 57 only**, original source archive and frozen K, zero known D.

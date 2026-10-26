@@ -1,5 +1,8 @@
 # Native Surface execution scope — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: #1507. Branch: `feat/native-surface-execution-scope`.
 
 The shared Surface assertion DTO, netd verifier and Runner-owned sidecar can now

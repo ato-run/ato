@@ -1,5 +1,8 @@
 # Python artifact retention — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 At frozen Ato bbd368771732b14ac995a466f18ac54c67c2f0de / API
 a22b62df51f1a0d02746f56f1fd7ec7c670d81eb, changedetection.io trial 10
 completed its sdist-capable dependency operation, sealed and launched in the

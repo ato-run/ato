@@ -12,6 +12,10 @@ related:
 
 # Capsule Desktop Tab Management Architecture Specification
 
+> Historical component document; Japanese/mixed source. The original accepted
+> front matter describes its 2026-02-07 context, not current workspace authority.
+> Read the [current architecture map](../../../docs/architecture/README.md).
+
 ## 1. 概要 (Overview)
 
 ### 1.1 解決する問題
@@ -481,7 +485,7 @@ fn should_discard_tab(tab: &Tab, system: &SystemStats) -> bool {
 
 - [DESKTOP_SPEC.md](DESKTOP_SPEC.md) - Desktop全体仕様
 - [DRAFT_LIFECYCLE.md](DRAFT_LIFECYCLE.md) - Lifecycle管理
-- [APP_IN_APP.md](APP_IN_APP.md) - Guest Mode仕様
+- [APP_IN_APP.md](../../../docs/rfcs/archived/APP_IN_APP.md) - Guest Mode仕様
 - [CAPSULE_IPC_SPEC](DRAFT_CAPSULE_IPC.md) - IPC仕様
 
 ---

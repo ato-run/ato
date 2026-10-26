@@ -1,5 +1,8 @@
 # Formation 6b-F — preregistered adaptive arm
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Runtime libraries remain at `e494e9375cf1151fc2884d545047dfbdad52c2cc`; API receiver at `dcc3049a69051ed6d1c7819580ed1e171815c34c`. #1450 is OPEN at `d56a0395400ea5a31fbc593cedad22c496b00c22`. This plan adds measurement glue, no runtime/compiler/preset/catalog/network capability.
 
 ## Paired comparison and its limits

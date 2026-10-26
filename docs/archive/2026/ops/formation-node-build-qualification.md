@@ -1,5 +1,8 @@
 # 6b-A qualification: version-pinned package-manager-aware workspace build
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Baseline #1436 merged at `d63345cc236f6eb036b25fdf56383e71c680cdc2`.
 The immutable 20-app cohort and all eight affected archive hashes are preserved.
 This is **source qualification only**, before implementation/installation/remeasurement.

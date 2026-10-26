@@ -1,5 +1,8 @@
 # Formation common attempt (ato#1390) — Runtime Network acceptance (2026-09-24)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 One run of each path through the Runtime Network after the common attempt
 entry and receipt-authority changes:
 

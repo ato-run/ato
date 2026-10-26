@@ -1,5 +1,8 @@
 # Formation 2e-c — OCI container and service-group ownership
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Baseline and scope
 
 Started from ato main `da4d179059d2c9027058282aaeeeb75341c33a13` (after

@@ -1,5 +1,8 @@
 # Formation v0 small acceptance — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: in progress. Keep historical failures and WBO UNKNOWN unchanged.
 No deployment, remote migration, feature flag or ordinary Run permission.
 

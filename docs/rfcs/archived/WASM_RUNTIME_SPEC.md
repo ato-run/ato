@@ -636,5 +636,5 @@ wasmtime-wasi = "20"  # オプション: WASI対応する場合
 ## 付録A: 関連仕様
 
 - [SYNC_SPEC.md](./SYNC_SPEC.md) - .sync フォーマット仕様
-- [CAPSULE_SPEC.md](./CAPSULE_SPEC.md) - Capsule パッケージ仕様
-- [NACELLE_SPEC.md](./NACELLE_SPEC.md) - Nacelle ランタイム仕様
+- [CAPSULE_SPEC.md](../../archive/rfcs-legacy-accepted/CAPSULE_SPEC.md) - Capsule パッケージ仕様
+- [NACELLE_SPEC.md](../../archive/rfcs-legacy-accepted/NACELLE_SPEC.md) - Nacelle ランタイム仕様

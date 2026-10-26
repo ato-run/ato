@@ -1,5 +1,8 @@
 # Stalwart mail connectivity decision — 2026-09-20
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This note closes the research gate between the limited network-controls
 acceptance and the Stalwart + Missive application fixture. It is deliberately
 limited to a private staging fixture. It does not approve public SMTP, direct

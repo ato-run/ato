@@ -1,5 +1,8 @@
 # Runtime Network 3c-a search budget — local acceptance, 2026-09-25
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 No deployment, remote migration, feature-flag change or manual CI rerun was
 performed. The Coordinator was ato-api `feat/runtime-network-search-budget`
 under `wrangler dev --local`, with a fresh isolated D1 through migration 0296

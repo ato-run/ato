@@ -1,5 +1,8 @@
 # Portable durable local Instance progress — 2026-09-17
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This records PR 3 of the Portable v0 sequence. It is local-only and was not
 deployed to staging or production.
 

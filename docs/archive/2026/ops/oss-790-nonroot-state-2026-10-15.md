@@ -1,5 +1,8 @@
 # Writable OCI state admission (#790 / API #783)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 A writable mount previously selected its host directory's UID:GID verbatim for
 `docker run --user`. A directory provisioned as root therefore selected root in
 the workload. Admission now refuses UID0 or GID0 with typed

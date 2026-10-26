@@ -1,5 +1,8 @@
 # Formation P0 remeasure on the foundation stack — 2026-09-26
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 A foundation regression check after Stage 4, not coverage work: no language,
 runtime family or multi-service support was added for it.
 

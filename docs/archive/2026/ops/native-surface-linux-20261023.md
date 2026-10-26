@@ -1,5 +1,8 @@
 # Native Surface Linux producer measurement — 2026-10-23 UTC
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Source base: `ato` main `17305afe0820ad7dd1e9c05c99585f837da35227`.
 
 The new guest-agent `pixel_surface` configuration selects the common GUI producer
@@ -14,7 +17,7 @@ The test ran in `bwrap --unshare-all`, a read-only private filesystem, separate
 network, and temporary `/run`/`/tmp`. The Rust sidecar was compiled on that host
 with Cargo 1.96.1 from a dedicated two-crate netd/ipc copy.
 
-The [direct producer result](evidence/native-pixel-producer-linux-20261023.json)
+The [direct producer result](../../../ops/evidence/native-pixel-producer-linux-20261023.json)
 records a complete real RFB frame, keyboard-driven pixel change, 1024×768 desktop
 resize, reconnection, clipboard disabled, and closed listener after teardown.
 The first frame took 618 ms in this single run; it is not an application Contract
@@ -34,7 +37,7 @@ were preserved. Testing moved to the existing CPU host above.
 
 ## Authenticated common gateway
 
-The [gateway result](evidence/native-pixel-gateway-linux-20261023.json) used the
+The [gateway result](../../../ops/evidence/native-pixel-gateway-linux-20261023.json) used the
 new `ato-native-surface-gateway` Rust binary and existing HMAC assertion protocol
 inside the same bwrap boundary. Actual WebSocket requests carrying an expired
 assertion or another session's assertion received HTTP 401. Fresh assertions

@@ -1,5 +1,8 @@
 # Formation D3 v2 — exact request evidence preregistration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: preregistered, not executed. Review before merge; the execution driver
 remains a separate Draft. No live budget journal has been initialized.
 
@@ -7,7 +10,7 @@ remains a separate Draft. No live budget journal has been initialized.
 
 - Base: `c3f44c6e548cc4f73acaf37966621d21bad0097a`.
 - New execution pin: `d1dde994c2d310a725b546921f9b3455777e28da`.
-- Plan: [formation-deepseek-d3-plan-v2.json](formation-deepseek-d3-plan-v2.json).
+- Plan: [formation-deepseek-d3-plan-v2.json](../../../ops/formation-deepseek-d3-plan-v2.json).
 - Plan SHA-256: `a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249`.
 - API: `38668a97e7632256b33074b0d223670c16b76bfd`.
 - Receiver WASM: `d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46`.
@@ -18,7 +21,7 @@ from that clean execution pin, never from the later controller/main checkout.
 
 ## v1 superseded before execution, not rewritten
 
-The original [plan](formation-deepseek-d3-plan.json) remains byte-identical:
+The original [plan](../../../ops/formation-deepseek-d3-plan.json) remains byte-identical:
 `b67607c6cff1de5339f79822bd3e5d6610d1663dcce6e3f0d6b418ef8a2a1585`.
 It is historical preregistration with zero live calls. This document, not an
 edit to v1, records `superseded_before_execution`.

@@ -8,7 +8,7 @@ docs/ops/b1-nightly-baseline.md	docs/archive/2026/ops/b1-nightly-baseline.md	ori
 docs/ops/bounded-github-source-fetch-20261024.md	docs/archive/2026/ops/bounded-github-source-fetch-20261024.md	original Markdown path and heading anchors retained
 docs/ops/browser-verifier-containment-acceptance-2026-09-23.md	docs/archive/2026/ops/browser-verifier-containment-acceptance-2026-09-23.md	original Markdown path and heading anchors retained
 docs/ops/component-contract-observation-20261024.md	docs/archive/2026/ops/component-contract-observation-20261024.md	original Markdown path and heading anchors retained
-docs/ops/connected-runner-max-slots.md	docs/operations/connected-runner-max-slots.md	original Markdown path and heading anchors retained
+docs/ops/connected-runner-max-slots.md	docs/archive/2026/ops/connected-runner-max-slots.md	original Markdown path and heading anchors retained
 docs/ops/connected-runner-native-inference-smoke.md	docs/archive/2026/ops/connected-runner-native-inference-smoke.md	original Markdown path and heading anchors retained
 docs/ops/continuous-patching-ledger.md	docs/archive/2026/ops/continuous-patching-ledger.md	original Markdown path and heading anchors retained
 docs/ops/contract-preserving-transformation-v0.md	docs/archive/2026/ops/contract-preserving-transformation-v0.md	original Markdown path and heading anchors retained
@@ -160,7 +160,7 @@ docs/ops/native-browser-joint-fixture-20261024.md	docs/archive/2026/ops/native-b
 docs/ops/native-controls-integration-20261024.md	docs/archive/2026/ops/native-controls-integration-20261024.md	original Markdown path and heading anchors retained
 docs/ops/native-framebuffer-resize-boundary-20261024.md	docs/archive/2026/ops/native-framebuffer-resize-boundary-20261024.md	original Markdown path and heading anchors retained
 docs/ops/native-helper-controls-20261024.md	docs/archive/2026/ops/native-helper-controls-20261024.md	original Markdown path and heading anchors retained
-docs/ops/native-inference-vulkan-gpu-runbook.md	docs/operations/native-inference-vulkan-gpu-runbook.md	original Markdown path and heading anchors retained
+docs/ops/native-inference-vulkan-gpu-runbook.md	docs/archive/2026/ops/native-inference-vulkan-gpu-runbook.md	original Markdown path and heading anchors retained
 docs/ops/native-model-component-integration-20261024.md	docs/archive/2026/ops/native-model-component-integration-20261024.md	original Markdown path and heading anchors retained
 docs/ops/native-owned-pixel-20261024.md	docs/archive/2026/ops/native-owned-pixel-20261024.md	original Markdown path and heading anchors retained
 docs/ops/native-owned-terminal-20261024.md	docs/archive/2026/ops/native-owned-terminal-20261024.md	original Markdown path and heading anchors retained
@@ -182,7 +182,7 @@ docs/ops/oss-790-nonroot-state-2026-10-15.md	docs/archive/2026/ops/oss-790-nonro
 docs/ops/p3-dynamic-compute-staging-acceptance.md	docs/archive/2026/ops/p3-dynamic-compute-staging-acceptance.md	original Markdown path and heading anchors retained
 docs/ops/p4-stable-instance-host.md	docs/archive/2026/ops/p4-stable-instance-host.md	original Markdown path and heading anchors retained
 docs/ops/pmf-golden-scenario-acceptance.md	docs/archive/2026/ops/pmf-golden-scenario-acceptance.md	original Markdown path and heading anchors retained
-docs/ops/pocketllm-demo-host.md	docs/operations/pocketllm-demo-host.md	original Markdown path and heading anchors retained
+docs/ops/pocketllm-demo-host.md	docs/archive/2026/ops/pocketllm-demo-host.md	original Markdown path and heading anchors retained
 docs/ops/portable-datasette-derivations-staging-2026-09-16.md	docs/archive/2026/ops/portable-datasette-derivations-staging-2026-09-16.md	original Markdown path and heading anchors retained
 docs/ops/portable-dependency-export-progress-2026-09-16.md	docs/archive/2026/ops/portable-dependency-export-progress-2026-09-16.md	original Markdown path and heading anchors retained
 docs/ops/portable-durable-local-instance-progress-2026-09-17.md	docs/archive/2026/ops/portable-durable-local-instance-progress-2026-09-17.md	original Markdown path and heading anchors retained
@@ -197,12 +197,12 @@ docs/ops/runtime-network-3c-b-2026-09-25.md	docs/archive/2026/ops/runtime-networ
 docs/ops/runtime-network-3c-b-hardening-2026-09-25.md	docs/archive/2026/ops/runtime-network-3c-b-hardening-2026-09-25.md	original Markdown path and heading anchors retained
 docs/ops/runtime-network-phase1-acceptance-2026-09-23.md	docs/archive/2026/ops/runtime-network-phase1-acceptance-2026-09-23.md	original Markdown path and heading anchors retained
 docs/ops/scenario-verifier-v1.md	docs/architecture/scenario-verifier-v1.md	original Markdown path and heading anchors retained
-docs/ops/sglang-cuda-host.md	docs/operations/sglang-cuda-host.md	original Markdown path and heading anchors retained
+docs/ops/sglang-cuda-host.md	docs/archive/2026/ops/sglang-cuda-host.md	original Markdown path and heading anchors retained
 docs/ops/single-jsx-compiler-provisioning.md	docs/operations/single-jsx-compiler-provisioning.md	original Markdown path and heading anchors retained
 docs/ops/single-oci-model-sets-20261024.md	docs/archive/2026/ops/single-oci-model-sets-20261024.md	original Markdown path and heading anchors retained
 docs/ops/source-runtime-provenance-client-20261024.md	docs/archive/2026/ops/source-runtime-provenance-client-20261024.md	original Markdown path and heading anchors retained
 docs/ops/staging-orphaned-lease-recovery-2026-09-27.md	docs/archive/2026/ops/staging-orphaned-lease-recovery-2026-09-27.md	original Markdown path and heading anchors retained
-docs/ops/staging-snapshot-builder-sugamo.md	docs/operations/staging-snapshot-builder-sugamo.md	original Markdown path and heading anchors retained
+docs/ops/staging-snapshot-builder-sugamo.md	docs/archive/2026/ops/staging-snapshot-builder-sugamo.md	original Markdown path and heading anchors retained
 docs/ops/stalwart-mail-connectivity-decision-2026-09-20.md	docs/archive/2026/ops/stalwart-mail-connectivity-decision-2026-09-20.md	original Markdown path and heading anchors retained
 docs/ops/stalwart-missive-mail-staging-2026-09-20.md	docs/archive/2026/ops/stalwart-missive-mail-staging-2026-09-20.md	original Markdown path and heading anchors retained
 docs/ops/stateful-transformation-v1.md	docs/archive/2026/ops/stateful-transformation-v1.md	original Markdown path and heading anchors retained
