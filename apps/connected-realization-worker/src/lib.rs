@@ -1299,6 +1299,9 @@ pub struct WorkerConfig {
         default_value_t = false
     )]
     pub require_explicit_runtime_placement: bool,
+    /// Operator-installed executable for a dedicated Formation-only host.
+    #[arg(long, env = "ATO_FORMATION_WORKER_BINARY")]
+    pub formation_worker_binary: Option<PathBuf>,
     #[arg(
         long,
         env = "ATO_RUNNER_TOKEN",
@@ -1623,6 +1626,76 @@ impl ConnectedWorker {
         })
     }
 
+    /// A dedicated Formation process uses the same enrolled identity and measured
+    /// heartbeat, but never polls the ordinary Run lease queue.
+    fn run_formation_worker(&self) -> Result<()> {
+        let binary = self
+            .config
+            .formation_worker_binary
+            .as_ref()
+            .context("Formation binary missing")?;
+        ensure!(
+            self.config.isolation == IsolationMode::HostBoundary && self.config.max_slots == 1,
+            "GPU Formation requires one dedicated host-boundary slot"
+        );
+        let root = self.config.work_root.join("formation");
+        fs::create_dir_all(&root)?;
+        let mut child = std::process::Command::new(binary)
+            .args([
+                "serve",
+                "--portable-host-boundary",
+                "--stop-after-job",
+                "--api-base",
+                &self.config.api_base,
+                "--worker-id",
+                &self.config.runner_id,
+                "--work-root",
+            ])
+            .arg(&root)
+            .arg("--workload-uid")
+            .arg(
+                self.config
+                    .workload_uid
+                    .context("workload UID missing")?
+                    .to_string(),
+            )
+            .arg("--workload-gid")
+            .arg(
+                self.config
+                    .workload_gid
+                    .context("workload GID missing")?
+                    .to_string(),
+            )
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .env("LANG", "C.UTF-8")
+            .env("HOME", &root)
+            .env("ATO_FORMATION_TOKEN", &self.config.runner_token)
+            .spawn()
+            .context("start dedicated GPU Formation worker")?;
+        let result = (|| -> Result<()> {
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    ensure!(
+                        status.success(),
+                        "dedicated Formation worker exited unsuccessfully"
+                    );
+                    return Ok(());
+                }
+                self.heartbeat_with_retry(1)?;
+                thread::sleep(Duration::from_secs(15));
+            }
+        })();
+        // Failure to keep its lease/control-plane presence never leaves a child
+        // running after the supervisor returns to the provider deletion wrapper.
+        let _ = child.kill();
+        let _ = child.wait();
+        result
+    }
+
     /// Stop and report whatever this slot left running before it advertises
     /// new work. Reconciles three sources of truth — the Run journal, the
     /// labelled resources still present, and leftover `leases/` directories —
@@ -1859,6 +1932,9 @@ impl ConnectedWorker {
     }
 
     pub fn run(&self) -> Result<()> {
+        if self.config.formation_worker_binary.is_some() {
+            return self.run_formation_worker();
+        }
         // One process owns this slot on the work root. Sibling slots may
         // share the root — the lock is scoped by slot id. Leftover lease
         // state is NOT a reason to refuse to start: only a running worker
@@ -5050,7 +5126,9 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": with_explicit_runtime_placement_capability(advertised_capabilities(
+            "capabilities": if config.formation_worker_binary.is_some() {
+                vec!["formation_gpu_v1", runtime_launch::host_boundary::ISOLATION_CAPABILITY]
+            } else { with_explicit_runtime_placement_capability(advertised_capabilities(
                 with_native_pixel_control_capabilities(
                     with_native_terminal_capability(runner_capabilities(
                         config.firecracker_configured(), oci_available, self.persistent_volumes,
@@ -5061,7 +5139,7 @@ impl HttpRunnerApi {
                 ),
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
-            ), config.require_explicit_runtime_placement),
+            ), config.require_explicit_runtime_placement) },
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
             "public_base_url": config.public_base_url,
@@ -5421,6 +5499,9 @@ struct LeaseStatusProbe {
 }
 
 fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
+    if config.formation_worker_binary.is_some() {
+        return Vec::new();
+    }
     let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
     // Only advertised where the workload can actually be contained. A Runner
     // that took `runtime_launch` leases it must then refuse would look
@@ -7130,6 +7211,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             require_explicit_runtime_placement: false,
+            formation_worker_binary: None,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
@@ -7162,6 +7244,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             require_explicit_runtime_placement: false,
+            formation_worker_binary: None,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
@@ -7205,6 +7288,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: String::new(),
             runner_token: String::new(),
             require_explicit_runtime_placement: false,
+            formation_worker_binary: None,
             runner_credentials_file: Some(credentials),
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: directory.path().join("work"),
@@ -7266,6 +7350,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
             require_explicit_runtime_placement: false,
+            formation_worker_binary: None,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
@@ -7332,6 +7417,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             require_explicit_runtime_placement: false,
+            formation_worker_binary: None,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
@@ -7536,6 +7622,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
             require_explicit_runtime_placement: false,
+            formation_worker_binary: None,
             runner_credentials_file: None,
             public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
@@ -7568,6 +7655,16 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         config.run_control_verification_key = Some("v".repeat(32));
         expected.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
         assert_eq!(supported_lease_kinds(&config, false), expected);
+    }
+
+    #[test]
+    fn formation_worker_never_advertises_ordinary_run_leases() {
+        let mut config = capability_test_config(None);
+        config.formation_worker_binary = Some(PathBuf::from("/operator/formation-worker"));
+        assert!(supported_lease_kinds(&config, true).is_empty());
+        config.browser_chrome = Some(PathBuf::from("/operator/chrome"));
+        config.run_control_verification_key = Some("test".to_owned());
+        assert!(supported_lease_kinds(&config, true).is_empty());
     }
 
     fn http_assertion(
