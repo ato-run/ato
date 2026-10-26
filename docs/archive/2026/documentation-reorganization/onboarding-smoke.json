@@ -1,0 +1,18 @@
+{
+  "platform": "macOS local",
+  "build_command": "cargo build -p ato-cli --bin ato --locked",
+  "build_exit_code": 0,
+  "fresh_environment": true,
+  "command": "ato run samples/interop-static.capsule --no-open --verification-receipt <output>",
+  "fully_satisfied": true,
+  "observations": 2,
+  "bundle_sha256": "sha256:95b837f4e8ed3c3354a4560e56820030cdb2ba34ba2a7c65aa6d26e139bdd813",
+  "contract_ref": "sha256:b565e9d771c53ba03548b1a151c0ebbc2b884c1d6ec532f72596ce33a4b741db",
+  "derivation_ref": "sha256:87a0ac84ccdf72ce5ffde7ffc12277d60f3097fb277332a48173c4ddadb7a3cb",
+  "receipt_sha256": "7e1b243c058e80b3b44204e7c60453e1325c4b16b893bafdd8495a80cd12209b",
+  "authoring_pack": {
+    "source": "samples/portable-multi-process-authored",
+    "exit_code": 0
+  },
+  "initial_doc_defect": "ato pack samples/interop-static-k failed: schema/1 source is not accepted by the schema/2 CLI frontend; corrected documentation only"
+}

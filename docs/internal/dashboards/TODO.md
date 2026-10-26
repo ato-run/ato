@@ -345,7 +345,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 ## Phase 8: Identity Layer 🚧
 
-**仕様:** [IDENTITY_SPEC.md](docs/specs/IDENTITY_SPEC.md)
+**仕様:** [IDENTITY_SPEC.md](../../rfcs/archived/IDENTITY_SPEC.md)
 
 ### 8.1 capsule `did:key` サポート
 
@@ -387,7 +387,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 ## Phase 9: License Protocol 📅
 
-**仕様:** [LICENSE_SPEC.md](docs/specs/LICENSE_SPEC.md)  
+**仕様:** [LICENSE_SPEC.md](../../archive/rfcs-legacy-draft/LICENSE_SPEC.md)
 **依存:** Phase 8 完了後
 
 ### 9.1 license.sync フォーマット
@@ -421,7 +421,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 ## Phase 10: Dynamic Binding 📅
 
-**仕様:** [ASSOCIATION_SPEC.md](docs/specs/ASSOCIATION_SPEC.md)  
+**仕様:** [ASSOCIATION_SPEC.md](../../archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md)
 **依存:** Phase 8 完了後（Phase 9 と並行可）
 
 ### 10.1 Association Registry
@@ -957,7 +957,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 ### 14.1 Desktop Tab Management 仕様策定
 
-**仕様**: [DESKTOP_TAB_SPEC.md](docs/specs/DESKTOP_TAB_SPEC.md)
+**仕様**: [DESKTOP_TAB_SPEC.md](../../../apps/desktop/docs/DESKTOP_TAB_SPEC.md)
 
 **背景**: タブ切り替え時に各カプセルの状態（フォーム入力・スクロール位置等）を保持し、ブラウザ的なUXを実現するためのマルチWebViewアーキテクチャの策定。
 

@@ -1,0 +1,28 @@
+name: Documentation acceptance
+
+on:
+  pull_request:
+    branches: [dev, stg, main]
+    paths: ["docs/**", "README*.md", "CONTRIBUTING.md", "scripts/docs-*", ".github/workflows/docs-ci.yml"]
+  push:
+    branches: [dev, stg]
+    paths: ["docs/**", "README*.md", "CONTRIBUTING.md", "scripts/docs-*", ".github/workflows/docs-ci.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
+      - name: Check current links and reject new historical failures
+        run: python3 scripts/docs-audit.py --allow-historical-from docs/archive/2026/documentation-reorganization/link-audit.json --output .tmp/docs-ci-links.json
+      - name: Check published-site routing and first example
+        run: node scripts/docs-site-check.mjs
