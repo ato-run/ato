@@ -384,8 +384,14 @@ impl FormationApi {
         &self,
         attempt_id: &str,
         digest: &str,
+        contract_ref: &str,
+        derivation_ref: &str,
         bytes: &[u8],
     ) -> Result<String> {
+        // The route refuses a bundle that does not name the Contract and
+        // Derivation it claims to be: a transport digest alone does not say
+        // which K the bytes satisfy. Both are content addresses, so the
+        // control plane can check them against the attempt it authorized.
         let response: serde_json::Value = self
             .client
             .put(format!(
@@ -397,6 +403,8 @@ impl FormationApi {
                 "content-type",
                 ato_ipc::formation::PORTABLE_APPLICATION_MEDIA_TYPE,
             )
+            .header("x-ato-contract-ref", contract_ref)
+            .header("x-ato-derivation-ref", derivation_ref)
             .body(bytes.to_vec())
             .send()?
             .error_for_status()
