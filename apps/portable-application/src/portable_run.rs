@@ -383,6 +383,8 @@ impl PortableBundleExecutor<'_> {
                 state: state_mounts,
                 inputs: input_mounts,
             },
+            self.context.sandbox_shim,
+            self.context.sandbox_subcommand,
         )?;
         let adapter = ProcessAdapter::new(ProcessSpec {
             id: step.id.clone(),
@@ -1198,6 +1200,7 @@ fn resolve_portable_state_mounts(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn portable_process_sandbox_command(
     workspace: &std::path::Path,
     runtime_root: &std::path::Path,
@@ -1206,6 +1209,8 @@ fn portable_process_sandbox_command(
     host_port: u16,
     working_dir: &str,
     mounts: PortableProcessMounts<'_>,
+    sandbox_shim: &Path,
+    sandbox_subcommand: &str,
 ) -> Result<Vec<String>> {
     let state_mounts = mounts.state;
     let input_mounts = mounts.inputs;
@@ -1236,6 +1241,8 @@ fn portable_process_sandbox_command(
                 host_port,
                 working_dir,
                 mounts,
+                sandbox_shim,
+                sandbox_subcommand,
             );
         }
         #[cfg(not(target_os = "linux"))]
@@ -1275,13 +1282,9 @@ fn portable_process_sandbox_command(
     let policy_path = runtime_root.join("sandbox-policy.json");
     fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
         .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
-    let shim = std::env::current_exe()
-        .context("locate ato sandbox shim")?
-        .canonicalize()
-        .context("canonicalize ato sandbox shim")?;
     let mut command = vec![
-        shim.display().to_string(),
-        "__portable-sandbox-exec".to_owned(),
+        sandbox_shim.display().to_string(),
+        sandbox_subcommand.to_owned(),
         "--policy".to_owned(),
         policy_path.display().to_string(),
         "--".to_owned(),
@@ -1291,6 +1294,7 @@ fn portable_process_sandbox_command(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn portable_process_bwrap_command(
     workspace: &Path,
     runtime_root: &Path,
@@ -1299,15 +1303,13 @@ fn portable_process_bwrap_command(
     host_port: u16,
     working_dir: &str,
     mounts: PortableProcessMounts<'_>,
+    sandbox_shim: &Path,
+    sandbox_subcommand: &str,
 ) -> Result<Vec<String>> {
     let state_mounts = mounts.state;
     let input_mounts = mounts.inputs;
     let bwrap = executable_path("bwrap")
         .context("local process runtime admission failed: `bwrap` is not on PATH")?;
-    let shim = std::env::current_exe()
-        .context("locate ato sandbox shim")?
-        .canonicalize()
-        .context("canonicalize ato sandbox shim")?;
     let guest_working_dir = if working_dir == "." {
         "/app".to_owned()
     } else {
@@ -1414,7 +1416,7 @@ fn portable_process_bwrap_command(
         "--dir".to_owned(),
         "/.ato".to_owned(),
         "--ro-bind".to_owned(),
-        shim.display().to_string(),
+        sandbox_shim.display().to_string(),
         "/.ato/ato".to_owned(),
         "--ro-bind".to_owned(),
         policy_path.display().to_string(),
@@ -1422,7 +1424,7 @@ fn portable_process_bwrap_command(
         "--chdir".to_owned(),
         guest_working_dir,
         "/.ato/ato".to_owned(),
-        "__portable-sandbox-exec".to_owned(),
+        sandbox_subcommand.to_owned(),
         "--policy".to_owned(),
         "/.ato/sandbox-policy.json".to_owned(),
         "--".to_owned(),
