@@ -1364,12 +1364,7 @@ impl HttpValidatorApi {
     /// terminalizes the attempt as `interrupted` (retryable by a wake) with our
     /// typed code — the app's Contract was never judged, so it must not be
     /// reported as failed.
-    fn report_runtime_failure(
-        &self,
-        job: &ValidationJob,
-        code: &str,
-        message: &str,
-    ) -> Result<()> {
+    fn report_runtime_failure(&self, job: &ValidationJob, code: &str, message: &str) -> Result<()> {
         let path = format!(
             "/v1/capsule-bundles/runtime-verification-jobs/{}/fail",
             job.job_id
@@ -1548,7 +1543,10 @@ fn retry_after_from(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     Some(Duration::from_secs(seconds.min(30)))
 }
 
-fn classify_status(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> Option<RetryableFailure> {
+fn classify_status(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<RetryableFailure> {
     if status.is_success() {
         return None;
     }
@@ -1595,7 +1593,10 @@ fn with_retry<T>(
             Ok(value) => return Ok(value),
             Err(failure) if !failure.retryable => return Err(failure),
             Err(failure) => {
-                let pause = failure.retry_after.unwrap_or(backoff).min(Duration::from_secs(5));
+                let pause = failure
+                    .retry_after
+                    .unwrap_or(backoff)
+                    .min(Duration::from_secs(5));
                 if Instant::now() + pause >= deadline {
                     return Err(RetryableFailure {
                         retryable: true,
