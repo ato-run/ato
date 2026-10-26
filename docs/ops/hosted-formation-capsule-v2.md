@@ -125,7 +125,12 @@ verifier were real.
 | portable process | `cargo test -p ato-formation-worker --test hosted_capsule_v2` | **PASS** |
 | unknown schema / invalid v2 / unadmitted OCI network / Node 20 policy | same file | **PASS** (typed refusals) |
 
-memos Gate A measured values:
+Fixture conditions for these runs: the API is the local fixture (no staging
+deployment); `policy.network = "dependency_resolution"` for the OCI case; the
+formation host is Linux with Docker and the pinned image resolvable. The bundle
+builder, the Docker launch, the HTTP observation and the verifier are real.
+
+memos Gate A measured values (stable across runs):
 
 ```
 contract_ref            = sha256:64368f746f00ed7be9c5e6846c99639d19d402bdc4e96b022407dc3f8863908b
@@ -135,8 +140,27 @@ verification_receipt.fully_satisfied = true
 formation_kind          = portable_v2
 ```
 
+portable process positive (same pipeline, no Docker):
+
+```
+contract_ref            = sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5
+derivation_ref          = sha256:769ff433b244677dd2c872a25d01fdf94e0d3d45f414f1c524c1a27d71591481
+portable_bundle_sha256  = sha256:3bb9598aa897216cc6913d82de8dc9e74fc79953752174224483932da70f0b67
+verification_receipt.fully_satisfied = true
+```
+
 (`portable_bundle_artifact_ref` is `bnd_fixture` in the fixture; in a deployed
 stack it is the id the upload endpoint returns.)
+
+**Why the DerivationRef is not an expected constant.** `ContractRef` is the
+authority: it is the same `sha256:64368f74…` the local memos pack produces
+because K is the authored Contract, independent of the workspace bytes.
+`DerivationRef` also covers the bundle's workspace **tree**, so it differs
+between an E2E fixture whose workspace carries different files and this test's
+workspace (the sample's placeholder plus the fixture's own file). Gate A
+asserts K, `fully_satisfied`, the receipt/ref self-consistency and
+`formation_kind`; it does not require an expected D. A staging E2E should judge
+the same fields and the bundle sha's self-consistency, not a pinned D.
 
 ## 5. Refusals
 
@@ -152,14 +176,31 @@ stack it is the id the upload endpoint returns.)
 | K not satisfied at runtime | the verifier's typed code (e.g. `scenario_step_failed`) | no |
 | bundle registration failure | `capsule_v2_bundle_publication_failed` | no |
 
-v1 regressions on the same host: `scenario_verification`,
+v1 regressions on the same host (final HEAD): `scenario_verification`,
 `derivation_transformation`, `stateful_transformation`, `ato-ipc` (v1 golden
-fixtures), `ato-portable-application --lib`, `ato-formation --lib` all pass.
-Two failures seen in the wider runs are **pre-existing/flaky**, not caused by
-this change: `a_run_whose_contract_fails_keeps_nothing_running` reproduces on
-unmodified `dev` `287fe65ef` (same `NotFound` at `portable_application.rs:952`),
-and the retry-budget reasoning test passes 3/3 when run alone (it is timing
-sensitive under full-suite parallelism).
+fixtures), `ato-portable-application --lib`, `ato-formation --lib`, and the
+whole `ato-formation-worker` suite (172 lib tests) pass; `fmt`,
+`cargo check --workspace --all-targets`, `clippy` (changed crates) and
+`arch-check` pass.
+
+Two failures seen in the wider earlier runs are **pre-existing/flaky**, not
+caused by this change:
+
+- `a_run_whose_contract_fails_keeps_nothing_running`
+  (`apps/cli/tests/portable_application.rs:952:74`, `Os { code: 2, kind:
+  NotFound }`) reproduces identically on unmodified `dev` `287fe65ef`
+  (`/data/p1570-base/logs/01_cli_portable_base.log`): same test, same line,
+  same error. Pre-existing on dev.
+- `runtime_network::proposal::reasoning::autonomous_tests::
+  operation_retries_are_initial_plus_three_and_survive_restart` is timing
+  sensitive: it failed once in a full parallel run (assert `left: 3, right: 4`)
+  and passed on serial rerun 3/3, on base `287fe65ef`, and in the final full
+  run (172 passed / 0 failed).
+
+The `hosted_capsule_v2` suite (including the process positive) passed **three
+consecutive times**; it binds `127.0.0.1:0` for the API fixture and the
+executor allocates a free loopback port per route, so it does not depend on a
+fixed port.
 
 ## 6. Gate B (next change)
 
