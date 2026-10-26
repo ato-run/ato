@@ -557,3 +557,95 @@ fn host_native_ports_launch_golden_is_canonical_and_digest_bound() {
     );
     assert!(spec.endpoints.is_empty());
 }
+
+// ---- single-OCI Runner-local volume backing (#1571) -------------------------
+
+fn single_oci_volume_spec(backing: &str) -> String {
+    format!(
+        r#"{{"protocol":"ato.runtime-launch-spec.v1","context":{{"run_id":"run_01M5VOLUME000000000000001","compute_id":"cmp_01M5VOLUME00000000000001","compute_schema_id":"csch_01M5VOLUME0000000000001","compute_instance_id":"cinst_01M5VOLUME000000000001"}},"workspace":{{"materialization_ref":"sha256:069d07bc4486336a54a9dc8f5949c48a4f28ae73535d0d5f783f8f667121fab4","cwd_relative":""}},"realization":{{"kind":"oci","image_digest_ref":"sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0","image_reference":"docker.io/neosmemo/memos@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0","platform":"linux/amd64","resource_limits":{{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":128}},"argv":["--port","5230"],"working_dir":"/app"}},"public_env":[],"secret_grants":[],"state_attachments":[{{"state_key":"data","revision_ref":null,"mount_target":"/var/opt/memos","access":"read_write","writer_fence":7,"backing":{backing}}}],"endpoints":[{{"name":"app.http","protocol":"http","guest_port":5230,"allocation":"automatic"}}],"readiness":{{"kind":"http","endpoint_name":"app.http","path":"/","timeout_ms":60000}},"lifecycle":{{"graceful_shutdown_ms":10000,"force_kill_after_ms":15000}}}}"#
+    )
+}
+
+const VOLUME_BACKING: &str = r#"{"kind":"runner_volume","volume_ref":"svol_01M5ABCDE00000000000000001","capacity_bytes":1073741824,"initialize_from_revision_ref":null}"#;
+
+#[test]
+fn a_single_oci_spec_can_name_a_runner_volume() {
+    let raw = single_oci_volume_spec(VOLUME_BACKING);
+    let spec = RuntimeLaunchSpecV1::parse(&raw).expect("a volume-backed single OCI spec is valid");
+    // The attachment is still a v1 attachment: the volume is the backing, not
+    // a second kind of slot.
+    assert_eq!(spec.state_attachments.len(), 1);
+    assert_eq!(
+        spec.state_attachments[0]
+            .backing
+            .as_ref()
+            .map(|backing| matches!(backing, StateBackingV1::RunnerVolume(_))),
+        Some(true)
+    );
+    // The digest binds the volume: canonicalising twice is stable, and the
+    // same spec without a backing digests differently.
+    let canonical = spec.canonical_bytes().unwrap();
+    let reparsed = RuntimeLaunchSpecV1::parse(std::str::from_utf8(&canonical).unwrap()).unwrap();
+    assert_eq!(
+        reparsed.canonical_digest().unwrap(),
+        spec.canonical_digest().unwrap()
+    );
+    let stateless = OCI_FIXTURE;
+    assert_ne!(
+        spec.canonical_digest().unwrap(),
+        RuntimeLaunchSpecV1::parse(stateless)
+            .unwrap()
+            .canonical_digest()
+            .unwrap()
+    );
+    let unified = crate::runtime_launch_v2::RuntimeLaunchSpec::parse(&raw).unwrap();
+    let backing = unified
+        .runner_volume("data")
+        .expect("the unified view resolves the v1 volume");
+    assert_eq!(backing.volume_ref, "svol_01M5ABCDE00000000000000001");
+    assert_eq!(backing.capacity_bytes, 1_073_741_824);
+}
+
+#[test]
+fn a_spec_without_a_backing_keeps_its_exact_bytes_and_digest() {
+    // Absence is not serialized: every existing revision-backed v1/v2 spec must
+    // canonicalize to the same bytes it always did.
+    let raw = OCI_FIXTURE;
+    let spec = RuntimeLaunchSpecV1::parse(raw).unwrap();
+    assert_eq!(spec.canonical_bytes().unwrap(), raw.trim_end().as_bytes());
+    assert!(
+        !serde_json::to_string(&spec)
+            .unwrap()
+            .contains("\"backing\"")
+    );
+    let unified = crate::runtime_launch_v2::RuntimeLaunchSpec::parse(raw).unwrap();
+    assert_eq!(unified.runner_volume("data"), None);
+}
+
+#[test]
+fn a_volume_backing_is_validated_not_trusted() {
+    let cases = [
+        // not a volume ref
+        r#"{"kind":"runner_volume","volume_ref":"../../etc","capacity_bytes":1073741824,"initialize_from_revision_ref":null}"#,
+        // zero capacity
+        r#"{"kind":"runner_volume","volume_ref":"svol_01M5ABCDE00000000000000001","capacity_bytes":0,"initialize_from_revision_ref":null}"#,
+        // unknown seed shape
+        r#"{"kind":"runner_volume","volume_ref":"svol_01M5ABCDE00000000000000001","capacity_bytes":1073741824,"initialize_from_revision_ref":"../../etc"}"#,
+    ];
+    for backing in cases {
+        let error = RuntimeLaunchSpecV1::parse(&single_oci_volume_spec(backing))
+            .expect_err("an invalid backing is refused");
+        assert!(
+            matches!(error, RuntimeLaunchSpecError::InvalidStateVolume { .. }),
+            "{backing}: {error:?}"
+        );
+    }
+    // A volume is a writer: read-only is contradictory.
+    let read_only = single_oci_volume_spec(VOLUME_BACKING)
+        .replace("\"access\":\"read_write\"", "\"access\":\"read_only\"");
+    let error = RuntimeLaunchSpecV1::parse(&read_only).expect_err("read-only volume refused");
+    assert!(matches!(
+        error,
+        RuntimeLaunchSpecError::InvalidStateVolume { .. }
+    ));
+}

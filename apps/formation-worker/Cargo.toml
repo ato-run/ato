@@ -25,6 +25,7 @@ ato-adapter-process = { path = "../../extensions/adapters/process", version = "0
 ato-formation = { path = "../../lib/formation", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
 ato-sandbox = { path = "../../lib/sandbox", version = "0.1.0" }
 clap = { version = "4.5", features = ["derive", "env"] }

@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn authorized_inputs_and_output_are_guest_paths_with_independent_access() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::launch::test_temp_dir();
         let workspace = root.path().join("workspace");
         let assets = root.path().join("assets");
         std::fs::create_dir(&workspace).unwrap();
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn overlapping_guest_workspace_or_state_and_environment_are_refused() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::launch::test_temp_dir();
         let context = context(root.path()).with_read_only_inputs(vec![ResolvedReadOnlyInput {
             input_id: None,
             env_name: "ATO_INPUT_ASSETS_DIR".into(),
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn input_names_and_output_overlap_are_refused_before_creation() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::launch::test_temp_dir();
         for name in ["HOME", "ATO_INPUT_PATH_", "ATO_INPUT_PATH_lowercase"] {
             let c = context(root.path()).with_read_only_inputs(vec![ResolvedReadOnlyInput {
                 input_id: None,
@@ -209,7 +209,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlink_input_and_output_ancestors_are_refused() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::launch::test_temp_dir();
         let link = root.path().join("link");
         std::os::unix::fs::symlink(root.path(), &link).unwrap();
         let c = context(root.path()).with_read_only_inputs(vec![ResolvedReadOnlyInput {

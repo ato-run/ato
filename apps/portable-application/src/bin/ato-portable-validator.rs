@@ -47,6 +47,10 @@ fn main() -> Result<()> {
                 bundle_id,
                 fully_satisfied,
             } => println!("hosted-verified bundle={bundle_id} fully_satisfied={fully_satisfied}"),
+            ValidatorRunOutcome::HostedAbandoned {
+                bundle_id,
+                failure_code,
+            } => println!("hosted-abandoned bundle={bundle_id} code={failure_code}"),
             ValidatorRunOutcome::Exported {
                 export_id,
                 bundle_sha256,

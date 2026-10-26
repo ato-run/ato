@@ -21,3 +21,14 @@ pub mod session;
 pub mod state_artifact;
 pub mod storage_capacity;
 pub mod volume;
+
+/// Security-sensitive mount fixtures need a real parent: macOS `/var` and
+/// operator-supplied temporary roots may themselves be symlinks. Tests create
+/// explicit child symlinks separately when checking their rejection.
+#[cfg(test)]
+fn test_temp_dir() -> tempfile::TempDir {
+    let parent = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical test temporary parent");
+    tempfile::tempdir_in(parent).expect("create test temporary directory")
+}

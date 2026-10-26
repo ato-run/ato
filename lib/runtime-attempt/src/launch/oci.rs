@@ -865,7 +865,7 @@ mod tests {
         .unwrap();
         let spec = parsed.service_group_spec().unwrap();
         let service = &spec.service_group().services[0];
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = crate::launch::test_temp_dir();
         let original = "https://broker.example/v1/managed-secrets";
         let context = ResolvedRuntimeLaunchContext::new(
             workspace.path().to_path_buf(),
@@ -930,8 +930,8 @@ mod tests {
         let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = &spec.realization else {
             panic!("fixture is an OCI realization");
         };
-        let workspace = tempfile::tempdir().unwrap();
-        let state = tempfile::tempdir().unwrap();
+        let workspace = crate::launch::test_temp_dir();
+        let state = crate::launch::test_temp_dir();
         let context = ResolvedRuntimeLaunchContext::new(
             workspace.path().to_path_buf(),
             "",
@@ -956,11 +956,11 @@ mod tests {
         assert!(adapter_spec.mounts[0].writable);
         ato_adapter_oci::validate_oci_spec(&adapter_spec).expect("the Adapter accepts it");
 
-        let assets = tempfile::tempdir().unwrap();
-        let models = tempfile::tempdir().unwrap();
+        let assets = crate::launch::test_temp_dir();
+        let models = crate::launch::test_temp_dir();
         let output = state.path().join("output");
         // Run output must be distinct from an attached state directory.
-        let separate_output = tempfile::tempdir().unwrap();
+        let separate_output = crate::launch::test_temp_dir();
         let context = context
             .with_read_only_inputs(vec![
                 crate::launch::resolved::ResolvedReadOnlyInput {
@@ -1058,7 +1058,7 @@ mod tests {
             None
         };
         let image = std::env::var("ATO_OCI_DATA_TEST_IMAGE").unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::launch::test_temp_dir();
         let workspace = root.path().join("workspace");
         let assets = root.path().join("assets");
         let output = root.path().join("outputs");
@@ -1392,7 +1392,7 @@ time.sleep(30)
             assert!(root.join("second/ownership.json").is_file());
             return;
         }
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::launch::test_temp_dir();
         let real = Command::new("sh")
             .args(["-c", "command -v docker"])
             .output()

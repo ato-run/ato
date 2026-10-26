@@ -80,20 +80,23 @@ fn a_revision_backed_group_is_untouched_by_v3() {
 }
 
 #[test]
-fn older_parsers_fail_closed_on_a_volume_attachment() {
-    // What a Runner without v3 does: refuse by shape before materializing
-    // anything, never read the volume as a working copy.
-    assert!(RuntimeLaunchSpecV2::parse(VOLUME_FIXTURE).is_err());
-    assert!(RuntimeLaunchSpecV1::parse(VOLUME_FIXTURE).is_err());
-    // A v2 envelope carrying a v3 attachment is refused too, not reinterpreted.
-    let smuggled = VOLUME_FIXTURE.replace(
-        RUNTIME_LAUNCH_SPEC_V3_PROTOCOL,
-        RUNTIME_LAUNCH_SPEC_V2_PROTOCOL,
+fn a_volume_attachment_is_refused_when_its_backing_is_unknown() {
+    // v1/v2 now carry a Runner-volume backing on purpose (#1571, single-OCI
+    // volume). What must still fail closed is a backing the parser does not
+    // know: it may not be reinterpreted as a working copy, and a backing with
+    // unknown fields may not lose them silently.
+    let unknown_kind = VOLUME_FIXTURE.replace(
+        "\"kind\":\"runner_volume\"",
+        "\"kind\":\"firecracker_snapshot\"",
     );
-    assert_eq!(
-        RuntimeLaunchSpec::parse(&smuggled).unwrap_err().code(),
-        "ATO_ERR_RUNTIME_LAUNCH_SPEC_FORBIDDEN_FIELD"
+    assert!(RuntimeLaunchSpecV1::parse(&unknown_kind).is_err());
+    assert!(RuntimeLaunchSpecV2::parse(&unknown_kind).is_err());
+    let extra_field = VOLUME_FIXTURE.replace(
+        "\"capacity_bytes\":1073741824",
+        "\"capacity_bytes\":1073741824,\"host_path\":\"/etc\"",
     );
+    assert!(RuntimeLaunchSpecV1::parse(&extra_field).is_err());
+    assert!(RuntimeLaunchSpecV2::parse(&extra_field).is_err());
 }
 
 #[test]
