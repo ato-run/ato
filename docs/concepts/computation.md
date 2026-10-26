@@ -91,7 +91,10 @@ Computation.
 
 ## Implementation note
 
-The current implementation represents a sealed point as
+The computation-root implementation represents a sealed point as
 `ComputationObject { semantics, boundary, residual }` and addresses its
 canonical bytes with a `ComputationRef`. See the accepted
 [Computation Architecture](../rfcs/accepted/COMPUTATION_ARCHITECTURE.md).
+
+The [portable application profile](application-contracts.md) has a distinct
+Contract-root identity. Its refs must not be substituted for a ComputationRef.

@@ -1,5 +1,10 @@
 # Ready-State backend matrix
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../specifications/README.md)
+> before applying any command or contract here.
+
 How each host/provider maps to an isolation substrate and a Ready-State
 mechanism. The Desktop Runner rows (M0) are produced by
 `crates/cli/src/application/desktop_runner/`; the Firecracker/KVM rows are the

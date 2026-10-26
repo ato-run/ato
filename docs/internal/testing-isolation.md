@@ -25,7 +25,7 @@ To reuse an existing hermetic root intentionally, set both `ATO_TEST_REUSE_ENV_R
 Run a single command in isolation:
 
 ```bash
-./scripts/ato-test-shell.sh --print-env ./target/debug/ato run --sandbox -y capsule://github.com/Koh0920/WasedaP2P
+./scripts/ato-test-shell.sh --print-env ./target/debug/ato run .tmp/getting-started/static.capsule --no-open
 ```
 
 ## MCP verification
@@ -37,8 +37,8 @@ Preferred flow: open one fresh hermetic shell and run both commands inside it.
 ```bash
 ./scripts/ato-test-shell.sh --print-env
 
-ATO_HOME="$ATO_HOME" cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop
-ATO_HOME="$ATO_HOME" cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp
+ATO_HOME="$ATO_HOME" cargo run --manifest-path apps/desktop/Cargo.toml --bin ato-desktop
+ATO_HOME="$ATO_HOME" cargo run --manifest-path apps/desktop/Cargo.toml --bin ato-desktop-mcp
 ```
 
 If you need separate command invocations, allocate one fresh root first and then opt into reuse for that single verification run:
@@ -47,10 +47,10 @@ If you need separate command invocations, allocate one fresh root first and then
 env_root="$(./scripts/ato-test-shell.sh --print-env true | sed -n 's/^ATO_TEST_ENV_ROOT=//p')"
 
 ATO_TEST_REUSE_ENV_ROOT=1 ATO_TEST_ENV_ROOT="$env_root" \
-	./scripts/ato-test-shell.sh cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop
+	./scripts/ato-test-shell.sh cargo run --manifest-path apps/desktop/Cargo.toml --bin ato-desktop
 
 ATO_TEST_REUSE_ENV_ROOT=1 ATO_TEST_ENV_ROOT="$env_root" \
-	./scripts/ato-test-shell.sh cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp
+	./scripts/ato-test-shell.sh cargo run --manifest-path apps/desktop/Cargo.toml --bin ato-desktop-mcp
 ```
 
 Do not call `./scripts/ato-test-shell.sh` twice without the explicit reuse flags above; each invocation creates a different fresh root by default.
@@ -72,4 +72,6 @@ Set `ATO_TEST_REUSE_ENV_ROOT=1` only if you intentionally need to rerun against 
 
 ## Guard
 
-Use [scripts/check-ato-home-paths.sh](../../scripts/check-ato-home-paths.sh) to catch new direct `HOME -> .ato` path derivations in product source.
+The former `scripts/check-ato-home-paths.sh` guard is absent from this checkout.
+Do not report that guard as executed. Review direct `HOME -> .ato` path
+derivations against the current environment-root implementation.
