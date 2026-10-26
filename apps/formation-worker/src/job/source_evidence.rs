@@ -8,7 +8,7 @@ use serde::Serialize;
 /// The existing `source_evidence` payload. New producers emit both metrics;
 /// receiver schemas keep the pair optional for historical results.
 #[derive(Debug, Serialize)]
-pub(super) struct FormationSourceEvidenceV1 {
+pub(crate) struct FormationSourceEvidenceV1 {
     archive_digest: String,
     tree_digest: String,
     resolver_contract_version: String,
@@ -17,7 +17,7 @@ pub(super) struct FormationSourceEvidenceV1 {
     observed_uncompressed_bytes: u64,
 }
 
-pub(super) fn capture(
+pub(crate) fn capture(
     verified: &FileVerifiedArchive,
     subdirectory: &str,
 ) -> Result<FormationSourceEvidenceV1> {
