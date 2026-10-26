@@ -49,7 +49,7 @@ portable laneは一時primary/allowlistとし、本作業の検証は元からal
 
 | 試験 | 結果 | 実機証跡・未達条件 |
 |---|---|---|
-| A Native Terminal | PASS（主要経路）、最終再試行SKIP | 14 checks: 起動/IO、120×40→100×30、切断再接続、同一PID/starttime、counter継続、Stop、Cross-user Run/Surface/Runner拒否。稼働中gatewayでevil Origin403、偽Assertion401。最終API/PWA反映後の再試行は別セッションのexplicit slot使用により409 user_runner_no_capacity、新規Runなし |
+| A Native Terminal | PASS（最終配信後の再試行も成功） | 14 checks: 起動/IO、120×40→100×30、切断再接続、同一PID/starttime、counter継続、Stop、Cross-user Run/Surface/Runner拒否。稼働中gatewayでevil Origin403、偽Assertion401。最終API/PWA反映後の初回再試行は共有slot使用で409。解放を確認後の再試行でも全14 checks PASS |
 | B Formation | PASS（対応済みv1/v2経路）/機能完成は未達 | v1回帰、v2 Source、Frozen K、実HTTP verifier、Formation Receipt、同一ArtifactからHosted RunとRunに束縛したReceipt。capsule/3、HTTP body破壊、Node20.20.2 Policyは拒否・success resultなし。Candidate K再定義はRust suiteで確認。全構文/全runtime対応、Receipt条件#1582は未完 |
 | C Source Archive | PARTIAL / 長期再利用FAIL | Upload・保存・Digest・取得・同一Source再Formation・Revision・Old/New・旧Receipt不変・Cross-user拒否はPASS。期限後の元Archive参照から再Formationは410 upload_expired。#895をP0とし、表示取得だけで成功扱いにしない |
 | D ライフサイクル | PARTIAL | 合成Source→Hosted Formation→Contract verification→Hosted Process Runを同一Source/K/D/bundle/Runで追跡。Terminal再接続・同一Instanceのcounter state restoreは別fixtureで成功。memosの単一OCI wakeと同一InstanceでのD更新をこの結果で解決済みにしない（#1571/#1572） |
@@ -67,7 +67,7 @@ portable laneは一時primary/allowlistとし、本作業の検証は元からal
 
 上記2 Runはそれぞれexecution.run_id/lease_id/attempt_idに束縛されたfully_satisfied=true Receiptを取得しStop済み。Source1のDは508def…、Source2は9b7afa…へ変化したがKは884ed3…のまま。transport SHA、元Archive SHA、Source treeのdigestを別々に記録している。
 
-Rustのsource_evidenceでは元Archive4f6e…のtree_digestが8b4ba6c0…、Archive869b…がee6e2905…。v1とv2は同じSourceRevision（srev_01M5V53V8NXCVCBB9P1YKZQT56 / srev_01M5V6868RTT6Y07CVFS9FZSS9）を共有したが、全5 Resultのsource_materialization_idはnullだった。API Source表示のdigestは別の表現なので、このRust tree digestやArchive digestへ読み替えない。
+Rust source_evidence: Archive4f6e…のtree_digestは8b4ba6c0…、Archive869b…はee6e2905…。v1/v2は同じSourceRevision（srev_01M5V53V8NXCVCBB9P1YKZQT56 / srev_01M5V6868RTT6Y07CVFS9FZSS9）を共有したが、全5 Resultのsource_materialization_idはnull。API Source表示digestは別表現なのでRust tree digestやArchive digestへ読み替えない。
 
 v1 Source: Archive4f6e…から初回schema csch_01M5V53V48DY4NQGP64GB5XPFS、再Formation schema csch_01M5V547J4M10BQ5EBWV8MDB6P。API Source digestはいずれも6c968306…で、file bytes/hashを確認。Archive869b…へのRevisionはschema csch_01M5V6862HTSRNE9062WJVDHSY、API Source digest aab49c92…。旧Result/ReceiptのSHAは変更前後ともa9f46265c712fbbe028712f8823dbcb0df273475ee037fc138b50bbb04072667。
 
@@ -79,9 +79,9 @@ v1 Source: Archive4f6e…から初回schema csch_01M5V53V48DY4NQGP64GB5XPFS、�
 
 ## 回収・残留
 
-本作業が作成した15 Runと15 LeaseをD1で照合し、非終端0件。Source/旧Receipt/Instance/State volumeは継続と監査のため保持した。State fixtureは同一InstanceでStop後に新しいprocessを起動しcounter3を復元した。同一process継続の確認はStopを挟まないReconnect試験で行った。
+本作業が作成した16 Runと16 LeaseをD1で照合し、非終端0件。Source/旧Receipt/Instance/State volumeは継続と監査のため保持した。State fixtureは同一InstanceでStop後に新しいprocessを起動しcounter3を復元した。同一process継続の確認はStopを挟まないReconnect試験で行った。
 
-最終Linux読取では開始時の4 Containerが残り、別セッションのRun run_01M5V95TBKN469MCQ0NWNQ853R / Lease01M5V95TBKKMS8QP182X8YNNNYのContainer 0e3642334607も稼働中。本作業のRun一覧にはなく、停止・削除していない。この共有slot使用が最終Terminal再試行のcapacity拒否と一致する。Production Formation WorkerのPID2809237と起動時刻は開始前後で一致。
+共有slotが別セッションのRun run_01M5V95TBKN469MCQ0NWNQ853R / Lease01M5V95TBKKMS8QP182X8YNNNYで使用中だったため、初回の最終Terminal再試行はcapacity拒否となった。そのRunを停止せず、解放後の再試行に成功。最終Docker読取は開始時の4 Containerだけで、本作業のContainer残留0件。Production Formation WorkerのPID2809237と起動時刻は開始前後で一致。
 
 ## 残課題
 
