@@ -1,0 +1,2999 @@
+{
+  "recorded_at": "2026-10-26T05:14:58.820477+00:00",
+  "complete": false,
+  "production_mutations": 0,
+  "main_pushes_by_this_task": 0,
+  "code_validation_sha": "4d43ad44d9e565699f9e2e52b1f0e6353b2bee57",
+  "heads": {
+    "ato": {
+      "main": "585e86c5222836d41e9d8359178d37ac06f712b9",
+      "dev": "4d43ad44d9e565699f9e2e52b1f0e6353b2bee57"
+    },
+    "ato-api": {
+      "main": "d05ecbbd5d5574373abcad500ded7aab9970f250",
+      "dev": "6e178c901c0a028b121a4fc18841a4d03e13702d"
+    },
+    "ato-pwa": {
+      "main": "83635a90c076d97e635c0ea59d985294aa3ed44c",
+      "dev": "33febac1717bb4c8a5d66e4ea87e5d12ae4d27c1"
+    }
+  },
+  "open_prs_before": 113,
+  "open_prs_after": 19,
+  "absorbed_closed": 95,
+  "merged_prs": [
+    {
+      "repo": "ato",
+      "number": 1575,
+      "url": "https://github.com/ato-run/ato/pull/1575",
+      "headRefOid": "35ca801b1f8b5691769c36ffdd82007a29e1edf7",
+      "mergeCommit": {
+        "oid": "dc5c110afb4233c6b76f2f0f040855182dfec76e"
+      }
+    },
+    {
+      "repo": "ato",
+      "number": 1576,
+      "url": "https://github.com/ato-run/ato/pull/1576",
+      "headRefOid": "5e4721b0745c0487175b3724179cbeaa23291665",
+      "mergeCommit": {
+        "oid": "dc5c110afb4233c6b76f2f0f040855182dfec76e"
+      }
+    },
+    {
+      "repo": "ato",
+      "number": 1579,
+      "url": "https://github.com/ato-run/ato/pull/1579",
+      "headRefOid": "017879fdc8f21665b1bc21dec2ef1daf0799afc9",
+      "mergeCommit": {
+        "oid": "62d72878c1c9ef9a88b4db81c4f1b9923329ae84"
+      }
+    },
+    {
+      "repo": "ato",
+      "number": 1580,
+      "url": "https://github.com/ato-run/ato/pull/1580",
+      "headRefOid": "70545bb8e0b597288bf92479305d1c927b644264",
+      "mergeCommit": {
+        "oid": "4d43ad44d9e565699f9e2e52b1f0e6353b2bee57"
+      }
+    },
+    {
+      "repo": "ato-api",
+      "number": 889,
+      "url": "https://github.com/ato-run/ato-api/pull/889",
+      "headRefOid": "ce81f4cc797a20995abe21eb13f03e7f664f8b73",
+      "mergeCommit": {
+        "oid": "f6bc3f6479246d4812d857681cdee7e615f6398b"
+      }
+    },
+    {
+      "repo": "ato-api",
+      "number": 890,
+      "url": "https://github.com/ato-run/ato-api/pull/890",
+      "headRefOid": "bbed8e28790874e9e1d3cceda81ae1f51d73267e",
+      "mergeCommit": {
+        "oid": "4dbd770a090a74a8ea560f467fe7a9c1642c36cc"
+      }
+    },
+    {
+      "repo": "ato-api",
+      "number": 892,
+      "url": "https://github.com/ato-run/ato-api/pull/892",
+      "headRefOid": "5a348c1ed2b4eff7cc4b2d7a17a9988388ac9d12",
+      "mergeCommit": {
+        "oid": "b52e8874c29ec704e1c7572917d56fcd97cb2460"
+      }
+    },
+    {
+      "repo": "ato-api",
+      "number": 894,
+      "url": "https://github.com/ato-run/ato-api/pull/894",
+      "headRefOid": "5a8e3eb427193ed001ccb23a6aa713af5c0121e8",
+      "mergeCommit": {
+        "oid": "6e178c901c0a028b121a4fc18841a4d03e13702d"
+      }
+    }
+  ],
+  "rollout": {
+    "portable_enabled": false,
+    "unrelated_concurrent_allowlist_changes_preserved": true
+  },
+  "cleanup": [
+    {
+      "kind": "run",
+      "id": "run_01M5TXC7ABM9QPTWR7B6MK3KK4",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5TXHJEX8T2FDYAKGP4T519B",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5TXTASEFN9DYD55PC5WQD2C",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5TY5QR1YPGAQQX4A8T69937",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5TYEAX9TSKFVA7BVQD5AVHF",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5TYM8R787D9WBXS4YVSE8VP",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V1D6RZB90FDJA96MSZS7F0",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V1FV8QHZ4Q2XYYS1SX38EM",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V1GSJ2AWJDW5G9XHFMH4WW",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V1Q18BE3HNMYX6QKHDSWP6",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V1Y5Y3S8Y7YQ1NSQX00F2S",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V3R89SVRZ69ZNFAJN39P4Z",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V7Y3C2QE0AAGMRZYJTPPGV",
+      "status": "failed",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "run",
+      "id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+      "status": "stopped",
+      "stopped_at": null
+    },
+    {
+      "kind": "lease",
+      "id": "01M5TXC7ABEZAEABPPR9RRK31K",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T01:33:52.345Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5TXHJEXY3ZB4GSMYCJBQARB",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T01:38:18.878Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5TXTASEYE5J57GW0FCM5ZKN",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T01:40:26.459Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5TY5QR179N823RA6E72CZGW",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T01:46:41.860Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5TYEAX9KCST6FJ5DSHQ4N9S",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T01:51:18.596Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5TYM8R7Q350DAFW65WWTZ6C",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T01:55:32.367Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V1D6RZGAP4XDEQ9KXGCK9S",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T02:43:00.480Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V1FV8Q8NWBWHCYBWN69C1E",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T02:44:29.988Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V1GSJ2VX9TV15P7XSWNA65",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T02:45:03.877Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V1Q18BVS7FNE76SSFV9WJ6",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T02:48:30.270Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V1Y5Y3JY7SMZ1DVBC7XPW8",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T02:53:07.206Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V3R89S52XX7BDD8S9Z37X9",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T03:23:58.551Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V7Y3C2G76JP0D7JW6Z80EJ",
+      "status": "failed",
+      "stopped_at": "2026-10-26T04:36:44.115Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V89PCKS1PJMKF4R213610J",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T04:43:05.988Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V8BV1PMCC6EF9PPD4FD41E",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T04:44:16.303Z"
+    },
+    {
+      "kind": "lease",
+      "id": "01M5V9W6NPK1P68MXPW3F3JA31",
+      "status": "stopped",
+      "stopped_at": "2026-10-26T05:11:02.218Z"
+    }
+  ],
+  "source_replay_after_upload_expiry": {
+    "at": "2026-10-26T04:33:28.253Z",
+    "schema": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+    "original_upload": "upl_01M5V53DN03A5WXNYY98CS325H",
+    "original_archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+    "reference": {
+      "http": 200,
+      "body": {
+        "compute_schema_id": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+        "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+        "environment": "staging",
+        "byte_integrity_verified": false,
+        "status": "source_reference_retained",
+        "formation_job_id": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+        "upload_id": "upl_01M5V53DN03A5WXNYY98CS325H",
+        "source_archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+        "compressed_bytes": 167,
+        "normalized_source_read_route": "available_with_existing_limits"
+      }
+    },
+    "admission": {
+      "http": 410,
+      "body": {
+        "error": "upload_expired"
+      }
+    },
+    "repeat": {
+      "http": 410,
+      "body": {
+        "error": "upload_expired"
+      }
+    },
+    "durable_reformation_pass": false
+  },
+  "source_provenance": [
+    {
+      "results": [
+        {
+          "job_id": "fjob_3256748bcf4f09327716c0f21286435d9ae548d6b9a7b96a2883af9746c4f459",
+          "source_revision_id": "srev_01M5V6868RTT6Y07CVFS9FZSS9",
+          "source_materialization_id": null,
+          "archive_digest": "sha256:869b6426ce564c9f93d2ac01ded2937f22e822ec1b62ac2b49754f57c4164c14",
+          "tree_digest": "sha256:ee6e290511271a92013d9d257a7585d9c05ae114675140e4565c6ac7b87996e4"
+        },
+        {
+          "job_id": "fjob_6e1e066aa5b9e6b6ebf95ee93cb5d3466dbe928510be43d0b7f7bbe2f4eaee8b",
+          "source_revision_id": "srev_01M5V53V8NXCVCBB9P1YKZQT56",
+          "source_materialization_id": null,
+          "archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+          "tree_digest": "sha256:8b4ba6c05badab77548ddd1c337c872627b50c1c24a40116079eefd15716fbce"
+        },
+        {
+          "job_id": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+          "source_revision_id": "srev_01M5V53V8NXCVCBB9P1YKZQT56",
+          "source_materialization_id": null,
+          "archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+          "tree_digest": "sha256:8b4ba6c05badab77548ddd1c337c872627b50c1c24a40116079eefd15716fbce"
+        },
+        {
+          "job_id": "fjob_aad3039b67d328ed99f5e8cb4401a2a743029048afbd141974087c3ed8273754",
+          "source_revision_id": "srev_01M5V6868RTT6Y07CVFS9FZSS9",
+          "source_materialization_id": null,
+          "archive_digest": "sha256:869b6426ce564c9f93d2ac01ded2937f22e822ec1b62ac2b49754f57c4164c14",
+          "tree_digest": "sha256:ee6e290511271a92013d9d257a7585d9c05ae114675140e4565c6ac7b87996e4"
+        },
+        {
+          "job_id": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+          "source_revision_id": "srev_01M5V53V8NXCVCBB9P1YKZQT56",
+          "source_materialization_id": null,
+          "archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+          "tree_digest": "sha256:8b4ba6c05badab77548ddd1c337c872627b50c1c24a40116079eefd15716fbce"
+        }
+      ],
+      "success": true,
+      "meta": {
+        "served_by": "v3-prod",
+        "served_by_region": "APAC",
+        "served_by_colo": "KIX",
+        "served_by_primary": true,
+        "timings": {
+          "sql_duration_ms": 0.8361
+        },
+        "duration": 0.8361,
+        "changes": 0,
+        "last_row_id": 717,
+        "changed_db": false,
+        "size_after": 141938688,
+        "rows_read": 10,
+        "rows_written": 0,
+        "total_attempts": 1
+      }
+    }
+  ],
+  "source_tests": {
+    "first_and_repeat": {
+      "started_at": "2026-10-26T03:47:08.161Z",
+      "production_mutations": 0,
+      "checks": [
+        {
+          "name": "upload_v1",
+          "ok": true,
+          "detail": {
+            "http": 201,
+            "id": "upl_01M5V53DN03A5WXNYY98CS325H"
+          }
+        },
+        {
+          "name": "archive_stored_v1",
+          "ok": true,
+          "detail": {
+            "http": 200,
+            "digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72"
+          }
+        },
+        {
+          "name": "complete_v1",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "wrong_archive_digest_rejected",
+          "ok": true,
+          "detail": {
+            "http": 409,
+            "error": "upload_digest_mismatch"
+          }
+        },
+        {
+          "name": "wrong_digest_cannot_reform",
+          "ok": true,
+          "detail": {
+            "http": 409,
+            "error": "upload_digest_mismatch"
+          }
+        },
+        {
+          "name": "formation_queued",
+          "ok": true,
+          "detail": {
+            "http": 202,
+            "upload": "upl_01M5V53DN03A5WXNYY98CS325H",
+            "digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72"
+          }
+        },
+        {
+          "name": "formation_ready",
+          "ok": true,
+          "detail": {
+            "job": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "status": "ready",
+            "failure": null
+          }
+        },
+        {
+          "name": "source_retrieved_and_file_hashes_verified",
+          "ok": true,
+          "detail": {
+            "job": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "http": 200,
+            "source_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8",
+            "reference": "source_reference_retained"
+          }
+        },
+        {
+          "name": "formation_queued",
+          "ok": true,
+          "detail": {
+            "http": 202,
+            "upload": "upl_01M5V53DN03A5WXNYY98CS325H",
+            "digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72"
+          }
+        },
+        {
+          "name": "formation_ready",
+          "ok": true,
+          "detail": {
+            "job": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "status": "ready",
+            "failure": null
+          }
+        },
+        {
+          "name": "source_retrieved_and_file_hashes_verified",
+          "ok": true,
+          "detail": {
+            "job": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "http": 200,
+            "source_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8",
+            "reference": "source_reference_retained"
+          }
+        },
+        {
+          "name": "same_archive_reformation_source_digest",
+          "ok": true,
+          "detail": {
+            "first": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "repeat": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "original_archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+            "first_source_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8",
+            "repeat_source_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8"
+          }
+        }
+      ],
+      "jobs": [
+        {
+          "id": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+          "compute": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+          "upload": "upl_01M5V53DN03A5WXNYY98CS325H",
+          "archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+          "outcome": {
+            "job_id": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "status": "ready",
+            "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "compute_schema_id": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+            "result": {
+              "result_digest": "sha256:e7654142314a94e5c0ffe0bb7efa861d24334f83b10118bf3f6df82cbdc10821",
+              "contract_ref": "sha256:7b47859d63ee0f40f707cc8bb3bafcf0eee7077da375d15f2f30f8a0d2603ef6",
+              "derivation_ref": "sha256:1baa9f1786630fafe229c487800bbfae06589df7a1c35104b79c6509d0fc5a00",
+              "formation_kind": null,
+              "schema_profile": null,
+              "portable_bundle_sha256": null,
+              "portable_bundle_artifact_ref": null,
+              "fully_satisfied": true,
+              "verification_receipt": {
+                "contract_ref": "sha256:7b47859d63ee0f40f707cc8bb3bafcf0eee7077da375d15f2f30f8a0d2603ef6",
+                "derivation_ref": "sha256:1baa9f1786630fafe229c487800bbfae06589df7a1c35104b79c6509d0fc5a00",
+                "execution": {
+                  "attempt_id": "fatt_01M5V53PHR8SCXJ9HA3RAPA2EC",
+                  "endpoint": "http://127.0.0.1:36427/",
+                  "platform": "linux/x86_64",
+                  "realization": "static_web",
+                  "request_id": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6"
+                },
+                "fully_satisfied": true,
+                "observations": [
+                  {
+                    "evidence": {
+                      "body_sha256": "sha256:398cae754ed182d699e4f6ab83f90a7b597be63b0a15c52149ea8b7a25ec434d",
+                      "method": "GET",
+                      "path": "/",
+                      "status": 200
+                    },
+                    "id": "root",
+                    "outcome": "satisfied"
+                  },
+                  {
+                    "evidence": {
+                      "digest": "sha256:5f05a9bfb2668286349b76391da74ff0a3278cafac76f366c05637785e502304",
+                      "input": "workspace"
+                    },
+                    "id": "source-identity",
+                    "outcome": "satisfied"
+                  }
+                ],
+                "schema": "ato.contract-verification-receipt/1",
+                "target": {
+                  "kind": "formation-runtime"
+                }
+              },
+              "observation_summary": [
+                {
+                  "id": "root",
+                  "outcome": "satisfied"
+                },
+                {
+                  "id": "source-identity",
+                  "outcome": "satisfied"
+                }
+              ]
+            },
+            "failure": null,
+            "failure_code": null,
+            "failure_stage": null,
+            "failure_category": null,
+            "failure_retryable": null,
+            "failure_classification": null,
+            "failure_attempt_id": null
+          },
+          "schema": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+          "source": {
+            "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "compute_schema_id": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+            "source_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8",
+            "files": [
+              {
+                "path": "index.html",
+                "size": 34,
+                "digest": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "content": "<!doctype html><h1>source-v1</h1>\n"
+              },
+              {
+                "path": "proof.txt",
+                "size": 24,
+                "digest": "sha256:3944ea07ebcb8c77773e56df337995faf85b157a855ff05ef300f59ccf23ea8e",
+                "content": "consolidation source v1\n"
+              }
+            ]
+          },
+          "source_reference": {
+            "compute_schema_id": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+            "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "environment": "staging",
+            "byte_integrity_verified": false,
+            "status": "source_reference_retained",
+            "formation_job_id": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+            "upload_id": "upl_01M5V53DN03A5WXNYY98CS325H",
+            "source_archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+            "compressed_bytes": 167,
+            "normalized_source_read_route": "available_with_existing_limits"
+          }
+        },
+        {
+          "id": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+          "compute": "cmp_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+          "upload": "upl_01M5V53DN03A5WXNYY98CS325H",
+          "archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+          "outcome": {
+            "job_id": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "status": "ready",
+            "compute_id": "cmp_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "compute_schema_id": "csch_01M5V547J4M10BQ5EBWV8MDB6P",
+            "result": {
+              "result_digest": "sha256:9da393b71c35159177cfbe8317637987b8ccfa443cd84a393414274ca0a1ceda",
+              "contract_ref": "sha256:7b47859d63ee0f40f707cc8bb3bafcf0eee7077da375d15f2f30f8a0d2603ef6",
+              "derivation_ref": "sha256:1baa9f1786630fafe229c487800bbfae06589df7a1c35104b79c6509d0fc5a00",
+              "formation_kind": null,
+              "schema_profile": null,
+              "portable_bundle_sha256": null,
+              "portable_bundle_artifact_ref": null,
+              "fully_satisfied": true,
+              "verification_receipt": {
+                "contract_ref": "sha256:7b47859d63ee0f40f707cc8bb3bafcf0eee7077da375d15f2f30f8a0d2603ef6",
+                "derivation_ref": "sha256:1baa9f1786630fafe229c487800bbfae06589df7a1c35104b79c6509d0fc5a00",
+                "execution": {
+                  "attempt_id": "fatt_01M5V542VN7Y08527Q0NMPF9E3",
+                  "endpoint": "http://127.0.0.1:45197/",
+                  "platform": "linux/x86_64",
+                  "realization": "static_web",
+                  "request_id": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be"
+                },
+                "fully_satisfied": true,
+                "observations": [
+                  {
+                    "evidence": {
+                      "body_sha256": "sha256:398cae754ed182d699e4f6ab83f90a7b597be63b0a15c52149ea8b7a25ec434d",
+                      "method": "GET",
+                      "path": "/",
+                      "status": 200
+                    },
+                    "id": "root",
+                    "outcome": "satisfied"
+                  },
+                  {
+                    "evidence": {
+                      "digest": "sha256:5f05a9bfb2668286349b76391da74ff0a3278cafac76f366c05637785e502304",
+                      "input": "workspace"
+                    },
+                    "id": "source-identity",
+                    "outcome": "satisfied"
+                  }
+                ],
+                "schema": "ato.contract-verification-receipt/1",
+                "target": {
+                  "kind": "formation-runtime"
+                }
+              },
+              "observation_summary": [
+                {
+                  "id": "root",
+                  "outcome": "satisfied"
+                },
+                {
+                  "id": "source-identity",
+                  "outcome": "satisfied"
+                }
+              ]
+            },
+            "failure": null,
+            "failure_code": null,
+            "failure_stage": null,
+            "failure_category": null,
+            "failure_retryable": null,
+            "failure_classification": null,
+            "failure_attempt_id": null
+          },
+          "schema": "csch_01M5V547J4M10BQ5EBWV8MDB6P",
+          "source": {
+            "compute_id": "cmp_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "compute_schema_id": "csch_01M5V547J4M10BQ5EBWV8MDB6P",
+            "source_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8",
+            "files": [
+              {
+                "path": "index.html",
+                "size": 34,
+                "digest": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "content": "<!doctype html><h1>source-v1</h1>\n"
+              },
+              {
+                "path": "proof.txt",
+                "size": 24,
+                "digest": "sha256:3944ea07ebcb8c77773e56df337995faf85b157a855ff05ef300f59ccf23ea8e",
+                "content": "consolidation source v1\n"
+              }
+            ]
+          },
+          "source_reference": {
+            "compute_schema_id": "csch_01M5V547J4M10BQ5EBWV8MDB6P",
+            "compute_id": "cmp_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "environment": "staging",
+            "byte_integrity_verified": false,
+            "status": "source_reference_retained",
+            "formation_job_id": "fjob_ac1dc1d24acd8c67c3c2bd3da51305ae7efd85d6f00e111bf99a7af1dc6322be",
+            "upload_id": "upl_01M5V53DN03A5WXNYY98CS325H",
+            "source_archive_digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+            "compressed_bytes": 167,
+            "normalized_source_read_route": "available_with_existing_limits"
+          }
+        }
+      ],
+      "uploads": [
+        "upl_01M5V53DN03A5WXNYY98CS325H"
+      ],
+      "first_schema_before": {
+        "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+        "compute_schema_id": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+        "operation_catalog": {
+          "catalog_ref": "sha256:490080a3936fb093c3faf171f3c94332163bbebe4ae6380534ea1f0e23bccd1a",
+          "protocol": "ato.operation-catalog@1",
+          "operations": [],
+          "diagnostics": []
+        },
+        "title": "Consolidation source",
+        "icon_image_path": null,
+        "created_at": "2026-10-26 03:47:22",
+        "capsule_revision_id": "",
+        "static_materialization_id": "sha256:62eb650f3cb7b5c52b1a50c7e4a81a725c326f56a893c3c0e07a8237ba20ce89",
+        "state_protocol": "ato.materialize.browser@1"
+      },
+      "finished_at": "2026-10-26T03:47:36.471Z",
+      "pass": true
+    },
+    "revision": {
+      "started_at": "2026-10-26T04:07:05.524Z",
+      "production_mutations": 0,
+      "checks": [
+        {
+          "name": "source_instance_opened",
+          "ok": true,
+          "detail": {
+            "http": 201
+          }
+        },
+        {
+          "name": "revision_archive_digest",
+          "ok": true,
+          "detail": {
+            "digest": "sha256:869b6426ce564c9f93d2ac01ded2937f22e822ec1b62ac2b49754f57c4164c14"
+          }
+        },
+        {
+          "name": "revision_upload",
+          "ok": true,
+          "detail": {
+            "http": 201
+          }
+        },
+        {
+          "name": "revision_archive_stored",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "revision_digest_verified",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "revision_queued",
+          "ok": true,
+          "detail": {
+            "http": 202
+          }
+        },
+        {
+          "name": "revision_ready",
+          "ok": true,
+          "detail": {
+            "status": "ready",
+            "failure": null
+          }
+        },
+        {
+          "name": "source_revision_distinct",
+          "ok": true,
+          "detail": {
+            "old_schema": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+            "new_schema": "csch_01M5V6862HTSRNE9062WJVDHSY",
+            "old_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8",
+            "new_digest": "sha256:aab49c92b6d4e2f61a49be76bef8dd18c34a276a97b94d85e71af17157223c24"
+          }
+        },
+        {
+          "name": "new_source_bytes_match",
+          "ok": true,
+          "detail": {
+            "files": 2
+          }
+        },
+        {
+          "name": "old_source_immutable",
+          "ok": true,
+          "detail": {
+            "schema": "csch_01M5V53V48DY4NQGP64GB5XPFS"
+          }
+        },
+        {
+          "name": "old_result_and_receipt_immutable",
+          "ok": true,
+          "detail": {
+            "before": "sha256:a9f46265c712fbbe028712f8823dbcb0df273475ee037fc138b50bbb04072667",
+            "after": "sha256:a9f46265c712fbbe028712f8823dbcb0df273475ee037fc138b50bbb04072667"
+          }
+        },
+        {
+          "name": "cross_user_source_denied",
+          "ok": true,
+          "detail": {
+            "http": 404,
+            "error": "compute_schema_not_found"
+          }
+        }
+      ],
+      "instance": {
+        "instance_id": "cinst_01M5V67YMNDNN71GJDZGW040V8",
+        "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+        "schema_id": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+        "display_name": "Consolidation source",
+        "default_display_name": "Consolidation source",
+        "icon_color": null,
+        "icon_glyph": null,
+        "icon_image_path": null,
+        "listing_icon_url": null,
+        "role": "owner",
+        "origin_kind": "local_upload",
+        "origin_key": null,
+        "discover_app_id": null,
+        "host_slug": "cinst-xbfn3oly2siq3snz",
+        "app_url": "https://cinst-xbfn3oly2siq3snz.stg-app.ato.run/",
+        "status": "active",
+        "created_at": "2026-10-26T04:07:06.133Z",
+        "updated_at": "2026-10-26T04:07:06.133Z"
+      },
+      "old_schema": "csch_01M5V53V48DY4NQGP64GB5XPFS",
+      "old_job": "fjob_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+      "old_digest": "sha256:6c9683062e6b44b57af52dec5ad9396ebdc8e3bad145d8b9065257ef5440d6d8",
+      "upload_id": "upl_01M5V67ZMAQ7Q9NTBH138KPYQN",
+      "job_id": "fjob_3256748bcf4f09327716c0f21286435d9ae548d6b9a7b96a2883af9746c4f459",
+      "job": {
+        "job_id": "fjob_3256748bcf4f09327716c0f21286435d9ae548d6b9a7b96a2883af9746c4f459",
+        "status": "ready",
+        "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+        "compute_schema_id": "csch_01M5V6862HTSRNE9062WJVDHSY",
+        "result": {
+          "result_digest": "sha256:2d431357bd4d07491b6a13331fd1466caa49f1671fa3a4e17407c8ffde6d09ab",
+          "contract_ref": "sha256:85a0e9f19d16ace44b900cf5593fb4fe848187b8ec92e3e81e5519c0bbadfd57",
+          "derivation_ref": "sha256:a8c2bd1c93a924bc4c318513145c5d56013f9d0e17bd651ee3767e378ba2c831",
+          "formation_kind": null,
+          "schema_profile": null,
+          "portable_bundle_sha256": null,
+          "portable_bundle_artifact_ref": null,
+          "fully_satisfied": true,
+          "verification_receipt": {
+            "contract_ref": "sha256:85a0e9f19d16ace44b900cf5593fb4fe848187b8ec92e3e81e5519c0bbadfd57",
+            "derivation_ref": "sha256:a8c2bd1c93a924bc4c318513145c5d56013f9d0e17bd651ee3767e378ba2c831",
+            "execution": {
+              "attempt_id": "fatt_01M5V682VT7SGA5QYG9N21RYRX",
+              "endpoint": "http://127.0.0.1:42205/",
+              "platform": "linux/x86_64",
+              "realization": "static_web",
+              "request_id": "fjob_3256748bcf4f09327716c0f21286435d9ae548d6b9a7b96a2883af9746c4f459"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:398cae754ed182d699e4f6ab83f90a7b597be63b0a15c52149ea8b7a25ec434d",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:a1a6cdfad217dd51947ac7c3bb76cb40d54e7315c1a181064a8e5904e299dc52",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "observation_summary": [
+            {
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ]
+        },
+        "failure": null,
+        "failure_code": null,
+        "failure_stage": null,
+        "failure_category": null,
+        "failure_retryable": null,
+        "failure_classification": null,
+        "failure_attempt_id": null
+      },
+      "new_source": {
+        "compute_id": "cmp_8c8ffa27448454a9891a268354a243a728f1c4c6992f825d3b3539382f07cbc6",
+        "compute_schema_id": "csch_01M5V6862HTSRNE9062WJVDHSY",
+        "source_digest": "sha256:aab49c92b6d4e2f61a49be76bef8dd18c34a276a97b94d85e71af17157223c24",
+        "files": [
+          {
+            "path": "index.html",
+            "size": 34,
+            "digest": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+            "content": "<!doctype html><h1>source-v1</h1>\n"
+          },
+          {
+            "path": "proof.txt",
+            "size": 24,
+            "digest": "sha256:bc6e87ac8a9bcf8dd8c62e53f954252448b5cd7ff04af128bc06d59bd981e9fd",
+            "content": "consolidation source v2\n"
+          }
+        ]
+      },
+      "old_result_digest_before": "sha256:a9f46265c712fbbe028712f8823dbcb0df273475ee037fc138b50bbb04072667",
+      "old_result_digest_after": "sha256:a9f46265c712fbbe028712f8823dbcb0df273475ee037fc138b50bbb04072667",
+      "old_contract_ref": "sha256:7b47859d63ee0f40f707cc8bb3bafcf0eee7077da375d15f2f30f8a0d2603ef6",
+      "new_contract_ref": "sha256:85a0e9f19d16ace44b900cf5593fb4fe848187b8ec92e3e81e5519c0bbadfd57",
+      "finished_at": "2026-10-26T04:07:16.478Z",
+      "pass": true
+    },
+    "authorization_and_digest_negatives": {
+      "started_at": "2026-10-26T02:57:43.793Z",
+      "checks": [
+        {
+          "name": "upload_created",
+          "ok": true,
+          "detail": {
+            "http": 201
+          }
+        },
+        {
+          "name": "archive_stored",
+          "ok": true,
+          "detail": {
+            "digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72"
+          }
+        },
+        {
+          "name": "complete_rejects_wrong_digest",
+          "ok": true,
+          "detail": {
+            "http": 409,
+            "error": "archive_evidence_mismatch"
+          }
+        },
+        {
+          "name": "complete_accepts_original_digest",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "owner_upload_read",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "cross_user_upload_read_denied",
+          "ok": true,
+          "detail": {
+            "http": 404,
+            "error": "upload_not_found"
+          }
+        },
+        {
+          "name": "cross_user_formation_denied",
+          "ok": true,
+          "detail": {
+            "http": 404,
+            "error": "upload_not_found",
+            "job": null
+          }
+        },
+        {
+          "name": "reformation_rejects_wrong_digest",
+          "ok": true,
+          "detail": {
+            "http": 409,
+            "error": "upload_digest_mismatch",
+            "job": null
+          }
+        }
+      ],
+      "production_mutations": 0,
+      "upload_id": "upl_01M5V28YZQF2M2RNT4STFAHRS5",
+      "finished_at": "2026-10-26T02:57:47.181Z",
+      "pass": true
+    }
+  },
+  "portable": {
+    "first": {
+      "started_at": "2026-10-26T04:42:52.245Z",
+      "production_mutations": 0,
+      "checks": [
+        {
+          "name": "existing_allowlisted_owner",
+          "ok": true,
+          "detail": {
+            "authenticated": true
+          }
+        },
+        {
+          "name": "input_archive_digest",
+          "ok": true,
+          "detail": {
+            "digest": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72"
+          }
+        },
+        {
+          "name": "v2_source_accepted",
+          "ok": true,
+          "detail": {
+            "http": 201
+          }
+        },
+        {
+          "name": "source_stored",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "source_digest_verified",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "formation_queued",
+          "ok": true,
+          "detail": {
+            "http": 202
+          }
+        },
+        {
+          "name": "formation_ready",
+          "ok": true,
+          "detail": {
+            "status": "ready",
+            "failure": null
+          }
+        },
+        {
+          "name": "frozen_k_preserved",
+          "ok": true,
+          "detail": {
+            "expected": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "actual": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667"
+          }
+        },
+        {
+          "name": "fresh_artifact_validated",
+          "ok": true,
+          "detail": {
+            "old": "sha256:271ddbee34f1db85711d166b96ae3bd58fbd2cc198f4eead470bdab2f94850dc",
+            "new": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b"
+          }
+        },
+        {
+          "name": "portable_v2_result",
+          "ok": true,
+          "detail": {
+            "kind": "portable_v2"
+          }
+        },
+        {
+          "name": "formation_frozen_k_d_receipt",
+          "ok": true,
+          "detail": {
+            "contract": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "derivation": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+            "fully_satisfied": true
+          }
+        },
+        {
+          "name": "artifact_digest_separate_from_source",
+          "ok": true,
+          "detail": {
+            "artifact": "bnd_01M5V89JDD9XC9ZF80G9QG7KRF",
+            "source": "sha256:4f6e211cac1c3cb33de03a8cda690122619cd18e5cd3607fd3d6a6e2daed9d72",
+            "bundle": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b"
+          }
+        },
+        {
+          "name": "formation_artifact_hosted_run",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "hosted_run_ready",
+          "ok": true,
+          "detail": {
+            "status": "ready",
+            "error": null
+          }
+        },
+        {
+          "name": "same_k_d_bundle_verified_for_this_run",
+          "ok": true,
+          "detail": {
+            "status": "verified",
+            "run": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+            "contract": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "derivation": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+            "attempt": "pav_01M5V89Q87743B6G8JYWRV73KZ"
+          }
+        }
+      ],
+      "upload_id": "upl_01M5V89FCWRP5A9PBESJW8CGXE",
+      "job_id": "fjob_6e1e066aa5b9e6b6ebf95ee93cb5d3466dbe928510be43d0b7f7bbe2f4eaee8b",
+      "compute_id": "cmp_6e1e066aa5b9e6b6ebf95ee93cb5d3466dbe928510be43d0b7f7bbe2f4eaee8b",
+      "job": {
+        "job_id": "fjob_6e1e066aa5b9e6b6ebf95ee93cb5d3466dbe928510be43d0b7f7bbe2f4eaee8b",
+        "status": "ready",
+        "compute_id": "cmp_6e1e066aa5b9e6b6ebf95ee93cb5d3466dbe928510be43d0b7f7bbe2f4eaee8b",
+        "compute_schema_id": "csch_01M5V89MJS7S3MK8QA9FYRN62H",
+        "result": {
+          "result_digest": "sha256:e94c6e40457d56eef4215caa6a4876b589ffaca7306418f3c1e8d21fc6a69925",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+          "formation_kind": "portable_v2",
+          "schema_profile": "ato.portable-application/1",
+          "portable_bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+          "portable_bundle_artifact_ref": "bnd_01M5V89JDD9XC9ZF80G9QG7KRF",
+          "fully_satisfied": true,
+          "verification_receipt": {
+            "bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+            "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+            "execution": {
+              "attempt_id": "fatt_01M5V89H53MY1ABE3MHFKS2Z14",
+              "endpoint": "http://127.0.0.1:38453",
+              "pid": 3530234,
+              "realization": "process",
+              "request_id": "fjob_6e1e066aa5b9e6b6ebf95ee93cb5d3466dbe928510be43d0b7f7bbe2f4eaee8b",
+              "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3.12",
+              "runtime_version": "Python 3.12.7"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "app-ready",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "observation_summary": [
+            {
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ]
+        },
+        "failure": null,
+        "failure_code": null,
+        "failure_stage": null,
+        "failure_category": null,
+        "failure_retryable": null,
+        "failure_classification": null,
+        "failure_attempt_id": null
+      },
+      "formation_result": {
+        "result_digest": "sha256:e94c6e40457d56eef4215caa6a4876b589ffaca7306418f3c1e8d21fc6a69925",
+        "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+        "derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+        "formation_kind": "portable_v2",
+        "schema_profile": "ato.portable-application/1",
+        "portable_bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+        "portable_bundle_artifact_ref": "bnd_01M5V89JDD9XC9ZF80G9QG7KRF",
+        "fully_satisfied": true,
+        "verification_receipt": {
+          "bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+          "execution": {
+            "attempt_id": "fatt_01M5V89H53MY1ABE3MHFKS2Z14",
+            "endpoint": "http://127.0.0.1:38453",
+            "pid": 3530234,
+            "realization": "process",
+            "request_id": "fjob_6e1e066aa5b9e6b6ebf95ee93cb5d3466dbe928510be43d0b7f7bbe2f4eaee8b",
+            "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3.12",
+            "runtime_version": "Python 3.12.7"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "observation_summary": [
+          {
+            "id": "app-ready",
+            "outcome": "satisfied"
+          }
+        ]
+      },
+      "bundle_id": "bnd_01M5V89JDD9XC9ZF80G9QG7KRF",
+      "import": {
+        "import_id": "pai_01M5V89P8TF8PEKE9T9H9RMMKJ",
+        "bundle_id": "bnd_01M5V89JDD9XC9ZF80G9QG7KRF",
+        "bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+        "root_contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+        "application_ref": "sha256:85d78da70a0eee3f336247009210bb944fd49f654dc794ab74564176eecb8822",
+        "selected_derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+        "placement": {
+          "kind": "managed"
+        },
+        "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+        "lease_id": "01M5V89PCKS1PJMKF4R213610J",
+        "workspace_materialization_ref": "sha256:e132b4d8271f098f223d812d5dad62eb075d7cca96de4fcf80f080e92f1b11e2",
+        "instance_snapshot_ref": null,
+        "snapshot_bindings": null,
+        "snapshot_restored_at": null,
+        "session_kind": "durable",
+        "expires_at": null,
+        "stopped_at": null,
+        "setup_required": null,
+        "verification_status": "pending",
+        "verification_receipt": null,
+        "verification_failure_kind": null,
+        "attempt_deadline_at": "2026-10-26T04:53:01.255Z",
+        "last_verified_at": null,
+        "last_verified_receipt": null,
+        "surface": {
+          "status": "starting",
+          "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+          "lease_id": "01M5V89PCKS1PJMKF4R213610J"
+        },
+        "instance": {
+          "instance_id": "cinst_01M5V89P658KZVP69MQG8RM2CS",
+          "compute_id": "cmp_01M5V89P0J1VQE0K6ZBS877TY2",
+          "schema_id": "csch_01M5V89P3JX2SDA14QFVDZB7CG",
+          "host_slug": "cinst-4ntky4bxlzvjogxx",
+          "status": "active",
+          "created_at": "2026-10-26T04:43:00.165Z",
+          "updated_at": "2026-10-26T04:43:00.165Z",
+          "discover_app_id": null,
+          "listing_title": null,
+          "listing_icon_url": null,
+          "display_name": "Source dev regression",
+          "origin_kind": "local_upload",
+          "origin_key": null,
+          "default_display_name": "Source dev regression",
+          "icon_color": null,
+          "icon_glyph": null,
+          "icon_image_path": null,
+          "role": "owner",
+          "app_url": "https://cinst-4ntky4bxlzvjogxx.stg-app.ato.run/"
+        }
+      },
+      "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+      "run": {
+        "id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+        "capsule_scoped_id": null,
+        "status": "ready",
+        "placement": "external-runner",
+        "urls": [
+          {
+            "kind": "ready",
+            "url": "https://s1-rstg002.ato.run"
+          },
+          {
+            "kind": "public",
+            "url": "https://s1-rstg002.ato.run"
+          },
+          {
+            "kind": "app",
+            "url": "https://01m5v89s0j7352aercb87w6r2q.stg-app.ato.run/"
+          }
+        ],
+        "launch_url": null,
+        "user_visible_url": "https://s1-rstg002.ato.run",
+        "ready_url": "https://s1-rstg002.ato.run",
+        "app_url": "https://01m5v89s0j7352aercb87w6r2q.stg-app.ato.run/",
+        "error": null,
+        "error_code": null,
+        "pending_consent": null,
+        "collaboration": {
+          "separate": {
+            "supported": false,
+            "reason": "capsule_continuation_unavailable"
+          },
+          "together": {
+            "supported": false,
+            "reason": "capsule_continuation_unavailable"
+          }
+        },
+        "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+        "session_id": null,
+        "app_instance_id": null,
+        "receipt_pending": false,
+        "receipt": {
+          "execution_id": "sha256:c66d395ab0ba40b64f58b02350eda8cad5fb20e5b690d4fe30bf7b955232d610",
+          "reproducibility_class": null
+        },
+        "created_at": "2026-10-26 04:43:00",
+        "updated_at": "2026-10-26T04:43:03.043Z"
+      },
+      "hosted_verification": {
+        "import_id": "pai_01M5V89P8TF8PEKE9T9H9RMMKJ",
+        "bundle_id": "bnd_01M5V89JDD9XC9ZF80G9QG7KRF",
+        "bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+        "root_contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+        "application_ref": "sha256:85d78da70a0eee3f336247009210bb944fd49f654dc794ab74564176eecb8822",
+        "selected_derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+        "placement": {
+          "kind": "managed"
+        },
+        "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+        "lease_id": "01M5V89PCKS1PJMKF4R213610J",
+        "workspace_materialization_ref": "sha256:e132b4d8271f098f223d812d5dad62eb075d7cca96de4fcf80f080e92f1b11e2",
+        "instance_snapshot_ref": null,
+        "snapshot_bindings": null,
+        "snapshot_restored_at": null,
+        "session_kind": "durable",
+        "expires_at": null,
+        "stopped_at": null,
+        "setup_required": null,
+        "verification_status": "verified",
+        "verification_receipt": {
+          "bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+          "execution": {
+            "attempt_id": "pav_01M5V89Q87743B6G8JYWRV73KZ",
+            "endpoint": "https://s1-rstg002.ato.run",
+            "lease_id": "01M5V89PCKS1PJMKF4R213610J",
+            "pid": 3530348,
+            "realization": "process",
+            "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+            "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+            "runtime_version": "Python 3.12.7"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "ato-run-hosted"
+          }
+        },
+        "verification_failure_kind": null,
+        "attempt_deadline_at": null,
+        "last_verified_at": "2026-10-26T04:43:04.598Z",
+        "last_verified_receipt": {
+          "bundle_sha256": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+          "execution": {
+            "attempt_id": "pav_01M5V89Q87743B6G8JYWRV73KZ",
+            "endpoint": "https://s1-rstg002.ato.run",
+            "lease_id": "01M5V89PCKS1PJMKF4R213610J",
+            "pid": 3530348,
+            "realization": "process",
+            "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+            "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+            "runtime_version": "Python 3.12.7"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "ato-run-hosted"
+          }
+        },
+        "surface": {
+          "status": "ready",
+          "run_id": "run_01M5V89PCKAVRJESNTQ77P6KPR",
+          "lease_id": "01M5V89PCKS1PJMKF4R213610J"
+        },
+        "instance": {
+          "instance_id": "cinst_01M5V89P658KZVP69MQG8RM2CS",
+          "compute_id": "cmp_01M5V89P0J1VQE0K6ZBS877TY2",
+          "schema_id": "csch_01M5V89P3JX2SDA14QFVDZB7CG",
+          "host_slug": "cinst-4ntky4bxlzvjogxx",
+          "status": "active",
+          "created_at": "2026-10-26T04:43:00.165Z",
+          "updated_at": "2026-10-26T04:43:00.165Z",
+          "discover_app_id": null,
+          "listing_title": null,
+          "listing_icon_url": null,
+          "display_name": "Source dev regression",
+          "origin_kind": "local_upload",
+          "origin_key": null,
+          "default_display_name": "Source dev regression",
+          "icon_color": null,
+          "icon_glyph": null,
+          "icon_image_path": null,
+          "role": "owner",
+          "app_url": "https://cinst-4ntky4bxlzvjogxx.stg-app.ato.run/"
+        }
+      },
+      "cleanup": {
+        "http": 200,
+        "status": "stopped"
+      },
+      "finished_at": "2026-10-26T04:43:06.650Z",
+      "pass": true
+    },
+    "source_revision": {
+      "started_at": "2026-10-26T04:44:01.934Z",
+      "production_mutations": 0,
+      "checks": [
+        {
+          "name": "existing_allowlisted_owner",
+          "ok": true,
+          "detail": {
+            "authenticated": true
+          }
+        },
+        {
+          "name": "input_archive_digest",
+          "ok": true,
+          "detail": {
+            "digest": "sha256:869b6426ce564c9f93d2ac01ded2937f22e822ec1b62ac2b49754f57c4164c14"
+          }
+        },
+        {
+          "name": "v2_source_accepted",
+          "ok": true,
+          "detail": {
+            "http": 201
+          }
+        },
+        {
+          "name": "source_stored",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "source_digest_verified",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "formation_queued",
+          "ok": true,
+          "detail": {
+            "http": 202
+          }
+        },
+        {
+          "name": "formation_ready",
+          "ok": true,
+          "detail": {
+            "status": "ready",
+            "failure": null
+          }
+        },
+        {
+          "name": "frozen_k_preserved",
+          "ok": true,
+          "detail": {
+            "expected": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "actual": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667"
+          }
+        },
+        {
+          "name": "source_change_only_changes_d",
+          "ok": true,
+          "detail": {
+            "old": "sha256:508def413d8266f10d24d3bc813e5e57e3a7e203a2175e82321b8bf67b681541",
+            "new": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f"
+          }
+        },
+        {
+          "name": "fresh_artifact_validated",
+          "ok": true,
+          "detail": {
+            "old": "sha256:e5ec8d779824c2d0da204f8e1da6221224ad9790ffe432a13f4c9d3545be803b",
+            "new": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d"
+          }
+        },
+        {
+          "name": "portable_v2_result",
+          "ok": true,
+          "detail": {
+            "kind": "portable_v2"
+          }
+        },
+        {
+          "name": "formation_frozen_k_d_receipt",
+          "ok": true,
+          "detail": {
+            "contract": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "derivation": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+            "fully_satisfied": true
+          }
+        },
+        {
+          "name": "artifact_digest_separate_from_source",
+          "ok": true,
+          "detail": {
+            "artifact": "bnd_01M5V8BQFT9ATMK8FEN824F9MH",
+            "source": "sha256:869b6426ce564c9f93d2ac01ded2937f22e822ec1b62ac2b49754f57c4164c14",
+            "bundle": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d"
+          }
+        },
+        {
+          "name": "formation_artifact_hosted_run",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "hosted_run_ready",
+          "ok": true,
+          "detail": {
+            "status": "ready",
+            "error": null
+          }
+        },
+        {
+          "name": "same_k_d_bundle_verified_for_this_run",
+          "ok": true,
+          "detail": {
+            "status": "verified",
+            "run": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+            "contract": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "derivation": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+            "attempt": "pav_01M5V8BVY91J0EC7AXJWQHPT52"
+          }
+        }
+      ],
+      "upload_id": "upl_01M5V8BKGMVK4294HHH82EF1WV",
+      "job_id": "fjob_aad3039b67d328ed99f5e8cb4401a2a743029048afbd141974087c3ed8273754",
+      "compute_id": "cmp_aad3039b67d328ed99f5e8cb4401a2a743029048afbd141974087c3ed8273754",
+      "job": {
+        "job_id": "fjob_aad3039b67d328ed99f5e8cb4401a2a743029048afbd141974087c3ed8273754",
+        "status": "ready",
+        "compute_id": "cmp_aad3039b67d328ed99f5e8cb4401a2a743029048afbd141974087c3ed8273754",
+        "compute_schema_id": "csch_01M5V8BSGW20B6S1T2HX616Z73",
+        "result": {
+          "result_digest": "sha256:fb9e1681b2a9ce27b48507253fa7c609a4014b299565a9582aeee2ecb37ee17c",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+          "formation_kind": "portable_v2",
+          "schema_profile": "ato.portable-application/1",
+          "portable_bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+          "portable_bundle_artifact_ref": "bnd_01M5V8BQFT9ATMK8FEN824F9MH",
+          "fully_satisfied": true,
+          "verification_receipt": {
+            "bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+            "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+            "derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+            "execution": {
+              "attempt_id": "fatt_01M5V8BP4TD1RS9PE1KKRDPKVC",
+              "endpoint": "http://127.0.0.1:42293",
+              "pid": 3530955,
+              "realization": "process",
+              "request_id": "fjob_aad3039b67d328ed99f5e8cb4401a2a743029048afbd141974087c3ed8273754",
+              "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3.12",
+              "runtime_version": "Python 3.12.7"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "app-ready",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "observation_summary": [
+            {
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ]
+        },
+        "failure": null,
+        "failure_code": null,
+        "failure_stage": null,
+        "failure_category": null,
+        "failure_retryable": null,
+        "failure_classification": null,
+        "failure_attempt_id": null
+      },
+      "formation_result": {
+        "result_digest": "sha256:fb9e1681b2a9ce27b48507253fa7c609a4014b299565a9582aeee2ecb37ee17c",
+        "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+        "derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+        "formation_kind": "portable_v2",
+        "schema_profile": "ato.portable-application/1",
+        "portable_bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+        "portable_bundle_artifact_ref": "bnd_01M5V8BQFT9ATMK8FEN824F9MH",
+        "fully_satisfied": true,
+        "verification_receipt": {
+          "bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+          "execution": {
+            "attempt_id": "fatt_01M5V8BP4TD1RS9PE1KKRDPKVC",
+            "endpoint": "http://127.0.0.1:42293",
+            "pid": 3530955,
+            "realization": "process",
+            "request_id": "fjob_aad3039b67d328ed99f5e8cb4401a2a743029048afbd141974087c3ed8273754",
+            "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3.12",
+            "runtime_version": "Python 3.12.7"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        },
+        "observation_summary": [
+          {
+            "id": "app-ready",
+            "outcome": "satisfied"
+          }
+        ]
+      },
+      "bundle_id": "bnd_01M5V8BQFT9ATMK8FEN824F9MH",
+      "import": {
+        "import_id": "pai_01M5V8BTXQH5T564NBC0A8N7P9",
+        "bundle_id": "bnd_01M5V8BQFT9ATMK8FEN824F9MH",
+        "bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+        "root_contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+        "application_ref": "sha256:85d78da70a0eee3f336247009210bb944fd49f654dc794ab74564176eecb8822",
+        "selected_derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+        "placement": {
+          "kind": "managed"
+        },
+        "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+        "lease_id": "01M5V8BV1PMCC6EF9PPD4FD41E",
+        "workspace_materialization_ref": "sha256:903a0b11a5d689446850cfb66954260d76b7fda20eda93f3eae50ab360b7a73e",
+        "instance_snapshot_ref": null,
+        "snapshot_bindings": null,
+        "snapshot_restored_at": null,
+        "session_kind": "durable",
+        "expires_at": null,
+        "stopped_at": null,
+        "setup_required": null,
+        "verification_status": "pending",
+        "verification_receipt": null,
+        "verification_failure_kind": null,
+        "attempt_deadline_at": "2026-10-26T04:54:11.593Z",
+        "last_verified_at": null,
+        "last_verified_receipt": null,
+        "surface": {
+          "status": "starting",
+          "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+          "lease_id": "01M5V8BV1PMCC6EF9PPD4FD41E"
+        },
+        "instance": {
+          "instance_id": "cinst_01M5V8BTTRWSTPHRXK6PAF0CT7",
+          "compute_id": "cmp_01M5V8BTN07ATGKD64MRHC8QEZ",
+          "schema_id": "csch_01M5V8BTR6GH0YD8B2H4D7CHEE",
+          "host_slug": "cinst-ih3vvsyarkgopxkk",
+          "status": "active",
+          "created_at": "2026-10-26T04:44:10.456Z",
+          "updated_at": "2026-10-26T04:44:10.456Z",
+          "discover_app_id": null,
+          "listing_title": null,
+          "listing_icon_url": null,
+          "display_name": "Source dev regression",
+          "origin_kind": "local_upload",
+          "origin_key": null,
+          "default_display_name": "Source dev regression",
+          "icon_color": null,
+          "icon_glyph": null,
+          "icon_image_path": null,
+          "role": "owner",
+          "app_url": "https://cinst-ih3vvsyarkgopxkk.stg-app.ato.run/"
+        }
+      },
+      "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+      "run": {
+        "id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+        "capsule_scoped_id": null,
+        "status": "ready",
+        "placement": "external-runner",
+        "urls": [
+          {
+            "kind": "ready",
+            "url": "https://s1-rstg002.ato.run:8443"
+          },
+          {
+            "kind": "public",
+            "url": "https://s1-rstg002.ato.run:8443"
+          },
+          {
+            "kind": "app",
+            "url": "https://01m5v8bxap4jtpahvhyrahf57n.stg-app.ato.run/"
+          }
+        ],
+        "launch_url": null,
+        "user_visible_url": "https://s1-rstg002.ato.run:8443",
+        "ready_url": "https://s1-rstg002.ato.run:8443",
+        "app_url": "https://01m5v8bxap4jtpahvhyrahf57n.stg-app.ato.run/",
+        "error": null,
+        "error_code": null,
+        "pending_consent": null,
+        "collaboration": {
+          "separate": {
+            "supported": false,
+            "reason": "capsule_continuation_unavailable"
+          },
+          "together": {
+            "supported": false,
+            "reason": "capsule_continuation_unavailable"
+          }
+        },
+        "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+        "session_id": null,
+        "app_instance_id": null,
+        "receipt_pending": false,
+        "receipt": {
+          "execution_id": "sha256:a9f4025503e0d0026d8e9470bc46b093d6b4e3b17b5c27a8c061da0dacdf5598",
+          "reproducibility_class": null
+        },
+        "created_at": "2026-10-26 04:44:10",
+        "updated_at": "2026-10-26T04:44:12.999Z"
+      },
+      "hosted_verification": {
+        "import_id": "pai_01M5V8BTXQH5T564NBC0A8N7P9",
+        "bundle_id": "bnd_01M5V8BQFT9ATMK8FEN824F9MH",
+        "bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+        "root_contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+        "application_ref": "sha256:85d78da70a0eee3f336247009210bb944fd49f654dc794ab74564176eecb8822",
+        "selected_derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+        "placement": {
+          "kind": "managed"
+        },
+        "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+        "lease_id": "01M5V8BV1PMCC6EF9PPD4FD41E",
+        "workspace_materialization_ref": "sha256:903a0b11a5d689446850cfb66954260d76b7fda20eda93f3eae50ab360b7a73e",
+        "instance_snapshot_ref": null,
+        "snapshot_bindings": null,
+        "snapshot_restored_at": null,
+        "session_kind": "durable",
+        "expires_at": null,
+        "stopped_at": null,
+        "setup_required": null,
+        "verification_status": "verified",
+        "verification_receipt": {
+          "bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+          "execution": {
+            "attempt_id": "pav_01M5V8BVY91J0EC7AXJWQHPT52",
+            "endpoint": "https://s1-rstg002.ato.run:8443",
+            "lease_id": "01M5V8BV1PMCC6EF9PPD4FD41E",
+            "pid": 3531003,
+            "realization": "process",
+            "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+            "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+            "runtime_version": "Python 3.12.7"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "ato-run-hosted"
+          }
+        },
+        "verification_failure_kind": null,
+        "attempt_deadline_at": null,
+        "last_verified_at": "2026-10-26T04:44:13.730Z",
+        "last_verified_receipt": {
+          "bundle_sha256": "sha256:9c78fbf40b32535d5ed9404ffd4b2a9b3c4cd798c84357d6ac1024b32e1ae52d",
+          "contract_ref": "sha256:884ed35a6c7abe1a9daa4078d8371309ed3332a321fa75061cb43987264c3667",
+          "derivation_ref": "sha256:9b7afaaadcfceac2988ce00a0a9260834e2c47add4fed32267c77f559e98680f",
+          "execution": {
+            "attempt_id": "pav_01M5V8BVY91J0EC7AXJWQHPT52",
+            "endpoint": "https://s1-rstg002.ato.run:8443",
+            "lease_id": "01M5V8BV1PMCC6EF9PPD4FD41E",
+            "pid": 3531003,
+            "realization": "process",
+            "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+            "runtime_executable": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+            "runtime_version": "Python 3.12.7"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:add7b7725210fb812a85f7a7b446cdb63fb5a47916798bc0332c047abede0d9b",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "app-ready",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "ato-run-hosted"
+          }
+        },
+        "surface": {
+          "status": "ready",
+          "run_id": "run_01M5V8BV1PR5N3T52CCZ154PKB",
+          "lease_id": "01M5V8BV1PMCC6EF9PPD4FD41E"
+        },
+        "instance": {
+          "instance_id": "cinst_01M5V8BTTRWSTPHRXK6PAF0CT7",
+          "compute_id": "cmp_01M5V8BTN07ATGKD64MRHC8QEZ",
+          "schema_id": "csch_01M5V8BTR6GH0YD8B2H4D7CHEE",
+          "host_slug": "cinst-ih3vvsyarkgopxkk",
+          "status": "active",
+          "created_at": "2026-10-26T04:44:10.456Z",
+          "updated_at": "2026-10-26T04:44:10.456Z",
+          "discover_app_id": null,
+          "listing_title": null,
+          "listing_icon_url": null,
+          "display_name": "Source dev regression",
+          "origin_kind": "local_upload",
+          "origin_key": null,
+          "default_display_name": "Source dev regression",
+          "icon_color": null,
+          "icon_glyph": null,
+          "icon_image_path": null,
+          "role": "owner",
+          "app_url": "https://cinst-ih3vvsyarkgopxkk.stg-app.ato.run/"
+        }
+      },
+      "cleanup": {
+        "http": 200,
+        "status": "stopped"
+      },
+      "finished_at": "2026-10-26T04:44:17.426Z",
+      "pass": true
+    },
+    "negatives": {
+      "started_at": "2026-10-26T04:45:04.140Z",
+      "cases": [
+        {
+          "name": "unsupported_schema",
+          "expected": [
+            "unsupported_capsule_schema"
+          ],
+          "upload_http": 400,
+          "upload_error": "unsupported_capsule_schema",
+          "pass": true
+        },
+        {
+          "name": "broken_http_contract",
+          "expected": [
+            "http_body_digest_mismatch"
+          ],
+          "upload_http": 201,
+          "upload_id": "upl_01M5V8DHZFPS4SY4ZAW1AGH9G0",
+          "job_id": "fjob_1a48e07ce21d97df8b543955f17b3cbee0303aa5763e16f99edb1e3b1225c5d6",
+          "status": "failed",
+          "code": "http_body_digest_mismatch",
+          "result": null,
+          "pass": true
+        },
+        {
+          "name": "runtime_policy",
+          "expected": [
+            "runtime_version_not_patched",
+            "unverifiable"
+          ],
+          "upload_http": 201,
+          "upload_id": "upl_01M5V8DRH5ZKNC8348CYQ7NXSA",
+          "job_id": "fjob_19c48a018692f5f740ac3165b9ed63417c2dbeeaeade4844eceaeffb9e436762",
+          "status": "failed",
+          "code": "runtime_version_not_patched",
+          "result": null,
+          "pass": true
+        }
+      ],
+      "production_mutations": 0,
+      "finished_at": "2026-10-26T04:45:18.775Z",
+      "pass": true
+    }
+  },
+  "native": {
+    "started_at": "2026-10-26T05:10:33.419Z",
+    "bundle": "bnd_01M5PS38FRC82DE9CXF4PK3YZQ",
+    "derivation": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
+    "runner": "01M5PDZZKS0115690TRHHAM5MM",
+    "checks": [
+      {
+        "name": "import",
+        "ok": true,
+        "detail": {
+          "http": 200
+        }
+      },
+      {
+        "name": "ready",
+        "ok": true,
+        "detail": {
+          "status": "ready"
+        }
+      },
+      {
+        "name": "contract_verification",
+        "ok": true,
+        "detail": {
+          "status": "verified",
+          "expected_run": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+          "actual_run": "run_01M5V9W6NPBQQ7GA17AB4SZ95F"
+        }
+      },
+      {
+        "name": "foreign_run",
+        "ok": true,
+        "detail": {
+          "http": 403
+        }
+      },
+      {
+        "name": "foreign_stop",
+        "ok": true,
+        "detail": {
+          "http": 403
+        }
+      },
+      {
+        "name": "foreign_runner",
+        "ok": true,
+        "detail": {
+          "http": 404
+        }
+      },
+      {
+        "name": "foreign_surface",
+        "ok": true,
+        "detail": {
+          "http": 404
+        }
+      },
+      {
+        "name": "io",
+        "ok": true,
+        "detail": {
+          "initial": "status\r\nstatus:1,120,40,1,985762599\r\nEND",
+          "go1": "go\r\n2\r\nEND",
+          "status1": "status\r\nstatus:2,120,40,1,985762599\r\nEND",
+          "resize": "status\r\nstatus:2,100,30,1,985762599\r\nEND",
+          "go2": "go\r\n3\r\nEND",
+          "status2": "status\r\nstatus:3,100,30,1,985762599\r\nEND"
+        }
+      },
+      {
+        "name": "resize_120x40",
+        "ok": true,
+        "detail": [
+          "2",
+          "120",
+          "40",
+          "1",
+          "985762599"
+        ]
+      },
+      {
+        "name": "resize_100x30",
+        "ok": true,
+        "detail": [
+          "2",
+          "100",
+          "30",
+          "1",
+          "985762599"
+        ]
+      },
+      {
+        "name": "reconnect_same_pid_starttime",
+        "ok": true,
+        "detail": [
+          [
+            "2",
+            "120",
+            "40",
+            "1",
+            "985762599"
+          ],
+          [
+            "2",
+            "100",
+            "30",
+            "1",
+            "985762599"
+          ],
+          [
+            "3",
+            "100",
+            "30",
+            "1",
+            "985762599"
+          ]
+        ]
+      },
+      {
+        "name": "reconnect_continues_counter",
+        "ok": true,
+        "detail": [
+          [
+            "2",
+            "120",
+            "40",
+            "1",
+            "985762599"
+          ],
+          [
+            "2",
+            "100",
+            "30",
+            "1",
+            "985762599"
+          ],
+          [
+            "3",
+            "100",
+            "30",
+            "1",
+            "985762599"
+          ]
+        ]
+      },
+      {
+        "name": "owner_continues_after_foreign_denials",
+        "ok": true,
+        "detail": {
+          "status": "ready"
+        }
+      },
+      {
+        "name": "stop",
+        "ok": true,
+        "detail": {
+          "http": 200,
+          "state": "stopped"
+        }
+      }
+    ],
+    "production_mutations": 0,
+    "owner": "Sjw3iAzUbGSdtcOI09PWyMPNGPfNFHHN",
+    "other": "9NnR9p6cCtrnT2WnKprMjbWO975qJVOY",
+    "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+    "import_ids": {
+      "import_id": "pai_01M5V9W6J80C0EGQFM50FEZY0P",
+      "bundle_id": "bnd_01M5PS38FRC82DE9CXF4PK3YZQ",
+      "root_contract_ref": "sha256:25f299f6beca849785c63e3aaab40655f18eb201d6a5cb01085fb58561e1ca71",
+      "application_ref": "sha256:484b05c11150c90c3632858853b0527651da191cc2c7f16e2a3bea5f6a3b6c49",
+      "selected_derivation_ref": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
+      "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+      "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+      "workspace_materialization_ref": "sha256:e8d8e7e58d2535bf46a5eb15a149424e17ab1beeeeb99c3332521b4aac3c1a0e",
+      "instance_snapshot_ref": null
+    },
+    "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+    "verification": {
+      "import_id": "pai_01M5V9W6J80C0EGQFM50FEZY0P",
+      "bundle_id": "bnd_01M5PS38FRC82DE9CXF4PK3YZQ",
+      "root_contract_ref": "sha256:25f299f6beca849785c63e3aaab40655f18eb201d6a5cb01085fb58561e1ca71",
+      "application_ref": "sha256:484b05c11150c90c3632858853b0527651da191cc2c7f16e2a3bea5f6a3b6c49",
+      "selected_derivation_ref": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
+      "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+      "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+      "workspace_materialization_ref": "sha256:e8d8e7e58d2535bf46a5eb15a149424e17ab1beeeeb99c3332521b4aac3c1a0e",
+      "instance_snapshot_ref": null,
+      "verification_status": "verified",
+      "verification_receipt": {
+        "bundle_sha256": "sha256:1d26e308c107728d5375d4697ce3e46a3ef83a89a5e6ce4682cbb4c825f1a545",
+        "contract_ref": "sha256:25f299f6beca849785c63e3aaab40655f18eb201d6a5cb01085fb58561e1ca71",
+        "derivation_ref": "sha256:33c731e5144425e0b0c9ffa9dcc8aed0ef844a9c2b7cf250e2c58727ff788452",
+        "execution": {
+          "attempt_id": "pav_01M5V9W7K93E1SA6FR0BRKMHTD",
+          "container_id": "7be8e27b1b961a6643a7e9e669da5d51521b26b8ca716c577de37decec6ea43d",
+          "endpoint": "https://ubuntu-sugamo.tail934987.ts.net",
+          "image": "docker.io/library/python@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280",
+          "lease_id": "01M5V9W6NPK1P68MXPW3F3JA31",
+          "platform": "linux/amd64",
+          "realization": "native_oci_container",
+          "run_id": "run_01M5V9W6NPBQQ7GA17AB4SZ95F",
+          "runtime_executable": "docker"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:3b342e2bd4a6c13b34b8ae36a50759a7a1fe4b012537ad70d92a30d4d62bafca",
+              "method": "GET",
+              "path": "/result",
+              "status": 200
+            },
+            "id": "result",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "ato-run-hosted"
+        }
+      }
+    },
+    "surface_host": "01m5v9w9r3qtcmf6m3tfyb2wdc.stg-app.ato.run",
+    "terminal": {
+      "initial": "status\r\nstatus:1,120,40,1,985762599\r\nEND",
+      "go1": "go\r\n2\r\nEND",
+      "status1": "status\r\nstatus:2,120,40,1,985762599\r\nEND",
+      "resize": "status\r\nstatus:2,100,30,1,985762599\r\nEND",
+      "go2": "go\r\n3\r\nEND",
+      "status2": "status\r\nstatus:3,100,30,1,985762599\r\nEND"
+    },
+    "network": [
+      {
+        "event": "Network.webSocketCreated",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketWillSendHandshakeRequest",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketHandshakeResponseReceived",
+        "requestId": "41260.14",
+        "status": 101
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketClosed",
+        "requestId": "41260.14"
+      },
+      {
+        "event": "Network.webSocketCreated",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketWillSendHandshakeRequest",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketHandshakeResponseReceived",
+        "requestId": "41260.16",
+        "status": 101
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameReceived",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketFrameSent",
+        "requestId": "41260.16"
+      },
+      {
+        "event": "Network.webSocketClosed",
+        "requestId": "41260.16"
+      }
+    ],
+    "finished_at": "2026-10-26T05:11:02.851Z",
+    "pass": true
+  },
+  "state": {
+    "first": {
+      "started_at": "2026-10-26T02:44:00.131Z",
+      "bundle": "bnd_01M5R7T21D4RDMK3CB74DK6ZNJ",
+      "derivation": "sha256:cb155993b8bd63287e2e518a44c7d1f07a84f4a284c71feb547f08d3b8d69040",
+      "runner": "01M5PDZZKS0115690TRHHAM5MM",
+      "checks": [
+        {
+          "name": "import",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "ready",
+          "ok": true,
+          "detail": {
+            "status": "ready"
+          }
+        },
+        {
+          "name": "contract_verification",
+          "ok": true,
+          "detail": {
+            "status": "verified"
+          }
+        },
+        {
+          "name": "foreign_run",
+          "ok": true,
+          "detail": {
+            "http": 403
+          }
+        },
+        {
+          "name": "foreign_stop",
+          "ok": true,
+          "detail": {
+            "http": 403
+          }
+        },
+        {
+          "name": "foreign_runner",
+          "ok": true,
+          "detail": {
+            "http": 404
+          }
+        },
+        {
+          "name": "foreign_surface",
+          "ok": true,
+          "detail": {
+            "http": 404
+          }
+        },
+        {
+          "name": "io",
+          "ok": true,
+          "detail": {
+            "initial": "status\r\nstatus:0,120,40,1,984883322\r\nEND",
+            "go1": "go\r\n1\r\nEND",
+            "status1": "status\r\nstatus:1,120,40,1,984883322\r\nEND",
+            "resize": "status\r\nstatus:1,100,30,1,984883322\r\nEND",
+            "go2": "go\r\n2\r\nEND",
+            "status2": "status\r\nstatus:2,100,30,1,984883322\r\nEND"
+          }
+        },
+        {
+          "name": "resize_120x40",
+          "ok": true,
+          "detail": [
+            "1",
+            "120",
+            "40",
+            "1",
+            "984883322"
+          ]
+        },
+        {
+          "name": "resize_100x30",
+          "ok": true,
+          "detail": [
+            "1",
+            "100",
+            "30",
+            "1",
+            "984883322"
+          ]
+        },
+        {
+          "name": "reconnect_same_pid_starttime",
+          "ok": true,
+          "detail": [
+            [
+              "1",
+              "120",
+              "40",
+              "1",
+              "984883322"
+            ],
+            [
+              "1",
+              "100",
+              "30",
+              "1",
+              "984883322"
+            ],
+            [
+              "2",
+              "100",
+              "30",
+              "1",
+              "984883322"
+            ]
+          ]
+        },
+        {
+          "name": "reconnect_continues_counter",
+          "ok": true,
+          "detail": [
+            [
+              "1",
+              "120",
+              "40",
+              "1",
+              "984883322"
+            ],
+            [
+              "1",
+              "100",
+              "30",
+              "1",
+              "984883322"
+            ],
+            [
+              "2",
+              "100",
+              "30",
+              "1",
+              "984883322"
+            ]
+          ]
+        },
+        {
+          "name": "owner_continues_after_foreign_denials",
+          "ok": true,
+          "detail": {
+            "status": "ready"
+          }
+        },
+        {
+          "name": "stop",
+          "ok": true,
+          "detail": {
+            "http": 200,
+            "state": "stopped"
+          }
+        }
+      ],
+      "production_mutations": 0,
+      "owner": "Sjw3iAzUbGSdtcOI09PWyMPNGPfNFHHN",
+      "other": "9NnR9p6cCtrnT2WnKprMjbWO975qJVOY",
+      "run_id": "run_01M5V1FV8QHZ4Q2XYYS1SX38EM",
+      "lease_id": "01M5V1FV8Q8NWBWHCYBWN69C1E",
+      "surface_host": "01m5v1fywnx1q6e21mgpnybjpm.stg-app.ato.run",
+      "terminal": {
+        "initial": "status\r\nstatus:0,120,40,1,984883322\r\nEND",
+        "go1": "go\r\n1\r\nEND",
+        "status1": "status\r\nstatus:1,120,40,1,984883322\r\nEND",
+        "resize": "status\r\nstatus:1,100,30,1,984883322\r\nEND",
+        "go2": "go\r\n2\r\nEND",
+        "status2": "status\r\nstatus:2,100,30,1,984883322\r\nEND"
+      },
+      "finished_at": "2026-10-26T02:44:31.342Z",
+      "pass": true
+    },
+    "restored": {
+      "started_at": "2026-10-26T02:47:55.466Z",
+      "bundle": "bnd_01M5R7T21D4RDMK3CB74DK6ZNJ",
+      "derivation": "sha256:cb155993b8bd63287e2e518a44c7d1f07a84f4a284c71feb547f08d3b8d69040",
+      "runner": "01M5PDZZKS0115690TRHHAM5MM",
+      "checks": [
+        {
+          "name": "import",
+          "ok": true,
+          "detail": {
+            "http": 200
+          }
+        },
+        {
+          "name": "ready",
+          "ok": true,
+          "detail": {
+            "status": "ready"
+          }
+        },
+        {
+          "name": "contract_verification",
+          "ok": true,
+          "detail": {
+            "status": "verified",
+            "expected_run": "run_01M5V1Q18BE3HNMYX6QKHDSWP6",
+            "actual_run": "run_01M5V1Q18BE3HNMYX6QKHDSWP6"
+          }
+        },
+        {
+          "name": "foreign_run",
+          "ok": true,
+          "detail": {
+            "http": 403
+          }
+        },
+        {
+          "name": "foreign_stop",
+          "ok": true,
+          "detail": {
+            "http": 403
+          }
+        },
+        {
+          "name": "foreign_runner",
+          "ok": true,
+          "detail": {
+            "http": 404
+          }
+        },
+        {
+          "name": "foreign_surface",
+          "ok": true,
+          "detail": {
+            "http": 404
+          }
+        },
+        {
+          "name": "io",
+          "ok": true,
+          "detail": {
+            "initial": "status\r\nstatus:3,120,40,1,984907415\r\nEND",
+            "go1": "go\r\n4\r\nEND",
+            "status1": "status\r\nstatus:4,120,40,1,984907415\r\nEND",
+            "resize": "status\r\nstatus:4,100,30,1,984907415\r\nEND",
+            "go2": "go\r\n5\r\nEND",
+            "status2": "status\r\nstatus:5,100,30,1,984907415\r\nEND"
+          }
+        },
+        {
+          "name": "resize_120x40",
+          "ok": true,
+          "detail": [
+            "4",
+            "120",
+            "40",
+            "1",
+            "984907415"
+          ]
+        },
+        {
+          "name": "resize_100x30",
+          "ok": true,
+          "detail": [
+            "4",
+            "100",
+            "30",
+            "1",
+            "984907415"
+          ]
+        },
+        {
+          "name": "reconnect_same_pid_starttime",
+          "ok": true,
+          "detail": [
+            [
+              "4",
+              "120",
+              "40",
+              "1",
+              "984907415"
+            ],
+            [
+              "4",
+              "100",
+              "30",
+              "1",
+              "984907415"
+            ],
+            [
+              "5",
+              "100",
+              "30",
+              "1",
+              "984907415"
+            ]
+          ]
+        },
+        {
+          "name": "reconnect_continues_counter",
+          "ok": true,
+          "detail": [
+            [
+              "4",
+              "120",
+              "40",
+              "1",
+              "984907415"
+            ],
+            [
+              "4",
+              "100",
+              "30",
+              "1",
+              "984907415"
+            ],
+            [
+              "5",
+              "100",
+              "30",
+              "1",
+              "984907415"
+            ]
+          ]
+        },
+        {
+          "name": "owner_continues_after_foreign_denials",
+          "ok": true,
+          "detail": {
+            "status": "ready"
+          }
+        },
+        {
+          "name": "stop",
+          "ok": true,
+          "detail": {
+            "http": 200,
+            "state": "stopped"
+          }
+        }
+      ],
+      "production_mutations": 0,
+      "owner": "Sjw3iAzUbGSdtcOI09PWyMPNGPfNFHHN",
+      "other": "9NnR9p6cCtrnT2WnKprMjbWO975qJVOY",
+      "run_id": "run_01M5V1Q18BE3HNMYX6QKHDSWP6",
+      "import_ids": {
+        "import_id": "pai_01M5V1FV4RPKS40152GE357XR1",
+        "bundle_id": "bnd_01M5R7T21D4RDMK3CB74DK6ZNJ",
+        "root_contract_ref": "sha256:03f5b1c04994f1be2bf6be5a344d728f89dd333bf57faffe8d80aa4cf9c9812e",
+        "application_ref": "sha256:15d85258435150c9c4264d68f5a8cc9018534cb45d61191189bcda4aa3db848a",
+        "selected_derivation_ref": "sha256:cb155993b8bd63287e2e518a44c7d1f07a84f4a284c71feb547f08d3b8d69040",
+        "run_id": "run_01M5V1Q18BE3HNMYX6QKHDSWP6",
+        "lease_id": "01M5V1Q18BVS7FNE76SSFV9WJ6",
+        "workspace_materialization_ref": "sha256:00b3d8435e8304392bcdea570284416edfaa2f6ad51a39ac8d4147fec10d9d3d",
+        "instance_snapshot_ref": null
+      },
+      "lease_id": "01M5V1Q18BVS7FNE76SSFV9WJ6",
+      "verification": {
+        "import_id": "pai_01M5V1FV4RPKS40152GE357XR1",
+        "bundle_id": "bnd_01M5R7T21D4RDMK3CB74DK6ZNJ",
+        "root_contract_ref": "sha256:03f5b1c04994f1be2bf6be5a344d728f89dd333bf57faffe8d80aa4cf9c9812e",
+        "application_ref": "sha256:15d85258435150c9c4264d68f5a8cc9018534cb45d61191189bcda4aa3db848a",
+        "selected_derivation_ref": "sha256:cb155993b8bd63287e2e518a44c7d1f07a84f4a284c71feb547f08d3b8d69040",
+        "run_id": "run_01M5V1Q18BE3HNMYX6QKHDSWP6",
+        "lease_id": "01M5V1Q18BVS7FNE76SSFV9WJ6",
+        "workspace_materialization_ref": "sha256:00b3d8435e8304392bcdea570284416edfaa2f6ad51a39ac8d4147fec10d9d3d",
+        "instance_snapshot_ref": null,
+        "verification_status": "verified",
+        "verification_receipt": {
+          "bundle_sha256": "sha256:45cca0979aafed87a8e91830168d588feb60363767a62967c160c817b355bb43",
+          "contract_ref": "sha256:03f5b1c04994f1be2bf6be5a344d728f89dd333bf57faffe8d80aa4cf9c9812e",
+          "derivation_ref": "sha256:cb155993b8bd63287e2e518a44c7d1f07a84f4a284c71feb547f08d3b8d69040",
+          "execution": {
+            "attempt_id": "pav_01M5V1Q23V2ENJF56EVGM1VD2B",
+            "container_id": "12fb32aa11c177c0581ef968ceaf484e2784b8b3af3b15840161d09e5ade8374",
+            "endpoint": "https://ubuntu-sugamo.tail934987.ts.net",
+            "image": "docker.io/library/python@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280",
+            "lease_id": "01M5V1Q18BVS7FNE76SSFV9WJ6",
+            "platform": "linux/amd64",
+            "realization": "native_oci_container",
+            "run_id": "run_01M5V1Q18BE3HNMYX6QKHDSWP6",
+            "runtime_executable": "docker"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:cf340d5ebd9bead1bff82fc8d964253dfa85bc391d9a293fb54668575932d4ee",
+                "method": "GET",
+                "path": "/result",
+                "status": 200
+              },
+              "id": "result",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "ato-run-hosted"
+          }
+        }
+      },
+      "surface_host": "01m5v1qa43njejysq71fdq5nwk.stg-app.ato.run",
+      "terminal": {
+        "initial": "status\r\nstatus:3,120,40,1,984907415\r\nEND",
+        "go1": "go\r\n4\r\nEND",
+        "status1": "status\r\nstatus:4,120,40,1,984907415\r\nEND",
+        "resize": "status\r\nstatus:4,100,30,1,984907415\r\nEND",
+        "go2": "go\r\n5\r\nEND",
+        "status2": "status\r\nstatus:5,100,30,1,984907415\r\nEND"
+      },
+      "network": [
+        {
+          "event": "Network.webSocketCreated",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketWillSendHandshakeRequest",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketHandshakeResponseReceived",
+          "requestId": "63962.14",
+          "status": 101
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketClosed",
+          "requestId": "63962.14"
+        },
+        {
+          "event": "Network.webSocketCreated",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketWillSendHandshakeRequest",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketHandshakeResponseReceived",
+          "requestId": "63962.16",
+          "status": 101
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameReceived",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketFrameSent",
+          "requestId": "63962.16"
+        },
+        {
+          "event": "Network.webSocketClosed",
+          "requestId": "63962.16"
+        }
+      ],
+      "finished_at": "2026-10-26T02:48:31.179Z",
+      "pass": true
+    }
+  },
+  "pwa_served": {
+    "url": "https://stg-app.ato.run",
+    "asset": "/assets/index-2mT3TY-t.js",
+    "http": 200,
+    "sha256": "289dbf01edf0968c3af4ba7f60461fdd7fafcc1f2b3c34f76a275103b45b307f",
+    "staging_api": true,
+    "commit_33febac1": true
+  },
+  "unresolved_issues": [
+    "https://github.com/ato-run/ato-api/issues/895",
+    "https://github.com/ato-run/ato/issues/1582",
+    "https://github.com/ato-run/ato/issues/1571",
+    "https://github.com/ato-run/ato/issues/1572",
+    "https://github.com/ato-run/ato/issues/1577",
+    "https://github.com/ato-run/ato/issues/1578",
+    "https://github.com/ato-run/ato-pwa/issues/525"
+  ]
+}
