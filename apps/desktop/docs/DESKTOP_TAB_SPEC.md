@@ -12,6 +12,11 @@ related:
 
 # Capsule Desktop Tab Management Architecture Specification
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../../docs/archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../../docs/specifications/README.md)
+> before applying any command or contract here.
+
 > Historical component document; Japanese/mixed source. The original accepted
 > front matter describes its 2026-02-07 context, not current workspace authority.
 > Read the [current architecture map](../../../docs/architecture/README.md).
