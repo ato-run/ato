@@ -692,3 +692,29 @@ fn memos_v2_hosted_formation_returns_a_satisfied_receipt() {
         result["portable_bundle_artifact_ref"],
     );
 }
+
+#[test]
+fn gpu_candidate_is_quarantined_before_missing_host_refusal_without_publishing_success() {
+    let manifest = process_manifest("python", "3.12", "server.py")
+        + r#"
+[derivation.host]
+os = "linux"
+arch = "x86_64"
+[[derivation.host.accelerators]]
+vendor = "nvidia"
+count = 1
+min_vram_mib = 1048576
+"#;
+    let hosted = hosted_with(
+        &manifest,
+        &[("server.py", "raise Exception('must not execute')")],
+        "denied",
+        "",
+    );
+    let error = hosted
+        .outcome
+        .expect_err("a host without the declared GPU cannot satisfy Formation");
+    assert_eq!(refusal_code(&error), "gpu_host_unavailable", "{error:#}");
+    assert!(hosted.fixture.captured.bundle.lock().unwrap().is_some());
+    assert!(hosted.fixture.captured.result.lock().unwrap().is_none());
+}

@@ -383,6 +383,50 @@ impl FormationApi {
     /// stores them through the existing validator path and answers the
     /// `capsule_bundles.id` a Hosted Run later imports. Nothing about K is
     /// decided here — the receipt published with the result is the verdict.
+    pub fn check_gpu_attempt(&self, attempt_id: &str) -> Result<()> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/v1/internal/formation/attempts/{attempt_id}/gpu-runtime",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .send()
+            .context("GPU attempt authorization request failed")?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "GPU attempt authorization refused: {}",
+            response.status()
+        );
+        Ok(())
+    }
+
+    pub fn gpu_model_range(
+        &self,
+        attempt_id: &str,
+        digest: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Box<dyn std::io::Read>> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/v1/internal/formation/attempts/{attempt_id}/model-objects/{digest}",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .header("range", format!("bytes={start}-{end}"))
+            .timeout(std::time::Duration::from_secs(1800))
+            .send()
+            .context("Formation Model Object request failed")?;
+        anyhow::ensure!(
+            response.status() == reqwest::StatusCode::PARTIAL_CONTENT,
+            "Formation Model Object range refused: {}",
+            response.status()
+        );
+        Ok(Box::new(response))
+    }
+
     pub fn publish_portable_bundle(
         &self,
         attempt_id: &str,

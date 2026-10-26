@@ -355,6 +355,7 @@ pub fn run_claimed_job_with_ledger(
             source_root: &source_root,
             attempt_root: &attempt_root,
             work_root: context.work_root,
+            worker_id: context.worker_id,
             shim: context.shim,
             closure_ref: &closure_ref,
             source_evidence: &source_evidence,
@@ -371,6 +372,11 @@ pub fn run_claimed_job_with_ledger(
             permit: Some(permit),
         });
     }
+
+    anyhow::ensure!(
+        ato_runtime_attempt::launch::host_boundary::active().is_none(),
+        "formation_gpu_authored_v2_required: dedicated GPU workers only verify authored portable v2"
+    );
 
     let draft = match authored_toml {
         Some(text) => {
