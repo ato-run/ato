@@ -444,11 +444,12 @@ mod deny_bridge_tests {
     #[test]
     fn denies_egress_without_any_host_destination_and_removes_its_socket() {
         use std::io::Read;
-        std::fs::create_dir_all(".tmp").unwrap();
+        // A checkout path can exceed macOS's Unix socket limit. Honour the
+        // test runner's temporary parent instead of the crate's working dir.
         let root = tempfile::Builder::new()
             .prefix("n")
             .rand_bytes(2)
-            .tempdir_in(".tmp")
+            .tempdir()
             .unwrap();
         let socket = root.path().join("e");
         let bridge = super::HostBridge::deny(&socket).unwrap();
