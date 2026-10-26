@@ -1,8 +1,8 @@
 # License Protocol Specification
 
-**Status:** v0.1 (Draft)  
-**最終更新:** 2026-02-02  
-**関連仕様:** [IDENTITY_SPEC.md](IDENTITY_SPEC.md), [SYNC_SPEC.md](SYNC_SPEC.md)
+**Status:** v0.1 (Draft)
+**最終更新:** 2026-02-02
+**関連仕様:** [IDENTITY_SPEC.md](../../rfcs/archived/IDENTITY_SPEC.md), [SYNC_SPEC.md](../../rfcs/archived/SYNC_SPEC.md)
 
 ---
 
@@ -475,6 +475,6 @@ if (hasEntitlement('export_pdf')) {
 
 ## 11. 参照
 
-- [IDENTITY_SPEC.md](IDENTITY_SPEC.md) - 署名と DID の詳細
-- [SYNC_SPEC.md](SYNC_SPEC.md) - `.sync` カプセルの基本仕様
-- [TRUST_AND_KEYS.md](TRUST_AND_KEYS.md) - 失効と信頼モデル
+- [IDENTITY_SPEC.md](../../rfcs/archived/IDENTITY_SPEC.md) - 署名と DID の詳細
+- [SYNC_SPEC.md](../../rfcs/archived/SYNC_SPEC.md) - `.sync` カプセルの基本仕様
+- [TRUST_AND_KEYS.md](../rfcs-legacy-accepted/TRUST_AND_KEYS.md) - 失効と信頼モデル

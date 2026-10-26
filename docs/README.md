@@ -1,104 +1,83 @@
 # Ato documentation
 
-This documentation distinguishes the current semantic model, implemented
-architecture, theory, and historical designs. A document's layer matters:
-theory describes intended semantics; accepted RFCs and code define current
-behavior; archived documents are evidence, not authority.
+Start with the [project overview](../README.md), then follow the path matching
+your task. English is the default for current documentation;
+[README.ja.md](../README.ja.md) is the Japanese overview. Historical Japanese
+or mixed-language sources are labelled in the archive catalogue.
 
-## 60-second model
+## Reading paths
 
-```text
-Computation
-  what can still happen from here
+| Task | Read in order |
+|---|---|
+| Understand Ato | [Computation](concepts/computation.md) → [Capsule and Run](concepts/capsule.md) → [K, D and Source](concepts/application-contracts.md) → [glossary](glossary-reference.md) |
+| Build and verify an app | [Getting started](guides/getting-started.md) → [Formation](guides/formation.md) → [Runner / Hosting](guides/runner-hosting.md) |
+| Change the runtime | [Architecture](architecture/README.md) → [Specifications](specifications/README.md) → [Contributing](../CONTRIBUTING.md) |
+| Operate a service | [Operations](operations/README.md) → the relevant update/rollback/provisioning runbook |
 
-Capsule
-  one immutable point in that computation
+## Concepts
 
-Run
-  an active continuation from that point
+- [Computation](concepts/computation.md): residual work, Evolution, composition,
+  Ports and projections.
+- [Capsule and Run](concepts/capsule.md): immutable continuation and active evaluation.
+- [Contract K, Derivation D and Source](concepts/application-contracts.md):
+  profile-specific identity and explicit realization.
+- [Formation, Verification and Receipt](concepts/formation-verification.md):
+  frozen expectations, observations and evidence.
+- [Instance, Run, Lease and State Continuity](concepts/state-continuity.md).
+- [Compatibility, Continuous Patching and Derivation Transformation](concepts/compatibility.md).
+- [Materialization](concepts/materialization.md), [execution identity](execution-identity.md),
+  and the [canonical glossary](glossary-reference.md).
 
-Record
-  evidence of how a Run evolved
+## Specifications
 
-Materialization
-  a physical way to get back to the point
-```
+[Specifications](specifications/README.md) lists all eight accepted RFCs and
+locates Protocol, wire, schema, Contract and Verification Receipt contracts.
+[RFCs](rfcs/README.md) separates accepted, draft and historical documents.
+An accepted RFC owns normative behavior; code describes implementation.
+A conflict is a [Detected mismatch](rfcs/draft/DOCUMENTATION_AUTHORITY_MISMATCHES.md),
+not permission to rewrite either side during documentation maintenance.
 
-This is a summary, not a substitute for the [Glossary](glossary-reference.md)
-or the worked example in [Computation](concepts/computation.md).
+## Guides and architecture
 
-## Pick a reading path
+- [Developer guides](guides/README.md): CLI, formation, transformation, Runner,
+  hosting, contribution and component instructions.
+- [Architecture](architecture/README.md): library boundaries, shared portable
+  execution, Hosted Formation and Scenario verification.
+- [Capsule bundle overview](capsule.md) and [computation lifecycle](run.md).
+- [Snapshot materialization](snapshot.md) and [COOP](coop.md).
+- [Theory draft](theory/capsule-process-model.md): research background, not an
+  implementation or deployment promise.
 
-**Using Ato**
+## Operations
 
-1. [README](../README.md) — the concrete example and lifecycle
-2. [Local lifecycle](run.md) — verified CLI behavior, manifest details
-3. [Capsule bundle](capsule.md) — the `.capsule` transport format
+[Operations](operations/README.md) is the entry for current binary identity,
+worker updates, Runner rollout/rollback and compiler provisioning. API/PWA
+deployment and remote migrations stay with their owning service repositories.
 
-**Contributing to Ato**
+## Archive and complete inventory
 
-1. [Computation](concepts/computation.md), [Capsule and Run](concepts/capsule.md),
-   [Materialization](concepts/materialization.md) — the concepts
-2. [Core architecture](core-architecture.md) — library responsibilities and
-   dependency direction
-3. [COOP and Ato](coop.md) — how human/agent collaboration maps onto Ato
-   without becoming a new Semantic Core primitive
-4. [Accepted RFCs](rfcs/README.md) — normative current architecture.
-   Implementation-track drafts (Formation ADR-017–031 and related proposals)
-   are linked from the same index with their draft status; progress states
-   live only in the [Formation roadmap](rfcs/draft/FORMATION_ROADMAP.md).
-5. [AGENTS.md](../AGENTS.md) — before changing architecture or implementation
+[Archive](archive/README.md) maps past models, reports, experiments and plans.
+[2026](archive/2026/README.md) includes moved ops reports and retained evidence
+trees. Old Markdown paths and heading anchors remain compatibility entry points.
 
-**Research / theory**
+The [inventory](archive/2026/documentation-reorganization/inventory.tsv) covers
+all baseline docs attachments and repository-wide prose. The
+[move list](archive/2026/documentation-reorganization/moves.tsv),
+[retention assessment](archive/2026/documentation-reorganization/EVIDENCE-RETENTION.md)
+and [audit report](archive/2026/documentation-reorganization/REPORT.md)
+record classifications, duplicates, link checks and unresolved limitations.
+The [acceptance review](archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md)
+checks the newcomer reading paths, actual first example, external references
+and code CI separately.
 
-1. [Computation](concepts/computation.md), [Capsule and Run](concepts/capsule.md),
-   [Materialization](concepts/materialization.md) — the concepts
-2. [Capsule Process Model](theory/capsule-process-model.md) — **Theory
-   Draft**; a design-hypothesis deep dive, not an implementation status
-   document
+<!-- Compatibility anchors from the previous documentation entry. -->
+<a id="60-second-model"></a>
+<a id="pick-a-reading-path"></a>
+<a id="full-index"></a>
+<a id="architecture"></a>
+<a id="theory"></a>
+<a id="implementation-and-protocol-details"></a>
+<a id="historical-material"></a>
 
-## Full index
-
-### Concepts
-
-- [Computation](concepts/computation.md) — evolution, composition, Ports,
-  Contracts, and state projections.
-- [Capsule and Run](concepts/capsule.md) — the immutable point and its mutable
-  evaluation.
-- [Materialization](concepts/materialization.md) — logical identity versus
-  physical realization.
-- [Glossary](glossary-reference.md) — canonical terminology.
-
-### Architecture
-
-- [Core architecture](core-architecture.md) — library responsibilities and
-  dependency direction.
-- [COOP and Ato](coop.md) — non-normative integration model for human/agent
-  shared and parallel work.
-- [Accepted RFCs](rfcs/README.md) — normative current architecture.
-- [Formation roadmap](rfcs/draft/FORMATION_ROADMAP.md) — **draft plan**;
-  the single progress reference for Formation stages (pending rows are not
-  shipped functionality).
-- [Local lifecycle](run.md) — verified CLI behavior.
-- [Capsule bundle](capsule.md) — transport and identity.
-- [Snapshot materialization](snapshot.md) — the limited current snapshot
-  implementation.
-
-### Theory
-
-- [Capsule Process Model](theory/capsule-process-model.md) — **Theory Draft**;
-  intended semantics, not an implementation status document.
-
-### Implementation and protocol details
-
-- [Protocol Adapter RFC](rfcs/accepted/PROTOCOL_ADAPTER.md)
-- [Composition RFC](rfcs/accepted/COMPOSITION.md)
-- [Object Closure Bundle RFC](rfcs/accepted/OBJECT_BUNDLE.md)
-- [Materialization RFC](rfcs/accepted/MATERIALIZATION.md)
-- [Internal engineering material](internal/README.md)
-
-### Historical material
-
-[The archive](archive/README.md) contains superseded manifest-, lock-,
-Ready-State-, provider-, and Store-centered models. Historical documents must
-not be used as current API or architecture authority.
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_60-second-model"></a>

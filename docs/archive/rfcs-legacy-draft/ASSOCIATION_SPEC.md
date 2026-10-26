@@ -1,8 +1,8 @@
 # Association & Dynamic Binding Specification
 
-**Status:** v0.1 (Draft)  
-**最終更新:** 2026-02-02  
-**関連仕様:** [IDENTITY_SPEC.md](IDENTITY_SPEC.md), [SYNC_SPEC.md](SYNC_SPEC.md), [SCHEMA_REGISTRY.md](SCHEMA_REGISTRY.md)
+**Status:** v0.1 (Draft)
+**最終更新:** 2026-02-02
+**関連仕様:** [IDENTITY_SPEC.md](../../rfcs/archived/IDENTITY_SPEC.md), [SYNC_SPEC.md](../../rfcs/archived/SYNC_SPEC.md), [SCHEMA_REGISTRY.md](../rfcs-legacy-accepted/SCHEMA_REGISTRY.md)
 
 ---
 
@@ -477,6 +477,6 @@ invoke('app_update', { appId: string }) → AppInfo
 
 ## 12. 参照
 
-- [SYNC_SPEC.md](SYNC_SPEC.md) - `.sync` カプセルの基本仕様
-- [SCHEMA_REGISTRY.md](SCHEMA_REGISTRY.md) - content_type とスキーマの関係
-- [IDENTITY_SPEC.md](IDENTITY_SPEC.md) - アプリ署名と DID
+- [SYNC_SPEC.md](../../rfcs/archived/SYNC_SPEC.md) - `.sync` カプセルの基本仕様
+- [SCHEMA_REGISTRY.md](../rfcs-legacy-accepted/SCHEMA_REGISTRY.md) - content_type とスキーマの関係
+- [IDENTITY_SPEC.md](../../rfcs/archived/IDENTITY_SPEC.md) - アプリ署名と DID

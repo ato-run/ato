@@ -1,10 +1,21 @@
-# Computation identity and diagnostics
+# Execution identity and diagnostics
 
-Canonical `ComputationObject` bytes derive the BLAKE3 `ComputationRef`.
-Identity includes semantics, boundary, and current residual future—not
-transition history or provider host facts.
+Computation-root identity is the BLAKE3 `ComputationRef` derived from canonical
+`ComputationObject` bytes. Portable application identity is the SHA-256
+`ContractRef` derived from canonical `BoundContract` bytes. Its selected
+`DerivationRef` names the declared realization route; the bundle SHA-256 names
+transport bytes. These values are distinct.
 
-Drift is diagnosed by comparing computation refs and adapter/provider receipts.
-Repository resolution evidence explains source/toolchain choices; provider
-receipts explain physical realization. These derived diagnostics do not form a
-generic ExecutionIdentity aggregate.
+An actual execution additionally has Run/attempt, lease and realization
+evidence. A PID, container ID, host path or current endpoint is not logical
+Capsule identity. No generic `ExecutionIdentity` aggregate is assumed here.
+Use the actual attempt's receipt and recorded execution evidence when
+diagnosing drift; do not substitute a later successful receipt or deployment
+version for that evidence.
+
+See [profiles and identity](concepts/application-contracts.md),
+[receipt boundaries](concepts/formation-verification.md) and
+[state continuity](concepts/state-continuity.md).
+
+<!-- Compatibility anchors from the previous documentation entry. -->
+<a id="computation-identity-and-diagnostics"></a>

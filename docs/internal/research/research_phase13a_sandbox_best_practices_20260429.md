@@ -11,6 +11,11 @@ status: research
 
 # Phase 13a Sandbox Enforcer — Best Practices
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 > **Decision context**: nacelle に IPC ソケットパスを動的にサンドボックス許可させる Phase 13a を進めるにあたり、`nono` (always-further) と `alcless` (AkihiroSuda) の既存実装からベストプラクティスを抽出する。前回の設計で「案A/B/C」のうち macOS Seatbelt の方針を保留していたが、本研究で **方針が確定** した。
 
 ## TL;DR — 一言で

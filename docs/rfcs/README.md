@@ -79,3 +79,9 @@ merged implementation are separate states.
 
 Files not listed above are likewise non-normative drafts; check each file and
 the merged implementation before relying on it.
+
+## Documentation authority review
+
+[Detected mismatches](draft/DOCUMENTATION_AUTHORITY_MISMATCHES.md) records
+profile, lifecycle, adoption and stale-status questions found during the
+2026-10-26 audit. It does not amend the accepted specifications.
