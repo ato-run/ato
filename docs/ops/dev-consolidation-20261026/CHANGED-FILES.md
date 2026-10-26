@@ -68,3 +68,14 @@
 | [ato-api #894](https://github.com/ato-run/ato-api/pull/894) | `src/tests/formation-portable-v2.test.ts` |
 
 Migration: `0363_formation_portable_schema_kind.sql`のみ本作業でstagingへ適用。既存process 17 / static_web 488を維持。別セッションの`0363_discover_moderation.sql`も適用済みだが、数字が同じことを理由にrename/reapplyしない。`bootstrap.sql`とschema fingerprintはAPI #892で再生成。ProductionへのMigrationは行っていない。
+
+## 終了時に追加統合されたVerifier差分
+
+| Repo / PR | ファイル |
+|---|---|
+| [ato #1583](https://github.com/ato-run/ato/pull/1583) | `apps/portable-application/src/bin/ato-portable-validator.rs` |
+| [ato #1583](https://github.com/ato-run/ato/pull/1583) | `apps/portable-application/src/validator_agent.rs` |
+| [ato #1583](https://github.com/ato-run/ato/pull/1583) | `apps/portable-application/tests/hosted_validator_verification.rs` |
+| [ato-api #896](https://github.com/ato-run/ato-api/pull/896) | `src/routes/capsule_bundles.ts` |
+| [ato-api #896](https://github.com/ato-run/ato-api/pull/896) | `src/services/portable_attempt_lifecycle.ts` |
+| [ato-api #896](https://github.com/ato-run/ato-api/pull/896) | `src/tests/portable-verification-ingress.test.ts` |
