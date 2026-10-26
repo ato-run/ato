@@ -12,6 +12,11 @@ related:
 
 # Nacelle Terminal Spec — Interactive PTY Execution for ato-desktop
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 ## 1. 概要
 
 nacelle に Interactive PTY モードを追加し、ato-desktop の WebView 内で対話的シェルセッションを実行可能にする。

@@ -19,3 +19,9 @@ Language of the preserved document: English.
 <a id="future-work--a-third-network-class"></a>
 <a id="not-claimed"></a>
 <a id="the-rule-this-gate-established"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="b1-s-shadow-comparison-all-pass"></a>
+<a id="future-work-a-third-network-class"></a>
+<a id="scenarios-al-all-pass"></a>
+<a id="unexpected-semantic-drift-0"></a>

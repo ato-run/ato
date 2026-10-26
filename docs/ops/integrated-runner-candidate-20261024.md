@@ -9,3 +9,6 @@ Language of the preserved document: Japanese / English.
 <a id="統合した通常runnerの導入候補"></a>
 <a id="導入で維持する既存契約"></a>
 <a id="後続候補--明示配置制約とterminal実chrome試験"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="後続候補-明示配置制約とterminal実chrome試験"></a>

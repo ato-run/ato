@@ -20,3 +20,14 @@ Language of the preserved document: English.
 <a id="7-systemd-units-the-script-installs"></a>
 <a id="8-teardown-gotcha-778-for-reference"></a>
 <a id="status"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_0-prerequisites"></a>
+<a id="_1-a-nightly-ato-on-the-host-sglang-engine-is-nightly-only-775"></a>
+<a id="_2-run-the-setup-script"></a>
+<a id="_3-the-exact-validated-commands-manual-fallback"></a>
+<a id="_4-the-demo-after-setup-is-green"></a>
+<a id="_5-verify"></a>
+<a id="_6-gotchas-verbatim-these-cost-hours"></a>
+<a id="_7-systemd-units-the-script-installs"></a>
+<a id="_8-teardown-gotcha-778-for-reference"></a>

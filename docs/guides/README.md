@@ -1,7 +1,7 @@
 # Developer guides
 
-- [Getting started](getting-started.md): build the CLI, package a static sample,
-  run it and inspect verification evidence.
+- [Getting started](getting-started.md): build the CLI, verify the supplied static bundle,
+  inspect its receipt and package current authoring input.
 - [Formation](formation.md): choose authoring/formation input, preserve K and
   interpret the result.
 - [Derivation transformation](derivation-transformation.md): verify a changed

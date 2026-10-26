@@ -1,5 +1,10 @@
 # Vikunja / Memos / LibreTranslate を ato capsule 化する手順
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 > 作成: 2026-04-29
 > 対象 ato: v0.4.100
 > 関連: [ato-desktop-dogfood-capsule-research.md](./ato-desktop-dogfood-capsule-research.md)

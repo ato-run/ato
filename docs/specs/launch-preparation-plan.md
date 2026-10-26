@@ -15,3 +15,6 @@ Language of the preserved document: English.
 <a id="blocker-vocabulary"></a>
 <a id="how-ato-api-maps-bridge-codes--run-blockers-593"></a>
 <a id="stability"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="how-ato-api-maps-bridge-codes-→-run-blockers-593"></a>

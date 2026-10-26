@@ -8,6 +8,11 @@ related: ["ADR-006"]
 
 # ADR-005: シークレット管理アーキテクチャ — グローバルストア + ACL + カプセル分離
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 ## 1. コンテキスト
 
 ### 現状の問題

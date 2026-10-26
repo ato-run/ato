@@ -12,3 +12,10 @@ Language of the preserved document: English.
 <a id="3-switch-the-binary"></a>
 <a id="4-confirm-recovery-and-advertisement"></a>
 <a id="5-undrain-and-smoke"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_1-stop-new-assignment"></a>
+<a id="_2-stop-and-confirm-the-running-runs"></a>
+<a id="_3-switch-the-binary"></a>
+<a id="_4-confirm-recovery-and-advertisement"></a>
+<a id="_5-undrain-and-smoke"></a>

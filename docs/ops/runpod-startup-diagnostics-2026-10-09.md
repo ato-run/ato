@@ -14,3 +14,8 @@ Language of the preserved document: Japanese / English.
 <a id="診断と回収"></a>
 <a id="ローカル検証"></a>
 <a id="残る実機範囲費用"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_503の切り分け"></a>
+<a id="abi・imageの選択"></a>
+<a id="残る実機範囲・費用"></a>

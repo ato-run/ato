@@ -15,3 +15,9 @@ Language of the preserved document: English.
 <a id="final-stack-regression-2026-09-2526"></a>
 <a id="stage-4-review-hardening-2026-09-26"></a>
 <a id="stage-4-completion-gate"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_2f-pr-1406"></a>
+<a id="_3d-durable-acceptance-subsequent-evidence"></a>
+<a id="_3d-in-progress"></a>
+<a id="stage-4-durable-deterministic-searchstate"></a>

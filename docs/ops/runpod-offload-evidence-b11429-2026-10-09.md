@@ -12,3 +12,6 @@ Language of the preserved document: Japanese / English.
 <a id="ローカル検証と出所"></a>
 <a id="次回判断に残るもの"></a>
 <a id="3回目の実機結果とstream-parser修正"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_3回目の実機結果とstream-parser修正"></a>

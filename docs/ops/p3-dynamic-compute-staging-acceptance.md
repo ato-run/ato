@@ -19,3 +19,13 @@ Language of the preserved document: English.
 <a id="g--authorization-and-sandbox--pass"></a>
 <a id="h--worker-crash--pass"></a>
 <a id="known-limitations-deliberately-not-closed-here"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="a-cold-start-·-pass"></a>
+<a id="b-first-persistent-write-·-pass"></a>
+<a id="c-fresh-wake-·-pass"></a>
+<a id="d-third-realization-·-pass"></a>
+<a id="e-stale-writer-·-pass"></a>
+<a id="f-readiness-failure-·-pass"></a>
+<a id="g-authorization-and-sandbox-·-pass"></a>
+<a id="h-worker-crash-·-pass"></a>

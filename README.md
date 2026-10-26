@@ -19,7 +19,7 @@ of current documentation. [日本語の概要 / Japanese](README.ja.md).
 | What is Ato? | [Computation](docs/concepts/computation.md) |
 | Core Concepts | [Capsule / Contract K / Derivation D / Source](docs/concepts/application-contracts.md), [glossary](docs/glossary-reference.md) |
 | Architecture | [Architecture map](docs/architecture/README.md) |
-| Getting Started | [Build, package and verify a sample](docs/guides/getting-started.md) |
+| Getting Started | [Build the CLI and verify a sample](docs/guides/getting-started.md) |
 | Capsule Specification | [Accepted specifications and implementation-track contracts](docs/specifications/README.md), [bundle profiles](docs/capsule.md) |
 | Formation Guide | [Form and verify an application](docs/guides/formation.md) |
 | Runner / Hosting | [Execution paths and admission boundaries](docs/guides/runner-hosting.md) |
@@ -57,14 +57,12 @@ With the repository's pinned Rust toolchain:
 ```sh
 cargo build -p ato-cli --bin ato --locked
 mkdir -p .tmp/getting-started
-target/debug/ato pack samples/interop-static-k \
-  -o .tmp/getting-started/static.capsule
-target/debug/ato run .tmp/getting-started/static.capsule --no-open \
+target/debug/ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 
 The [Getting Started guide](docs/guides/getting-started.md) explains the
-input, receipt and failure boundary. This example uses a static portable
+input, receipt and failure boundary. This example uses the supplied static portable
 application; Python, OCI, GPU, state and external services need their own
 declared routes and host admission. Do not infer production availability or
 general cross-host/process-memory restoration from a successful sample.
@@ -81,3 +79,7 @@ general cross-host/process-memory restoration from a successful sample.
 <a id="capsuletoml-example"></a>
 <a id="project-scope"></a>
 <a id="current-implementation-status"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="capsule-run-replay-continue"></a>
+<a id="core-kernel-and-adapter"></a>

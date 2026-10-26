@@ -17,3 +17,12 @@ Language of the preserved document: English.
 <a id="6-stop--and-the-teardown-gotcha-778"></a>
 <a id="post-stop-verification"></a>
 <a id="status"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="_0-host-requirements"></a>
+<a id="_1-provision-one-step-dockerless"></a>
+<a id="_2-doctor-read-only-dockerless"></a>
+<a id="_3-the-capsule"></a>
+<a id="_4-run"></a>
+<a id="_5-verify"></a>
+<a id="_6-stop-and-the-teardown-gotcha-778"></a>

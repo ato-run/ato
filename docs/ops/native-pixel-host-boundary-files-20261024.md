@@ -12,3 +12,6 @@ Language of the preserved document: English.
 <a id="root-gui--files-acceptance-and-controls"></a>
 <a id="final-child-regression"></a>
 <a id="reproduction-and-remaining-limits"></a>
+
+<!-- Additional Docsify slug aliases (including numeric prefixes). -->
+<a id="root-gui-files-acceptance-and-controls"></a>
