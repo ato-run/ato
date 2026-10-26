@@ -321,3 +321,94 @@ fn a_delete_removes_only_its_own_volume() {
         "x"
     );
 }
+
+/// A candidate volume is seeded from a packed state artifact. This is the #1572
+/// P1-A/P1-B path for memos: a stopped app's WAL-mode database is checkpointed
+/// into a revision, and the revision is unpacked into a NEW volume on another
+/// Runner, which must read back every committed row.
+#[test]
+fn a_new_volume_is_seeded_from_a_packed_wal_state_artifact() {
+    use crate::launch::state_artifact::{pack_state_tree, sqlite_wal, unpack_state_tree};
+
+    let Some(sqlite3) = sqlite_wal::cli() else {
+        eprintln!(
+            "skipping a_new_volume_is_seeded_from_a_packed_wal_state_artifact: this host has no sqlite3 CLI"
+        );
+        return;
+    };
+
+    // The seed revision the control plane would hand this Runner.
+    let source = tempfile::tempdir().unwrap();
+    sqlite_wal::create(
+        &sqlite3,
+        &source.path().join("memos_prod.db"),
+        &[("m1", "hello"), ("m2", "world")],
+    );
+    assert!(
+        !fs::read(source.path().join("memos_prod.db-wal"))
+            .unwrap()
+            .is_empty(),
+        "the seed revision must carry its rows in the WAL"
+    );
+    let artifact = pack_state_tree(source.path()).expect("packs");
+
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    let seeded = Cell::new(0);
+    let seed = |data: &Path| {
+        seeded.set(seeded.get() + 1);
+        unpack_state_tree(artifact.bytes(), artifact.digest(), data)
+    };
+
+    // A NEW volume, still Provisioning, is filled exactly once.
+    let volume = store
+        .attach(
+            VOLUME,
+            CAPACITY,
+            VolumeStatus::Provisioning,
+            Some("isrev_1"),
+            &seed,
+        )
+        .unwrap();
+    assert!(volume.provisioned);
+    assert_eq!(seeded.get(), 1);
+    let database = volume.data_dir().join("memos_prod.db");
+    assert_eq!(sqlite_wal::rows(&sqlite3, &database), "m1|hello\nm2|world");
+    assert_eq!(sqlite_wal::integrity(&sqlite3, &database), "ok");
+    drop(volume);
+
+    // A second attachment, now Ready, must NOT seed over what the volume holds:
+    // an existing volume is newer than any revision.
+    let reseeded = Cell::new(false);
+    let must_not_seed = |_: &Path| -> Result<()> {
+        reseeded.set(true);
+        Ok(())
+    };
+    let ready = store
+        .attach(
+            VOLUME,
+            CAPACITY,
+            VolumeStatus::Ready,
+            Some("isrev_1"),
+            &must_not_seed,
+        )
+        .unwrap();
+    assert!(!ready.provisioned);
+    assert!(
+        !reseeded.get(),
+        "a volume that already exists must never be seeded again"
+    );
+    assert_eq!(
+        sqlite_wal::rows(&sqlite3, &ready.data_dir().join("memos_prod.db")),
+        "m1|hello\nm2|world"
+    );
+    drop(ready);
+
+    // Maintenance (checkpoint, restore, delete) opens the same bytes: this is
+    // the read path a later restore of the candidate volume takes.
+    let existing = store.open_existing(VOLUME).unwrap();
+    assert_eq!(
+        sqlite_wal::rows(&sqlite3, &existing.data_dir().join("memos_prod.db")),
+        "m1|hello\nm2|world"
+    );
+}
