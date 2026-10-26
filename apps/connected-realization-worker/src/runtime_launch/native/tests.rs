@@ -485,6 +485,7 @@ async fn owner_eof_during_a_stalled_native_action_cleans_workload_and_socket() {
         mount_target: "/data".into(),
         access: ato_ipc::runtime_launch::StateAccessV1::ReadWrite,
         writer_fence: None,
+        backing: None,
     }];
     let context = ResolvedRuntimeLaunchContext::new(
         original_context.workspace_root().to_path_buf(),
