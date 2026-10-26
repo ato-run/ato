@@ -18,34 +18,51 @@ use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_oci::{
-    DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
-};
-use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
-use ato_formation::request::{AttemptFailure, RuntimeProfile};
-use ato_formation::verify::VerificationExecutionEvidence;
-use ato_objects::PortableDependencyProfile;
-use ato_portable_application::{
+use crate::{
     OCI_CPU_MILLIS_RUNTIME, OCI_ENTRYPOINT_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME,
     OCI_PIDS_LIMIT_RUNTIME, OCI_PLATFORM_RUNTIME, OCI_USER_RUNTIME, OCI_WORKING_DIR_RUNTIME,
     OCI_WORKSPACE_MOUNT_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationServer,
     StaticApplicationServerExt, StaticApplicationState, ValidatedPortableApplication,
 };
+use anyhow::{Context, Result, bail, ensure};
+use ato_adapter_oci::{
+    DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
+};
+use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
+use ato_formation::request::{AttemptFailure, AttemptOutcomes, RuntimeProfile};
+use ato_formation::verify::{
+    ContractVerification, ContractVerificationReceipt, VerificationExecutionEvidence,
+    VerificationTargetKind,
+};
+use ato_objects::PortableDependencyProfile;
+use ato_runtime_attempt::admission::EffectAuthorization;
+use ato_runtime_attempt::build_sandbox::NetworkPolicy;
 use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry, ModelSetManifest, env_name};
 use ato_runtime_attempt::launch::oci::{
     LaunchedOci, OciCandidate, ServiceStart, start_service_group,
 };
 use ato_runtime_attempt::realize::{CandidateRealizer, RealizeFailure, Realized, RunningCandidate};
+use ato_sandbox::SandboxPolicy;
 
-use super::{
-    endpoint_port_env_name, parse_runtime_limit, portable_process_sandbox_command,
-    resolve_pinned_python, resolve_portable_state_mounts, state_path_env_name,
-};
+/// Host-side inputs a portable Run needs from whoever starts it.
+///
+/// The CLI answers with `~/.ato/cache`, its own binary as the sandbox shim and
+/// the `__portable-sandbox-exec` subcommand. The Formation worker answers with
+/// its work root and its own shim subcommand. Neither value belongs to the
+/// bundle, K, D or the receipt.
+pub struct PortableRunContext<'a> {
+    /// Where cached external objects (Model Sets, wheels) live.
+    pub cache_root: &'a Path,
+    /// The executable that carries the portable sandbox shim subcommand.
+    pub sandbox_shim: &'a Path,
+    /// The subcommand that applies a portable sandbox policy.
+    pub sandbox_subcommand: &'a str,
+}
 
 /// Makes a validated portable route runnable and starts it.
-pub(crate) struct PortableBundleExecutor<'a> {
+pub struct PortableBundleExecutor<'a> {
     /// The bundle as it arrived; a thin bundle's external objects are
     /// fetched and verified when the candidate is realized.
     pub bundle: &'a ato_objects::PortableApplicationBundle,
@@ -56,6 +73,8 @@ pub(crate) struct PortableBundleExecutor<'a> {
     pub static_state: Option<StaticApplicationState>,
     pub filesystem_state: Option<&'a BTreeMap<String, PathBuf>>,
     pub binding_environment: &'a BTreeMap<String, String>,
+    /// Everything the host, not the bundle, decides about this start.
+    pub context: &'a PortableRunContext<'a>,
 }
 
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
@@ -73,14 +92,12 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
 
     fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
         if !self.validated.model_sets.is_empty() {
-            let checked = super::ato_home().and_then(|home| {
-                resolve_model_inputs(
-                    &self.validated.model_sets,
-                    &home.join("cache"),
-                    self.runtime_root,
-                    false,
-                )
-            });
+            let checked = resolve_model_inputs(
+                &self.validated.model_sets,
+                self.context.cache_root,
+                self.runtime_root,
+                false,
+            );
             if let Err(error) = checked {
                 return refused(
                     "model_set_unavailable",
@@ -133,7 +150,7 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         fs::create_dir_all(self.runtime_root)
             .with_context(|| format!("create {}", self.runtime_root.display()))?;
         let (hydrated, dependency_fetches) =
-            crate::portable_dependency::hydrate_external_objects(self.bundle)?;
+            crate::dependency_transport::hydrate_external_objects(self.bundle)?;
         for reference in &dependency_fetches {
             eprintln!("dependency fetched and verified: {reference}");
         }
@@ -144,14 +161,13 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         } else {
             resolve_model_inputs(
                 &route.model_sets,
-                &super::ato_home()?.join("cache"),
+                self.context.cache_root,
                 self.runtime_root,
                 true,
             )?
         };
         let workspace = self.runtime_root.join("workspace");
-        ato_portable_application::materialize_tree(&hydrated, route, &workspace)
-            .map_err(anyhow::Error::from)?;
+        crate::materialize_tree(&hydrated, route, &workspace).map_err(anyhow::Error::from)?;
         let mut realized = match route.realization {
             PortableRealizationKind::StaticWeb => self.start_static(workspace)?,
             PortableRealizationKind::LocalProcess => {
@@ -172,11 +188,11 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
 /// Resolves only the declared cached objects. No upstream fetch or alternate
 /// Model Set is considered; absence is an admission refusal before execution.
 fn resolve_model_inputs(
-    sets: &[ato_portable_application::ValidatedModelSet],
+    sets: &[crate::ValidatedModelSet],
     cache_root: &Path,
     runtime_root: &Path,
     materialize: bool,
-) -> Result<Vec<super::PortableInputMount>> {
+) -> Result<Vec<PortableInputMount>> {
     let mut names = BTreeSet::from([env_name("workspace"), env_name("assets")]);
     for set in sets {
         ensure!(
@@ -214,7 +230,7 @@ fn resolve_model_inputs(
         if materialize {
             cache.materialize(manifest, &host_path)?;
         }
-        inputs.push(super::PortableInputMount {
+        inputs.push(PortableInputMount {
             env_name: env_name(&set.input_id),
             host_path,
             guest_path: format!("/ato-inputs/{index}"),
@@ -256,8 +272,8 @@ impl PortableBundleExecutor<'_> {
     fn start_process(
         &self,
         workspace: PathBuf,
-        state_mounts: &[super::PortableStateMount],
-        input_mounts: &[super::PortableInputMount],
+        state_mounts: &[PortableStateMount],
+        input_mounts: &[PortableInputMount],
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let step = &route.derivation.steps[0];
@@ -363,7 +379,7 @@ impl PortableBundleExecutor<'_> {
             &command,
             host_port.parse().context("host port")?,
             &step.cwd,
-            super::PortableProcessMounts {
+            PortableProcessMounts {
                 state: state_mounts,
                 inputs: input_mounts,
             },
@@ -404,7 +420,7 @@ impl PortableBundleExecutor<'_> {
         &self,
         hydrated: &ato_objects::PortableApplicationBundle,
         workspace: PathBuf,
-        state_mounts: &[super::PortableStateMount],
+        state_mounts: &[PortableStateMount],
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let step = &route.derivation.steps[0];
@@ -493,7 +509,7 @@ impl PortableBundleExecutor<'_> {
         &self,
         hydrated: &ato_objects::PortableApplicationBundle,
         workspace: PathBuf,
-        state_mounts: &[super::PortableStateMount],
+        state_mounts: &[PortableStateMount],
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let derivation = &route.derivation;
@@ -513,7 +529,7 @@ impl PortableBundleExecutor<'_> {
             let runtime = &step.runtimes;
             let mut environment = step.env.clone();
             for binding in &step.bindings {
-                let name = ato_portable_application::binding_environment_name(binding);
+                let name = crate::binding_environment_name(binding);
                 if let Some(value) = self.binding_environment.get(&name) {
                     environment.insert(name, value.clone());
                 }
@@ -727,7 +743,7 @@ fn local_oci_adapter(
                 .find(|archive| archive.image == spec.image && archive.platform == spec.platform)
         })
         .context("offline OCI image archive is missing")?;
-    let verified = ato_portable_application::oci_archive::verify_oci_archive(archive)?;
+    let verified = crate::oci_archive::verify_oci_archive(archive)?;
     DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)
 }
 
@@ -812,7 +828,7 @@ fn remove_owned(paths: &[PathBuf]) -> Result<()> {
 
 /// A Run's process: its process group, and the unpacked tree and process
 /// runtime directories it owns.
-pub(crate) struct PortableProcessCandidate {
+pub struct PortableProcessCandidate {
     handle: Option<ProcessHandle>,
     endpoints: BTreeMap<String, String>,
     owned: Vec<PathBuf>,
@@ -864,7 +880,7 @@ impl Drop for PortableProcessCandidate {
 }
 
 /// A Run's static server, and the unpacked tree it serves from.
-pub(crate) struct PortableStaticCandidate {
+pub struct PortableStaticCandidate {
     server: Option<StaticApplicationServer>,
     endpoints: BTreeMap<String, String>,
     workspace: PathBuf,
@@ -872,7 +888,7 @@ pub(crate) struct PortableStaticCandidate {
 
 impl PortableStaticCandidate {
     /// The page state the application kept, before it is stopped.
-    pub(crate) fn local_storage(&self) -> Result<Option<BTreeMap<String, String>>> {
+    pub fn local_storage(&self) -> Result<Option<BTreeMap<String, String>>> {
         match &self.server {
             Some(server) => Ok(server.local_storage()?),
             None => Ok(None),
@@ -918,7 +934,7 @@ mod model_input_tests {
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
 
-    fn model_set(id: &str, data: &[u8]) -> ato_portable_application::ValidatedModelSet {
+    fn model_set(id: &str, data: &[u8]) -> crate::ValidatedModelSet {
         let manifest = Manifest {
             schema: MODEL_SET_SCHEMA.to_owned(),
             objects: vec![ManifestEntry {
@@ -927,14 +943,14 @@ mod model_input_tests {
                 bytes: data.len() as u64,
             }],
         };
-        ato_portable_application::ValidatedModelSet {
+        crate::ValidatedModelSet {
             input_id: id.to_owned(),
             reference: manifest.reference().unwrap(),
             manifest,
         }
     }
 
-    fn populate(root: &Path, set: &ato_portable_application::ValidatedModelSet, data: &[u8]) {
+    fn populate(root: &Path, set: &crate::ValidatedModelSet, data: &[u8]) {
         let cache = ModelCache::open(root).unwrap();
         let e = &set.manifest.objects[0];
         cache
@@ -1004,4 +1020,591 @@ mod model_input_tests {
         assert!(error.to_string().contains("environment names collide"));
         assert!(!runtime_root.exists());
     }
+}
+
+// ─── host-side helpers extracted from the CLI ────────────────────────────────
+//
+// These were private to `apps/cli`. They are realization concerns, not CLI
+// concerns: which Python a pinned runtime resolves to, how a filesystem state
+// is mounted, and how the process sandbox is invoked. `run_portable_bundle_attempt`
+// needs them for every caller, so they live beside the executor that uses them.
+
+#[derive(Debug, Clone)]
+struct PortableStateMount {
+    id: String,
+    host_path: PathBuf,
+    guest_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct PortableInputMount {
+    env_name: String,
+    host_path: PathBuf,
+    guest_path: String,
+}
+
+struct PortableProcessMounts<'a> {
+    state: &'a [PortableStateMount],
+    inputs: &'a [PortableInputMount],
+}
+
+fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
+    if let Ok(output) = Command::new("uv")
+        .args(["python", "find", version])
+        .env("UV_PYTHON_DOWNLOADS", "never")
+        .output()
+        && output.status.success()
+    {
+        let path = String::from_utf8(output.stdout)?.trim().to_owned();
+        if !path.is_empty() {
+            let executable = executable_path(&path).unwrap_or_else(|| PathBuf::from(&path));
+            return verified_python(&executable.display().to_string(), version);
+        }
+    }
+    let provisioned_root = PathBuf::from("/opt/ato/toolchains/python");
+    if let Ok(entries) = std::fs::read_dir(&provisioned_root) {
+        let mut candidates = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|candidate| {
+                candidate == version || candidate.starts_with(&format!("{version}."))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        for candidate in candidates.into_iter().rev() {
+            let executable = provisioned_root.join(candidate).join("bin").join("python3");
+            if executable.is_file() {
+                return verified_python(&executable.display().to_string(), version);
+            }
+        }
+    }
+    for executable in ["python3", "python"] {
+        let Ok(output) = Command::new(executable).arg("--version").output() else {
+            continue;
+        };
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() && python_version_matches(&reported, version) {
+            let selected = executable_path(executable)
+                .unwrap_or_else(|| PathBuf::from(executable))
+                .display()
+                .to_string();
+            return verified_python(&selected, version);
+        }
+    }
+    bail!(
+        "selected derivation requires Python {version}; install that runtime with `uv python install {version}`"
+    )
+}
+
+fn executable_path(executable: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(executable);
+    if candidate.components().count() > 1 && candidate.is_file() {
+        return Some(candidate);
+    }
+    std::env::var_os("PATH").and_then(|search| {
+        std::env::split_paths(&search)
+            .map(|directory| directory.join(executable))
+            .find(|path| path.is_file())
+    })
+}
+
+fn python_version_matches(reported: &str, required: &str) -> bool {
+    reported
+        .trim()
+        .strip_prefix("Python ")
+        .is_some_and(|actual| actual == required || actual.starts_with(&format!("{required}.")))
+}
+
+fn verified_python(executable: &str, version: &str) -> Result<(String, String)> {
+    let output = Command::new(executable)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("inspect selected Python executable {executable}"))?;
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() || !python_version_matches(&reported, version) {
+        bail!(
+            "selected Python executable {executable} does not satisfy {version}: {}",
+            reported.trim()
+        );
+    }
+    let identity = Command::new(executable)
+        .args([
+            "-c",
+            "import os,sys; print(os.path.realpath(sys.executable))",
+        ])
+        .output()
+        .with_context(|| format!("resolve selected Python executable {executable}"))?;
+    let resolved = String::from_utf8(identity.stdout)?.trim().to_owned();
+    if !identity.status.success() || resolved.is_empty() || !PathBuf::from(&resolved).is_file() {
+        bail!("selected Python executable {executable} did not resolve to a file");
+    }
+    Ok((resolved, reported.trim().to_owned()))
+}
+
+fn resolve_portable_state_mounts(
+    route: &ValidatedPortableApplication,
+    runtime_root: &Path,
+    persistent: Option<&BTreeMap<String, PathBuf>>,
+) -> Result<Vec<PortableStateMount>> {
+    if let Some(persistent) = persistent
+        && persistent.len() != route.derivation.state.len()
+    {
+        bail!("local Instance filesystem state does not match the selected Derivation");
+    }
+    route
+        .derivation
+        .state
+        .iter()
+        .map(|state| {
+            let host_path = match persistent {
+                Some(paths) => paths.get(&state.id).cloned().with_context(|| {
+                    format!("local Instance filesystem state `{}` is missing", state.id)
+                })?,
+                None => {
+                    let path = runtime_root.join("state").join(&state.id);
+                    fs::create_dir_all(&path).with_context(|| {
+                        format!("create portable filesystem state {}", path.display())
+                    })?;
+                    path
+                }
+            };
+            let host_path = host_path.canonicalize().with_context(|| {
+                format!(
+                    "canonicalize portable filesystem state {}",
+                    host_path.display()
+                )
+            })?;
+            if !host_path.is_dir() {
+                bail!(
+                    "portable filesystem state `{}` is not a directory",
+                    state.id
+                );
+            }
+            Ok(PortableStateMount {
+                id: state.id.clone(),
+                host_path,
+                guest_path: state.mount.clone(),
+            })
+        })
+        .collect()
+}
+
+fn portable_process_sandbox_command(
+    workspace: &std::path::Path,
+    runtime_root: &std::path::Path,
+    executable: &str,
+    workload: &[String],
+    host_port: u16,
+    working_dir: &str,
+    mounts: PortableProcessMounts<'_>,
+) -> Result<Vec<String>> {
+    let state_mounts = mounts.state;
+    let input_mounts = mounts.inputs;
+    #[cfg(not(target_os = "linux"))]
+    let _ = working_dir;
+    let workspace = workspace
+        .canonicalize()
+        .context("canonicalize portable workspace")?;
+    let runtime_root = runtime_root
+        .canonicalize()
+        .context("canonicalize portable runtime directory")?;
+    let executable = PathBuf::from(executable)
+        .canonicalize()
+        .with_context(|| format!("canonicalize portable runtime {executable}"))?;
+    let interpreter_root = executable
+        .parent()
+        .and_then(std::path::Path::parent)
+        .context("portable runtime has no readable installation root")?
+        .to_path_buf();
+    if !state_mounts.is_empty() {
+        #[cfg(target_os = "linux")]
+        {
+            return portable_process_bwrap_command(
+                &workspace,
+                &runtime_root,
+                &interpreter_root,
+                workload,
+                host_port,
+                working_dir,
+                mounts,
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            bail!(
+                "local process runtime admission failed: declared filesystem state requires a Linux bubblewrap sandbox"
+            );
+        }
+    }
+    let system_roots = [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/etc",
+        "/dev",
+        "/proc",
+        "/System",
+        "/Library",
+        "/private/var/db",
+        "/opt",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .filter(|path| path.exists());
+    let policy = SandboxPolicy::new()
+        .allow_read_write([runtime_root.clone()])
+        .allow_read_only(
+            [workspace, interpreter_root]
+                .into_iter()
+                .chain(system_roots)
+                .chain(input_mounts.iter().map(|input| input.host_path.clone())),
+        )
+        .with_network(false)
+        .allow_tcp_bind([host_port]);
+    let policy_path = runtime_root.join("sandbox-policy.json");
+    fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
+        .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
+    let shim = std::env::current_exe()
+        .context("locate ato sandbox shim")?
+        .canonicalize()
+        .context("canonicalize ato sandbox shim")?;
+    let mut command = vec![
+        shim.display().to_string(),
+        "__portable-sandbox-exec".to_owned(),
+        "--policy".to_owned(),
+        policy_path.display().to_string(),
+        "--".to_owned(),
+    ];
+    command.extend(workload.iter().cloned());
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn portable_process_bwrap_command(
+    workspace: &Path,
+    runtime_root: &Path,
+    interpreter_root: &Path,
+    workload: &[String],
+    host_port: u16,
+    working_dir: &str,
+    mounts: PortableProcessMounts<'_>,
+) -> Result<Vec<String>> {
+    let state_mounts = mounts.state;
+    let input_mounts = mounts.inputs;
+    let bwrap = executable_path("bwrap")
+        .context("local process runtime admission failed: `bwrap` is not on PATH")?;
+    let shim = std::env::current_exe()
+        .context("locate ato sandbox shim")?
+        .canonicalize()
+        .context("canonicalize ato sandbox shim")?;
+    let guest_working_dir = if working_dir == "." {
+        "/app".to_owned()
+    } else {
+        format!("/app/{working_dir}")
+    };
+    let policy = SandboxPolicy::new()
+        .allow_read_write(
+            state_mounts
+                .iter()
+                .map(|state| PathBuf::from(&state.guest_path))
+                .chain([PathBuf::from("/tmp")]),
+        )
+        .allow_read_only(
+            [
+                PathBuf::from("/app"),
+                PathBuf::from("/.ato"),
+                interpreter_root.to_path_buf(),
+                PathBuf::from("/usr"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/sbin"),
+                PathBuf::from("/lib"),
+                PathBuf::from("/lib64"),
+                PathBuf::from("/etc"),
+                PathBuf::from("/dev"),
+                PathBuf::from("/proc"),
+            ]
+            .into_iter()
+            .chain(
+                input_mounts
+                    .iter()
+                    .map(|input| PathBuf::from(&input.guest_path)),
+            ),
+        )
+        .with_network(false)
+        .allow_tcp_bind([host_port]);
+    let policy_path = runtime_root.join("sandbox-policy.json");
+    fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
+        .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
+
+    let mut command = vec![
+        bwrap.display().to_string(),
+        "--unshare-all".to_owned(),
+        "--share-net".to_owned(),
+        "--die-with-parent".to_owned(),
+        "--new-session".to_owned(),
+        "--proc".to_owned(),
+        "/proc".to_owned(),
+        "--dev".to_owned(),
+        "/dev".to_owned(),
+        "--tmpfs".to_owned(),
+        "/tmp".to_owned(),
+    ];
+    for (source, target, required) in [
+        ("/bin", "/bin", false),
+        ("/sbin", "/sbin", false),
+        ("/lib", "/lib", false),
+        ("/lib64", "/lib64", false),
+        ("/usr", "/usr", true),
+        ("/etc/resolv.conf", "/etc/resolv.conf", false),
+        ("/etc/hosts", "/etc/hosts", false),
+        ("/etc/ssl", "/etc/ssl", false),
+    ] {
+        command.extend([
+            if required {
+                "--ro-bind"
+            } else {
+                "--ro-bind-try"
+            }
+            .to_owned(),
+            source.to_owned(),
+            target.to_owned(),
+        ]);
+    }
+    if !interpreter_root.starts_with("/usr") {
+        command.extend([
+            "--ro-bind".to_owned(),
+            interpreter_root.display().to_string(),
+            interpreter_root.display().to_string(),
+        ]);
+    }
+    command.extend([
+        "--ro-bind".to_owned(),
+        workspace.display().to_string(),
+        "/app".to_owned(),
+    ]);
+    for state in state_mounts {
+        command.extend([
+            "--bind".to_owned(),
+            state.host_path.display().to_string(),
+            state.guest_path.clone(),
+        ]);
+    }
+    if !input_mounts.is_empty() {
+        command.extend(["--dir".to_owned(), "/ato-inputs".to_owned()]);
+    }
+    for input in input_mounts {
+        command.extend([
+            "--ro-bind".to_owned(),
+            input.host_path.display().to_string(),
+            input.guest_path.clone(),
+        ]);
+    }
+    command.extend([
+        "--dir".to_owned(),
+        "/.ato".to_owned(),
+        "--ro-bind".to_owned(),
+        shim.display().to_string(),
+        "/.ato/ato".to_owned(),
+        "--ro-bind".to_owned(),
+        policy_path.display().to_string(),
+        "/.ato/sandbox-policy.json".to_owned(),
+        "--chdir".to_owned(),
+        guest_working_dir,
+        "/.ato/ato".to_owned(),
+        "__portable-sandbox-exec".to_owned(),
+        "--policy".to_owned(),
+        "/.ato/sandbox-policy.json".to_owned(),
+        "--".to_owned(),
+    ]);
+    command.extend(workload.iter().cloned());
+    Ok(command)
+}
+
+fn endpoint_port_env_name(port_id: &str) -> String {
+    format!(
+        "ATO_ENDPOINT_{}_PORT",
+        port_id
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
+}
+
+fn state_path_env_name(state_id: &str) -> String {
+    format!(
+        "ATO_STATE_PATH_{}",
+        state_id
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
+}
+
+fn parse_runtime_limit(runtimes: &BTreeMap<String, String>, key: &str) -> Result<u64> {
+    runtimes
+        .get(key)
+        .with_context(|| format!("OCI route omitted {key}"))?
+        .parse()
+        .with_context(|| format!("OCI route has invalid {key}"))
+}
+
+// ─── the shared attempt entry ───────────────────────────────────────────────
+
+/// What one portable-bundle attempt established.
+///
+/// The receipt and the verification are the same Rust-owned values a CLI Run
+/// gets; this API adds no second verdict path. `attempt` carries the typed
+/// failure when the attempt was refused, and `stop` says how the candidate's
+/// cleanup went when one was stopped.
+pub struct PortableBundleAttemptOutcome {
+    pub attempt: ato_formation::request::FormationAttempt,
+    pub attempt_record: ato_runtime_attempt::journal::AttemptRecordState,
+    pub receipt: Option<ContractVerificationReceipt>,
+    pub verification: Option<ContractVerification>,
+    /// The realization facts the attempt recorded (executor, containment…).
+    pub realization: Option<ato_formation::request::RealizationEvidence>,
+    pub outcomes: AttemptOutcomes,
+    pub stop: Option<ato_runtime_attempt::realize::StopClass>,
+    pub error: Option<anyhow::Error>,
+}
+
+/// Everything a caller decides before a portable bundle can run.
+///
+/// The bundle, K, D and tree travel as bytes; everything host-specific is a
+/// field here, so the same function serves `ato run`, a local Instance and a
+/// hosted Formation attempt.
+pub struct PortableBundleAttempt<'a> {
+    /// The bundle file as it arrived (transport bytes).
+    pub bundle_bytes: &'a [u8],
+    /// The decoded bundle those bytes carry.
+    pub bundle: &'a ato_objects::PortableApplicationBundle,
+    /// The one Derivation the caller selected. Never inferred here.
+    pub derivation_ref: &'a str,
+    /// Scratch this attempt owns and the attempt removes again.
+    pub runtime_root: &'a Path,
+    /// Host cache for declared external objects.
+    pub cache_root: &'a Path,
+    /// Executable carrying the portable sandbox shim subcommand.
+    pub sandbox_shim: &'a Path,
+    /// The sandbox shim subcommand for this caller.
+    pub sandbox_subcommand: &'a str,
+    pub request_id: &'a str,
+    pub attempt_id: &'a str,
+    /// How the caller names this candidate in evidence.
+    pub label: &'a str,
+    pub runtime_id: &'a str,
+    pub profile: &'a RuntimeProfile,
+    pub authorization: EffectAuthorization<'a>,
+    pub network: NetworkPolicy,
+    /// What the receipt names besides K, D and this attempt.
+    pub receipt_target: VerificationTargetKind,
+    pub run_id: Option<&'a str>,
+    pub binding_environment: &'a BTreeMap<String, String>,
+    pub interrupt: Option<&'a std::sync::atomic::AtomicBool>,
+}
+
+/// Run one already-built portable bundle through the Runtime's common attempt:
+/// admission, the start record, realization, observation and verification.
+///
+/// The caller keeps the choices: which Derivation, what authorization, what a
+/// build may reach, and what the receipt names. This function owns only the
+/// shared pipeline, so the CLI and the Formation worker cannot drift.
+pub fn run_portable_bundle_attempt(
+    request: &PortableBundleAttempt<'_>,
+    permit: Box<dyn ato_runtime_attempt::journal::AttemptPermit>,
+) -> Result<PortableBundleAttemptOutcome> {
+    use ato_runtime_attempt::attempt::{
+        AttemptRequest, Continuation, ReceiptContext, run_reserved_attempt,
+    };
+
+    let validated = crate::validate_bundle_for_derivation(request.bundle, request.derivation_ref)?;
+    let transport = crate::bundle_sha256(request.bundle_bytes);
+    let portability_profile =
+        request
+            .bundle
+            .portability
+            .as_ref()
+            .map(|portability| match portability.profile {
+                PortableDependencyProfile::Thin => "thin",
+                PortableDependencyProfile::Cached => "cached",
+                PortableDependencyProfile::Offline => "offline",
+            });
+    let spec = validated.attempt_spec(None);
+    let context = PortableRunContext {
+        cache_root: request.cache_root,
+        sandbox_shim: request.sandbox_shim,
+        sandbox_subcommand: request.sandbox_subcommand,
+    };
+    let executor = PortableBundleExecutor {
+        bundle: request.bundle,
+        validated: &validated,
+        runtime_root: request.runtime_root,
+        static_state: None,
+        filesystem_state: None,
+        binding_environment: request.binding_environment,
+        context: &context,
+    };
+    let outcome = run_reserved_attempt(
+        &AttemptRequest {
+            request_id: request.request_id,
+            attempt_id: request.attempt_id,
+            label: request.label,
+            spec: &spec,
+            contract_ref: validated.contract_ref.as_str(),
+            runtime_id: request.runtime_id,
+            profile: request.profile,
+            authorization: request.authorization,
+            network: request.network,
+            browser: None,
+            attempt_root: request.runtime_root,
+            continuation: Continuation::Stop,
+            receipt: ReceiptContext {
+                target: request.receipt_target,
+                bundle_sha256: Some(&transport),
+                portability_profile,
+                run_id: request.run_id,
+            },
+            interrupt: request.interrupt,
+            control: None,
+        },
+        &executor,
+        Ok(permit),
+    );
+    let ato_runtime_attempt::attempt::AttemptOutcome {
+        attempt,
+        attempt_record,
+        verified: _,
+        live: _,
+        error,
+        stop,
+    } = outcome;
+    Ok(PortableBundleAttemptOutcome {
+        receipt: attempt.receipt.clone(),
+        verification: attempt.verification.clone(),
+        realization: attempt.realization.clone(),
+        outcomes: attempt.outcomes.clone(),
+        attempt,
+        attempt_record,
+        stop,
+        error,
+    })
 }
