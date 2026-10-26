@@ -269,6 +269,9 @@
     .markdown-section table tr:nth-child(2n) {
       background: var(--table-row-odd-bg);
     }
+    .markdown-section table tr:nth-child(2n+1) {
+      background: var(--base-background-color);
+    }
 
     .markdown-section kbd {
       color: var(--kbd-color);
@@ -445,7 +448,34 @@
         "/rfcs/.*/_sidebar.md": "/rfcs/_sidebar.md",
         "/.*/_sidebar.md": "/_sidebar.md"
       },
-      relativePath: false,
+      relativePath: true,
+      markdown: function (marked, renderer) {
+        var renderLink = renderer.link;
+        renderer.link = function (href, title, text) {
+          // Keep Markdown valid in GitHub and in the docs-only Pages artifact.
+          if (!/^(?:[a-z][a-z0-9+.-]*:|\/|#)/i.test(href)) {
+            var route = location.hash.slice(1).split('?')[0] || '/README';
+            if (route.endsWith('/')) route += 'README';
+            var target = new URL(href, 'https://docs.invalid/docs' + route);
+            var inDocs = target.pathname.startsWith('/docs/');
+            var markdown = /\.md$/i.test(target.pathname);
+            if (!inDocs || !markdown) {
+              var file = target.pathname.slice(1);
+              if (inDocs && /\.[a-z0-9]+$/i.test(file)) {
+                // JSON, TSV and images are files, not Markdown routes.
+                href = new URL(file.slice(5), location.href.split('#')[0]).href;
+              } else {
+                var kind = /\.[a-z0-9]+$/i.test(file) ? 'blob' : 'tree';
+                href = 'https://github.com/ato-run/ato/' + kind + '/main/' + file;
+              }
+              href += target.search + target.hash;
+            }
+          }
+          return renderLink(href, title, text);
+        };
+        marked.setOptions({ renderer: renderer });
+        return marked;
+      },
       subMaxLevel: 3,
       auto2top: true,
       toc: {

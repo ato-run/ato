@@ -1,5 +1,10 @@
 # ato で何が動かせるのか: 実行境界メモ
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 > 作成: 2026-05-02
 > 目的: 「ato で何が動くのか」と「ato-desktop でどう見せられるのか」の境界を、現行 spec と実装断片に基づいて整理する。
 
@@ -15,8 +20,8 @@
 
 根拠:
 
-- [docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md](../docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md)
-- [docs/rfcs/accepted/ATO_CLI_SPEC.md](../docs/rfcs/accepted/ATO_CLI_SPEC.md)
+- [docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md](../../archive/rfcs-legacy-accepted/CAPSULE_HANDLE_SPEC.md)
+- [docs/rfcs/accepted/ATO_CLI_SPEC.md](../../archive/rfcs-legacy-accepted/ATO_CLI_SPEC.md)
 
 ---
 
@@ -36,8 +41,8 @@ ato 側の判断軸は、アプリ種別そのものではなく session contrac
 
 根拠:
 
-- [docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md](../docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md)
-- [docs/rfcs/accepted/ATO_CLI_SPEC.md](../docs/rfcs/accepted/ATO_CLI_SPEC.md)
+- [docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md](../../archive/rfcs-legacy-accepted/CAPSULE_HANDLE_SPEC.md)
+- [docs/rfcs/accepted/ATO_CLI_SPEC.md](../../archive/rfcs-legacy-accepted/ATO_CLI_SPEC.md)
 
 ---
 
@@ -55,7 +60,7 @@ ato 側の判断軸は、アプリ種別そのものではなく session contrac
 
 根拠:
 
-- [docs/rfcs/accepted/ATO_CLI_SPEC.md](../docs/rfcs/accepted/ATO_CLI_SPEC.md)
+- [docs/rfcs/accepted/ATO_CLI_SPEC.md](../../archive/rfcs-legacy-accepted/ATO_CLI_SPEC.md)
 
 #### B. guest contract に載ったフロントエンド
 
@@ -83,7 +88,7 @@ guest contract 上で現在明示されている互換面は次の通り。
 
 根拠:
 
-- [docs/rfcs/archived/DESKY_GUEST_CONTRACT.md](../docs/rfcs/archived/DESKY_GUEST_CONTRACT.md)
+- [docs/rfcs/archived/DESKY_GUEST_CONTRACT.md](../../rfcs/archived/DESKY_GUEST_CONTRACT.md)
 
 ### 3.2 動かせても pane に載せにくいもの
 
@@ -139,8 +144,8 @@ guest contract 上で現在明示されている互換面は次の通り。
 
 根拠:
 
-- [docs/rfcs/archived/DESKY_GUEST_CONTRACT.md](../docs/rfcs/archived/DESKY_GUEST_CONTRACT.md)
-- [docs/TODO.md](../docs/TODO.md)
+- [docs/rfcs/archived/DESKY_GUEST_CONTRACT.md](../../rfcs/archived/DESKY_GUEST_CONTRACT.md)
+- [docs/TODO.md](../dashboards/TODO.md)
 
 ---
 
@@ -187,4 +192,4 @@ ato-desktop で日常利用する capsule 候補を選ぶときは、実装言�
 
 根拠:
 
-- [docs/TODO.md](../docs/TODO.md)
+- [docs/TODO.md](../dashboards/TODO.md)

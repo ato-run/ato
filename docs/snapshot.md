@@ -1,18 +1,26 @@
 # Snapshot materialization
 
-A snapshot is a physical Materialization. It is not a Capsule, does not
-replace a `ComputationRef`, and does not make VM or process state part of the
-Semantic Core.
+A snapshot is a physical realization artifact. Its digest, backend and host
+compatibility evidence are distinct from logical Capsule identity.
 
-The current `ato.snapshot@1` implementation is specifically a
-workspace/filesystem Materialization. It records physical artifacts and an
-exact host compatibility contract, verifies the target Computation and every
-artifact, and keeps referenced content live through object-store traversal.
-Likely plaintext secrets are rejected.
+| Path | Current code / limitation |
+|---|---|
+| workspace snapshot | `ato.materialize.workspace.snapshot@1`; legacy `ato.snapshot@1` reader; captures/verifies filesystem artifacts and remains verify-only |
+| VM snapshot | `ato.materialize.vm.snapshot@1`; restore-capable interface with an injected backend and RunnerCapabilities; no universal host/process checkpoint promise |
+| portable Instance snapshot | wire v4 saved-state closure; bounded declared resources/assets and Contract requirements; separate from VM memory |
 
-Its current restore capability is **verify-only**. There is no public
-`ato snapshot` command and it must not be presented as a process or VM
-checkpoint backend.
+The workspace implementation is in
+[snapshot materializer](../extensions/materializers/snapshot/src/lib.rs).
+The [VM materializer](../extensions/materializers/vm-snapshot/src/lib.rs)
+reports `RestoreCapability::Supported`, but actual restoration requires its
+backend and a compatible host. The [VM draft](rfcs/draft/VM_SNAPSHOT_MATERIALIZATION.md)
+and [Instance draft](rfcs/draft/PORTABLE_INSTANCE_SNAPSHOT.md) remain
+implementation-track contracts. The accepted
+[Materialization RFC](rfcs/accepted/MATERIALIZATION.md) is unchanged.
 
-See [Materialization](concepts/materialization.md) and the accepted
-[Materialization RFC](rfcs/accepted/MATERIALIZATION.md).
+There is no general public `ato snapshot` command. A tested backend or a
+fresh-instance scenario does not establish arbitrary cross-host resume,
+distributed capture or state migration. Read
+[State Continuity](concepts/state-continuity.md) before making a persistence
+claim. Former Ready-State experiments remain in the
+[historical subtree](ready-state/README.md).
