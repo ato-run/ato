@@ -1,5 +1,8 @@
 # Always-on and TCP network controls staging acceptance — 2026-09-19
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: **PASS** for the scoped staging acceptance. Production was not
 deployed, enabled, migrated, or otherwise changed. The test Instance was left
 in `on_demand` / `stopped` state.

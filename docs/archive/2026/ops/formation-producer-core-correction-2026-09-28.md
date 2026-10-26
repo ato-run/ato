@@ -1,5 +1,8 @@
 # Formation CandidateProducer — core semantics correction
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Date: 2026-09-28. This supersedes the semantics and source-access limitation of
 [the first-slice checkpoint](formation-provider-split-2026-09-28.md).
 **Core/local acceptance only, not original Phase 4 completion.**
@@ -24,7 +27,7 @@ Full 330-line source read:
 Parent Continuation Model SHA-256:
 `ce0f0e3c91cefaf0fafe2ce4a48cbcca801739a96cd906b30d13ea4c136d15fb`.
 
-The [companion correspondence table](../rfcs/draft/Formation.md) maps all
+The [companion correspondence table](../../../rfcs/draft/Formation.md) maps all
 original sections and preserves ADR-041's authority boundaries:
 
 | Original | Implementation roadmap |

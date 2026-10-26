@@ -1,5 +1,8 @@
 # Isolated Python native toolchain claims, 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The builtin Python operation isolation change at `5143a6dc` added `-I` to
 registered exec argv. `native_runtime_requirements` still recognized only the
 old five-argument spelling. Current six-argument Python steps therefore lost

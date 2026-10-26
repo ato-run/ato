@@ -1,5 +1,8 @@
 # Formation v0 native dependency operations — 2026-10-01
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Depends on Ato #1454. Fixed merged main is still
 `8fca0f4b78b1bed92eae21823e5c5f7207058271`; provider prompt versions 1–9
 retain their bytes and legacy capability projections. Version 10 exposes the

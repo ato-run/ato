@@ -1,5 +1,8 @@
 # Launch Preparation Bridge Contract (#581 ↔ #593)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > **Historical draft.** The crate paths and launch-plan model below predate the
 > Computation architecture and are not current implementation authority.
 
@@ -18,7 +21,7 @@ and ato-api does not (yet) invoke `prepare_launch` directly — until a real cor
 service / worker / CLI integration exists, ato-api uses a dev/test provider that
 emits this exact shape. See `ato-api/src/services/launch_preparation.ts`.
 
-- Schema: [`launch-preparation-plan.schema.json`](./launch-preparation-plan.schema.json)
+- Schema: [`launch-preparation-plan.schema.json`](../../../specs/launch-preparation-plan.schema.json)
 - Golden fixtures: `crates/capsule/tests/fixtures/launch_preparation/`
   - `prepared_managed_runner.json`
   - `not_prepared_standard_install.json`

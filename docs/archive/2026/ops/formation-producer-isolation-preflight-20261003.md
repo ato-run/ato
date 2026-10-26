@@ -1,5 +1,8 @@
 # Formation Producer隔離preflight
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 2026-10-03、公開Skill packageの準備とmacOS kernelの固定C fixtureを検証した。実Codex/Claude Code、認証、Search、Runtimeの受入は実行していない。過去の探索pin・成功D・失敗Search・台帳を変更していない。
 
 | 測定 | 実装pin | 公開package SHA-256 | 結果 |
@@ -33,10 +36,10 @@ package/authorityの15unit testもPASS。独立copy、配置先の一致、既�
 
 ## 残るgateと証跡
 
-実装は[安定したpreflight手順](../../skills/ato-formation-explore/references/producer-isolation.md)にまとめた。`prepare`、`verify`、`probe`だけを持ち、Native起動command、login、global設定変更、product更新は行わない。
+実装は[安定したpreflight手順](../../../../skills/ato-formation-explore/references/producer-isolation.md)にまとめた。`prepare`、`verify`、`probe`だけを持ち、Native起動command、login、global設定変更、product更新は行わない。
 
 ローカルCodex 0.46.0はSource確認済みの機能下限0.99.0を満たさない。Claude Codeは2.1.288。helperへ指定したbinaryはdigestで固定したが、native Skill discovery、tool inventory/read/write/exec負例、認証IPCへのmodel toolからのアクセス拒否は未測定である。Keychain fileを0600で許可するfallbackはない。
 
 privateなSession connectionをNative sandboxへ渡さずに固定MCPへ結合するexternal brokerと、選定したNative providerへのegressも未完了。prepared profileへcredential fileや任意networkを追加して完成扱いにしない。承認済みの新しいplan、対応version、native認証・tool境界・固定MCP・通信の各gateが揃うまで`native_acceptance_ready = false`を保持する。
 
-[機械可読の証跡](evidence/formation-producer-isolation-preflight-20261003.json)に両測定pin/hash、診断、13チェック、選定binary hash、package内容、未測定gateを保存した。各raw packageとmetadataは実装worktreeの`.tmp/producer-isolation-20261003-01/`と`02/`へ保持した。実private credential読取、Native/auth/inference、Search、実Runtime attempt、有料API call、配備、remote migration、flag変更は0。エージェント内部の実LLM call数と費用は`unknown`。
+[機械可読の証跡](../../../ops/evidence/formation-producer-isolation-preflight-20261003.json)に両測定pin/hash、診断、13チェック、選定binary hash、package内容、未測定gateを保存した。各raw packageとmetadataは実装worktreeの`.tmp/producer-isolation-20261003-01/`と`02/`へ保持した。実private credential読取、Native/auth/inference、Search、実Runtime attempt、有料API call、配備、remote migration、flag変更は0。エージェント内部の実LLM call数と費用は`unknown`。

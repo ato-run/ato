@@ -1,5 +1,8 @@
 # Private Terminal producer — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: ato #1511, branch `feat/native-terminal-unix-producer`.
 
 The existing guest PTY broker can serve an explicitly selected, private Unix

@@ -1,5 +1,8 @@
 # Continuous patching ledger
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: **record of what exists**, 2026-10-24. This is the first PR of the
 continuous-patching work: it inventories the update paths that already exist,
 names the gaps with evidence, and fixes the PR split. It does not claim that any

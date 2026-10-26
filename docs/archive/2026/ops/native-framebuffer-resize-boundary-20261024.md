@@ -1,5 +1,8 @@
 # Native framebuffer resize boundary
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Date: 2026-10-24. Parent: text-paste boundary #1539,
 `f8f8b8a96df663c1953ad413d8b3eed3441891f2` (frozen base 876cb714).
 Code/test/RFC commit: `95825c007e6a640c23909e2d612992211c0ba9ad`.

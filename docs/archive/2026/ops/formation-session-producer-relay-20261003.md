@@ -1,12 +1,15 @@
 # Formation Session Producer relay: 2026-10-03
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Ownerのprivate Session接続ファイルをNative sandbox外へ置くbrokerと、固定MCP入口を
 Producer descriptorだけで利用するrelayを実装した。既存の4 toolsとSession authorityを
 再利用し、新しい探索エンジン、予算台帳、PASS判定は追加していない。
 本記録はsynthetic Session/MCP fixtureであり、実Codex/Claude Code受入ではない。
 
-契約: [FORMATION_SESSION_PRODUCER_RELAY](../rfcs/draft/FORMATION_SESSION_PRODUCER_RELAY.md)。
-集計: [証跡JSON](evidence/formation-session-producer-relay-20261003.json)。
+契約: [FORMATION_SESSION_PRODUCER_RELAY](../../../rfcs/draft/FORMATION_SESSION_PRODUCER_RELAY.md)。
+集計: [証跡JSON](../../../ops/evidence/formation-session-producer-relay-20261003.json)。
 既存のOSS測定、失敗Search、UNKNOWN、台帳、独立API成功数は変更していない。
 
 ## Source pinと初回失敗

@@ -1,5 +1,8 @@
 # Native text paste boundary — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Scope
 
 Base: `876cb714085e17dc6156c5762ea1752f9aa8cef1`, frozen as

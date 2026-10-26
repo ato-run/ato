@@ -1,5 +1,8 @@
 # D3-E execution controller — offline review, live BLOCKED
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## State and exact snapshots
 
 Preregistration #1429 merged at `c3f44c6e548cc4f73acaf37966621d21bad0097a`,

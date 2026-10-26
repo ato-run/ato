@@ -1,5 +1,8 @@
 # Trilium Notes staging acceptance — 2026-09-20
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Upstream Trilium v0.105.0 as a personal App on staging: imported, run on a
 Runner, used as a notes app, and shown to keep its notes across a stop and a
 restart.

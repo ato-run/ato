@@ -1,5 +1,8 @@
 # Formation P0 unblock 4 — generic Process + Node / npm / pnpm / yarn (2026-09-24)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: ato `main` `7824422e` (#1387 merged as `2992101f`, #1388 as
 `7824422e`). Branch `feat/formation-p0-unblock-4-generic-process-node`. Local
 Coordinator: ato-api `d4800415` under `wrangler dev --local` (local D1, no

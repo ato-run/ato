@@ -1,5 +1,8 @@
 # Formation PR統合レビュー — 2026-10-01
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 今回の範囲は現在成立している実装・測定・文書のmainへの統合です。
 配備、remote migration、feature flag変更、追加のmodel/OSS実験は含みません。
 マージcommitの`[skip ci]`でpush由来の自動配備・公開を抑止します。
@@ -67,7 +70,7 @@ PRの既存CIはgreenではなく、テスト修正headの新CIもローカル�
 テスト修正headではUbuntu CLI・architecture・snapshotなどはPASS、Windows CLIはFAIL、
 workspaceとmacOSの一部はこの記録時点で実行中です。全体greenとは扱いません。
 
-ローカルログとdigestは[evidence manifest](evidence/formation-merge-review-20261001/manifest.json)に保存しています。
+ローカルログとdigestは[evidence manifest](../../../ops/evidence/formation-merge-review-20261001/manifest.json)に保存しています。
 
 ## 継続する制約
 

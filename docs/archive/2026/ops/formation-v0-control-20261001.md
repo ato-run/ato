@@ -1,5 +1,8 @@
 # Formation v0 exploration control — 2026-10-01
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base pins: Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`; API `9e0031900836090612b94e775e26f980a68f32d7`.
 
 Search/round deadlines remain absolute across resume. Runtime source hashing,

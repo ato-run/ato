@@ -1,12 +1,15 @@
 # 共通Skillの最終ローカル検証
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID `formation-skill-integration-local-20261003-01`。実行pinは
 `b7e0d63d`、後続のSession文書rebase後もSkill packageのbytesは同一と確認した。
 過去のOS測定pinをこの後続commitへ付け替えない。
 
 Installer 7件とProducer隔離/preflight補助26件、合計33件がPASS。C probeの
 strict syntax check、package内のlocal Markdown参照と計画/evidence JSONもPASS。
-保存log hashと参照一覧は[機械記録](evidence/formation-skill-integration-local-20261003.json)。
+保存log hashと参照一覧は[機械記録](../../../ops/evidence/formation-skill-integration-local-20261003.json)。
 tracked Sourceは検証時にclean、既存のuntracked Python test cacheは残っていた。
 
 これは固定fixtureと補助処理の検証である。

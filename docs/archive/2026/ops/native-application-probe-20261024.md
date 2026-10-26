@@ -1,5 +1,8 @@
 # Native application observation Adapter — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Depends on portable Native admission #1514 and bounded RFB capture #1515.
 The common sidecar now accepts the selected D's shared typed native catalog and
 an owned private endpoint. Expected K answers are never passed to the Adapter.

@@ -1,5 +1,8 @@
 # Exploration D-conversion repair: actual OSS append
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This append preserves the original 100-app result **baseline 7 → exploration 7
 (+0)**. It is not an 8/100 result. Three successful cases establish **one unique
 additional upstream app: SVGOMG**. Functional acceptance and persistence are

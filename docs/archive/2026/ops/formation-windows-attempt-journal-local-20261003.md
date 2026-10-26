@@ -1,5 +1,8 @@
 # Windows attempt journalの限定修正
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID `formation-windows-attempt-journal-local-20261003-01`。修正codeを `478ab4857dcaad91ddb090c3b30b4c38c87b675e` へ保存した。ローカル検証はcommit前の同じcode bytesを対象とし、後の文書commitへ測定pinを付け替えない。Windows native受入はこのローカル測定に含まれない。
 
 ## 失敗と差分の照合
@@ -10,7 +13,7 @@ Actions run [37109321016](https://github.com/ato-run/ato/actions/runs/3710932101
 
 既存実装はsync済fileのrename後にdirectoryを通常の `File::open` で開いてsyncしていた。Windowsの[CreateFile仕様](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)ではdirectory handleの取得にbackup-semantics flagが必要で、[FlushFileBuffers仕様](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)はwrite accessを要求する。コードと失敗ログから、このUnix向けdirectory open/syncを共通使用したplatform境界が原因と判断した。
 
-Windowsでは同期済temporaryを同じparentの保存先へ `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` で公開し、失敗は引き続き開始拒否へ返す。Unixのrenameとdirectory syncは維持した。Windowsでも既存delivery permitのrequest lockを `File::lock` で取得し、共有temporaryへの同時更新を防ぐ。過去record・schema・Source/K/D・Coordinator台帳は変更しない。[Draftの保存境界](../rfcs/draft/FORMATION_ATTEMPT_JOURNAL_WINDOWS.md)にAPI保証の範囲を記録した。
+Windowsでは同期済temporaryを同じparentの保存先へ `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` で公開し、失敗は引き続き開始拒否へ返す。Unixのrenameとdirectory syncは維持した。Windowsでも既存delivery permitのrequest lockを `File::lock` で取得し、共有temporaryへの同時更新を防ぐ。過去record・schema・Source/K/D・Coordinator台帳は変更しない。[Draftの保存境界](../../../rfcs/draft/FORMATION_ATTEMPT_JOURNAL_WINDOWS.md)にAPI保証の範囲を記録した。
 
 ## 新しいローカル検証
 
@@ -25,4 +28,4 @@ Windowsでは同期済temporaryを同じparentの保存先へ `MoveFileExW(REPLA
 
 既存CLI CIへWindows限定のjournalテストstepを追加した。Windows nativeでは8件となり、readonly destinationでの置換失敗と旧record保持も実行する。Windows portable test全体とこの新stepの結果は、修正後Actionsで別途確認する。CI既存ログはstable Rust 1.99.0 / MSVCであり、ローカル1.96.0 / GNU cross targetと同じ環境として扱わない。
 
-電源断試験、任意filesystemの耐久性、実Codex/Claude Code、OSSの機能・保存・再起動は未測定。推論API call、実受入Runは0。配備・remote migration・flag変更・既存測定の修正もない。全ログのhashとcode blobを [機械記録](evidence/formation-windows-attempt-journal-local-20261003.json) に保存した。
+電源断試験、任意filesystemの耐久性、実Codex/Claude Code、OSSの機能・保存・再起動は未測定。推論API call、実受入Runは0。配備・remote migration・flag変更・既存測定の修正もない。全ログのhashとcode blobを [機械記録](../../../ops/evidence/formation-windows-attempt-journal-local-20261003.json) に保存した。

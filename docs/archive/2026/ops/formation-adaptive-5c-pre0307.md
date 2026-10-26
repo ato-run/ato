@@ -1,5 +1,8 @@
 # Formation 5c — implementation and actual merge blocker
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **STOP / Draft / unmerged.** 5c is not completed. No new migration was created,
 0301/0302 were not edited, no SQL fence was bypassed. Additional model calls 0.
 

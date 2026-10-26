@@ -1,5 +1,8 @@
 # Formation #1449 — final reviewed head CI recheck
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The additional Ubuntu failure is **base-reproduced and intermittent in the
 isolated observations**. Reviewed head
 `06330897500092555c64cf143b241fbf93770a8d` produced FAIL / PASS / PASS.
@@ -59,9 +62,9 @@ test. No retry was added to the test or workflow. A preliminary archive
 transfer/extraction error stopped before any test ran and is excluded from
 these counts.
 
-The [JSON ledger](formation-ci-static-recheck-2026-09-30.json) records exact
+The [JSON ledger](../../../ops/formation-ci-static-recheck-2026-09-30.json) records exact
 pins, export hashes, commands, results, environment and evidence hashes.
-[Raw evidence](evidence/formation-ci-static-recheck-20260930/) includes all
+[Raw evidence](../../../ops/evidence/formation-ci-static-recheck-20260930) includes all
 isolated logs, both full-CI run metadata records and bounded static-test log
 excerpts. The export and test drivers are retained for provenance.
 Raw logs retain their original whitespace and hashes. Text whitespace checks

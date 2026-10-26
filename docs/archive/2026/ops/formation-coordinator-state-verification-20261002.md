@@ -1,5 +1,8 @@
 # Coordinator-backed Formation state verification
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This gate is separate functional acceptance of an existing retained Codex D.
 It does not start an ordinary authorized Run, change frozen K, seed the API
 producer, deploy a Worker, or apply a remote migration. Source exploration
@@ -76,7 +79,7 @@ Preregistration SHA-256:
 `ef56ad1a8093ab75aedcfa443d1dd6fe5861f00e01550ffa6e78bcf495ce08ab`.
 Public metadata proof SHA-256:
 `d8ef5cc590d002cf25c93573ee3a8021a7fcd6ce056725c8bdc4228ca708eb52`
-([proof](evidence/formation-coordinator-state-verification-20261002.json)).
+([proof](../../../ops/evidence/formation-coordinator-state-verification-20261002.json)).
 The dedicated Coordinator was stopped after collecting final metadata; both
 Runtime stops are confirmed. Earlier fixtures and shared services were preserved.
 

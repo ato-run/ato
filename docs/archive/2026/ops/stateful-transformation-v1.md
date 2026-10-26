@@ -1,5 +1,8 @@
 # Stateful transformation v1 — E2E evidence
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 - 状態: **proof / E2E**（Linux Runtime 上で実行する証拠。production の提供機能を主張する文書ではない）。
 - 対象: `ato pack` / `ato run` / `ato reform`（PR #1557, #1559）、Scenario Verifier v1（#1560, #1561）、および既存の `run_attempt → verify_observed_scenario`。
 - 追加した semantic concept は無い。K は既存の `BoundContract`、scenario は既存の `ato.scenario/1` requirement のまま。

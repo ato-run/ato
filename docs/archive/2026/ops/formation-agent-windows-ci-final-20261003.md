@@ -1,5 +1,8 @@
 # Formation agent Windows-target follow-up — 2026-10-03
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Measurement ID: `formation-agent-ci-20261003-02`. This is a follow-up to
 `formation-agent-ci-20261003-01`; the prior failure log and measurement remain
 unchanged.
@@ -24,7 +27,7 @@ with `#[cfg(unix)]`. It adds no test skip or lint suppression and changes no
 Session module. The final run exited 0 in 3.77 seconds. Formatting and diff
 checks also passed.
 
-[Evidence](evidence/formation-agent-windows-ci-final-20261003.json) records the
+[Evidence](../../../ops/evidence/formation-agent-windows-ci-final-20261003.json) records the
 logs, source hashes and the parallel uncommitted Rust snapshot. The committed
 HEAD at the start was `e4124e11`; this is an integration worktree verification,
 not a claim that all checked Session changes were already committed there.

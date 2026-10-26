@@ -1,7 +1,10 @@
 # E1 preregistration — bounded Python generation efficacy
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Registered before **any E1 model or Runtime experiment**, 2026-09-27.
-[Immutable machine-readable registration](formation-efficacy-e1-plan.json)
+[Immutable machine-readable registration](../../../ops/formation-efficacy-e1-plan.json)
 fixes main SHAs, harness commit, binary/source/fixture hashes and all budgets.
 Historical G9 and v1 decline remain unchanged; this is a new experiment.
 

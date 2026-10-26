@@ -1,5 +1,8 @@
 # Formation 6a — 20-app known-D baseline results
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 20/20 pinned upstream archives traversed the existing local Formation path on isolated Linux/aarch64. CandidateProducer and DecisionProvider OFF; model calls **0**. Preregistration was committed before measurement. No per-app authoring overrides.
 
 ## Result scope

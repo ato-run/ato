@@ -1,5 +1,8 @@
 # Formation 5b stack review — 2026-09-27
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: review corrections implemented and locally/integration verified;
 **all six PRs remain unmerged, #1413 remains Draft, nothing deployed**.
 5b remains **In progress**. Review completion is not merge authorization.
@@ -94,7 +97,7 @@ program generation or general repair.
   New compiler-size and requester-dedup regressions were each observed red before
   their fix and green after. These are distinct from the seven existing mutations.
 - Local logs retained under each worktree's `.tmp/stack-review/`; mutation run
-  `1790479606230894000`. [Machine-readable safe review ledger](formation-generation-stack-review-2026-09-27.json).
+  `1790479606230894000`. [Machine-readable safe review ledger](../../../ops/formation-generation-stack-review-2026-09-27.json).
 
 ### Actual Coordinator revalidation (no live model)
 

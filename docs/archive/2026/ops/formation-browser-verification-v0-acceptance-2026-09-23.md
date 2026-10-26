@@ -1,5 +1,8 @@
 # Formation Browser Verification v0 — acceptance (2026-09-23)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > The hardening re-run (K identity, read-only recheck, origin boundary,
 > observed evidence) at the end of this file supersedes the first run.
 

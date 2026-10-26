@@ -1,14 +1,17 @@
 # Formation 6b-D1 — native process vs Dockerfile→OCI qualification
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: **qualification only** (docs). No implementation, build, image pull,
 run, network change or model call; no deploy/remote migration. Base `233bda52`.
 
 Question: for the 41 service/process sources of the 50-app wave, which route
 would increase generic coverage more — native process authoring, or authoring
 a bounded source-Dockerfile build into Ato's existing OCI execution? Inputs:
-[corrected D0](formation-service-qualification-d0.json) and a static parse of
+[corrected D0](../../../ops/formation-service-qualification-d0.json) and a static parse of
 every Dockerfile in the same pinned archives
-([facts](formation-oci-source-qualification-d1-facts.json),
+([facts](../../../ops/formation-oci-source-qualification-d1-facts.json),
 `scripts/acceptance/coverage/dockerfile-qualification-facts.py`). Ledger
 generator: `scripts/acceptance/coverage/oci-source-qualification-d1.py`.
 

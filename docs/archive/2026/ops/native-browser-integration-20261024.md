@@ -1,5 +1,8 @@
 # Native GUI / browser 結合の統合証跡
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 2026-10-24。Runtime [Draft #1543](https://github.com/ato-run/ato/pull/1543)
 最終c8db60fd（実行コードc505ea0f）、PWA
 [Draft #518](https://github.com/ato-run/ato-pwa/pull/518) b0bf0e1f。

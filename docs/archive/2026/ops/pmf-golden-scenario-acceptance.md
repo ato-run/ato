@@ -1,5 +1,8 @@
 # PMF Golden Scenario — verified from a browser
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Status: PASS. All 18 steps, driven from Chrome against staging, 2026-09-03.**
 
 The proposition under test was not a feature list:

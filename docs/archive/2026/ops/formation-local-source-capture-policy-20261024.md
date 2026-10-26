@@ -1,5 +1,8 @@
 # Local Formation source capture exclusions
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The accepted `PROTOCOL_ADAPTER.md` requires the shared default credential
 exclusions at workspace capture boundaries. Local Formation's in-memory and
 file-backed source snapshots previously skipped only `.git`, so a selected

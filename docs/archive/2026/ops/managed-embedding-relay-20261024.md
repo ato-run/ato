@@ -1,5 +1,8 @@
 # CPU managed embedding transport acceptance — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Branches: `feat/managed-embedding-private-relay` (Rust, child of #1524) and
 `feat/managed-embedding-relay-authority` (API, child of #856). No staging/flag,
 production/provider key or paid-provider changes were made.

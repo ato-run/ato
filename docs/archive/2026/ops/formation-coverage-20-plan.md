@@ -1,5 +1,8 @@
 # Formation 6a — 20-app known-D baseline preregistration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: cohort frozen before outcomes; measurement not started.
 
 Plan SHA-256: `09dd673a79b73e561dc872e75268008c4703615097a1019495ed652e51e7f556`. Baseline ato: `857cb1ed4d71c99fde95a0302e0acf6952cdc7e8`.

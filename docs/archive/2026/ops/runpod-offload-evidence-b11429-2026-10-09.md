@@ -1,5 +1,8 @@
 # b11429 offload証拠の調査・修正（追加有料Podなし）
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 対象はRunPod小型LLMの2回目失敗。3回目は作成していない。
 API、Runner、image、共有staging設定、migration、feature flagは今回変更していない。
 Rust repoのsampleと診断・回帰試験だけを修正し、PRはDraftとする。マージ・デプロイは行わない。
@@ -88,7 +91,7 @@ stdoutへ移ったログも既存の共通Asset保存枠へ渡す。管理key/en
 
 ## ローカル検証と出所
 
-fixtureの[README](../../tests/fixtures/portable-gpu-llm/b11429/README.md)と
+fixtureの[README](../../../../tests/fixtures/portable-gpu-llm/b11429/README.md)と
 `provenance.json`にSHA-256と再現手順を記録した。
 
 - **前回の実Asset**：HTTP200だが配置未証明をそのまま再現。一般timeoutにmissing理由を併記し、停止・診断保存を検証する。

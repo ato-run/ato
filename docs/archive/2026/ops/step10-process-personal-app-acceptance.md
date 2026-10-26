@@ -1,5 +1,8 @@
 # Step 10 — Process Personal App, staging acceptance
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 A FastAPI + SQLite folder becomes an ordinary Personal App through the ordinary
 Add App flow, and keeps its data across sleeping and waking.
 

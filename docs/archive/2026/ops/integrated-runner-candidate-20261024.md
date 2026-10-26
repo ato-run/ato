@@ -1,5 +1,8 @@
 # 統合した通常Runnerの導入候補
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 source b6341239acea53132ed7583c44b32d731387d8dcを独立exportし、通常の
 ato-connected-realization-workerをLinuxでbuildした。test executableではない。
 ELF x86_64 GNU/Linux、50,479,808 bytes、SHA256

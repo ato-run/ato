@@ -1,5 +1,8 @@
 # Source-only archive storage implementation
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Rust branch: `feat/source-only-archive-materialization`, stacked on PR #1519.
 Matching API receiver and actual storage authority are a separate change owned by
 `ato-api`; no API deployment or installed worker is claimed by this record.

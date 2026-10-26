@@ -1,5 +1,8 @@
 # Windows修正を含む統合Sourceの追加検証
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID `formation-agent-integration-local-20261003-02`、clean Source
 `b0408d46c9a4574139fd7ab1a7672f7e4c989c94`、macOS arm64/Rust1.96.0。
 直前の統合 `8bb3a2b1` へWindows publication/lockとjournalテストを追加した。
@@ -13,7 +16,7 @@ CLI/Worker all-target strict clippy、workspace format、MCP buildもPASS。
 
 新しい固定MCPは6,092,472 bytes、mode0555、SHA256
 `3a56748bdc3ce8189b7f9bb81ec43f3e11f5aa38df493137ef7dc755e1aa9582`。
-[機械記録](evidence/formation-agent-integration-windows-fix-local-20261003.json)に
+[機械記録](../../../ops/evidence/formation-agent-integration-windows-fix-local-20261003.json)に
 各log hashと固定artifact pathを保存した。旧artifactを上書きしない。
 
 これは統合fixture/buildで、実Codex/Claude Codeの探索やPWA/OSS機能受入ではない。

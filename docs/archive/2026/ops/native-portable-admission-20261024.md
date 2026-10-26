@@ -1,5 +1,8 @@
 # Portable native format admission — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Scope: Draft PR #1514, `feat/portable-native-surface-admission`, based on the
 frozen technical integration commit
 `89f525af9dad56ced892ee4eaf6368f47beeaf42`. This is a review stack, not a release,

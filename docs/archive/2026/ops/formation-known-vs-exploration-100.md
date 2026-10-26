@@ -1,5 +1,8 @@
 # Known-D baseline versus bounded exploration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Frozen sources unchanged: baseline 7/100 → exploration 7/100 (+0). Regressed typed-K apps: []. New typed-K apps: [].
 
 K/template entry differences, new adapter code and exploration ceiling are documented in [measurement](formation-exploration-100.md). Outcome equality does not mean diagnostic or execution reach equality. The JSON records original/current K/D refs and reach; historical baseline is not overwritten.
@@ -108,4 +111,3 @@ Reach improved on 81 apps and reduced on 12 apps. Existing verified PASS apps ar
 | 98 | Jackett | preset_no_match | rounds_exhausted | False → False | 3/0 | B /  |
 | 99 | Radarr | preset_node_static_v2_manager_config | rounds_exhausted | False → False | 3/0 | B /  |
 | 100 | Sonarr | preset_node_static_v2_manager_config | rounds_exhausted | False → False | 3/0 | B /  |
-

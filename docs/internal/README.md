@@ -8,5 +8,8 @@ navigation.
 - [Handoffs](handoffs/README.md)
 - [Dashboards](dashboards/README.md)
 
-The rule is simple: durable docs live at `docs/` root or under `docs/rfcs/`,
-temporary working records live under `docs/internal/`.
+These existing plans, research, handoffs and dashboards are classified as
+Archive in the [inventory](../archive/2026/documentation-reorganization/inventory.tsv).
+They are historical working records, not current implementation or release
+authority. [Test isolation](testing-isolation.md) remains a developer guide.
+Current durable documentation is indexed by [docs/README.md](../README.md).

@@ -1,5 +1,8 @@
 # Formation 5c — bounded adaptive integration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **A0–A9 actual PASS; implemented and integration verified.** One proposal
 round, finite DecisionProvider choices, requester-owned FixedCandidateProducer,
 actual Runtime/Verifier only. No autonomous repair or repeated model generation.

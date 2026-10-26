@@ -1,7 +1,10 @@
 # D3 v2 request evidence — verification, no live execution
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 [Preregistration](formation-deepseek-d3-plan-v2.md) ·
-[Machine-readable ledger](formation-deepseek-d3-v2-verification.json)
+[Machine-readable ledger](../../../ops/formation-deepseek-d3-v2-verification.json)
 
 Tested execution: `d1dde994c2d310a725b546921f9b3455777e28da`.
 CI documentation head: `7dcd89dd972a10eeb61217209ac88b43c247a1c7`.

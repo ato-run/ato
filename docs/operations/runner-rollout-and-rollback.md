@@ -1,6 +1,6 @@
 # Runner rollout and rollback (connected realization worker)
 
-Status: operating procedure  
+Status: operating procedure
 Date: 2026-09-19
 
 A Runner binary change is never "swap the binary and restart". A restart

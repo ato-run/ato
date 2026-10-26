@@ -1,5 +1,8 @@
 # Datasette portable Python/OCI staging acceptance — 2026-09-16
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: **four receipt assertions PASS; full UI acceptance remains BLOCKED**.
 This is staging evidence only. No production deploy, merge, feature activation,
 or durable-data migration was performed.

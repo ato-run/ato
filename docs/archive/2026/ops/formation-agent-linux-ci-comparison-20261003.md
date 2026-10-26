@@ -1,5 +1,8 @@
 # Formation Session変更に伴うnative Linux CI比較
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID: `formation-agent-ci-linux-20261003-01`。2026-10-03の新しい測定であり、過去のFormation探索、実行pin、失敗Search、receipt、台帳を変更していない。
 
 APIの`instance-state-sync`は、native Linuxでもexact base/headの両方で同じWebSocket handshake拒否を再現した。既存fixtureのRoom登録を修正したcommitでは、同じlockfile、ブラウザ、OS依存の全試験が通った。既存fixture不具合の比較であり、新しいSession変更の成功実測やCI全面成功には計上しない。
@@ -46,6 +49,6 @@ export LD_LIBRARY_PATH="$formation_ci_root/os-deps/root/usr/lib/aarch64-linux-gn
 
 ## 証跡と未完了範囲
 
-[機械可読の比較記録](evidence/formation-agent-linux-ci-comparison-20261003.json)に、全pin、各exit code・時間・log digest、公式Node archive digest、OSライブラリ、準備失敗の区別、Source照合結果を保存した。raw logはAPI worktreeの`.tmp/ci/linux-native-20261003-01/`へコピーし、元remoteの専用ディレクトリにも残した。
+[機械可読の比較記録](../../../ops/evidence/formation-agent-linux-ci-comparison-20261003.json)に、全pin、各exit code・時間・log digest、公式Node archive digest、OSライブラリ、準備失敗の区別、Source照合結果を保存した。raw logはAPI worktreeの`.tmp/ci/linux-native-20261003-01/`へコピーし、元remoteの専用ディレクトリにも残した。
 
 [前回の比較](formation-agent-ci-comparison-20261003.md)と[Windows追加検証](formation-agent-windows-ci-final-20261003.md)は当時の結果のまま維持する。元macOS CIのworker起動障害は、child log欠損のため原因未確定。Windows GNU cross-clippyの成功はnative Windows/MSVCの成功ではない。Activity/CORSの同一13失敗も未解決。新しいGitHub CIの再実行、Formation Search、実LLM、実Runtime attempt、private入力、配備、remote migration、flag変更は実施していない。追加有料API callは0。

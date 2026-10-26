@@ -1,5 +1,8 @@
 # Verified raw archive to existing Search — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Branch: feat/formation-approved-source-search, child of Rust #1526.
 
 The shared intake and existing requester were exercised against a GitHub-shaped

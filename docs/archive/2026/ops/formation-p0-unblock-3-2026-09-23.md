@@ -1,5 +1,8 @@
 # Formation P0 unblock 3 — authored `exec` projection (2026-09-23)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: ato `feat/formation-p0-unblock-2` head `feb839e6` (#1387: main `c0de5efb`
 + the process-group and artifact-symlink work; #1387 not yet merged at the
 time of writing, so this branch is stacked on it). Branch

@@ -1,5 +1,8 @@
 # E1 protocol amendment — comparator integration error
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Original registration `410285f3` is immutable. This amendment is committed and
 pushed **before repaired B or any further C invocation**. It does not silently
 reinterpret the original protocol, whose no-resume rule is explicitly amended.

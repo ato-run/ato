@@ -1,5 +1,8 @@
 # Computation architecture migration matrix
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > **Historical cutover record.** Component names and compatibility paths below
 > capture an intermediate migration state. Use the accepted RFCs and current
 > repository layout for implementation authority.

@@ -1,5 +1,8 @@
 # Runner-owned isolated GUI producer — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This child implements physical GUI ownership. Pixel lease dispatch, capability
 advertisement, API admission and shared Runner installation remain disabled.
 No staging, paid provider, operator API key or production operation occurred.

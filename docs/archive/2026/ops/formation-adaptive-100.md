@@ -1,5 +1,8 @@
 # Formation 6b-F — 100-app Adaptive arm
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **baseline 7/100 → adaptive 7/100、追加typed-K PASSは0。** 100件すべてでfresh known-D Formation terminalを保存し、12件で実Adaptive API searchを行った。valid canonical Dは10件、Runtime実行は2件、generated-D PASSは0件。既存7件のPASSはfresh same-K receiptで維持した。
 
 ## 測定条件と比較の限界
@@ -120,7 +123,7 @@ reservationは実usageと分離し、12×81102＋12×2753＝1006260 USD micros�
 
 raw archive SHA256 `d031296251e528a0523b4373415e508bed51f2e7e8aa64187abc3391ec967752`、raw results `13e3ca1aab0934a01477e3c98ba1559060a4e556dd64f2a525ac09f0cfda8288`、manifest `8fdb536157513d70dd57b808265a7aea9a42cf58dcc68210d4c453b9511bd1ef`。raw583 filesを全件hash照合。その他output774 files、frozen archives、receipts／retained objects、D1/R2 stateはLinux hostで保全。preregistration時のresource確認でdisk free124713345024 bytes、実行前gateは20GiB以上、終了123937714176 bytes。Rust1.96.0、Ubuntu24.04/Linux6.17 aarch64。host-wide Docker pruneなし。
 
-preregistration [plan](formation-adaptive-100-plan.json)、[operation inventory / plan prose](formation-adaptive-100-plan.md)、[100結果](formation-adaptive-100.json)、[paired比較](formation-known-vs-adaptive-100.json)、[raw manifest](evidence/formation-adaptive-100-20260930/raw-manifest.json)、[raw archive](evidence/formation-adaptive-100-20260930/raw-evidence.tar.gz)。追加のsealed-channel正／負テストはdummyのみ、実credential read0／model call0。
+preregistration [plan](../../../ops/formation-adaptive-100-plan.json)、[operation inventory / plan prose](formation-adaptive-100-plan.md)、[100結果](../../../ops/formation-adaptive-100.json)、[paired比較](../../../ops/formation-known-vs-adaptive-100.json)、[raw manifest](../../../ops/evidence/formation-adaptive-100-20260930/raw-manifest.json)、[raw archive](../../../ops/evidence/formation-adaptive-100-20260930/raw-evidence.tar.gz)。追加のsealed-channel正／負テストはdummyのみ、実credential read0／model call0。
 
 implemented: measurement glueのみ、新capability0。measured: actual known terminals100＋scoped adaptive terminal100、実API searches12。verified: fresh same-K receipts7、generated-D PASS0、functional test0。このevidenceは未merge、deployed=false、remote migration=false。既存Runtime／general adapter／5cはmerge済みの固定pinを利用。
 

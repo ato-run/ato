@@ -1,8 +1,11 @@
 # Explicit verification state binding — 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: partial implementation, not deployed. Base Ato `9ed8ea05`
 (application code `1de0e3a0`), API `fa825a17`. No authority/schema/migration change.
-Draft design: [ADR-038](../rfcs/draft/ADR-038-formation-verification-state-bindings.md).
+Draft design: [ADR-038](../../../rfcs/draft/ADR-038-formation-verification-state-bindings.md).
 
 Runtime-only binding joins the existing assigned launch context, logical state
 attachment and resolved working copy. An explicit slot mapping supports the

@@ -1,5 +1,8 @@
 # Formation final Source and functional regression
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The merged foundation remains fixed at Ato `8fca0f4b78b1bed92eae21823e5c5f7207058271`
 and API `9e0031900836090612b94e775e26f980a68f32d7`. The final CLI, Worker and
 preflight code pin is `3bb28192419f4a12cf2566cab57a8f641cf88018`; the local
@@ -14,7 +17,7 @@ execution pins. The later pre-dispatch budget correction uses Ato
 `da7c452c1dcd6011399d2e12c7cb47e653e40ccd` / API
 `9b483d4a7df9aa2370636bd1b60c2fbcda98320b`; it does not relabel those earlier
 measurements. Ato `252d07a0` removes a redundant `Ok(...?)` only, after freezing
-the new binaries. [Budget control evidence](evidence/formation-pre-dispatch-budget-control-20261003.json)
+the new binaries. [Budget control evidence](../../../ops/evidence/formation-pre-dispatch-budget-control-20261003.json)
 records the new execution pin and receipt-authority hash.
 
 ## v0 scope and remaining gates
@@ -46,7 +49,7 @@ Local/CI/fixture acceptance is not reported as staging or production validation.
 
 ## SVGOMG
 
-[Source and separate functional evidence](evidence/formation-svg-source-functional-final-20261002.json)
+[Source and separate functional evidence](../../../ops/evidence/formation-svg-source-functional-final-20261002.json)
 (SHA-256 `3acbac1a5cd690d4af0a777a88629a26c514641f8790443ad92cfc459e5792f0`)
 records a fresh zero-known-D Codex session Search using the original Source
 and K `6b224432…`. Proposals were derived from this Search's verified root
@@ -85,7 +88,7 @@ new state field is explicitly `None` for this static-only observation.
 
 ## OCI single service
 
-[OCI Source evidence](evidence/formation-oci-source-final-20261002.json)
+[OCI Source evidence](../../../ops/evidence/formation-oci-source-final-20261002.json)
 (SHA-256 `71935dddaa3ccc7ce150c7056f3bd9cf37d2428649931b724e64f0c55caeff7c`)
 records a new zero-known-D Search at the same code/API pins. Its verified root
 Dockerfile declares a single BusyBox HTTP service, a digest-pinned base image,
@@ -108,7 +111,7 @@ rewriting remain outside v0.
 
 ## Preserved changedetection infrastructure failure
 
-[Initial final-pin path failure](evidence/formation-changedetection-path-failure-20261002.json)
+[Initial final-pin path failure](../../../ops/evidence/formation-changedetection-path-failure-20261002.json)
 (SHA-256 `f7d00a2a7bc863b0f41f6d73d5abada2b4b5d19cd7e18721cbe57517755920f4`)
 records Search `search_24c0047081996252c75981adb6f985ec` terminating as
 `infrastructure_failure`: Runtime admission hit the Unix socket path length
@@ -123,7 +126,7 @@ not a retry/resume that replenishes the failed Search's limits.
 
 ## changedetection.io Source regression
 
-[Source native dependency evidence](evidence/formation-changedetection-source-final-20261002.json)
+[Source native dependency evidence](../../../ops/evidence/formation-changedetection-source-final-20261002.json)
 (SHA-256 `dc9dec18a70edab88d4015550df8b565cb3508cebd95e88b38a14fe54317c2d4`)
 records corrected infrastructure Search `search_6eb04bad8d5678c5d01b4990e3faa338`.
 The proposal inspected the wrapper declared by root setup/Dockerfile, followed
@@ -146,7 +149,7 @@ these distinct counters are not treated as the same measurement. The corrected
 run followed a preexecution infrastructure failure; it is not represented as an
 uninterrupted first-Search success or another unique OSS app.
 
-[Current-pin functional/state evidence](evidence/formation-changedetection-functional-state-final-20261002.json)
+[Current-pin functional/state evidence](../../../ops/evidence/formation-changedetection-functional-state-final-20261002.json)
 (SHA-256 `174643c9822c7d945481fcede1c1944ca92df86983b2c3d33ea5a6a94b90b833`)
 records two separately assigned common Runtime Runs using the exact newly
 retained artifact. Both issued fresh fully satisfied receipts for the same K/D.
@@ -169,7 +172,7 @@ dispatch fixture; automatic production Source state provisioning remains pending
 
 ## Remaining acceptance and accounting
 
-The separately preregistered [Kutt Source regression](evidence/formation-kutt-source-final-20261003.json)
+The separately preregistered [Kutt Source regression](../../../ops/evidence/formation-kutt-source-final-20261003.json)
 (SHA-256 `475852aebde08c8f486d152a0b9d0695f3763d958ac0099e406937f57b64c875`)
 completed at Ato `da7c452c` / API `9b483d4a`. It began with zero known D,
 inspected eight files through root declarations and explicit imports, and used
@@ -203,9 +206,9 @@ or secret, but whole-orchestration value non-disclosure is not claimed. A future
 unexecuted controller template generates that email privately. The measured
 controller, original Searches, limits and evidence were not changed or rerun.
 
-The Kutt Source regression at the earlier pin stopped without PASS. [Preserved failure](evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. The common terminal correction is implemented in Ato #1476 / API #727. A separately preregistered new Search uses eight Codex exchanges; its original three-round, 10-minute round / 30-minute Search and retry limits remain fixed.
+The Kutt Source regression at the earlier pin stopped without PASS. [Preserved failure](../../../ops/evidence/formation-kutt-reasoning-budget-failure-20261003.json) records a correct pre-launch native audit refusal for missing `msgpackr-extract` lifecycle processing, followed by exhaustion of the frozen six-exchange Search allowance. The original code incorrectly reported the local pre-dispatch exhaustion as `provider_error / infrastructure_failure`. One attempt was ACKed, all reservations were zero, owner values were revoked, and no receipt was issued. The closed Search is not resumed or reset. The common terminal correction is implemented in Ato #1476 / API #727. A separately preregistered new Search uses eight Codex exchanges; its original three-round, 10-minute round / 30-minute Search and retry limits remain fixed.
 
-[Actual pre-dispatch budget control](evidence/formation-pre-dispatch-budget-control-20261003.json)
+[Actual pre-dispatch budget control](../../../ops/evidence/formation-pre-dispatch-budget-control-20261003.json)
 (SHA-256 `3be6a33a946e4f0e3ffa47c8d508967b9b1d2bb1f6180ec0fa2a7b5ced320055`)
 consumes six deliberately invalid repeated inspections in a negative fixture.
 It ends as `budget_exhausted` in 2.212 seconds, creates no seventh input,
@@ -217,7 +220,7 @@ saved-exchange restart/recovery is covered by the Worker unit test. Three
 receiver startup failures and the final observer's pathname/JSON error remain
 preserved. The valid result was collected from saved records without rerunning.
 
-[CI comparison](evidence/formation-budget-terminal-ci-comparison-20261003.json)
+[CI comparison](../../../ops/evidence/formation-budget-terminal-ci-comparison-20261003.json)
 records the new Ubuntu clippy warning and its correction, Ubuntu CI PASS at
 `88ee365c`, a passing local full
 CLI clippy check, and the same 13 Activity/CORS failure names on merged API main
@@ -225,7 +228,7 @@ and the new API head (155/168 PASS each). Local Node 25.6.0 differs from CI Node
 22; Linux WebSocket handshake and the macOS worker-start failure remain
 unreproduced CI limitations. These failures are not billing failures or green CI.
 
- [The interrupted prior exchange](evidence/formation-kutt-unanswered-round-20261003.json)
+ [The interrupted prior exchange](../../../ops/evidence/formation-kutt-unanswered-round-20261003.json)
 (SHA-256 `af14132136eb99ff85201731ce197a6330f8773b6fa6a038876874f641df2bfd`)
 closed Search `search_9a1e27fd1a9d5102a86620b2d61e7b93` at its original
 10-minute round deadline before creating any candidate or Runtime attempt.
@@ -233,7 +236,7 @@ Its original Search creation/deadline remain recorded, all reservations zero,
 and both owner values revoked. It is preserved as a failed measurement and
 never resumed, refunded or reset. No old WBO UNKNOWN was reexecuted.
 
-[Final HTTP input controls](evidence/formation-bound-http-controls-final-20261002.json)
+[Final HTTP input controls](../../../ops/evidence/formation-bound-http-controls-final-20261002.json)
 (SHA-256 `f6aecff9ee3ccd2e0fba6e1807861d04acee9531a09d6cfa06ac569d6412725f`)
 use actual Coordinator/Runtime at the same pins with fixed Source exchanges.
 Scope-matched reusable input produced a guarded POST 201 and fresh same-K PASS.
@@ -248,7 +251,7 @@ Public value occurrences were zero. These are controlled fixtures, not provider
 or unique OSS successes. An initial disk preflight rejection occurred before
 Search/Runtime creation and remains preserved.
 
-[Final input lifecycle controls](evidence/formation-input-lifecycle-final-20261002.json)
+[Final input lifecycle controls](../../../ops/evidence/formation-input-lifecycle-final-20261002.json)
 (SHA-256 `a07e694a17af3fde4c9a82b5d970943c5932c39dd51a317fcceb6a07e25b257d`)
 measure expired and revoked values, and two matching reusable candidates.
 They report `expired`, `revoked` and `ambiguous_scope` respectively before
@@ -257,7 +260,7 @@ post-deadline input request returned HTTP409 without Requester resume or new
 execution. All result ACKs and zero reservations were checked, registered values
 were removed and public scans found zero protected value occurrences.
 
-[Final embedding controls](evidence/formation-embedding-controls-final-20261003.json)
+[Final embedding controls](../../../ops/evidence/formation-embedding-controls-final-20261003.json)
 (SHA-256 `5d1650010c7629f3f980615297c92a40115f69ffa60e1b1b6e505eda4b84854c`)
 use the same Source/K in two new fixed-exchange Searches at the final Runtime pin.
 Source-owned Node build succeeds with nonsecret configuration, but forbidden
@@ -290,7 +293,7 @@ is still required for independent API acceptance. Old WBO UNKNOWN and old
 results are preserved; no 100-app remeasurement, deployment, remote migration,
 feature flag or ordinary Run permission has been performed.
 
-[Independent API preparation](evidence/formation-independent-api-preparation-20261003.json)
+[Independent API preparation](../../../ops/evidence/formation-independent-api-preparation-20261003.json)
 retains four unexecuted plans at Ato `da7c452c` / API `9b483d4a`, with the same
 rooted Source/K as each Codex arm and no successful D seed. SVGOMG retains its
 explicit custom retry 1 control; the other arms use default retry 3. Call caps

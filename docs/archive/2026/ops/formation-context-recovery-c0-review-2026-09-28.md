@@ -1,5 +1,8 @@
 # c0 review corrections before c1
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 GitHub prerequisite check: #1419 OPEN, head
 `6544253d00a3cf035218ad57dfd25604c0d97527`, no merge commit.
 Fetched origin/main: `c9fc25fea5ed474c3d24ab64750645190b0f608a`.

@@ -1,5 +1,8 @@
 # Formation v0共通Session・Skillの引き継ぎ
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 2026-10-03。レビュー可能な実装をDraftの単位へ分けた。実Codex/Claude Codeの探索と
 入力/状態の実機受入は未完了であり、本番提供完了として扱わない。
 旧測定pin・失敗Search・UNKNOWN・receipt・予算台帳は変更していない。

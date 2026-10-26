@@ -1,5 +1,8 @@
 # Native受入の開始境界ガード
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 `native-session-budget.py`はaudit専用だった。新しいowner入口
 `scripts/acceptance/coverage/native-session-owner.py`は、auditをSearch作成と
 Native launchの直前に必ず通す。Coordinatorの一般budget仕様は変更しない。

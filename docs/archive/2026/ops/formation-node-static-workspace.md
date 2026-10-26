@@ -1,19 +1,22 @@
 # Formation 6b-B — workspace-scoped static build authoring
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## State and exact pins
 
 - Base: #1440 merged `a6033ecfb768f8aa00f08fd6cf489a25e0d04483`
   (reviewed head `476393f3bb37957b656dec80bc3410927d01f2ad`); #1438 `968836af`,
   #1439 `a3b9a5d1` unchanged.
 - Execution / measurement pin **`c9500b37c91f6844f68b07cf1633d21144674dde`**;
-  plan commit `56df7b20` ([plan](formation-node-static-workspace-plan.json),
+  plan commit `56df7b20` ([plan](../../../ops/formation-node-static-workspace-plan.json),
   SHA256 `00bf84d711582da68e73189ea75911c8331ab4ccd7a7eb6174cfa70477894db5`).
   Later commits are rustfmt and ledger/docs only.
 - Implemented, locally verified, actual fixture integration verified, actual
   six-app remeasurement verified. **Not merged at ledger creation. Not
   deployed. No remote migration. Model calls 0. #1421 untouched.**
-- Contract: [node_static_workspace@1](../rfcs/draft/FORMATION_NODE_STATIC_WORKSPACE.md).
-  Machine-readable: [ledger](formation-node-static-workspace.json).
+- Contract: [node_static_workspace@1](../../../rfcs/draft/FORMATION_NODE_STATIC_WORKSPACE.md).
+  Machine-readable: [ledger](../../../ops/formation-node-static-workspace.json).
 
 ## What was added
 

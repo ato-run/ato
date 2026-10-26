@@ -1,5 +1,8 @@
 # Formation current support — 2026-09-30
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Current code: ato main `b43eaa0c55be0229d55b8d82054d355b616d04b1`,
 ato-api main `dcc3049a69051ed6d1c7819580ed1e171815c34c`, checked against live
 GitHub at the start. #1448 is merged; #1449 started open at

@@ -1,5 +1,8 @@
 # Formation 5b-a — typed generation, including an unmet live target
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Implemented; local/unit/integration safety verified; not merged or deployed.**
 The fixed typed-draft path reaches D1 FAIL → Dnew → same-K PASS. **The one live
 Jev call declined. LLM-generated Dnew PASS and the overall 5b gate remain open.**
@@ -37,7 +40,7 @@ The compiler copies one supported pinned Python parent, substitutes only the
 script and rebinds through the common canonical authoring compiler, proving
 K equality. The initial candidate vector is immutable; the admitted candidate
 is a separate record. Canonical duplicates are not added. Provenance is not
-D identity. See [ADR-037](../rfcs/draft/ADR-037-formation-typed-generation.md).
+D identity. See [ADR-037](../../../rfcs/draft/ADR-037-formation-typed-generation.md).
 
 The provider sees only opaque IDs and a fixed projection of typed failures;
 source/manifest/paths/raw logs/receipts/host identity/unrelated facts are absent.
@@ -67,7 +70,7 @@ local D1/R2, actual Rust `formation_search` requester using shared production
 helpers, actual existing Rust Runtime (unchanged source-ticket wire). The
 requester was built from `8daa6a19` and receiver from `f4ddc503`; the final
 post-run changes preserve decline telemetry only. Exact SHAs and executable
-hashes are in the [JSON ledger](formation-typed-generation-2026-09-26.json).
+hashes are in the [JSON ledger](../../../ops/formation-typed-generation-2026-09-26.json).
 The local database was a fresh copy of the quiescent 0302 acceptance state,
 then received 0303. This is not a remote Cloudflare D1 migration.
 

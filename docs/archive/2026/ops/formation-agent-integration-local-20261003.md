@@ -1,5 +1,8 @@
 # Formation共通Session・状態経路の統合検証
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 測定ID `formation-agent-integration-local-20261003-01`。Rust Source pinはAto
 `8bb3a2b1dd1a3ab3b8e10da270ed9a627d53c0ec`。macOS arm64、Rust 1.96.0。
 Session、外部relay、共通状態/機能受入、CI portability変更を統合したSourceを検査した。
@@ -31,7 +34,7 @@ CLIとMCP binaryの検証時はclean tree。Portable Application追加検証中�
 `0aca096859d4f4410d3674c0ef061bd572762774b680995d423f2c8d619a62f8`。
 専用測定領域へcopyしmode0555で保存した。以前のrelay単独artifactのhashを、この統合
 artifactの受入へ代用しない。全コマンドのlog hashとartifact pathは
-[機械記録](evidence/formation-agent-integration-local-20261003.json)に保存した。
+[機械記録](../../../ops/evidence/formation-agent-integration-local-20261003.json)に保存した。
 
 ## 新しいGitHub CIの観測
 
@@ -50,7 +53,7 @@ API Source `57991090c7a84ae39883893e763ec61aba4f5ea8` の
 [Activity CI](https://github.com/ato-run/ato-api/actions/runs/37110623145) はFAIL。
 Activity/CORSの13失敗名・155 PASSはexact base `02a9e58b` / head `9b483d4a`
 の比較と一致した。これは既存失敗の比較結果であり、修正済みとは扱わない。
-[比較記録](evidence/formation-current-api-ci-comparison-20261003.json)にlog hashと
+[比較記録](../../../ops/evidence/formation-current-api-ci-comparison-20261003.json)にlog hashと
 失敗名を保存した。instance-state-syncはCI #729のfixture修正が含まれないため、
 同じWebSocket handshake失敗。修正単独のnative Linux比較は
 [CI記録](https://github.com/ato-run/ato/blob/5798e23d28aaebd4fabd6d44cecef51ab869c717/docs/ops/formation-agent-linux-ci-comparison-20261003.md)を参照する。

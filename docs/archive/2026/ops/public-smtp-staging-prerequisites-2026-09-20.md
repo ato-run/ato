@@ -1,5 +1,8 @@
 # Public SMTP staging acceptance — prerequisites and blockers, 2026-09-20
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The next acceptance after the Stalwart + Missive fixture is a real exchange
 with Gmail over public SMTP, limited to inbound port 25 on staging. This note
 records why it has not been run, what was measured, and what has to exist

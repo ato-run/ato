@@ -1,5 +1,8 @@
 # Formation 2e-b — Hosted LocalProcess ownership
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Baselines and scope
 
 At start, fetched ato main `aaaaaa15d0cfafdf397977bcabb8eb189fb5c2c2`

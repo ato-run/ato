@@ -1,5 +1,8 @@
 # Managed embedding claimed-lease CPU fixture
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This change adds an opt-in Linux acceptance fixture for the existing
 `ConnectedWorker::execute_lease` evaluator. It does not replace an installed
 Runner, alter capability advertisement, deploy a service, enable a flag, create

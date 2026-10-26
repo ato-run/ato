@@ -1,5 +1,8 @@
 # Formation E1 efficacy results — 2026-09-27
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **The proposed efficacy gate was NOT met. Overall Formation 5b remains In progress.**
 This measures bounded parameter synthesis, not arbitrary program generation.
 No 5b-c feature was started, no deployment or remote migration was performed.
@@ -20,7 +23,7 @@ All six PRs were merged using their explicitly approved heads, in order:
 #1413 was made Ready before merging. Stacked bases were retargeted to main only
 after their ancestors merged; no approved head was rebased or changed. Explicit
 admin-merge approval was obtained after normal merge was policy-blocked.
-[Machine-readable merge record](formation-5b-merge-2026-09-27.jsonl).
+[Machine-readable merge record](../../../ops/formation-5b-merge-2026-09-27.jsonl).
 
 Evaluation base: ato `beefc6101beae745cb9e258fd59ea7c2d8f65386`,
 API `4b695432478084082cd55db3b1454ae50d49fb15` (same receiver tree as reviewed
@@ -32,7 +35,7 @@ current main. Source and all executable digests are in the registrations.
 ## Protocol integrity and deviation
 
 Original preregistration: commit `410285f3679a9e9f25b9787f96db1a7f24b3f10f`,
-[plan](formation-efficacy-e1-plan.md) / [hashes and budgets](formation-efficacy-e1-plan.json).
+[plan](formation-efficacy-e1-plan.md) / [hashes and budgets](../../../ops/formation-efficacy-e1-plan.json).
 10 cases × 2 opaque-ID permutations × A/B/C = 60 evaluated cells, 20 per arm.
 Exact model `jev-1.13.0`, unchanged generation prompt `/2`.
 
@@ -43,14 +46,14 @@ Jev superiority. We stopped, repaired only that validator argument, added an
 integrated provider regression, and pushed the
 [amendment](formation-efficacy-e1-amendment.md) before continuation
 (commit `990757eeec01c90deb97449df2c6826d909bd724`).
-Original observations remain [separately preserved](formation-efficacy-e1-original-observations.json).
+Original observations remain [separately preserved](../../../ops/formation-efficacy-e1-original-observations.json).
 
 The four completed original C calls (two PASS, two decline) were reused exactly,
 not repeated; only 16 unvisited C cells followed. All nine completed original A/C
 cells were retained. New B used the *same preregistered score/tie-break rule*.
 There were **20 unique C reservations / 20 model calls total**, no C retry,
 cherry-pick, prompt tuning or fixture substitution.
-[Reservation and original-file-digest audit](formation-efficacy-e1-reservations.json).
+[Reservation and original-file-digest audit](../../../ops/formation-efficacy-e1-reservations.json).
 This is an **amended experiment**, not a pristine uninterrupted run. The repaired
 schedule invalidates speed-comparison claims. Historical G9 and v1 remain untouched.
 
@@ -89,9 +92,9 @@ fixtures intentionally begin with known-D failure; A's 0% is not a real-world
 known-D coverage estimate. E09's no-generation Exact early stop is documented
 in the plan; B/C are matched at the same three-attempt ceiling.
 
-[Per-cell safe ledger](formation-efficacy-e1-results.json) records selected IDs,
+[Per-cell safe ledger](../../../ops/formation-efficacy-e1-results.json) records selected IDs,
 canonical D refs, K refs, safe fresh-receipt projections, contexts, usage/cost,
-timing, report digests and outcomes. [Aggregate JSON](formation-efficacy-e1-summary.json)
+timing, report digests and outcomes. [Aggregate JSON](../../../ops/formation-efficacy-e1-summary.json)
 is reproducible with `scripts/acceptance/efficacy/analyze.py`.
 
 ### Case and permutation results
@@ -155,7 +158,7 @@ A [separate post-outcome fixed-draft audit](formation-efficacy-e1-oracle-plan.md
 was registered before execution: three cells, **zero model calls**, no contribution
 to A/B/C rates or timing. **All three fixed-draft audits passed**, with the same
 K/source hash as their corresponding E1 cells and fresh receipt acceptance;
-[separate audit results](formation-efficacy-e1-oracle-results.json). This confirms
+[separate audit results](../../../ops/formation-efficacy-e1-oracle-results.json). This confirms
 that these unselected positives really can run, but cannot rescue the failed
 efficacy gate or justify model retries.
 

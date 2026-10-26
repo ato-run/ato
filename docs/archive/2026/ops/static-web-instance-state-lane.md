@@ -1,5 +1,8 @@
 # Static Web instance state lane — staging builder record
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 What is deployed, what it produces, and how to undo it.
 
 This is **not** a builder modernization. It adds artifact-native static state

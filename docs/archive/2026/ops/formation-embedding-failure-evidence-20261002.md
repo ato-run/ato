@@ -1,5 +1,8 @@
 # Formation artifact embedding failure evidence, 2026-10-02
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This change follows Ato #1461. It preserves the existing static bundle producer
 and process artifact guard; it does not add a second scan or relax permissions.
 

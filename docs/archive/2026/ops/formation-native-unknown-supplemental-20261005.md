@@ -1,10 +1,13 @@
 # 実UNKNOWN専用の追加受入
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 現時点のUNKNOWN gateは、別measurement `formation-native-real-unknown-20261005-05`で成立した。40分の上限内に実30分UNKNOWN、実Codexの新しいreconcile-only文脈、同一attemptのlate-result/ACK/closed、通常owner resolution、予約・writer・temporary input・所有processの0件確認まで終了した。旧campaignの13/12超過と01〜04の失敗・制約は変更していない。最新のユーザー指示により、同じ上限・独立measurement IDの追加枠は自動実行が承認されている。以下の「追加承認が必要」という記述は、その承認前の各測定時点の記録である。
 
 ユーザーが40分案を承認したため、`formation-native-real-unknown-20261005-01`を実Codex 0.160.0 / gpt-6.1-solで実行した。上限はSearch 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 2400秒。元Searchの期限は1800秒のまま。30分のsilence expiry、時計、DB timestamp、旧campaignの13/12を変更していない。
 
-このmeasurementはUNKNOWNへ到達せず終了した。最初のNative turnはSkillが要求するowner隔離確認を起動promptに見つけられず、typed `needs_input`を提出した。Search `search_36ebcf9479b6c5b359d9df8e685c3da4`は`unsatisfied / needs_input`で終端した。消費はSearch 1、割当round 1、exchange 1、inspection 0、Runtime attempt 0、経過51秒。新D、workload、transport切断、30分失効、UNKNOWN、receiptは未観測である。[公開証拠](evidence/formation-native-unknown-supplemental-20261005-01.json)。
+このmeasurementはUNKNOWNへ到達せず終了した。最初のNative turnはSkillが要求するowner隔離確認を起動promptに見つけられず、typed `needs_input`を提出した。Search `search_36ebcf9479b6c5b359d9df8e685c3da4`は`unsatisfied / needs_input`で終端した。消費はSearch 1、割当round 1、exchange 1、inspection 0、Runtime attempt 0、経過51秒。新D、workload、transport切断、30分失効、UNKNOWN、receiptは未観測である。[公開証拠](../../../ops/evidence/formation-native-unknown-supplemental-20261005-01.json)。
 
 元Searchをreopen/resetせず、別Searchを無断で作らない。承認済みSearch枠は消費済みであり、再試験には別measurementの明示承認が必要である。旧campaignは13/12超過で終了のまま。audit SHA-256 `91262a72bb27ebcc03107b7d0b6081135be78e6868e1d49f7ad5b70ef9470197`の不変を再確認した。独立API台帳、旧WBO UNKNOWN、過去の成功D・実測pinは変更していない。
 
@@ -22,7 +25,7 @@ Kuttの既存successful Search → Source Result → form-verify → State Run A
 
 ユーザーの「承認します。続けて」を受け、同じ上限の別measurement `formation-native-real-unknown-20261005-02`を開始した。開始前のCLIはscratch不足で停止したが、コピー元DBと受入DBのSearch/request/attempt件数がすべて6/6/7で一致し、新Search未作成を確認した。同じ予約を保持し、再生成可能なbuild outputを整理して、予約済み開始処理を継続した。この失敗launchも台帳に保存した。旧13/12、measurement 01、既存Search、期限、消費量は書き換えていない。
 
-修正済みSkill `e03b5b2f5`を実Codex 0.160.0 / gpt-6.1-solから呼び出し、制御Sourceを既知Dなしで探索した。Search `search_36277e87df76feb9bb5e444fa116307a`、attempt `01M45DWSE3GWKKDECQ3P3Q6VNY`で固定Kのfresh PASS、結果保存、ACK、closed、candidate stop、cleanupを確認した。消費はSearch 1 / D round 1 / exchange 1 / Runtime attempt 1 / inspection 0 / 58秒。通常Run許可、functional registration、公開、forkへは昇格していない。[公開証拠](evidence/formation-native-unknown-supplemental-20261005-02.json)。
+修正済みSkill `e03b5b2f5`を実Codex 0.160.0 / gpt-6.1-solから呼び出し、制御Sourceを既知Dなしで探索した。Search `search_36277e87df76feb9bb5e444fa116307a`、attempt `01M45DWSE3GWKKDECQ3P3Q6VNY`で固定Kのfresh PASS、結果保存、ACK、closed、candidate stop、cleanupを確認した。消費はSearch 1 / D round 1 / exchange 1 / Runtime attempt 1 / inspection 0 / 58秒。通常Run許可、functional registration、公開、forkへは昇格していない。[公開証拠](../../../ops/evidence/formation-native-unknown-supplemental-20261005-02.json)。
 
 ただしUNKNOWNゲートは未達である。切断ハーネスの監視はargvにSourceファイル名`server-unknown.js`が現れることを前提としていた。materialized entrypointを検出できず、開始markerがない場合にproxyが結果を通す構造だったため、結果はCoordinatorへ届いた。実測PASSをUNKNOWNへ変更せず、DBや時計を変更して再分類しない。30分silence expiryと新Native文脈でのUNKNOWN照合は今回も未観測である。
 
@@ -36,7 +39,7 @@ measurement 02の最終attempt/resource reservation、active writer、quarantine
 
 ユーザーの追加承認で`formation-native-real-unknown-20261005-03`を実行した。Search 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 40分を維持し、旧13/12とmeasurement 01/02は変更していない。実Codex 0.160.0 / gpt-6.1-solは既知Dなしの制御SourceからDを1回提案した。実Runtimeの保存済みfresh receiptによりworkload開始を確認し、result transportを保持した。独立した`/proc` monitorの開始markerは今回も取得できず、最初の切断のmarker欠落を保存した後、同じRuntime/result dispatchの通信retryを開始確認後に再度停止した。独立process観測が成功したとは報告しない。新しいRuntime attemptは作っていない。
 
-Search `search_b44da962307739556f9121288edf1c04`、attempt `01M45JR7BASXDRFDXF8W1CC6YE`は08:26:43.791 UTCにclaimされ、08:56:51.571 UTCに実際のUNKNOWNへ到達した。claimから1,808,017msであり、既存30分失効、時計、DB timestampを変更していない。元NativeはUNKNOWNまで待機状態で保持し、その後終了した。待機中とUNKNOWN後のowner viewではround 1、exchange 1、attempt used 1、元deadline、`input: null`が不変だった。byte予約はUNKNOWN時に保守的な消費へ移り、消費済み量を返却していない。[公開証拠](evidence/formation-native-unknown-supplemental-20261005-03.json)。
+Search `search_b44da962307739556f9121288edf1c04`、attempt `01M45JR7BASXDRFDXF8W1CC6YE`は08:26:43.791 UTCにclaimされ、08:56:51.571 UTCに実際のUNKNOWNへ到達した。claimから1,808,017msであり、既存30分失効、時計、DB timestampを変更していない。元NativeはUNKNOWNまで待機状態で保持し、その後終了した。待機中とUNKNOWN後のowner viewではround 1、exchange 1、attempt used 1、元deadline、`input: null`が不変だった。byte予約はUNKNOWN時に保守的な消費へ移り、消費済み量を返却していない。[公開証拠](../../../ops/evidence/formation-native-unknown-supplemental-20261005-03.json)。
 
 新しいNative文脈を同Searchへ`reconcile-only`で起動しようとしたが、MCP brokerが期限後のrelayを拒否した。Native SDK contextの開始前に`fixed_mcp_broker_unavailable`で停止し、新しい推論turnは0だった。launcherだけには最大120秒の報告windowがあった一方、Rust relayは元Search deadlineを超えられず、共通入口の実装不整合が露呈した。この実測はゲート未達であり、#1485をReadyにしていない。40分枠を延長せず、追加Searchやattemptで代用していない。
 
@@ -50,7 +53,7 @@ Search `search_b44da962307739556f9121288edf1c04`、attempt `01M45JR7BASXDRFDXF8W
 
 ## Supplemental 04: 復旧は確認、campaign内のcleanupは未成立
 
-[測定04の証跡](evidence/formation-native-unknown-supplemental-20261005-04.json)。修正済みSession/MCP `438efd6a864` とSkill `78c257fdd`を固定し、実Codexで1 Search・1 D round・1 exchange・1 Runtime attemptを使用した。既存の30分silence expiryでUNKNOWNとなり、新しいCodex文脈の実`status` / `next`は入力を返さず、同Search・同attempt・元deadline・消費量を維持した。保存済み同一結果のACK・closedと予約精算は40分以内に成立した。ownerの既存`effect_reconciled`経路で履歴UNKNOWNを保全し、期限後のPASSを成功Dや通常Run許可へ昇格していない。
+[測定04の証跡](../../../ops/evidence/formation-native-unknown-supplemental-20261005-04.json)。修正済みSession/MCP `438efd6a864` とSkill `78c257fdd`を固定し、実Codexで1 Search・1 D round・1 exchange・1 Runtime attemptを使用した。既存の30分silence expiryでUNKNOWNとなり、新しいCodex文脈の実`status` / `next`は入力を返さず、同Search・同attempt・元deadline・消費量を維持した。保存済み同一結果のACK・closedと予約精算は40分以内に成立した。ownerの既存`effect_reconciled`経路で履歴UNKNOWNを保全し、期限後のPASSを成功Dや通常Run許可へ昇格していない。
 
 最終secret/process cleanupは40分を超えたため、campaign全体の受入完了とはしない。全処理終了時は新規未解決attempt・予約・writer・temporary input・所有processが0。04の記録と旧13/12超過は保持し、同じ上限・別measurement IDの05で枠内の連続終了を検証する。追加枠の自動実行はユーザー承認済みである。
 
@@ -58,7 +61,7 @@ Search `search_b44da962307739556f9121288edf1c04`、attempt `01M45JR7BASXDRFDXF8W
 
 ## Supplemental 05: 実UNKNOWNとfresh Native照合を40分内で完了
 
-[測定05の証跡](evidence/formation-native-unknown-supplemental-20261005-05.json)。上限はSearch 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 40分。実消費は1 / 1 / 1 / 1 / 0。Codex 0.160.0 / gpt-6.1-solが、既知Dなしの制御SourceにDを提案した。実Runtimeの開始は保存済みRust receiptの`execution_started`とfresh fixed-K検証で確認し、その後result/completion/ACK transportを切断した。独立した`/proc`によるworkload生存観測とは区別する。保存済みresultは保持し、Coordinatorには失効まで届けていない。
+[測定05の証跡](../../../ops/evidence/formation-native-unknown-supplemental-20261005-05.json)。上限はSearch 1 / D round 2 / exchange 3 / Runtime attempt 1 / inspection 2 / wall clock 40分。実消費は1 / 1 / 1 / 1 / 0。Codex 0.160.0 / gpt-6.1-solが、既知Dなしの制御SourceにDを提案した。実Runtimeの開始は保存済みRust receiptの`execution_started`とfresh fixed-K検証で確認し、その後result/completion/ACK transportを切断した。独立した`/proc`によるworkload生存観測とは区別する。保存済みresultは保持し、Coordinatorには失効まで届けていない。
 
 claimed時刻から1,804,155 msで既存の30分silence expiryがUNKNOWNを作った。元Search期限は30分のまま。元Native clientがUNKNOWNまで生存していたことを確認してから終了し、新しいNative文脈で同Searchへreconcile-only接続した。実MCP `status / next`はともに成功し、`input: null`、元deadline、消費round/exchange/attempt各1を維持した。新しい推論input・D round・exchange・Runtime attemptは0。再接続turnのSDK利用は、追加のD探索と別に記録している。
 

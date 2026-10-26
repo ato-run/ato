@@ -1,5 +1,8 @@
 # Stage 3a receipt authority — local evidence, 2026-09-25
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Foundation base: ato #1396 merged `722f07610365d96d2432dbde29439e8c217c94e6`;
 ato-api #686 merged `c0f2682e752fce91f0d6e72e4d51b67b31e0725d`.
 No deployment, remote migration, flag change or manual CI rerun.

@@ -1,5 +1,8 @@
 # Contract-preserving Derivation transformation v0 — E2E evidence
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 - 状態: **proof**（Linux CI で実測する E2E）。production の挙動・提供機能を主張する文書ではない。
 - 対象: `ato` の `ato pack` / `ato run` / `ato reform`（PR2 #1557）と、既存の `run_attempt → verify_observed_candidate`。
 - 追加した semantic concept は無い。Contract / Derivation / Receipt の既存の意味だけを使う。

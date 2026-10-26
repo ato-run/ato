@@ -1,5 +1,8 @@
 # OCI profile: `oci.working_dir`, state over an image VOLUME, no anonymous volumes
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Status: implemented; offline actual verified on one host. Not merged, not
 deployed. Hosted projection: ato-api `feat/oci-working-dir-projection`.
 

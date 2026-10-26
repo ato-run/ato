@@ -1,5 +1,8 @@
 # Preregistered refusal-feedback repair pilot
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Frozen Runtime/CLI/authority source: `dfced9182159c143dd1ca994f42bf160eddc9f40`.
 API JS stays `b20bba7ab9daf282f8d5b1e22affe549ad3492a3`.
 Native/WASM hashes and resources are in the two JSON plans. Prompt v4,

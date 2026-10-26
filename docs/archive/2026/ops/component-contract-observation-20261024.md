@@ -1,5 +1,8 @@
 # Component Contract observation implementation — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Dependent on the explicit service-dependency authoring change (ato#1504).
 The independent Linux source-OCI compiler fix ato#1505 is required when building
 the CLI on Linux. Neither change alters an existing K or D.

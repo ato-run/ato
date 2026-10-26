@@ -1,5 +1,8 @@
 # Datasette dependency export progress — 2026-09-16
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This record began as a partial implementation checkpoint. Later sections now
 include the completed four-route, Hosted Surface, v4 transport, and isolated
 offline acceptance. Production was not changed.

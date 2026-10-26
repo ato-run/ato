@@ -1,5 +1,8 @@
 # Native controls / Source / Model / Group integration
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 2026-10-24。統合source `335557cfc79129f5331cf0fa87c0f139dcfffd65`、branch
 `integration/formation-native-models-v1`。既存Source #1538/Models #1535/Group #1537へ、
 Native controls #1539/#1540/#1541/#1542の共通base a322c898を競合なしで統合した。

@@ -1,5 +1,8 @@
 # Formation P0 unblock 2 — acceptance (2026-09-23)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Base: ato `main` `c0de5efb` (P0 unblock 1 merged as #1383); ato-api `main`
 `d4800415` as the local coordinator (`wrangler dev --local`, local D1/R2, no
 remote migration). Branch `feat/formation-p0-unblock-2`.

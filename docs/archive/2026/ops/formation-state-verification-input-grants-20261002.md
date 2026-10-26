@@ -1,5 +1,8 @@
 # Private functional acceptance with current Formation input grants
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 The retained functional verification helper now accepts an optional
 `formation_input` with a private `token_file` and the expected `search_id`.
 It claims a current Coordinator attempt through the existing durable Worker
@@ -68,7 +71,7 @@ The complete connected Worker clippy command with warnings denied fails on
 exact PR base `f362c894` fails with the same diagnostic; this unchanged enum
 was not suppressed or refactored. The private helper clippy passes.
 
-[Platform comparison evidence](evidence/formation-platform-ci-comparison-20261002.json)
+[Platform comparison evidence](../../../ops/evidence/formation-platform-ci-comparison-20261002.json)
 records Windows cross-checks with isolated head/base outputs: both report
 13 errors from unconditional Unix browser sandbox APIs and the non-Unix
 `plan.rs` branch's missing `bail` import. This is compilation evidence, not
@@ -84,7 +87,7 @@ Both also emit the existing `nodeCrypto.randomBytes` warning. The CI uses
 Linux/Node 22.23.3 and fails earlier on the WebKit presence handshake; that
 exact failure remains unreproduced. These jobs are not reported green.
 
-[Kutt functional/state evidence](evidence/formation-kutt-private-functional-state-20261002.json)
+[Kutt functional/state evidence](../../../ops/evidence/formation-kutt-private-functional-state-20261002.json)
 is now complete at helper/CLI pin `3bb28192` and API pin `02a9e58b`. Both
 separately assigned Runs produced a fresh fully satisfied receipt for the same
 K `2940ae2d…` and D `1c5a59c4…`. The first used writer fence 1, created an
@@ -127,7 +130,7 @@ original 07:46:20 UTC Search deadline. Its checkpoint stayed byte-identical, no
 Requester/Runtime/inference/execution was restarted, and the conservative
 512 MiB expanded/stored usage stayed charged with zero reservations. Earlier Kutt Source same-K repair PASS remains pinned separately in
 [the HTTP acceptance record](formation-bound-http-port-acceptance-20261002.md).
-The [current-pin changedetection functional/state proof](evidence/formation-changedetection-functional-state-final-20261002.json)
+The [current-pin changedetection functional/state proof](../../../ops/evidence/formation-changedetection-functional-state-final-20261002.json)
 also records fresh same-K/D receipts, browser watch creation/title edit/pause,
 confirmed stop, exact revision restoration with fence 2, preserved title/pause,
 deletion, child commit and writer release. It uses the input-free helper's

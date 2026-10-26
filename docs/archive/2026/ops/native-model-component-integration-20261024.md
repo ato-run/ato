@@ -1,5 +1,8 @@
 # Combined Native / ModelSet / OCI component regression — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Source: clean root integration `876cb714085e17dc6156c5762ea1752f9aa8cef1`
 (`integration/formation-native-models-v1`), exported with `git archive` into this
 independent scratch directory. Includes Native #1536, single OCI #1535 and

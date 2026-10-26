@@ -1,5 +1,8 @@
 # Runtime Network Phase 1 — acceptance (2026-09-23)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > The final-hardening re-run (Runtime-authoritative semantics, immutable
 > profiles, idempotent orchestration; cases A–L) at the end of this file
 > supersedes the first run.

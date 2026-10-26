@@ -1,5 +1,8 @@
 # D3-E v2 execution driver review
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This is the current #1431 review. The `/1` review remains historical evidence of
 the request-capture blocker; it is not the current driver state.
 

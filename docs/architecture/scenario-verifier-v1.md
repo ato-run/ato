@@ -1,5 +1,8 @@
 # Scenario verifier v1 (CLI local, Linux)
 
+> Implementation explanation with dated measurements. Language: en.
+> This page does not adopt a specification or certify current deployment.
+
 Status: operating note / acceptance record
 Date: 2026-10-25
 Scope: `ato run` and `ato reform` on a **Linux CLI host** with a process

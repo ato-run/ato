@@ -1,6 +1,9 @@
 # Local lifecycle
 
-The current CLI authors a local computation repository and transports selected
+This page describes the computation-root CLI lifecycle and its local repository.
+For contract-root `pack` / `form` / `app` workflows use the [Formation guide](guides/formation.md).
+
+The computation-root CLI authors a local computation repository and transports selected
 Capsule points. It does not infer a project from source, install toolchains, or
 run Git repositories and URLs.
 
@@ -18,7 +21,7 @@ ato reform <existing.capsule> <new-source-dir> --out <dir> [--derivation <sha256
 the branch head. `resume` continues the current head or forks a historical
 Record onto a new branch.
 
-`encap` is the portable Materialization boundary. `run` verifies the bundle,
+For computation-root v2, `encap` is the portable Materialization boundary. `run` verifies the bundle,
 selects a compatible restore-capable Materialization, resolves Bindings, and
 starts an ephemeral Run without advancing an authored branch.
 

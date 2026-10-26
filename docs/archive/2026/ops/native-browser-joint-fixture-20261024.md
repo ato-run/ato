@@ -1,5 +1,8 @@
 # Native browser joint fixture — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## Scope
 
 This test-only child freezes #1542 plus #1541 at combined base

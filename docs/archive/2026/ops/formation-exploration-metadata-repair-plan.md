@@ -1,5 +1,8 @@
 # Non-execution metadata normalization acceptance preregistration
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Freeze CLI/Runtime/Rust authority `44772cb2f1347a353a1d2c0593af4481c5da1e61`,
 API JS `b20bba7ab9daf282f8d5b1e22affe549ad3492a3`. SVGOMG 57 only,
 original archive and K, zero known D. Native/WASM hashes are in the JSON.

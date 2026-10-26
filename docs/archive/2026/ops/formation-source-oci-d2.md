@@ -1,5 +1,8 @@
 # Formation 6b-D2 — source → OCI materialization (offline integration)
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > Later: the builder boundary below (caller-provided private daemon) was
 > replaced by a CLI-owned private session; see
 > [formation-source-oci-d2-hardening](formation-source-oci-d2-hardening.md).
@@ -10,7 +13,7 @@
 **implemented · unit-tested · actual offline integration verified** on
 `ubuntu-sugamo` (x86_64, Linux 7.0.0-27-generic x86_64 GNU/Linux, Docker 29.1.3).
 **Not merged, not deployed. WBO actual not run** (needs the explicit online
-policy and the profile changes in the [design](../rfcs/draft/FORMATION_SOURCE_OCI.md)).
+policy and the profile changes in the [design](../../../rfcs/draft/FORMATION_SOURCE_OCI.md)).
 Model calls 0; no remote migration; #1421 untouched; host network never granted.
 
 - Code: `b6a3ee784bef`, `ato` sha256 `6c15d42abe0beaab…`.

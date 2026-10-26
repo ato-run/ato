@@ -1,5 +1,8 @@
 # B1_BASELINE — consolidated nightly
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 Recorded 2026-09-03 at the end of **I0 — Nightly Baseline Consolidation**.
 
 Everything Personal / Dynamic Compute had accumulated across a stack eleven

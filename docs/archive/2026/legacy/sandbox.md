@@ -1,5 +1,8 @@
 # Sandbox
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 > **Historical document.** This describes an earlier manifest/provider
 > execution path. Sandboxing remains a realization concern, but the commands,
 > crate paths, and identity statements below are not current Semantic Core or
@@ -77,9 +80,9 @@ At runtime:
 
 References:
 
-- [historical security and isolation model](archive/rfcs-legacy-accepted/SECURITY_AND_ISOLATION_MODEL.md)
-- [historical Nacelle specification](archive/rfcs-legacy-accepted/NACELLE_SPEC.md)
-- [historical macOS sandbox ADR](archive/rfcs-legacy-accepted/ADR-007-macos-sandbox-api-strategy.md)
+- [historical security and isolation model](../../rfcs-legacy-accepted/SECURITY_AND_ISOLATION_MODEL.md)
+- [historical Nacelle specification](../../rfcs-legacy-accepted/NACELLE_SPEC.md)
+- [historical macOS sandbox ADR](../../rfcs-legacy-accepted/ADR-007-macos-sandbox-api-strategy.md)
 
 ## Recipe permissions
 

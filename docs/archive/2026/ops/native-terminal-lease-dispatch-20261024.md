@@ -1,5 +1,8 @@
 # Native Terminal connected lease dispatch — 2026-10-24
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 This child connects the owned Terminal primitive to the existing lease evaluator.
 Shared Runner deployment and the API viewer-access rollout remain disabled.
 

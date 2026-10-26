@@ -2,7 +2,7 @@
 
 > Status: **Draft** (v0.5.x 目標) — 議論中
 > Scope: `ato-cli` の pipeline 層 (`run` / `publish` / `encap` / `decap`) と execute 層 (Node/Python/Deno/Bun...) を **1 枚の状態マシン + 1 枚の runtime 抽象**で扱うための統一仕様。
-> Non-goal: narrative (Try / Keep / Share) の再定義。語り方は [`ATO_CLI_SPEC.md §3.1`](../accepted/ATO_CLI_SPEC.md) のまま維持する。
+> Non-goal: narrative (Try / Keep / Share) の再定義。語り方は [`ATO_CLI_SPEC.md §3.1`](../rfcs-legacy-accepted/ATO_CLI_SPEC.md) のまま維持する。
 
 ---
 
@@ -112,7 +112,7 @@ README / spec では `"ConsumerRun の Install"` のように必ず variant 名�
 
 ### 3.4 エスカレーションパス（v0.5 → v0.5.x）
 
-- **v0.5 (Pipeline は現状維持 + pinpoint fix のみ)**: `encap` / `decap` は `share/mod.rs` 独立実装のまま。spec で narrative vs pipeline 分離を明記済 ([ATO_CLI_SPEC.md §3.1](../accepted/ATO_CLI_SPEC.md))。
+- **v0.5 (Pipeline は現状維持 + pinpoint fix のみ)**: `encap` / `decap` は `share/mod.rs` 独立実装のまま。spec で narrative vs pipeline 分離を明記済 ([ATO_CLI_SPEC.md §3.1](../rfcs-legacy-accepted/ATO_CLI_SPEC.md))。
 - **v0.5.x minor 2 (Pipeline Spine 統一)**:
   - `HourglassFlow` に `WorkspaceMaterialize` / `WorkspaceCapture` 追加
   - `materialize_loaded_share` を Install phase / Verify phase に分割
@@ -415,12 +415,12 @@ nacelle が受け取った env は append-only （ato-cli が指定したもの�
 
 | 参照 | 関係 |
 |------|------|
-| [ATO_CLI_SPEC §3.1](../accepted/ATO_CLI_SPEC.md) | narrative 階層の定義は維持、pipeline 実装層は本 RFC が定義 |
-| [NACELLE_SPEC](../accepted/NACELLE_SPEC.md) | Execute phase の spawn 契約を本 RFC から参照 |
-| [RUNTIME_AND_BUILD_MODEL](../accepted/RUNTIME_AND_BUILD_MODEL.md) | `RuntimeProvisioner` trait を本 RFC が定義する上位層 |
-| [EXECUTIONPLAN_ISOLATION_MODEL](../accepted/EXECUTIONPLAN_ISOLATION_MODEL.md) | PATH / env の default-deny を本 RFC が PATH にも拡張 |
-| [SECURITY_AND_ISOLATION_MODEL](../accepted/SECURITY_AND_ISOLATION_MODEL.md) | PDF §5.4 の env default-deny を PATH に適用する実装根拠 |
-| [archived CAPSULE_FORMAT_V2](../archived/CAPSULE_FORMAT_V2.md) | `ato.lock.json::runtime_tools` スキーマ拡張を本 RFC が規定 |
+| [ATO_CLI_SPEC §3.1](../rfcs-legacy-accepted/ATO_CLI_SPEC.md) | narrative 階層の定義は維持、pipeline 実装層は本 RFC が定義 |
+| [NACELLE_SPEC](../rfcs-legacy-accepted/NACELLE_SPEC.md) | Execute phase の spawn 契約を本 RFC から参照 |
+| [RUNTIME_AND_BUILD_MODEL](../rfcs-legacy-accepted/RUNTIME_AND_BUILD_MODEL.md) | `RuntimeProvisioner` trait を本 RFC が定義する上位層 |
+| [EXECUTIONPLAN_ISOLATION_MODEL](../rfcs-legacy-accepted/EXECUTIONPLAN_ISOLATION_MODEL.md) | PATH / env の default-deny を本 RFC が PATH にも拡張 |
+| [SECURITY_AND_ISOLATION_MODEL](../rfcs-legacy-accepted/SECURITY_AND_ISOLATION_MODEL.md) | PDF §5.4 の env default-deny を PATH に適用する実装根拠 |
+| [archived CAPSULE_FORMAT_V2](../../rfcs/archived/CAPSULE_FORMAT_V2.md) | `ato.lock.json::runtime_tools` スキーマ拡張を本 RFC が規定 |
 
 ---
 

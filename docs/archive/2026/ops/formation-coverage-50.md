@@ -1,5 +1,8 @@
 # Formation 6b-C — 20 → 50 actual coverage measurement
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 ## State
 
 - **measurement designed · preregistered · actual measured · evidence committed**
@@ -10,7 +13,7 @@
   or a base-reproduced intermittent Linux test, see below).
 - Measurement pin `c4c285f3` (Rust identical; checkout `57b063b9` = preregistration
   commit). Classification rules committed before reading results (`5f57437f`).
-- Plan: [JSON](formation-coverage-50-plan.json) / [md](formation-coverage-50-plan.md),
+- Plan: [JSON](../../../ops/formation-coverage-50-plan.json) / [md](formation-coverage-50-plan.md),
   SHA256 `222533282a12c8a3e9694c9fd672e74c07b6e3c24c10a6b931fd4c2d6a56289f`. Raw results SHA256 `bd80e70bf3d448e812259dbea8d12475b44dbf00190bf9e89fb982ff72f6b7c3`.
   Binaries: coverage_baseline `cabca856fe6f2c6a…`,
   worker `ee2c1e402e6111fa…`.
@@ -219,4 +222,4 @@ No Formation-specific failure.
 --output <dir>`; classification `classify-50.py`. Archives are fetched from the
 plan's `archive_url` and must match `archive_sha256`. Per-app observation
 hashes, attempts, typed failures, receipts and retained refs are in
-[JSON](formation-coverage-50.json). The 6a ledger is not modified.
+[JSON](../../../ops/formation-coverage-50.json). The 6a ledger is not modified.

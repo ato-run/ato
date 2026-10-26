@@ -1,5 +1,8 @@
 # Formation汎用化 調査台帳
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 調査日: 2026-10-23。実装の存在、過去の実測、今回の検証を区別する。
 この台帳に記載された機能が現在staging/productionで有効とは限らない。
 

@@ -1,5 +1,8 @@
 # E2登録と現行mainの統合境界
 
+> Status: historical evidence / past plan. Language: ja+en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 2026-10-01のマージ対象は、#1421の登録資料・fixture・評価harnessです。
 oracle、72 primary cells、48 model callsの実行は今回の範囲に含みません。
 過去の「review only / do not merge」は今回のマージ依頼で更新されましたが、
@@ -8,7 +11,7 @@ oracle、72 primary cells、48 model callsの実行は今回の範囲に含み�
 元の登録headは`dc0fba4e0ecdd585985320551b52b72768002a5c`、
 評価artifact baseは`34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e`、
 API pinは`f7d866cbef7768f67b46840766497fbf806640fe`です。
-[登録plan](formation-efficacy-e2-plan.json)のbytes、code/artifact/API pin、
+[登録plan](../../../ops/formation-efficacy-e2-plan.json)のbytes、code/artifact/API pin、
 予算、24 oracle classesは変更しません。
 
 現行mainには登録以降のFormation実装が含まれ、

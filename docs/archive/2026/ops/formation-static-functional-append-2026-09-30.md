@@ -1,10 +1,13 @@
 # Static functional acceptance append — 2048 and reveal.js
 
+> Status: historical evidence / past plan. Language: en.
+> Preserved content; relative navigation updated. Current [documentation map](../../../README.md).
+
 **Result: two fresh typed-K receipts PASS; both fixed browser operations PASS.**
 Persistence was not measured. This is later evidence, not a replacement for
-[coverage-50](formation-coverage-50.json) or a new 50-app success rate.
+[coverage-50](../../../ops/formation-coverage-50.json) or a new 50-app success rate.
 
-The [plan](formation-static-functional-plan-2026-09-30.json) was committed
+The [plan](../../../ops/formation-static-functional-plan-2026-09-30.json) was committed
 before Formation/browser execution at
 `896c3cc0e441e770c697a6ac5421b067be7d7203`, SHA256
 `1fe46dcc666385c2cc8a5ab36ba89b7e6deadf28da943beb2b0385709c3d0de7`.
@@ -49,15 +52,15 @@ RAF / visual-transition waiting to the harness; source, Formation result and
 acceptance conditions were unchanged. Both rounds are retained; no further
 Formation invocation or online retry.
 
-Evidence: [append JSON](formation-static-functional-append-2026-09-30.json),
-[raw browser trace](evidence/formation-static-functional-20260930/run-2/browser-results.json),
-[2048 Formation observation](evidence/formation-static-functional-20260930/21-formation.json),
-[reveal Formation observation](evidence/formation-static-functional-20260930/22-formation.json).
+Evidence: [append JSON](../../../ops/formation-static-functional-append-2026-09-30.json),
+[raw browser trace](../../../ops/evidence/formation-static-functional-20260930/run-2/browser-results.json),
+[2048 Formation observation](../../../ops/evidence/formation-static-functional-20260930/21-formation.json),
+[reveal Formation observation](../../../ops/evidence/formation-static-functional-20260930/22-formation.json).
 The JSON ledger hashes all screenshots and both browser rounds.
 
-![2048 after fixed keys](evidence/formation-static-functional-20260930/run-2/2048-after.png)
-![reveal.js next slide](evidence/formation-static-functional-20260930/run-2/reveal-next.png)
-![reveal.js returned](evidence/formation-static-functional-20260930/run-2/reveal-return.png)
+![2048 after fixed keys](../../../ops/evidence/formation-static-functional-20260930/run-2/2048-after.png)
+![reveal.js next slide](../../../ops/evidence/formation-static-functional-20260930/run-2/reveal-next.png)
+![reveal.js returned](../../../ops/evidence/formation-static-functional-20260930/run-2/reveal-return.png)
 
 Reproduction consumes the saved fresh bundle roots, using an already provisioned
 Playwright module and Chrome executable; it installs no dependency:
