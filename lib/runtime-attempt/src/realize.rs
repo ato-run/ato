@@ -96,6 +96,12 @@ pub trait CandidateRealizer {
         false
     }
 
+    /// The executor measures host conditions itself before any realization.
+    /// Unmeasured runtimes and automatic search keep the default refusal.
+    fn admits_host_requirements(&self) -> bool {
+        false
+    }
+
     /// Whether this realizer can run the candidate on this Runtime
     /// (containment, toolchains, build network). `None` when it can. Asked
     /// before the start record, so a refusal runs nothing.

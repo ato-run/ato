@@ -102,17 +102,25 @@ pub(crate) fn admit_with_model_delivery(
     browser: Option<&BrowserVerification>,
     delivers_model_sets: bool,
 ) -> Option<AttemptFailure> {
+    admit_with_realizer_capabilities(spec, authorization, browser, delivers_model_sets, false)
+}
+
+pub(crate) fn admit_with_realizer_capabilities(
+    spec: &AttemptSpec<'_>,
+    authorization: EffectAuthorization<'_>,
+    browser: Option<&BrowserVerification>,
+    delivers_model_sets: bool,
+    admits_host: bool,
+) -> Option<AttemptFailure> {
     if spec.derivation.native_surface.is_some() {
         return refused(
             "native_surface_unavailable",
             "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
         );
     }
-    // No entry into this attempt path measures its host against a route's
-    // host condition, so none may run such a route. The route is not wrong;
-    // it is unverified here, and only a Runner admitted against the condition
-    // runs it. Before authority, so an exploration grant cannot bypass it.
-    if spec.derivation.requirements.host.is_some() {
+    // Only an executor that actually measures host conditions can admit one.
+    // Before authority: an exploration grant cannot assert physical capacity.
+    if spec.derivation.requirements.host.is_some() && !admits_host {
         return refused(
             COMPATIBLE_RUNTIME_UNAVAILABLE,
             "D states a host condition this runtime does not admit against",
@@ -129,6 +137,12 @@ pub(crate) fn admit_with_model_delivery(
             MODEL_SET_UNAVAILABLE,
             "D consumes a Model Set and this runtime has no data plane to deliver it",
         );
+    }
+    // A measured physical host is admission, not permission for other effects.
+    // This local view never changes the sealed D or its digest.
+    let mut remaining_requirements = spec.derivation.requirements.clone();
+    if admits_host {
+        remaining_requirements.host = None;
     }
     match authorization {
         EffectAuthorization::Exploration {
@@ -152,7 +166,7 @@ pub(crate) fn admit_with_model_delivery(
                 );
             }
         }
-        _ if !spec.derivation.requirements.is_empty() => {
+        _ if !remaining_requirements.is_empty() => {
             return refused(
                 "execution_authority_required",
                 "requirements in D do not grant normal execution; risk assessment and authorization for this D digest are required",
@@ -530,5 +544,36 @@ mod tests {
                 Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
             );
         }
+        assert!(
+            admit_with_realizer_capabilities(
+                &spec,
+                EffectAuthorization::Unattended,
+                None,
+                true,
+                true
+            )
+            .is_none()
+        );
+        let mut needs_network = derivation.clone();
+        needs_network.requirements=serde_json::from_value(serde_json::json!({
+            "host":{"os":"linux","arch":"x86_64","accelerators":[{"vendor":"nvidia","count":1,"min_vram_mib":16000}]},
+            "network":[{"phase":"runtime","host":"example.com","port":443}]
+        })).unwrap();
+        let restricted = AttemptSpec {
+            derivation: &needs_network,
+            ..spec
+        };
+        assert_eq!(
+            admit_with_realizer_capabilities(
+                &restricted,
+                EffectAuthorization::Unattended,
+                None,
+                true,
+                true
+            )
+            .map(|failure| failure.code)
+            .as_deref(),
+            Some("execution_authority_required")
+        );
     }
 }
