@@ -143,6 +143,7 @@ fn runner_capabilities(
         // Runner until it understands v3 AND has a writable volume store.
         if persistent_volumes {
             capabilities.push(runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE);
+            capabilities.push(runtime_launch::volume::RUNNER_SINGLE_OCI_VOLUME_FEATURE);
         }
         if network_controls {
             capabilities.push("network=ato.tcp-egress@1");
