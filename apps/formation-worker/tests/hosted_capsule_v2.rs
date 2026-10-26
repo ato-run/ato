@@ -576,6 +576,11 @@ fn a_portable_v2_process_source_publishes_the_additive_result() {
         result["verification_receipt"]["derivation_ref"],
         derivation_ref
     );
+    eprintln!(
+        "[hosted-capsule-v2] contract_ref={contract_ref} derivation_ref={derivation_ref} \
+         portable_bundle_sha256={bundle_sha} fully_satisfied={} artifact_ref={}",
+        result["verification_receipt"]["fully_satisfied"], result["portable_bundle_artifact_ref"],
+    );
 }
 
 /// Gate A acceptance for the real memos source. It needs a Linux Docker host
@@ -616,4 +621,13 @@ fn memos_v2_hosted_formation_returns_a_satisfied_receipt() {
             .starts_with("sha256:")
     );
     assert_eq!(job.materialization_ref, "bnd_fixture");
+    eprintln!(
+        "[gate-a-memos] contract_ref={} derivation_ref={} portable_bundle_sha256={} \
+         fully_satisfied={} artifact_ref={} format=portable_v2",
+        result["contract_ref"],
+        result["derivation_ref"],
+        result["portable_bundle_sha256"],
+        result["verification_receipt"]["fully_satisfied"],
+        result["portable_bundle_artifact_ref"],
+    );
 }
