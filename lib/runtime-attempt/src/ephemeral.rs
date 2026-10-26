@@ -377,6 +377,8 @@ impl TemporaryRealization {
                     mount_target: slot.mount.clone(),
                     access,
                     writer_fence: None,
+                    // An exploration attempt never uses durable volumes.
+                    backing: None,
                 });
                 resolved_state.push(ResolvedStateAttachment::new(
                     slot.id.clone(),

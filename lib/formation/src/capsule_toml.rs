@@ -132,6 +132,24 @@ pub fn classify(text: &str) -> Result<CapsuleDocumentKind, CapsuleTomlError> {
     Ok(CapsuleDocumentKind::Unknown)
 }
 
+/// The `schema` a document declares, parsed but not interpreted.
+///
+/// Routing only: the control plane and the Formation worker must decide which
+/// frontend owns a document before loading either grammar. This reads the
+/// discriminator and nothing else, so a document claiming a grammar this build
+/// does not read is routed (and refused) by name rather than by a parse error
+/// from the wrong parser.
+pub fn declared_schema(text: &str) -> Result<Option<String>, CapsuleTomlError> {
+    let parsed: Value = text.parse().map_err(|error| CapsuleTomlError::Syntax {
+        detail: format!("{error}"),
+    })?;
+    Ok(parsed
+        .as_table()
+        .and_then(|table| table.get("schema"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned))
+}
+
 /// Read the file at a source root, if there is one.
 ///
 /// `Ok(None)` means the author wrote no `capsule.toml`, which is the ordinary
