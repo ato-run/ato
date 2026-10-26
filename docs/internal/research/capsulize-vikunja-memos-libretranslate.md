@@ -1,5 +1,10 @@
 # Vikunja / Memos / LibreTranslate を ato capsule 化する手順
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 > 作成: 2026-04-29
 > 対象 ato: v0.4.100
 > 関連: [ato-desktop-dogfood-capsule-research.md](./ato-desktop-dogfood-capsule-research.md)
@@ -25,7 +30,7 @@
 **OCI を選ぶ根拠（実コードで確認）:**
 
 - Vikunja は Go 単体バイナリだが、フロント (Vue) は **配布形態が Docker image / 個別 zip** で、ato 側の `runtime = "source/native"` は **UARC V1 で deprecated** ([crates/capsule/src/foundation/types/manifest.rs:91-94](../crates/capsule/src/foundation/types/manifest.rs))。同じ理由で Memos も OCI。
-- LibreTranslate は Python 製なので `runtime = "source/python"` も可能だが、**RuntimeGuard が `--unsafe` と `--enforcement strict` を要求** ([ATO_CLI_SPEC §3](../crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md))。OCI なら不要。
+- LibreTranslate は Python 製なので `runtime = "source/python"` も可能だが、**RuntimeGuard が `--unsafe` と `--enforcement strict` を要求** ([ATO_CLI_SPEC §3](../../archive/rfcs-legacy-accepted/ATO_CLI_SPEC.md))。OCI なら不要。
 - 永続化は **`[storage.volumes]`** で `mount_path` を指定すれば bollard が PortBinding と Volume を同時に張る ([oci.rs](../crates/capsule/src/engine/runtime/oci.rs))。
 
 ---
@@ -332,7 +337,7 @@ Argos の JP-EN BLEU は **11.36** と低め。技術文書の大意把握には
 
 ## 7. ato-desktop パネルへの登録
 
-3 capsule とも `ato run` 後、ato-desktop は **session contract 経由で `local_url` を受け取り、Wry WebView pane に埋め込む** ([ATO_CLI_SPEC §2.6](../crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md))。
+3 capsule とも `ato run` 後、ato-desktop は **session contract 経由で `local_url` を受け取り、Wry WebView pane に埋め込む** ([ATO_CLI_SPEC §2.6](../../archive/rfcs-legacy-accepted/ATO_CLI_SPEC.md))。
 
 手順:
 
@@ -442,6 +447,6 @@ user    = "0"     # ← この field を追加すれば wrapper image 不要に
 - [Memos GitHub](https://github.com/usememos/memos)
 - [LibreTranslate GitHub](https://github.com/LibreTranslate/LibreTranslate)
 - [LibreTranslate `--load-only` 解説](https://hub.docker.com/r/libretranslate/libretranslate)
-- リポジトリ内: [ato CLI Spec (v0.3)](../crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md)
+- リポジトリ内: [ato CLI Spec (v0.3)](../../archive/rfcs-legacy-accepted/ATO_CLI_SPEC.md)
 - リポジトリ内: [oci-alpine-hello サンプル](../crates/ato-cli/samples/01-capabilities/oci-alpine-hello/)
 - リポジトリ内: [persistent-workspace サンプル](../crates/ato-cli/samples/01-capabilities/persistent-workspace/)

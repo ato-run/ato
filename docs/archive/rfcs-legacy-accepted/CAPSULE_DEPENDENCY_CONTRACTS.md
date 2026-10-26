@@ -1217,6 +1217,6 @@ provision の credential 経路について (§7.3.2 適用結果):
 
 詳細な phase 分解、PR 順序、テスト戦略、リスクは:
 
-→ **[`docs/plan_capsule_dependency_contracts_20260504.md`](../../plan_capsule_dependency_contracts_20260504.md)**
+→ **[`docs/plan_capsule_dependency_contracts_20260504.md`](../../internal/plans/plan_capsule_dependency_contracts_20260504.md)**
 
 7 phase / 7 PR、推定 5–6 週。critical path は `parser → env origin → lock verification → orchestration → E2E`。credential 経路 (P4) は orchestration (P5) の前提として並行進行。

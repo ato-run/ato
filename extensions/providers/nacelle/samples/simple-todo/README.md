@@ -1,5 +1,15 @@
 # Simple TODO App - Capsule Deployment
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../../../../../docs/archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../../../../docs/specifications/README.md)
+> before applying any command or contract here.
+
+> Historical sample (English). Packaging and deployment commands below predate
+> the current CLI. Use the [current guide](../../../../../docs/guides/getting-started.md)
+> for a maintained portable example. Missing historical references are recorded
+> in the documentation audit; they are not replaced with unrelated specs.
+
 This directory contains a Simple TODO application ready to be deployed as a Capsule.
 
 ## Features

@@ -145,7 +145,7 @@ payload (Encrypted TAR)
 ### 6.1 署名
 
 - **Encrypted-then-Signed**: 署名は暗号化後のZIPバイト列に対して行う。
-- `sync.proof` の形式は [docs/SIGNATURE_SPEC.md](../SIGNATURE_SPEC.md) に従う。
+- `sync.proof` の形式は [docs/SIGNATURE_SPEC.md](../../archive/rfcs-legacy-accepted/SIGNATURE_SPEC.md) に従う。
 
 ### 6.2 信頼源
 
@@ -195,7 +195,7 @@ Capsule（アプリケーションパッケージ）を `.sync` 形式で配布�
 
 - **役割:** 署名/検証情報
 - **実装:** 保存・存在確認のみ（検証は未実装）
-- **形式:** [docs/SIGNATURE_SPEC.md](../SIGNATURE_SPEC.md) に準拠
+- **形式:** [docs/SIGNATURE_SPEC.md](../../archive/rfcs-legacy-accepted/SIGNATURE_SPEC.md) に準拠
 
 ## 11. 互換性
 

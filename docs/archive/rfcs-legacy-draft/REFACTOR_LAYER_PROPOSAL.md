@@ -1,8 +1,8 @@
 # ato-cli/core レイヤー構造リファクタ提案
 
-**作成日**: 2026-04-24  
-**根拠**: research_orchestrated_layer_structure_20260424/REPORT.md  
-**スタイル**: [../../REFACTOR_TODO.md](../../REFACTOR_TODO.md) に準拠（完了済み `[x]`、未着手 `[ ]`）
+**作成日**: 2026-04-24
+**根拠**: research_orchestrated_layer_structure_20260424/REPORT.md
+**スタイル**: [../../REFACTOR_TODO.md](../../internal/dashboards/REFACTOR_TODO.md) に準拠（完了済み `[x]`、未着手 `[ ]`）
 
 ---
 

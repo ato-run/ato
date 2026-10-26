@@ -1,0 +1,1085 @@
+{
+  "query": "repo:ato-run/ato \"docs/ops/\" in:body,comments",
+  "total_search_results": 129,
+  "items_fetched": 129,
+  "incomplete_search": false,
+  "bodies_and_issue_comments_inspected": 174,
+  "errors": [],
+  "references": [
+    {
+      "source": "https://github.com/ato-run/ato/pull/1503",
+      "reference": "docs/ops/oss-seven-20261023.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/1577",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1510",
+      "reference": "docs/ops/formation-repository-automation-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-repository-automation-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1510",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1513",
+      "reference": "docs/ops/native-surface-transport-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-surface-transport-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1513",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1539",
+      "reference": "docs/ops/native-text-paste-boundary-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-text-paste-boundary-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1539",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1535",
+      "reference": "docs/ops/single-oci-model-sets-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/single-oci-model-sets-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1535",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1529",
+      "reference": "docs/ops/formation-build-controller-environment-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-build-controller-environment-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1529",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1526",
+      "reference": "docs/ops/managed-embedding-relay-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/managed-embedding-relay-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1526",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1508",
+      "reference": "docs/ops/component-contract-observation-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/component-contract-observation-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1508",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1542",
+      "reference": "docs/ops/native-helper-controls-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-helper-controls-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1542",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1541",
+      "reference": "docs/ops/native-rfb-encoding-compat-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-rfb-encoding-compat-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1541",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1532",
+      "reference": "docs/ops/managed-embedding-lease-fixture-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/managed-embedding-lease-fixture-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1532",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1527",
+      "reference": "docs/ops/formation-approved-source-search-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-approved-source-search-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1527",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1538",
+      "reference": "docs/ops/source-runtime-provenance-client-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/source-runtime-provenance-client-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1538",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1517",
+      "reference": "docs/ops/bounded-github-source-fetch-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/bounded-github-source-fetch-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1517",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1534",
+      "reference": "docs/ops/oci-instance-files-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/oci-instance-files-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1534",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1530",
+      "reference": "docs/ops/native-owned-pixel-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-owned-pixel-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1530",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1514",
+      "reference": "docs/ops/native-portable-admission-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-portable-admission-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1514",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1543",
+      "reference": "docs/ops/native-browser-joint-fixture-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-browser-joint-fixture-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1543",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1540",
+      "reference": "docs/ops/native-framebuffer-resize-boundary-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-framebuffer-resize-boundary-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1540",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1533",
+      "reference": "docs/ops/native-pixel-lease-dispatch-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-pixel-lease-dispatch-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1533",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1519",
+      "reference": "docs/ops/formation-source-measurements-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-source-measurements-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1519",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/633",
+      "reference": "docs/ops/EXTERNAL_TESTER_ONBOARDING.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/633",
+      "reference": "docs/ops/EXTERNAL_TESTER_ONBOARDING.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1536",
+      "reference": "docs/ops/native-pixel-host-boundary-files-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-pixel-host-boundary-files-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1536",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1537",
+      "reference": "docs/ops/oci-component-inputs-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/oci-component-inputs-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1537",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1516",
+      "reference": "docs/ops/native-application-probe-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-application-probe-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1516",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1588",
+      "reference": "docs/ops/dev-consolidation-20261026/{PR-INVENTORY,VALIDATION,CHANGED-FILES}.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1449",
+      "reference": "docs/ops/formation-current-support-2026-09-30.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-current-support-2026-09-30.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1525",
+      "reference": "docs/ops/native-terminal-lease-dispatch-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-terminal-lease-dispatch-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1525",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1548",
+      "reference": "docs/ops/cve-2026-111497-node-brotli-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/cve-2026-111497-node-brotli-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1548",
+      "reference": "docs/ops/single-jsx-compiler-provisioning.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/operations/single-jsx-compiler-provisioning.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1520",
+      "reference": "docs/ops/formation-source-only-storage-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-source-only-storage-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1520",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1523",
+      "reference": "docs/ops/native-owned-terminal-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-owned-terminal-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1523",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1524",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1544",
+      "reference": "docs/ops/explicit-runtime-placement-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/explicit-runtime-placement-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1511",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/1023",
+      "reference": "docs/ops/staging-snapshot-builder-sugamo.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/staging-snapshot-builder-sugamo.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1515",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1512",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1509",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1507",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1545",
+      "reference": "docs/ops/native-terminal-browser-joint-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-terminal-browser-joint-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1476",
+      "reference": "docs/ops/formation-final-source-regression-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-final-source-regression-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1576",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1521",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1575",
+      "reference": "docs/ops/hosted-formation-capsule-v2.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/architecture/hosted-formation-capsule-v2.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1522",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1376",
+      "reference": "docs/ops/formation-p0-benchmark-2026-09-23.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-p0-benchmark-2026-09-23.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1531",
+      "reference": "docs/ops/formation-local-source-capture-policy-20261024.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-local-source-capture-policy-20261024.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1528",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1419",
+      "reference": "docs/ops/formation-context-recovery-c0-2026-09-27.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-context-recovery-c0-2026-09-27.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1419",
+      "reference": "docs/ops/formation-context-recovery-c0-review-2026-09-28.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-context-recovery-c0-review-2026-09-28.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1358",
+      "reference": "docs/ops/portable-instance-snapshot-progress-2026-09-17.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/portable-instance-snapshot-progress-2026-09-17.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1358",
+      "reference": "docs/ops/portable-dependency-export-progress-2026-09-16.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/portable-dependency-export-progress-2026-09-16.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1498",
+      "reference": "docs/ops/managed-cpu-release-20261015.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1420",
+      "reference": "docs/ops/formation-context-provider-c1-2026-09-28.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-context-provider-c1-2026-09-28.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1420",
+      "reference": "docs/ops/formation-context-provider-c1-hardening-2026-09-28.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-context-provider-c1-hardening-2026-09-28.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1562",
+      "reference": "docs/ops/stateful-transformation-v1.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/stateful-transformation-v1.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1385",
+      "reference": "docs/ops/static-web-instance-state-lane.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/static-web-instance-state-lane.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1408",
+      "reference": "docs/ops/formation-foundation-track-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-foundation-track-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1408",
+      "reference": "docs/ops/formation-foundation-track-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-foundation-track-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1546",
+      "reference": "docs/ops/continuous-patching-ledger.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/continuous-patching-ledger.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1461",
+      "reference": "docs/ops/formation-process-artifact-transport-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-process-artifact-transport-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1458",
+      "reference": "docs/ops/formation-wheel-metadata-headers-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-wheel-metadata-headers-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1518",
+      "reference": "docs/ops/dev-consolidation-20261026/PR-INVENTORY.md",
+      "moved": false,
+      "old_path_exists": true,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1407",
+      "reference": "docs/ops/formation-foundation-track-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-foundation-track-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1401",
+      "reference": "docs/ops/formation-2e-b-ownership-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-2e-b-ownership-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1397",
+      "reference": "docs/ops/formation-3a-acceptance-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-3a-acceptance-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1464",
+      "reference": "docs/ops/formation-build-record-retention-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-build-record-retention-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1462",
+      "reference": "docs/ops/formation-embedding-failure-evidence-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-embedding-failure-evidence-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1549",
+      "reference": "docs/ops/runtime-image-ledger.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/operations/runtime-image-ledger.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1547",
+      "reference": "docs/ops/formation-worker-update-lifecycle.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/operations/formation-worker-update-lifecycle.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1495",
+      "reference": "docs/ops/runpod-offload-evidence-b11429-2026-10-09.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/runpod-offload-evidence-b11429-2026-10-09.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1467",
+      "reference": "docs/ops/formation-coordinator-state-verification-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-coordinator-state-verification-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1499",
+      "reference": "docs/ops/oss-790-nonroot-state-2026-10-15.md\u3001docs/rfcs/draft/OCI_EXPLICIT_NUMERIC_USER.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1494",
+      "reference": "docs/ops/2026-10-09-runner-poll-gap.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1400",
+      "reference": "docs/ops/runtime-network-search-budget-migration.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1365",
+      "reference": "docs/ops/always-on-network-controls-staging-2026-09-19.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/always-on-network-controls-staging-2026-09-19.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1365",
+      "reference": "docs/ops/stalwart-missive-mail-staging-2026-09-20.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/stalwart-missive-mail-staging-2026-09-20.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1398",
+      "reference": "docs/ops/hosted-formation-2d-acceptance-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/hosted-formation-2d-acceptance-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1447",
+      "reference": "docs/ops/oci-profile-working-dir-state.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/oci-profile-working-dir-state.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1478",
+      "reference": "docs/ops/formation-agent-ci-comparison-20261003.md\u3001formation-agent-linux-ci-comparison-20261003.md\u3001formation-windows-attempt-journal-local-20261003.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1466",
+      "reference": "docs/ops/formation-verification-state-bindings-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-verification-state-bindings-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1465",
+      "reference": "docs/ops/formation-status-transport-retries-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-status-transport-retries-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1405",
+      "reference": "docs/ops/formation-2e-c-oci-ownership-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-2e-c-oci-ownership-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1405",
+      "reference": "docs/ops/formation-2e-c-oci-ownership-2026-09-25.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-2e-c-oci-ownership-2026-09-25.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1448",
+      "reference": "docs/ops/formation-wbo-online.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-wbo-online.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1222",
+      "reference": "docs/ops/pocketllm-demo-host.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/pocketllm-demo-host.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1410",
+      "reference": "docs/ops/formation-5b-exploration-actions-2026-09-26.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-5b-exploration-actions-2026-09-26.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1388",
+      "reference": "docs/ops/formation-p0-unblock-3-2026-09-23.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-p0-unblock-3-2026-09-23.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1481",
+      "reference": "docs/ops/formation-kutt-source-result-product-20261005.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-kutt-source-result-product-20261005.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1475",
+      "reference": "docs/ops/open-compute-staging-e2e-2026-10-03.md",
+      "moved": false,
+      "old_path_exists": false,
+      "destination": null
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1559",
+      "reference": "docs/ops/contract-preserving-transformation-v0.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/contract-preserving-transformation-v0.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1456",
+      "reference": "docs/ops/formation-v0-small-acceptance-20261002.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-v0-small-acceptance-20261002.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1409",
+      "reference": "docs/ops/formation-5a-decision-provider-2026-09-26.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-5a-decision-provider-2026-09-26.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1366",
+      "reference": "docs/ops/gmail-support-desk-2026-09-20.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/gmail-support-desk-2026-09-20.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1387",
+      "reference": "docs/ops/formation-p0-unblock-2-2026-09-23.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-p0-unblock-2-2026-09-23.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1377",
+      "reference": "docs/ops/formation-p0-unblock-1-2026-09-23.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-p0-unblock-1-2026-09-23.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1558",
+      "reference": "docs/ops/contract-preserving-transformation-v0.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/contract-preserving-transformation-v0.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1373",
+      "reference": "docs/ops/runtime-network-phase1-acceptance-2026-09-23.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/runtime-network-phase1-acceptance-2026-09-23.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1389",
+      "reference": "docs/ops/formation-p0-unblock-4-2026-09-24.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-p0-unblock-4-2026-09-24.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1390",
+      "reference": "docs/ops/formation-common-attempt-acceptance-2026-09-24.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-common-attempt-acceptance-2026-09-24.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1362",
+      "reference": "docs/ops/runner-rollout-and-rollback.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/operations/runner-rollout-and-rollback.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1372",
+      "reference": "docs/ops/formation-browser-verification-v0-acceptance-2026-09-23.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-browser-verification-v0-acceptance-2026-09-23.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1371",
+      "reference": "docs/ops/formation-local-phase1-linux-acceptance-2026-09-23.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/formation-local-phase1-linux-acceptance-2026-09-23.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1347",
+      "reference": "docs/ops/single-jsx-compiler-provisioning.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/operations/single-jsx-compiler-provisioning.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1346",
+      "reference": "docs/ops/single-jsx-compiler-provisioning.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/operations/single-jsx-compiler-provisioning.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1345",
+      "reference": "docs/ops/formation-worker-build-identity.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/operations/formation-worker-build-identity.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/789",
+      "reference": "docs/ops/pocketllm-demo-host.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/pocketllm-demo-host.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/956",
+      "reference": "docs/ops/connected-runner-max-slots.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/connected-runner-max-slots.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/743",
+      "reference": "docs/ops/native-inference-vulkan-gpu-runbook.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-inference-vulkan-gpu-runbook.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/743",
+      "reference": "docs/ops/native-inference-vulkan-gpu-runbook.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-inference-vulkan-gpu-runbook.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/764",
+      "reference": "docs/ops/connected-runner-native-inference-smoke.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/connected-runner-native-inference-smoke.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/742",
+      "reference": "docs/ops/native-inference-vulkan-gpu-runbook.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-inference-vulkan-gpu-runbook.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/784",
+      "reference": "docs/ops/sglang-cuda-host.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/sglang-cuda-host.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/759#issuecomment-4776702088",
+      "reference": "docs/ops/native-inference-vulkan-gpu-runbook.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-inference-vulkan-gpu-runbook.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1328#issuecomment-5511555023",
+      "reference": "docs/ops/static-web-instance-state-lane.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/static-web-instance-state-lane.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/788#issuecomment-5087329792",
+      "reference": "docs/ops/pocketllm-demo-host.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/pocketllm-demo-host.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1022#issuecomment-5078873789",
+      "reference": "docs/ops/staging-snapshot-builder-sugamo.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/staging-snapshot-builder-sugamo.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/1022#issuecomment-5078873789",
+      "reference": "docs/ops/staging-snapshot-builder-sugamo.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/staging-snapshot-builder-sugamo.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/776#issuecomment-5087329248",
+      "reference": "docs/ops/sglang-cuda-host.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/sglang-cuda-host.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/778#issuecomment-5087329603",
+      "reference": "docs/ops/sglang-cuda-host.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/sglang-cuda-host.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/777#issuecomment-5087329431",
+      "reference": "docs/ops/pocketllm-demo-host.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/pocketllm-demo-host.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/pull/742#issuecomment-4766253524",
+      "reference": "docs/ops/native-inference-vulkan-gpu-runbook.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/native-inference-vulkan-gpu-runbook.md"
+    },
+    {
+      "source": "https://github.com/ato-run/ato/issues/754#issuecomment-4778779627",
+      "reference": "docs/ops/connected-runner-native-inference-smoke.md",
+      "moved": true,
+      "old_path_exists": true,
+      "destination": "docs/archive/2026/ops/connected-runner-native-inference-smoke.md"
+    }
+  ],
+  "limits": [
+    "GitHub search coverage is bounded by indexed bodies and issue/PR conversation comments.",
+    "Private/unindexed sites and line-specific PR diff links are not exhaustively discoverable.",
+    "Pinned commit URLs retain their original immutable content. Branch-relative paths depend on that branch receiving the change."
+  ],
+  "public_site_check": {
+    "url": "https://ato-run.github.io/ato/#/ops/staging-snapshot-builder-sugamo",
+    "observed": "original runbook rendered before deployment; preview old path and archive target also rendered"
+  },
+  "moved_reference_occurrences": 104,
+  "moved_unique_paths": 85
+}

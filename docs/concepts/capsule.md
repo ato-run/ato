@@ -22,8 +22,8 @@ that can be preserved, passed, resumed, composed, and forked. "Open" means
 work still remains — Bob can keep debugging; "persistent" means the point can
 be named and shared independently of Alice's still-running process.
 
-In the current implementation, a Capsule is identified by a
-`ComputationRef`. The `.capsule` file Alice sends Bob is a transport bundle
+In the computation-root profile described by this example, a Capsule is
+identified by a `ComputationRef`. The `.capsule` file Alice sends Bob is a transport bundle
 rooted at that ref; the file's bytes are not the Capsule's identity — see
 [Capsule bundle](../capsule.md).
 
@@ -70,3 +70,9 @@ Capsule != capsule.toml
 
 Each item may participate in authoring, transport, observation, or physical
 realization. None substitutes for the logical continuation.
+
+## Portable application profile
+
+The application profile instead uses a frozen Contract K as its logical root,
+with explicit Derivations for realization. Read [K, D and Source](application-contracts.md)
+for the profile boundary and draft/accepted authority distinction.

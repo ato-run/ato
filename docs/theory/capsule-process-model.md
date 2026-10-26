@@ -7,7 +7,7 @@
 > for the explicit boundary between prior art and open questions.
 
 This is an optional deep dive. If you just want to use or contribute to Ato,
-the [concept docs](../README.md#pick-a-reading-path) are enough; come back
+the [concept docs](../README.md#reading-paths) are enough; come back
 here for the research framing.
 
 ## 1. Motivation
@@ -162,7 +162,7 @@ is testing.
 
 ## 17. Implementation status
 
-For implemented behavior, use [Current implementation status](../../README.md#current-implementation-status)
+For implemented behavior, use [Current implementation and specification boundaries](../specifications/README.md)
 and the [accepted RFCs](../rfcs/README.md), not this theory draft. In short:
 Computation identity, composition, and Replay-based Materialization are
 implemented; process/VM checkpoints, cross-host resume, contract-indexed

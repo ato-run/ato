@@ -162,6 +162,6 @@ IPC Broker は ato-cli が担う（CAPSULE_IPC_SPEC v1.1）。nacelle は **Sand
 
 ## 9. 関連ドキュメント
 
-- Engine Contract: [nacelle/docs/ENGINE_INTERFACE_CONTRACT.md](../nacelle/docs/ENGINE_INTERFACE_CONTRACT.md)
-- Security: [nacelle/SECURITY.md](../nacelle/SECURITY.md)
+- Engine Contract: [nacelle/docs/ENGINE_INTERFACE_CONTRACT.md](../../../extensions/providers/nacelle/docs/ENGINE_INTERFACE_CONTRACT.md)
+- Security: [nacelle/SECURITY.md](../../../extensions/providers/nacelle/SECURITY.md)
 - **IPC Specification:** `CAPSULE_IPC_SPEC.md`（accepted、`ATO_CLI_SPEC.md` Section 2 も参照）

@@ -79,6 +79,6 @@ port = 8000
 - **配布**: `.capsule` 単一ファイルとして配布し、ストリーミング検証しつつ展開・実行する
 
 注: 旧「自己展開型単一実行ファイル」と Artifact Format v2 は
-[`CAPSULE_FORMAT_V2.md`](../archived/CAPSULE_FORMAT_V2.md) にarchiveされている。
+[`CAPSULE_FORMAT_V2.md`](../../rfcs/archived/CAPSULE_FORMAT_V2.md) にarchiveされている。
 State + I/O のportable containerは
 [`CAPSULE_BUNDLE_V1.md`](protocol/CAPSULE_BUNDLE_V1.md)を正本とする。
