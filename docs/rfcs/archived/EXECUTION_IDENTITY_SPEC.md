@@ -58,7 +58,7 @@ not bumped** — the facet set carries its own version (§3.1).
 - RunnerClass sentinel resolution that supplies `rootfs_base_id` /
   `guest_kernel_id` — a **prerequisite tracked in a separate PR** (see §3.4).
 - The source-tree hash algorithm
-  ([A1_SOURCE_TREE_PROFILE.md](../draft/A1_SOURCE_TREE_PROFILE.md)).
+  ([A1_SOURCE_TREE_PROFILE.md](../../archive/rfcs-legacy-draft/A1_SOURCE_TREE_PROFILE.md)).
 
 ## 3. Design
 
@@ -130,7 +130,7 @@ execution_id = "blake3:" + hex(blake3(JCS(execution_identity_facets)))
   (like `ReadyStateManifest::id()`), consistent with the hash-role split:
   `sha256` facets are *identity* inputs; the `blake3` fold is the *structural
   id* of the facet set. See
-  [HASH_AND_PROVENANCE_POLICY.md](../draft/HASH_AND_PROVENANCE_POLICY.md) §2.
+  [HASH_AND_PROVENANCE_POLICY.md](../../archive/rfcs-legacy-draft/HASH_AND_PROVENANCE_POLICY.md) §2.
 - The facet set is a fixed, ordered schema governed by
   **`execution_identity_schema`** (independent of `ato.ready-state/v1`); JCS
   makes key order irrelevant, but the version pins which facets participate so a
@@ -191,6 +191,6 @@ and reproducible from its artifact alone.
 - `crates/snapshot/src/manifest.rs:19-63` — `ReadyStateManifest`, `READY_STATE_SCHEMA`, existing `execution_id`/`runner_class_id` fields.
 - `crates/snapshot/src/manifest.rs:112-130` — `ReadyStateLayers` (`rootfs`/`runtime`/`app` as `BlobManifest` CAS refs — the source of the sealed-output facets).
 - `crates/snapshot/src/manifest.rs:97-104` — `ReadyStateManifest::id()` (existing JCS + BLAKE3 structural id).
-- [../accepted/ADR-002-signature-format-jcs.md](../accepted/ADR-002-signature-format-jcs.md) — JCS (RFC 8785) canonicalization.
-- [A1_SOURCE_TREE_PROFILE.md](../draft/A1_SOURCE_TREE_PROFILE.md) —
+- [../accepted/ADR-002-signature-format-jcs.md](../../archive/rfcs-legacy-accepted/ADR-002-signature-format-jcs.md) — JCS (RFC 8785) canonicalization.
+- [A1_SOURCE_TREE_PROFILE.md](../../archive/rfcs-legacy-draft/A1_SOURCE_TREE_PROFILE.md) —
   `source_tree_hash` (`materialized_source_tree_hash`).

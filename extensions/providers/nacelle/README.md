@@ -81,7 +81,7 @@ the project into a container image or a virtual machine.
 
 - Engine契約（CLI↔Engine）: [nacelle/docs/ENGINE_INTERFACE_CONTRACT.md](docs/ENGINE_INTERFACE_CONTRACT.md)
 - セキュリティポリシー: [nacelle/SECURITY.md](SECURITY.md)
-- 最新アーキテクチャ概要（repo全体）: [docs/architecture/ARCHITECTURE_OVERVIEW.md](../docs/architecture/ARCHITECTURE_OVERVIEW.md)
+- 最新アーキテクチャ概要（repo全体）: [Ato architecture](../../../docs/architecture/README.md)
 
 ## 関連ADR
 

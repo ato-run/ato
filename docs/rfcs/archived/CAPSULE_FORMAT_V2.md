@@ -15,7 +15,7 @@ related:
 > **Archived:** This document describes the legacy Ato distribution artifact.
 > It is not an authority for the State + I/O Capsule Protocol. The portable
 > Protocol container is defined by
-> [`CAPSULE_BUNDLE_V1.md`](../accepted/protocol/CAPSULE_BUNDLE_V1.md).
+> [`CAPSULE_BUNDLE_V1.md`](../../archive/rfcs-legacy-accepted/protocol/CAPSULE_BUNDLE_V1.md).
 
 **配布物（.capsule）の標準フォーマット**を実装・運用向けに要約したもの。
 > 旧 ADR `docs/adr/2026-01-18_000001_capsule-format-v2.md` は廃止済み。ソースコードの実装 (`apps/ato-cli/core/src/packers/capsule.rs`) を正本とする。
