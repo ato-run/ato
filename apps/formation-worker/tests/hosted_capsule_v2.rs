@@ -37,6 +37,15 @@ impl SourceFetcher for Fetcher {
 }
 
 struct Packer;
+/// One request header, lowercased name, trimmed value.
+fn header_value(header: &str, name: &str) -> Option<String> {
+    header.lines().find_map(|line| {
+        line.to_ascii_lowercase()
+            .strip_prefix(&format!("{name}:"))
+            .map(|value| value.trim().to_owned())
+    })
+}
+
 impl TreePacker for Packer {
     fn pack(&self, root: &Path) -> Result<Vec<u8>> {
         ato_formation_worker::pack::pack_tree(root)
@@ -49,6 +58,8 @@ struct Captured {
     result: Arc<Mutex<Option<Value>>>,
     bundle: Arc<Mutex<Option<Vec<u8>>>>,
     bundle_path: Arc<Mutex<Option<String>>>,
+    bundle_identity: Arc<Mutex<Option<(String, String)>>>,
+    bundle_refusals: Arc<AtomicUsize>,
     uploads: Arc<AtomicUsize>,
 }
 
@@ -68,11 +79,15 @@ impl ApiFixture {
             result: Arc::new(Mutex::new(None)),
             bundle: Arc::new(Mutex::new(None)),
             bundle_path: Arc::new(Mutex::new(None)),
+            bundle_identity: Arc::new(Mutex::new(None)),
+            bundle_refusals: Arc::new(AtomicUsize::new(0)),
             uploads: Arc::new(AtomicUsize::new(0)),
         };
         let result = Arc::clone(&captured.result);
         let bundle = Arc::clone(&captured.bundle);
         let bundle_path = Arc::clone(&captured.bundle_path);
+        let bundle_identity = Arc::clone(&captured.bundle_identity);
+        let bundle_refusals = Arc::clone(&captured.bundle_refusals);
         let uploads = Arc::clone(&captured.uploads);
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopped);
@@ -126,13 +141,37 @@ impl ApiFixture {
                 } else if header.starts_with("PUT /v1/internal/formation/attempts/")
                     && header.contains("/portable-bundle/")
                 {
+                    // The route refuses a registration that does not name K and
+                    // D. Mirroring that here is what makes this suite catch a
+                    // worker that omits the headers: the fixture must not be
+                    // more permissive than the control plane it stands in for.
                     let path = header
                         .split_whitespace()
                         .nth(1)
                         .unwrap_or_default()
                         .to_owned();
+                    let contract_ref = header_value(&header, "x-ato-contract-ref");
+                    let derivation_ref = header_value(&header, "x-ato-derivation-ref");
+                    let content_address = |value: &Option<String>| {
+                        value
+                            .as_deref()
+                            .is_some_and(|v| v.starts_with("sha256:") && v.len() == 71)
+                    };
+                    if !content_address(&contract_ref) || !content_address(&derivation_ref) {
+                        bundle_refusals.fetch_add(1, Ordering::SeqCst);
+                        let refusal = r#"{"error":"portable_bundle_identity_invalid"}"#;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            refusal.len(),
+                            refusal
+                        );
+                        continue;
+                    }
                     *bundle_path.lock().unwrap() = Some(path);
                     *bundle.lock().unwrap() = Some(body.to_vec());
+                    *bundle_identity.lock().unwrap() =
+                        Some((contract_ref.unwrap(), derivation_ref.unwrap()));
                     uploads.fetch_add(1, Ordering::SeqCst);
                 }
                 let response = if header.contains("/portable-bundle/") {
@@ -552,6 +591,28 @@ fn a_portable_v2_process_source_publishes_the_additive_result() {
         "application/vnd.ato.portable-application.v3"
     );
     assert_eq!(result["materializations"][0]["digest"], bundle_sha);
+    // The registration named the identity the API checks. A worker that sent
+    // only the transport digest would be refused `portable_bundle_identity_invalid`
+    // by the real route, and the fixture now refuses it too.
+    let (registered_k, registered_d) = hosted
+        .fixture
+        .captured
+        .bundle_identity
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the bundle registration named its Contract and Derivation");
+    assert_eq!(registered_k, result["contract_ref"].as_str().unwrap());
+    assert_eq!(registered_d, result["derivation_ref"].as_str().unwrap());
+    assert_eq!(
+        hosted
+            .fixture
+            .captured
+            .bundle_refusals
+            .load(Ordering::SeqCst),
+        0,
+        "the control plane refused no registration"
+    );
     let derivation_ref = result["derivation_ref"].as_str().expect("a route ran");
     assert_eq!(
         result["realization_candidates"][0]["derivation_ref"],
