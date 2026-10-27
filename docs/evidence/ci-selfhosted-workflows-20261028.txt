@@ -154,3 +154,40 @@ exit=0
 
 $ node scripts/docs-site-check.mjs
 Documentation site acceptance: 8 route cases, shared sidebars and README example passed.
+
+============================================================
+7. GitHub dispatch observation (PR #1599, pool not yet up)
+============================================================
+date        2026-10-28T03:0x+09:00
+head_sha    409da1f6816f21489b9349f9c048a72ad0dd622b
+pr          https://github.com/ato-run/ato/pull/1599 (draft, base main)
+
+GitHub parsed every edited workflow and dispatched its jobs — this is the
+runtime confirmation that the matrix `runner` label lists resolve as intended,
+and that the historical check names are preserved:
+
+$ gh api repos/ato-run/ato/actions/runs?head_sha=409da1f6...
+Rust CI                    | run=40555688217 | queued
+Release dry-run            | run=40555688323 | queued
+Documentation acceptance   | run=40555688189 | queued
+Release                    | run=40555688214 | completed success
+
+$ gh api repos/ato-run/ato/actions/runs/40555688217/jobs
+workspace (windows-latest) | status=in_progress | runner=GitHub Actions 1000034459 | labels=windows-latest
+workspace (ubuntu-latest)  | status=queued      | runner=(none)                   | labels=self-hosted,linux,x64,ato-ci
+workspace (macos-latest)   | status=in_progress | runner=GitHub Actions 1000034463 | labels=macos-latest
+
+$ gh api repos/ato-run/ato/actions/runs/40555688323/jobs
+desktop xtask build paths        | status=queued | labels=self-hosted,linux,x64,ato-ci
+cargo-dist generate --check + plan | status=queued | labels=self-hosted,linux,x64,ato-ci
+
+$ gh api repos/ato-run/ato/actions/runs/40555688189/jobs
+documentation | status=queued | labels=self-hosted,linux,x64,ato-ci
+
+Reading: the Linux jobs are queued *with the exact label set* and no runner is
+assigned yet — that is the expected state until the self-hosted pool is
+provisioned, not a workflow error. The macOS/Windows legs started immediately on
+GitHub-hosted runners.
+
+STILL NOT PROVEN: any job actually executing on the pool (green), and a failing
+test producing a red check there. Both remain open for the pool acceptance.
