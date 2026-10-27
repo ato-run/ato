@@ -18,8 +18,15 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+# Runs on PRs (also from forks), so it stays read-only and secret-free: the
+# dry run only reads the repo and exercises the release tooling locally.
 permissions:
   contents: read
+
+# One in-flight run per ref; only PR runs are cancelled by a newer push.
+concurrency:
+  group: release-dry-run-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +35,8 @@ env:
 jobs:
   dist-check:
     name: cargo-dist generate --check + plan
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ato-ci]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +53,8 @@ jobs:
 
   xtask-build-paths:
     name: desktop xtask build paths
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ato-ci]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

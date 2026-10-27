@@ -24,6 +24,13 @@
 # even on a fresh fork.
 name: desktop-release
 
+# Release path, not CI: stays on GitHub-hosted runners (macOS/Windows build legs
+# plus the Linux publish job). It needs whole-release shaped runners and the
+# code-signing secrets below, and the self-hosted ato-ci pool must never hold
+# release credentials. Only tag pushes and workflow_dispatch can trigger it, so
+# pull requests — including fork PRs — cannot reach it. Do not move it to the
+# ato-ci label set; see docs/ops/ci-selfhosted-runners.md.
+
 on:
   push:
     tags:

@@ -7,17 +7,34 @@ on:
     paths: ["apps/cli/**", "lib/**", "extensions/**", "Cargo.toml", "Cargo.lock"]
   workflow_dispatch:
 
+# Public-repository CI: fork PRs run attacker-controlled code in this workflow,
+# so it gets read-only repository access and never sees a secret.
 permissions:
   contents: read
 
+# One in-flight run per ref; only PR runs are cancelled by a newer push.
+concurrency:
+  group: cli-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   cli:
-    runs-on: ${{ matrix.os }}
+    name: cli (${{ matrix.label }})
+    # Linux runs on the self-hosted ephemeral ato-ci pool; macOS/Windows stay on
+    # GitHub-hosted runners (no self-hosted capacity for them). `label` keeps
+    # the historical check names stable.
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - label: ubuntu-latest
+            runner: [self-hosted, linux, x64, ato-ci]
+          - label: macos-latest
+            runner: [macos-latest]
+          - label: windows-latest
+            runner: [windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
