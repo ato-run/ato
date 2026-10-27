@@ -25,6 +25,13 @@ target binary.
   labels, the run journal). An older target does not recover leftovers; step 2
   below must then leave nothing behind before switching.
 
+- Know which launch-spec features the target can PARSE, not only which
+  capabilities it advertises. A runner can advertise
+  `runner_persistent_volume_v1` while its binary predates
+  `StateAttachmentV1.backing`; such a binary rejects the lease with
+  `ATO_ERR_RUNTIME_LAUNCH_SPEC_FORBIDDEN_FIELD`. Check the commit with
+  `git merge-base --is-ancestor a7c35792b <target>`, and treat the
+  [compatibility matrix](compatibility-matrix.md) as part of this precondition.
 - Know whether the target understands `ato.runtime-launch-spec.v3`
   (Runner-local persistent volumes). A target without it, or without
   `ATO_RUNNER_STATE_VOLUME_ROOT`, does not advertise
