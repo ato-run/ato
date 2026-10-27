@@ -996,6 +996,7 @@ mod tests {
             mount_target: "/data".into(),
             access: StateAccessV1::ReadWrite,
             writer_fence: Some(1),
+            backing: None,
         };
         let resolved = ResolvedStateAttachment::new(
             "app_data",
