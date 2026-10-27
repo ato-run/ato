@@ -109,3 +109,23 @@ isolates tap, work root, IPs and scratch under an `atoe2e` run prefix and
   listener (`file_remains=true` in the log). → ato#1157
 - A non-`source_lost` capture failure has no backoff and no failure budget: 356
   full snapshots in ~15 minutes on an earlier run. → ato#1160
+
+---
+
+## `ci-selfhosted-workflows-20261028.txt`
+
+Static validation for the ato CI migration to the self-hosted ephemeral runner
+pool (branch `ci/selfhosted-ephemeral-runner-20261028`): actionlint, YAML parse,
+a job/step semantic diff against `origin/main`, the untrusted-PR and permission
+audit, and the docs gate. It is **not** a runner-job log — no self-hosted job had
+executed when it was recorded — so it claims only static correctness.
+
+```text
+date          2026-10-28
+base          origin/main 49b0f9627f80cc0fb84763edd58875c06fab83b7
+actionlint    1.7.12
+result        edited workflows: 0 findings; docs gate: 0 unexpected failures
+not verified  a real green job / a real red-check run on the pool
+```
+
+Regenerate with the commands listed in the file header.
