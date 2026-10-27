@@ -56,8 +56,9 @@ switch procedure and the rollback copy of the slot drop-ins.
 | --- | --- | --- |
 | ato CLI | 0.8.1 | `dist plan --tag=v0.8.1` succeeds; cargo-dist requires tag == crate version |
 | PWA contract | `PWA_API_CONTRACT=1` | served HTML carries the build stamp; stale bundles are fenced with 426 |
+| PWA main | `867f73bd` | staging serves the prior `524daddb` build until its next deploy; the contract fence, not the commit, decides compatibility |
 | API schema | migrations through `0377` on staging | production is behind; never infer from a commit number |
-| Staging API | version `9da8c665-d39e-4444-950e-54bd7f0469bb` | `safe deploy a662ff565666` |
+| Staging API | version `d51ae267-1cf6-45f2-90f9-7ec6c8a3c6ea` | `safe deploy c81faba692c1` (includes the volume-missing delete fix) |
 | Staging hosted Runner | `ato-connected-realization-worker-3b6a1df6e` | six slots; previous candidate `0fabc1f7e` is the rollback target |
 
 ## How to verify a combination
