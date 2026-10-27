@@ -1,6 +1,6 @@
 [package]
 name = "ato-cli"
-version = "0.7.9"
+version = "0.8.1"
 edition = "2024"
 description = "Ato command line interface for addressable computations"
 authors = ["ato-run"]
