@@ -14,6 +14,7 @@ mod portable_dependency;
 
 pub mod activity_client;
 pub mod activity_mcp;
+pub mod auth_device;
 pub mod formation_session_mcp;
 
 use std::collections::BTreeMap;
@@ -134,6 +135,8 @@ enum Commands {
     ExportPlan(ExportPlanArgs),
     /// Repack an existing portable application without changing K or D.
     Export(ExportArgs),
+    /// Authenticate this CLI with an Ato API using the browser device flow.
+    Login(LoginArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
     /// Form a local directory into a Capsule: build each candidate, observe it
@@ -407,8 +410,9 @@ struct UploadArgs {
     materializers: Vec<String>,
     #[arg(long, env = "ATO_API_URL")]
     api_url: String,
+    /// Bearer token; defaults to ATO_API_TOKEN, then a credential saved by `ato login`.
     #[arg(long, env = "ATO_API_TOKEN", hide_env_values = true)]
-    auth_token: String,
+    auth_token: Option<String>,
     #[arg(long, value_enum, default_value = "private")]
     visibility: VisibilityPolicy,
     #[arg(long)]
@@ -423,6 +427,16 @@ struct UploadArgs {
     validation_poll_ms: u64,
     #[arg(long, default_value = "object-upload-receipt.json")]
     receipt: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct LoginArgs {
+    /// Ato API origin to authenticate against.
+    #[arg(long, env = "ATO_API_URL", default_value = auth_device::DEFAULT_API_URL)]
+    api_url: String,
+    /// Print the approval URL and wait instead of opening a browser.
+    #[arg(long)]
+    headless: bool,
 }
 
 /// The request IS the whole statement: which directory, which Runtime
@@ -665,6 +679,7 @@ pub fn run() -> Result<()> {
         },
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
+        Commands::Login(args) => login(args),
         Commands::Upload(args) => upload(args),
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
@@ -1397,6 +1412,7 @@ fn encode_materializations(
 }
 
 fn upload(args: UploadArgs) -> Result<()> {
+    let token = auth_device::resolve_token(args.auth_token, &args.api_url)?;
     let selector: CapsuleSelector = args.selector.parse()?;
     let project = project_path(&selector.capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
@@ -1461,7 +1477,7 @@ fn upload(args: UploadArgs) -> Result<()> {
     if !(16..=160).contains(&idempotency_key.len()) {
         bail!("idempotency key must contain between 16 and 160 bytes");
     }
-    let api = HttpObjectTransportApi::new(&args.api_url, args.auth_token)?;
+    let api = HttpObjectTransportApi::new(&args.api_url, token)?;
     let (vm_materialization_descriptor_ref, record_frontier_ref) =
         object_transport::vm_capture_receipt_refs(&index, repository.objects())?;
     let mut receipt = upload_http_object_graph(
@@ -1481,6 +1497,32 @@ fn upload(args: UploadArgs) -> Result<()> {
     receipt.record_frontier_ref = record_frontier_ref;
     ato_local_execution::atomic_write(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
     println!("{} {}", receipt.bundle_id, receipt.root_computation_ref);
+    Ok(())
+}
+
+fn login(args: LoginArgs) -> Result<()> {
+    let credential = auth_device::device_login(
+        &args.api_url,
+        &format!("ato/{}", env!("CARGO_PKG_VERSION")),
+        |prompt| {
+            eprintln!(
+                "Open this URL in a browser to approve the login:\n{}\nVerification code: {}",
+                prompt.activate_url, prompt.user_code
+            );
+            if !args.headless
+                && let Err(error) = open_browser(&prompt.activate_url)
+            {
+                eprintln!("could not open a browser: {error:#}");
+            }
+        },
+    )?;
+    let stored = auth_device::StoredCredential::from(credential);
+    let path = auth_device::save_credential(&args.api_url, &stored)?;
+    match stored.handle.as_deref().filter(|handle| !handle.is_empty()) {
+        Some(handle) => println!("Logged in as {handle} ({})", stored.registry_url),
+        None => println!("Logged in ({})", stored.registry_url),
+    }
+    println!("Credential saved to {}", path.display());
     Ok(())
 }
 
@@ -3538,6 +3580,25 @@ mod tests {
     }
 
     #[test]
+    fn login_supplies_the_upload_token_when_no_flag_is_given() {
+        assert!(Cli::try_parse_from(["ato", "login"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "login",
+                "--api-url",
+                "https://staging.api.ato.run",
+                "--headless",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["ato", "upload", "value", "--api-url", "https://api.ato.run"])
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn formation_inspection_requires_a_paired_contract_and_derivation() {
         assert!(Cli::try_parse_from(["ato", "form-inspect", "."]).is_ok());
         assert!(
@@ -3615,7 +3676,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(!help.contains("__worker"));
         assert!(!help.contains("__desktop"));
-        for public in ["init", "resume", "stop", "encap", "run"] {
+        for public in ["init", "resume", "stop", "encap", "run", "login"] {
             assert!(help.contains(public));
         }
     }
