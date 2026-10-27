@@ -11,6 +11,9 @@ flag state with the operation record.
   drain, quiesce, verify candidate, switch, journal/recovery and rollback.
 - [Connected Runner rollout and rollback](runner-rollout-and-rollback.md):
   stop new assignment and confirm owned resources before switching binaries.
+- [Component compatibility matrix](compatibility-matrix.md): which CLI, bundle,
+  API/PWA contract and Runner launch-spec versions must agree (and how a
+  capability string can lie about the binary behind it).
 - [Runtime image ledger](runtime-image-ledger.md): record declared image and
   patch-candidate evidence; this is not an image scanner or security attestation.
 - [Single JSX compiler provisioning](single-jsx-compiler-provisioning.md):
