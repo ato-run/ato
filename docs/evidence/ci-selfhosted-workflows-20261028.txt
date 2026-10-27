@@ -191,3 +191,52 @@ GitHub-hosted runners.
 
 STILL NOT PROVEN: any job actually executing on the pool (green), and a failing
 test producing a red check there. Both remain open for the pool acceptance.
+
+============================================================
+8. branch protection / required status checks (recorded 2026-10-28)
+============================================================
+# Question for the runner migration: do required check names gate merging?
+# If required_status_checks still listed GitHub-hosted names, moving the Linux
+# jobs to self-hosted could make main/dev unmergeable. Answer: there are no
+# required status checks, from any source.
+
+$ gh api repos/ato-run/ato/rulesets --jq '.[] | "\(.id) | \(.name) | target=\(.target) | \(.enforcement)"'
+15849842 | protect-main-dev | target=branch | active
+15849843 | protect-tags | target=tag | active
+
+$ gh api repos/ato-run/ato/rulesets/15849842 --jq '{name, refs: .conditions.ref_name.include, rules: [.rules[].type], required_status_checks_count: ([.rules[] | select(.type=="required_status_checks")] | length)}'
+{"name":"protect-main-dev","refs":["refs/heads/main","refs/heads/dev"],"required_status_checks_count":0,"rules":["deletion","non_fast_forward","update","creation","pull_request"]}
+
+$ for B in main dev nightly stg; do gh api repos/ato-run/ato/branches/$B/protection; done
+main     Branch not protected (HTTP 404)
+dev      Branch not protected (HTTP 404)
+nightly  Branch not protected (HTTP 404)
+stg      Branch not protected (HTTP 404)
+
+$ gh api graphql -f query='query { repository(owner:"ato-run", name:"ato") { branchProtectionRules(first:20) { totalCount } } }' --jq '.data.repository.branchProtectionRules.totalCount'
+0
+
+$ gh api repos/ato-run/ato/rules/branches/main --jq '{rules: [.[].type], required_status_checks: ([.[] | select(.type=="required_status_checks")] | length), sources: ([.[].ruleset_source_type] | unique)}'
+{"required_status_checks":0,"rules":["deletion","non_fast_forward","update","creation","pull_request"],"sources":["Repository"]}
+
+Reading:
+- classic branch protection is unset on main/dev/nightly/stg (404 each);
+- the only branch ruleset covering main/dev is protect-main-dev, whose rules are
+  deletion, non_fast_forward, update, creation and pull_request; there is no
+  required_status_checks rule;
+- /rules/branches/main aggregates the rules that apply to the branch and reports
+  0 required_status_checks; the only ruleset source is Repository (the token
+  lacks admin:org, so org rulesets cannot be listed directly, but this endpoint
+  is the aggregate view and shows no Organization-sourced rule);
+- therefore the self-hosted migration cannot make merges fail on a stale
+  hosted check name, and no required-check list has to be edited.
+
+Check names the migration leaves unchanged (in case required checks are added
+later): workspace (ubuntu-latest|macos-latest|windows-latest), cli (<same>),
+architecture, snapshot, documentation, cargo-dist generate --check + plan,
+desktop xtask build paths, legacy apps/desktop shim compiles (macOS), tauri shell
+(macOS), Release jobs (plan, build-local-artifacts (<target>),
+build-global-artifacts, host, publish-homebrew-formula, announce),
+desktop-release jobs (bundle macOS (darwin-arm64), bundle Windows
+(windows-x86_64), bundle Linux (linux-x86_64), Publish GitHub Release), Docs
+Pages jobs (build, deploy).
