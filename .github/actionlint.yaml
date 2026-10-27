@@ -1,0 +1,9 @@
+# actionlint configuration.
+#
+# The Linux CI jobs run on the self-hosted ephemeral ato-ci pool. Its runner
+# registers the custom label "ato-ci" in addition to the built-in
+# self-hosted / linux / x64 labels, so actionlint has to be told about it.
+# Label contract: docs/ops/ci-selfhosted-runners.md.
+self-hosted-runner:
+  labels:
+    - ato-ci
