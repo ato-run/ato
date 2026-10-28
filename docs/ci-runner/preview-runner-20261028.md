@@ -72,7 +72,7 @@ CPU も CI 500% + preview 2 vCPU = 7/6 で oversubscribe。CI の queue latency 
 
 **同じ物理ホストで同時実行する場合の必須条件**: 容量ポリシー（§5 のいずれか） + 専用 bridge/nft + preview API の secret/migration + public surface + validator。これらが揃うまで実装・負荷試験は行わない。
 
-## 5. 容量に関する最小代替案（要判断）
+## 5. 容量に関する最小代替案（決定: C を #946 限定で採用）
 
 | 案 | 内容 | 長所 | 短所 / 必要な承認 |
 |---|---|---|---|
@@ -80,7 +80,9 @@ CPU も CI 500% + preview 2 vCPU = 7/6 で oversubscribe。CI の queue latency 
 | **B. Preview を ubuntu-sugamo へ** | 既存 ubuntu-sugamo（12 vCPU / 30 GiB / 652G free / KVM）に同じ QEMU/overlay パターンで preview VM を置く。br-pv/nft で CI と完全分離。 | 容量余裕。既存物理ホストで追加費用 0。CI と物理分離。 | staging runner と同居するため blast radius の再評価が必要（VM から host/credentials へ到達不可の検証、専用 bridge、host 硬化）。staging 運用への影響承認が必要。 |
 | **C. time-sliced（CI idle 時のみ）** | sugamo-test で CI idle + queue 空 + qemu 無しのときだけ preview VM を起動（lease 共有）。 | 追加ハード不要。preview の作成・実行・再開・削除と #946 Runner 検証は可能。 | 「CI と同時実行」の最終条件は満たさない。preview は CI 中停止待ち。 |
 
-推奨: **#946 の Runner 検証は C で先行**し、最終条件（同時実行）は **A の canary 実測**で判断。A が不合格なら B を設計（staging 影響評価込み）。いずれもホスト変更・設定変更は承認後に実施する。
+**決定（2026-10-28）**: **C を #946 の一時的検証手段として採用**する。ただし「CI idle を確認する」だけでは不十分で、ホスト側で CI VM と Preview VM を排他的に制御する（Preview 開始前に CI の新規 VM 起動を抑止、実行中 Job 0 を待機、Preview 中は CI Job を GitHub queue で待機、終了後に再開、異常終了時も自動解除）。この排他制御を実装・実測できない場合は **C も BLOCKED** とする。
+**A は保留**（C の実績後、canary で段階的に実測してから判断）。**B は代替候補**（staging 影響評価が前提）。
+排他制御プロトコル・変更範囲・承認チェックリスト・#946 E2E・A canary・B 検討時のディスク帰属は [`preview-runner-c-scope-20261028.md`](preview-runner-c-scope-20261028.md) に確定した。
 
 ## 6. Phase 3 で必要な最小変更（PROPOSAL / 未適用）
 
@@ -107,11 +109,11 @@ CPU も CI 500% + preview 2 vCPU = 7/6 で oversubscribe。CI の queue latency 
 
 ## 9. 未実施・要判断（次アクション）
 
-1. 容量ポリシー（A / B / C）の選択と承認。
+1. ~~容量ポリシー（A / B / C）の選択~~ → **決定: C（#946 限定）**。次は C の排他制御実装とホスト変更の承認（§7 のチェックリスト）。
 2. ホスト変更（br-pv/nft/dnsmasq/state root/systemd unit、golden role 追加）の承認と maintenance window。
 3. preview API の D1 migration / secrets の適用範囲（operator 承認）。
 4. public surface の方式（tunnel か公開 ingress か）。
 5. validator companion の配置（preview 内か別ホストか）。
-6. #946 の A1–A6 を preview runner で実測する計画（C 案なら CI idle 時）。
+6. C 案の排他制御を実装・実測し、#946 の A1–A6 を preview runner で検証する。A 案 canary は C の実績後に段階実施。
 
 これらが決まるまで、VM 起動・ホスト変更・負荷試験は行わない。
