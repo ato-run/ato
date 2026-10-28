@@ -174,6 +174,12 @@ TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempo
 | ato #1607 | 本 docs-only 決定記録 | Draft |
 | ato-api #936 | 管理 MCP に Portable Capsule の export/import tools を追加。capsule-bundle owner routes を delegated OAuth scope（apps:read/apps:write）で許可 | マージ済み・staging 配備済み |
 | ato-api #937 | delegated MCP bearer を run-mutation Origin gate に通す（Origin を持たない MCP 経由の export/import のため）。malformed token は従来どおり拒否 | マージ済み・staging 配備済み |
+| ato-api #938 | MCP の file download を HTTPS/userinfo/private host/redirect/timeout で制限 | マージ済み・staging 配備済み |
+| ato-api #939 | MCP envelope の off-by-one 修正 | マージ済み・staging 配備済み |
+| ato-api #940 | MCP 内部 upload URL から /v1 を除去 | マージ済み・staging 配備済み |
+| ato-pwa #558 | 単一 realization の capsule を既定 route で import、複数は候補を提示 | マージ済み・staging 配備済み |
+| ato-pwa #559 | Add App フォームを session 解決後に描画（ERR_ABORTED の原因除去） | マージ済み・staging 配備済み |
+| ato-pwa #560 | サインイン文言を既存カタログに統一 | マージ済み・staging 配備済み |
 
 追加した MCP tools: check_library_exportability / export_app / get_export / prepare_import（ChatGPT file param）/ get_import_validation / import_app / get_import。既存 REST service を呼ぶだけで、新しい import engine や canonicalizer は追加していない。
 
@@ -209,9 +215,20 @@ TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempo
 | B: 再 Export | PASS。app-only export が ready、contract_ref = K' |
 | I3 独立性 | PASS（A は B の Instance を読めない 404） |
 
-### 11.2c PWA UI import の未検証
+### 11.2c PWA UI import の ERR_ABORTED（原因確定・修正済み）
 
-B の .capsule import を PWA の Add App 画面から実行する試みは、staging の配備済み PWA build（524daddb）でファイル選択後に画面が反応せず、import を開始できなかった（Playwright の filechooser / setInputFiles の双方）。API 経由の import は成功しているため、service 側ではなく配信中の PWA bundle と current main（867f73bd）の差、または capsule 選択ハンドラの問題と推定される。異なるアカウントで 4 回再試行したが、いずれも prepare が ERR_ABORTED で中断した。UNVERIFIED として残す。切り分けには main の PWA を staging / dev preview に配備して再試験する必要がある。
+staging の Add App からの .capsule import で prepare が net::ERR_ABORTED になる件を追跡した。配信中の JS の build id は f5c95587（dev ブランチの merge、stg/main の祖先ではない）で、stg 配備前の一時的な build だった。
+
+原因は 2 つ:
+1. /apps/new がアカウント session 解決前にもフォームを描画し、key が signed_out → アカウント id に変わって remount していた。ファイル選択が早いと CreateAppPage の cleanup が in-flight import を abort する（ERR_ABORTED）。
+2. Capsule route セレクタの既定が Static Web のため、OCI-only の capsule では候補 0 件になり、原因の分からない portable_selected_derivation_missing になっていた。
+
+修正:
+- ato-pwa #558: 単一 realization の capsule を既定 route でも import。複数ある場合は portable_realization_required で候補を示す。
+- ato-pwa #559: session 解決まで Add App フォームを描画しない（loading は LoadingView、signed out はサインイン）。
+- ato-pwa #560: 追加したサインイン文言を既存カタログの Sign in に置換。
+
+stg を staging に配備（PWA version e2672da9、stg d57e67d2）し、修正後の build で早期のファイル選択（待ちなし）でも prepare 201 → upload → validate → import-app → Ready まで PASS した。
 
 ### 11.2d 動的 process + filesystem state の制約
 
@@ -248,6 +265,19 @@ Portable Notes（OCI derivation）で app-only の cross-account も確認した
 
 これで Portable Notes fixture について app-only / with-data / 独立性 / 負例（別 fixture の非対応 version・改ざん）の受入が揃った。
 
+### 11.2g PWA 操作のみの Export → Import → 実行（A の Instance 削除後）
+
+UI だけで以下を実施した（スクリプト: .tmp/portable-capsule-20261028/e2e/s22-ui-only-delete.mjs）。
+
+1. A が PWA の Add App から Portable Notes（OCI）を import（UI）
+2. A がノートを作成し、PWA の Export ダイアログから with-data export（UI）
+3. A の Instance を stop → Delete data → delete（API。UI の Remove App と同じ service）
+4. A の Instance が 404 になったことを確認
+5. B が PWA の Add App から A の artifact を import（UI）
+6. B の app が 200、A のノートが復元されていることを確認
+
+結果: A の Instance 削除後でも B は artifact だけで同じ K'・状態を再現できた。送信元 Instance の存続に依存しない。
+
 ### 11.3 MCP smoke（staging、delegated token）
 
 | 項目 | 結果 |
@@ -256,11 +286,31 @@ Portable Notes（OCI derivation）で app-only の cross-account も確認した
 | export_app（delegated token、Origin なし） | PASS。export job が ready になり artifact metadata を返す |
 | prepare_import（不正な file URL） | PASS（file_download_failed。認可・経路まで到達） |
 
+### 11.3b MCP 実ファイル import（staging）
+
+192.168. ではなく公開 HTTPS で artifact を配信する必要があるため、ローカルの .capsule を一時 HTTP server + cloudflared quick tunnel で公開し、delegated MCP token で prepare_import から実行した（script: .tmp/portable-capsule-20261028/e2e/s23-mcp-real-file.mjs）。
+
+| 項目 | 結果 |
+|---|---|
+| prepare_import（tunnel URL, 32 KiB v4 artifact） | PASS。bundle_id と validating を返す |
+| get_import_validation | PASS。ready、format_version 4、root_contract_ref と derivation_refs（process / oci）を確認 |
+| import_app（OCI derivation） | PASS。import request 受理 |
+| get_import | PASS。instance と verified receipt |
+| 実行 | PASS。app 200、A のノート（artifact に含まれる状態）を復元 |
+| 負例: http URL | file_download_url_invalid |
+| 負例: https://127.0.0.1 | file_download_url_invalid |
+
+監査・修正:
+- ato-api #938: 取得 URL は HTTPS 必須、userinfo 禁止、localhost/loopback/RFC1918/link-local を拒否、redirect は manual（追従しない）、30 秒 timeout、既存 32 MiB 上限（readBounded）。
+- ato-api #939: envelope の開始位置 off-by-one を修正（実 bundle が bundle_index_invalid になっていた）。
+- ato-api #940: prepare が返す公開 upload URL の /v1 を内部 Hono 用に除去（upload が 404 になっていた）。
+- signed URL の有効期限は HTTP 応答（403/410）として file_download_failed になり、形式検証へは進まない。
+
 ### 11.4 未検証・残課題
 
-- PWA UI での .capsule 選択 import（§11.2c、staging の旧 build で未反応）。
-- MCP prepare_import の実ファイル import（ChatGPT file parameter）。実ファイルを配信する HTTPS URL が必要で、今回は不正 URL の negative のみ。
-- filesystem volume / process memory / bindings / secrets の移送（v1 対象外）。process + filesystem は hosted runner の SUN_LEN 制限で未検証（§11.2d）。
+- PWA UI の import は PASS（§11.2c / §11.2g）。staging は現時点で stg d57e67d2 / PWA version e2672da9。
+- MCP 実ファイル import は PASS（§11.3b）。URL は公開 HTTPS である必要があり、期限切れ signed URL はダウンロード失敗として拒否される。SSRF 対策は host 判定 + redirect 禁止までで、DNS rebinding の完全防御は将来課題。
+- python process derivation は hosted runner の SUN_LEN 制限で未修正（§11.2d）。OCI では PASS。filesystem volume の移送は OCI で確認済み、process は未対応。
 - 19 個の validated capsule_bundles が staging に残存（immutable trigger により削除不可、owner は削除済み。active Instance なし）。
 
 ## 12. 受入条件
