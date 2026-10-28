@@ -146,8 +146,8 @@ TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempo
 
 ## 9. 既存ギャップ（本監査時点）
 
-1. **MCP tools が無い**: Library exportability / Export / Import pre-validation / Import commit / Import status・receipt を MCP から実行する tool が無い（管理 MCP 39 tools に export/import は含まれない）。PWA と API の service は既存。
-2. **cross-account E2E の証跡が無い**: A→Export→B Import の実アカウント試験が未実施。コード上は B が自分の bundle として upload するため成立する見込み。
+1. **MCP tools**: #936 で追加済み（§11）。
+2. **cross-account E2E**: app-only は §11.2 で PASS。with-data とブラウザ UI は未検証（§11.4）。
 3. **with-data の範囲**: browser state / Data Resource / Instance Asset は実装済み。filesystem volume / process memory / bindings / secrets は対象外。
 4. **保持ポリシー**: capsule_bundles の cleanup は uploading 期限切れのみ。validated bundle の長期保持・quota eviction は UNVERIFIED。
 5. **docs**: export/import の user-facing 手順と保証範囲が未整理。
@@ -165,7 +165,52 @@ TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempo
 2. **E2E**: Portable Notes fixture で E1–E4。
 3. **docs**: PWA 手順、Export Artifact の説明、未対応条件。
 
-## 11. 受入条件
+## 11. 実装・検証結果（2026-10-28 追記）
+
+### 11.1 実装
+
+| PR | 内容 | 状態 |
+|---|---|---|
+| ato #1607 | 本 docs-only 決定記録 | Draft |
+| ato-api #936 | 管理 MCP に Portable Capsule の export/import tools を追加。capsule-bundle owner routes を delegated OAuth scope（apps:read/apps:write）で許可 | マージ済み・staging 配備済み |
+| ato-api #937 | delegated MCP bearer を run-mutation Origin gate に通す（Origin を持たない MCP 経由の export/import のため）。malformed token は従来どおり拒否 | マージ済み・staging 配備済み |
+
+追加した MCP tools: check_library_exportability / export_app / get_export / prepare_import（ChatGPT file param）/ get_import_validation / import_app / get_import。既存 REST service を呼ぶだけで、新しい import engine や canonicalizer は追加していない。
+
+### 11.2 実アカウント間 E2E（staging、API 経由）
+
+アカウント A・B を staging に作成し、同じ Portable Notes 系静的 fixture（v3）を使って実行した。ログ: .tmp/portable-capsule-20261028/e2e/s1-cross-account.mjs, s1-result.json。
+
+| 項目 | 結果 |
+|---|---|
+| A: v3 fixture import → validation ready → import-app → verification verified | PASS。app_url 200、receipt schema ato.contract-verification-receipt/1、fully_satisfied=true、target=ato-run-hosted |
+| A: app-only export | PASS。出力は v4（ato.portable-application/2）、bundle_sha256 一致、contract_ref は元 K と一致 |
+| B: A の export artifact を import | PASS。validation ready、root_contract_ref と derivation_ref が A と一致、新 Instance、receipt fully_satisfied=true、app_url 200、/proof.txt 200 |
+| I1 Identity | PASS（root_contract_ref 一致） |
+| I2 Closure | PASS（validator ready、digest/size 一致） |
+| I3 Independent Authority | PASS（A は B の Instance/export を読めない 404、B は A の bundle を読めない 404） |
+| I5 Verified Realization | PASS（両側 receipt fully_satisfied=true） |
+| E4 負例（非対応 version） | PASS（prepare が 400 で拒否） |
+| E4 負例（改ざん） | PASS（transport digest を再計算しても validator が rejected/validator_failed） |
+| I6 Atomic Import | 部分的（idempotency/reconcile は既存 test 済み。実アカウントでの crash 注入は未実施） |
+
+### 11.3 MCP smoke（staging、delegated token）
+
+| 項目 | 結果 |
+|---|---|
+| tools/list | 46 tools。新規 7 tools を列挙 |
+| export_app（delegated token、Origin なし） | PASS。export job が ready になり artifact metadata を返す |
+| prepare_import（不正な file URL） | PASS（file_download_failed。認可・経路まで到達） |
+
+### 11.4 未検証・残課題
+
+- with-data（browser state / Data Resource / Asset）の cross-account E2E。export の saved-data は PWA の browser-state fence が必要で、API のみでは開始できない。E2 は未実施。
+- PWA のブラウザ UI 操作（Export ボタン / .capsule 選択）での E2E。今回の実アカウント試験は同じ PWA/API service を API 経由で叩いたもので、UI クリックではない。
+- MCP prepare_import の実ファイル import（ChatGPT file parameter）。実ファイルを配信する HTTPS URL が必要で、今回は不正 URL の negative のみ。
+- filesystem volume / process memory / bindings / secrets の移送（v1 対象外）。
+- 19 個の validated capsule_bundles が staging に残存（immutable trigger により削除不可、owner は削除済み。active Instance なし）。
+
+## 12. 受入条件
 
 | ID | 内容 | PASS 条件 |
 |---|---|---|
