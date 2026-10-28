@@ -12,7 +12,7 @@ Ato is an open-source runtime and computation model for verifiable, transferable
 
 ## Try it
 
-Explore the [live Discover experience](https://ato.run/). For a local developer example, build this checkout with its pinned Rust toolchain:
+Explore the [live Discover experience](https://ato.run/) or [try 2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048). For a local developer example, build this checkout with its pinned Rust toolchain:
 
 ```sh
 cargo build -p ato-cli --bin ato --locked
