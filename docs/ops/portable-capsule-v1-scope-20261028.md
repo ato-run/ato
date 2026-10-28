@@ -9,7 +9,7 @@
 > 本文中の `.tmp/...` は作業記録のローカルパス（リポジトリ外）であり、恒久的な参照先ではない。恒久記録はこの文書と各 PR/commit である。
 
 - コード根拠: ato `3d338309`（origin/stg。#1609 の fixture 2 行 + #1610 docs-only。意味論は #1609 の 2 行のみ）、ato-api `d95fab7f`（origin/stg。#941 SSRF fail-closed、#942 MCP export scope、#945 direct-upload envelope をマージ）、ato-pwa `d57e67d2`（origin/stg）。
-- 配備済み staging: API `ato-store-staging` version `914ad323-335f-4b91-8463-02b44cd518ed`（stg `d95fab7f`、health 200）。**注: 本文書の検証窓口の後、staging PWA は別タスクの配備で `ccef10f1-e8eb-4b52-8830-612dd65cfc75` / `assets/index-B4uiRi0X.js`（stg `f188d861`）に更新された（API は不変）。以下の PWA を含む証跡は当時の build（`index-DO1Hh8Ko.js`）で取得したもので、現行 build での再実行は §9 の通り**、PWA version `e2672da9-f729-4720-a367-dc4eb209d638` / asset `assets/index-DO1Hh8Ko.js`（stg `d57e67d2`）、hosted runner binary `ato-connected-realization-worker-9fbfe8f7`（sha256 `e8816a3c…ef775`、6 slot active）。
+- 統合候補（2026-10-28T08:14Z 時点）: API `ato-store-staging` `914ad323-335f-4b91-8463-02b44cd518ed`（stg `d95fab7f`、health 200）、PWA `ato-pwa-staging` Worker `5ffddf63-d2d6-4f0e-9743-dcc794c9ecef` / asset `assets/index-CGL6ctxK.js` / build `fb475bb`（stg `fb475bba`。PWA #561 `27ed1a0c` / #563 `f188d861` / #565 `fb475bba` を含む。§5.4）、ato stg `da9afc4f8`、runner `9fbfe8f7`（sha256 `e8816a3c…ef775`）。**注: 本文書の検証窓口の後、staging PWA は別タスクの配備で `ccef10f1-e8eb-4b52-8830-612dd65cfc75` / `assets/index-B4uiRi0X.js`（stg `f188d861`）に更新された（API は不変）。以下の PWA を含む証跡は当時の build（`index-DO1Hh8Ko.js`）で取得したもので、現行 build での再実行は §9 の通り**、PWA version `e2672da9-f729-4720-a367-dc4eb209d638` / asset `assets/index-DO1Hh8Ko.js`（stg `d57e67d2`）、hosted runner binary `ato-connected-realization-worker-9fbfe8f7`（sha256 `e8816a3c…ef775`、6 slot active）。
 - 追加で読んだ作業ブランチ: ato-api `cc37c8f9`/`9340d477`（#941/#942 のブランチ。export/import 関連ファイルは未変更）、ato `17442ceb5`（#1609 の fixture 修正）。
 - 本文書は他タスクの証跡を再掲・統合するもので、記載された E2E を本タスクが再実行したものではない。出所を各節に示す。
   - 責任モデル/権限表/在庫: `.tmp/portable-v1-stabilize/audit/LIBRARY-AUDIT.md`、`audit/inventory.json`（30 entries: portable catalogue 8, classic sample 8, durable 14）。
@@ -172,6 +172,30 @@ MANIFEST の詳細（PASS/MISMATCH/UNVERIFIED の全行、生コマンド、clea
 
 Production への deploy・migration・flag/secret 変更・CI 実装は行っていない。force push は #942 の rebase 時の `--force-with-lease` のみ。
 
+### 5.4 PWA home/About 改善との統合（#561 / #563 / #565）
+
+**変更内容（PWA）**
+
+- **#561（merge `27ed1a0c`, fix/home-search-snippet）**: Discover のカード/アプリ概要を `data-nosnippet` にして Google スニペットへの混入を防ぎ、アプリ詳細説明とクロール可能なリンクは維持。ホーム前置き文（”Discover open-source apps, games, tools, media, and AI…”）を prerender と通常 shell の両方に追加し、catalogue API が不達でも前置きを表示。main を staging へ統合し、streamed home / legacy app routes / session gating / GPU placement を維持。CI を self-hosted runner 上で実行し、staging deploy guard を Vitest 化。
+- **#563（`f188d861`）**: 公開情報（Shenzhen）関連の staging 配信。
+- **#565（`fb475bba`）**: About ページの可読性・computation model の説明改善（K/D より前に問題と Capsule モデルを説明、2048 demo と Discover/Execution の接続、en/zh）。
+
+**配備・観測（2026-10-28T08:14Z）**
+
+- staging PWA Worker は `5ffddf63-d2d6-4f0e-9743-dcc794c9ecef`、asset は `assets/index-CGL6ctxK.js`、build は `fb475bb`（stg `fb475bba`）。served JS に `fb475bb` を含むことを実測。API は `914ad323` で不変。
+- この配備は並行タスク（about-review）が deploy lock（`release=fb475bba`）を取得して実施し、検証後に `LOCK_RELEASED`（`.tmp/shenzhen-public-evidence/staging-verify-about-review.log`）。**#561 自身の CI 配信は GitHub 課金制限で開始前に失敗**しており、この配備は #561 のパイプラインによるものではない（stg に含まれるため結果的に配備済み）。
+- home: `meta description` / `title` に新前置き、HTML に `data-nosnippet` 213 箇所、カード概要は nosnippet 配下、アプリへのリンクは crawlable のまま。
+- about: `/about` → 307 → `/about/` 200。en/zh・desktop/mobile の title/lang/overflow/broken link を並行タスクが検証済み（同 log）。
+- **同じ build での統合検証（21/21 PASS、identity 前後一致）**:
+  - home（crawler HTML）: title/meta/og が新前置き、`data-nosnippet` 213 箇所、213 のカード/アプリ概要が `<span data-nosnippet>` 配下、213 のアプリリンクが crawlable（`/?view=discover&detail=discover%3A<id>`）。
+  - catalogue API 遮断時（Playwright で `/v1/discover*`・`/v1/apps`・`/v1/capsule-bundles` を abort）でも、shell が起動し、server-rendered 前置きが DOM に残り、About も表示される（screenshots あり）。
+  - `/about`: 307 → `/about/` 200、title「About Ato and ato.run | Ato」、主要コピーあり。
+  - Portable 回帰（同一 build・`pcs_int_` アカウント）: `discover-plaza`（classic）= PASS_NOT_EXPORTABLE（library add 200、保存参照1、owned Instance 0、publisher compute 404、export は**正確に 409 `portable_export_source_unavailable`**）、`discover-portable-memos` = PASS（import verified / `fully_satisfied=true`（attempt `pav_01M60SWT9…`）、app 200、app-only export v4 K保持、A instance 削除、B import verified、B app 200、K一致、cross-account 404）、`discover-portable-databag` = PASS（K `500d85d4…`）、`discover-2048` = UNVERIFIED_STATIC_ONLY（静的 entry 200 のみ、portable release 未作成）。
+
+**Production 未配備**: PWA の production deploy は未実施（main からの別デプロイが必要）。read 経路の契約は production API で **PASS**（query fence 実装済み、contract 1/1、payload shape 一致）だが、**portable import payload は既知 mismatch**（production API `80ac799c` / `532032accd33` は `accepted_session_surfaces` / `compute_account` を受理せず、staging API は受理。`compute_account` は `origin/main` にも未取込）。昇格には **API release（main 由来）→ PWA deploy の順序** と pinned Release Manifest 下の Staging E2E が必要。
+
+詳細（コード根拠・観測・ゲート・再現コマンド）: [`docs/ops/pwa-home-about-integration-20261028.md`](pwa-home-about-integration-20261028.md)。
+
 ## 6. 未対応・制約（v1 で保証しないこと）
 
 1. **Original Formation app の export**: §2.1 の provenance が無いため不可（409）。フォーメーションで作ったアプリを配布するには「export できる Instance」を作る別経路が必要で、v1 のスコープ外。
@@ -294,6 +318,12 @@ node .tmp/portable-v1-stabilize/audit/durable-query.mjs
 | Library saved-ref の消失挙動の実観測 | **部分観測** | C1 で保存参照 1 行を作成（`cap_plaza`）。参照先の可視性喪失による silent hide 自体は未観測（コード根拠は監査 §6） |
 | filesystem volume の with-data 実 E2E | **NOT RUN** | C2 の instance は volume を持ち cleanup で `state_volume_retained` を観測したが、with-data export の実 E2E は未実施 |
 | 現行 staging PWA build（`index-B4uiRi0X.js` / `ccef10f1`）での再実行 | **NOT RUN** | 本文書の PWA 証跡は `index-DO1Hh8Ko.js` 時点。別タスクの配備で PWA が更新されたため、現行 build での再実行が必要 |
+| PWA production 配備（#561/#563/#565） | **NOT RUN** | staging のみ。main からの明示的な別デプロイが必要 |
+| pinned Release Manifest 下の統合 E2E | **NOT RUN** | 現行 pin は stale で Manifest 未更新。promotion gate G2 |
+| production API との契約差（read 経路） | **PASS（主要3経路、read-only）** | prod API 実測: `/v1/client-compatibility` 200 `{api_contract:1,min_pwa_contract:1}`、`/v1/discover/apps(/page)` は `__ato_client_*` query 付きで 200（routing 前に strip）、`contract=0` で 426 `pwa_update_required`、`/api/auth/get-session` も同様。payload shape は prod/stg 一致（staging のみ `ai_rating`、PWA 型で optional）。**残 UNVERIFIED**: analytics-events の POST payload、旧 PWA binary の update 画面、prod API の次回 deploy 後の fence 維持（prod は hotfix build 532032ac で main 祖先ではない） |
+| 独立 Preview Runner での PWA 検証 | **NOT RUN** | 利用可能な host が無い（user 報告）。Preview リソースは回収済み |
+| catalogue API 不達時の home 前置き表示 | **PASS** | Playwright で `/v1/discover*`・`/v1/apps`・`/v1/capsule-bundles` を abort しても shell 起動・server-rendered 前置き・About 表示を確認（真の 5xx 障害ではなく API 遮断による document-level 検証） |
+| 統合 staging 検証（PWA #561 + Portable 回帰、同一 build） | **PASS（21/21）** | 同一 deployed identity（PWA `5ffddf63` / asset `index-CGL6ctxK.js`、API `914ad323`）で PWA home/About/SEO と portable flows を検証。identity は前後で不変 |
 | production の状態 | **NOT IN SCOPE** | 本文書は staging のみ |
 
 ## 10. 参照
