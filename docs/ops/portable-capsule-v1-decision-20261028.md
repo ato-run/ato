@@ -235,6 +235,19 @@ Portable Notes fixture（python process と OCI の 2 derivation、filesystem st
 
 python process derivation は hosted runner で path must be shorter than SUN_LEN により verification failed のまま（§11.2d）。with-data の Portable Notes 受入は OCI derivation で成立した。
 
+### 11.2f Portable Notes の app-only
+
+Portable Notes（OCI derivation）で app-only の cross-account も確認した。
+
+| 項目 | 結果 |
+|---|---|
+| A: Notes を import | PASS。verified、fully_satisfied=true |
+| A: app-only export | PASS。v4、instance_snapshot_ref なし、K は元 fixture の contract_ref と一致、bundle_sha256 一致 |
+| B: import | PASS。verified、root_contract_ref 一致、新 Instance、app 200、notes は空（状態は引き継がない） |
+| I3 | PASS（A は B の Instance を 404） |
+
+これで Portable Notes fixture について app-only / with-data / 独立性 / 負例（別 fixture の非対応 version・改ざん）の受入が揃った。
+
 ### 11.3 MCP smoke（staging、delegated token）
 
 | 項目 | 結果 |
