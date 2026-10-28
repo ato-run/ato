@@ -671,20 +671,17 @@ mod bounded_output_tests {
         .unwrap()
     }
 
-    fn settle(path: &std::path::Path) {
-        // The drain threads finish once the pipes close.
-        let mut last = u64::MAX;
+    fn wait_for_output(path: &std::path::Path, expected: &[&str]) -> String {
+        // A bounded log may stay at a constant size while the drain is still
+        // rotating it. Wait for the output under test, not a stable file size.
         for _ in 0..100 {
-            let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
-                + std::fs::metadata(previous_segment(path))
-                    .map(|meta| meta.len())
-                    .unwrap_or(0);
-            if size == last {
-                return;
+            let tail = read_output_tail(path, 4096);
+            if expected.iter().all(|marker| tail.contains(marker)) {
+                return tail;
             }
-            last = size;
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        panic!("timed out waiting for output markers {expected:?}");
     }
 
     #[test]
@@ -698,7 +695,7 @@ mod bounded_output_tests {
             64 * 1024,
         );
         handle.wait().unwrap();
-        settle(&path);
+        wait_for_output(&path, &["LAST-LINE"]);
         let kept = std::fs::metadata(&path).unwrap().len()
             + std::fs::metadata(previous_segment(&path))
                 .map(|meta| meta.len())
@@ -714,8 +711,7 @@ mod bounded_output_tests {
         let path = dir.path().join("out.log");
         let mut handle = spawn_writer("echo to-stdout; echo to-stderr >&2", &path, 1024 * 1024);
         handle.wait().unwrap();
-        settle(&path);
-        let tail = read_output_tail(&path, 4096);
+        let tail = wait_for_output(&path, &["to-stdout", "to-stderr"]);
         assert!(
             tail.contains("to-stdout") && tail.contains("to-stderr"),
             "{tail}"
