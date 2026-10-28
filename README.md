@@ -32,11 +32,6 @@ verification path.
 - **Run** resumes a Capsule and advances the computation. Runs can develop
   different futures from the same Capsule.
 
-“Everything can be a Capsule” is a design principle: a computation with a
-defined boundary, typed interactions, and continuation semantics can use the
-same interface. It does not mean every object is automatically a Capsule or
-that all workloads can currently be restored.
-
 For portable applications, a **Contract** describes observable requirements,
 a **Derivation** declares a way to realize them, and a verification **receipt**
 records the observations for a Run. See [Computation](docs/concepts/computation.md)
@@ -75,6 +70,18 @@ browser. See [Getting started](docs/guides/getting-started.md) for details,
 other routes, and failure boundaries. Published CLI artifacts are listed in
 [GitHub Releases](https://github.com/ato-run/ato/releases).
 
+For example, inspect the receipt with Python 3:
+
+```sh
+python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
+```
+
+```text
+fully_satisfied: True
+app-proof: satisfied
+source-identity: satisfied
+```
+
 This static example does not demonstrate general cross-host portability or
 restoration of process memory.
 
@@ -104,7 +111,7 @@ or safe side effects. See [compatibility](docs/concepts/compatibility.md) and
 
 See [Contributing](CONTRIBUTING.md) and [GitHub issues](https://github.com/ato-run/ato/issues).
 
-There is no repository-wide license file in the root. Individual components
+There is no repository-wide license file in the root. Some components
 state their licenses in their manifests; for example, the
 [CLI manifest](apps/cli/Cargo.toml) declares `Apache-2.0 OR MPL-2.0`, and the
 [CLI license file](apps/cli/LICENSE) contains Apache 2.0. Check the relevant
