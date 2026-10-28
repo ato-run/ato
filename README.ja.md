@@ -70,7 +70,9 @@ Atoは実験的なプロジェクトです。このリポジトリには計算�
 
 [貢献方法](CONTRIBUTING.md)と[GitHub issues](https://github.com/ato-run/ato/issues)を参照してください。
 
-ルートにはリポジトリ全体に適用されるライセンスファイルがありません。一部のコンポーネントはmanifestでライセンスを宣言しています。例えば、[CLIのmanifest](apps/cli/Cargo.toml)は`Apache-2.0 OR MPL-2.0`を宣言し、[CLIのライセンスファイル](apps/cli/LICENSE)にはApache 2.0の本文が含まれます。対象コンポーネントのライセンス情報を確認してください。リポジトリ全体への許諾はここでは定められていません。
+プロジェクトが作成したコードは[Mozilla Public License 2.0](LICENSE)（`MPL-2.0`）で提供します。第三者のコード、依存ライブラリ、上流コードを含むパッチ、独自のライセンス表示がある資料には、それぞれの条件が引き続き適用されます。例えば、CPythonのfixture、WiXテンプレート、リリースワークフローは上流のライセンスを、AODDスキルはMITライセンスを維持します。CLIの[Apacheライセンス本文](apps/cli/LICENSE-APACHE)はWiXテンプレートおよび過去に配布されたバージョンのために保持しています。過去に付与されたライセンスは引き続き有効です。
+
+このコードのライセンスは、Capsule Process Modelの理論文書に新たなライセンスを付与するものではありません。
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="ato"></a>
