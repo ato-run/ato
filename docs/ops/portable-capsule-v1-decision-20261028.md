@@ -194,6 +194,29 @@ TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempo
 | E4 負例（改ざん） | PASS（transport digest を再計算しても validator が rejected/validator_failed） |
 | I6 Atomic Import | 部分的（idempotency/reconcile は既存 test 済み。実アカウントでの crash 注入は未実施） |
 
+### 11.2b with-data cross-account（PWA ブラウザ export / API import）
+
+静的アプリ（localStorage にノートを保存）で with-data を検証した。A の Export は PWA の App 詳細画面の Export ダイアログから実行し、ブラウザの state flush / snapshot を含む v4 artifact をダウンロードした。B の import は同じ service を API 経由で実行し、B のブラウザで状態を確認した。
+
+| 項目 | 結果 |
+|---|---|
+| A: 静的アプリにノートを保存 → PWA UI で with-data export | PASS。v4（ato.portable-application/2）、instance_snapshot_ref あり |
+| with-data export の K | app-only K とは異なる snapshot-bound K' になる（設計どおり。I4 の「必要なら新しい Snapshot K を seal」） |
+| B: artifact import → verified | PASS。root_contract_ref = K'、receipt fully_satisfied=true、app_url 200 |
+| B: 状態の再現 | PASS。A のノートが localStorage に復元され、画面に表示 |
+| B: 編集 | PASS。追加したノートが 5 秒後の flush 後も保持され、reload 後も残る |
+| B: 再起動 | PASS。Instance stop → app_url 再オープン後もノートが残る |
+| B: 再 Export | PASS。app-only export が ready、contract_ref = K' |
+| I3 独立性 | PASS（A は B の Instance を読めない 404） |
+
+### 11.2c PWA UI import の未検証
+
+B の .capsule import を PWA の Add App 画面から実行する試みは、staging の配備済み PWA build（524daddb）でファイル選択後に画面が反応せず、import を開始できなかった（Playwright の filechooser / setInputFiles の双方）。API 経由の import は成功しているため、service 側ではなく配信中の PWA bundle と current main（867f73bd）の差、または capsule 選択ハンドラの問題と推定される。UNVERIFIED として残す。切り分けには main の PWA を staging / dev preview に配備して再試験する必要がある。
+
+### 11.2d 動的 process + filesystem state の制約
+
+Portable Notes の python process + sqlite volume fixture は、staging hosted runner で path must be shorter than SUN_LEN により verification failed（receipt: execution.attempt_interrupted=true, fully_satisfied=false）。with-data の E2 は上記の静的 browser-state lane で代替した。filesystem volume の移送は v1 の対象外であり、hosted runner の unix socket 長制限は未対応条件として記録する。
+
 ### 11.3 MCP smoke（staging、delegated token）
 
 | 項目 | 結果 |
@@ -204,10 +227,9 @@ TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempo
 
 ### 11.4 未検証・残課題
 
-- with-data（browser state / Data Resource / Asset）の cross-account E2E。export の saved-data は PWA の browser-state fence が必要で、API のみでは開始できない。E2 は未実施。
-- PWA のブラウザ UI 操作（Export ボタン / .capsule 選択）での E2E。今回の実アカウント試験は同じ PWA/API service を API 経由で叩いたもので、UI クリックではない。
+- PWA UI での .capsule 選択 import（§11.2c、staging の旧 build で未反応）。
 - MCP prepare_import の実ファイル import（ChatGPT file parameter）。実ファイルを配信する HTTPS URL が必要で、今回は不正 URL の negative のみ。
-- filesystem volume / process memory / bindings / secrets の移送（v1 対象外）。
+- filesystem volume / process memory / bindings / secrets の移送（v1 対象外）。process + filesystem は hosted runner の SUN_LEN 制限で未検証（§11.2d）。
 - 19 個の validated capsule_bundles が staging に残存（immutable trigger により削除不可、owner は削除済み。active Instance なし）。
 
 ## 12. 受入条件
