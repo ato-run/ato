@@ -132,6 +132,31 @@ fn connect_owner_socket(socket: &std::path::Path) -> Result<std::os::unix::net::
     Ok(std::os::unix::net::UnixStream::connect(socket)?)
 }
 
+/// Bind an owner-only Unix socket even when its checkout path exceeds SUN_LEN.
+///
+/// The socket keeps its long, private path for permissions, cleanup and connect;
+/// only the bind reaches it through a directory fd (/proc/self/fd/<fd>/<name>).
+#[cfg(target_os = "linux")]
+fn bind_owner_socket(socket: &std::path::Path) -> Result<std::os::unix::net::UnixListener> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+    let parent = socket
+        .parent()
+        .context("bridge control directory missing")?;
+    let name = socket.file_name().context("bridge socket name missing")?;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(parent)?;
+    let short =
+        std::path::PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name);
+    Ok(std::os::unix::net::UnixListener::bind(short)?)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn bind_owner_socket(socket: &std::path::Path) -> Result<std::os::unix::net::UnixListener> {
+    Ok(std::os::unix::net::UnixListener::bind(socket)?)
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod ingress_tests {
     use super::*;
@@ -269,7 +294,6 @@ impl HostBridge {
 
     fn start_inner(socket: &std::path::Path, target: Option<std::net::SocketAddr>) -> Result<Self> {
         use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
         use std::sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -289,7 +313,7 @@ impl HostBridge {
             std::fs::symlink_metadata(socket).is_err(),
             "bridge socket already exists"
         );
-        let listener = UnixListener::bind(socket)?;
+        let listener = bind_owner_socket(socket)?;
         std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let stopped = Arc::new(AtomicBool::new(false));
@@ -460,6 +484,27 @@ mod deny_bridge_tests {
         let mut response = String::new();
         client.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        drop(bridge);
+        assert!(!socket.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn binds_a_private_socket_under_a_path_longer_than_sun_len() {
+        let root = tempfile::Builder::new()
+            .prefix("n")
+            .rand_bytes(2)
+            .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
+            .unwrap();
+        let parent = root.path().join("owner-realization-".repeat(12));
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let socket = parent.join("egress.sock");
+        assert!(socket.as_os_str().len() > 108);
+        let bridge = super::HostBridge::deny(&socket).unwrap();
+        let client = super::connect_owner_socket(&socket).unwrap();
+        drop(client);
         drop(bridge);
         assert!(!socket.exists());
     }
