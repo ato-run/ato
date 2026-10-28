@@ -159,6 +159,7 @@ fn failure_of(observation: &Value) -> &str {
 
 /// The runtime scratch survives a failed Run (kept under `ATO_HOME/cache`);
 /// its receipt is the attempt's own evidence, never a published receipt.
+#[track_caller]
 fn latest_runtime_receipt_for_derivation(home: &Path, derivation_ref: &str) -> (Value, PathBuf) {
     let cache = home.join("cache");
     // Two negative Runs in this test can share a Contract and differ only by
@@ -379,6 +380,7 @@ fn a_scenario_contract_is_executed_verified_and_reformable() {
     pack(&home, &fixture("isolation"), &isolation_bundle_path);
     let isolation_receipt_path = work.join("isolation-receipt.json");
     let isolation_run = run(&home, &isolation_bundle_path, &isolation_receipt_path);
+    eprintln!("isolation stderr: {}", String::from_utf8_lossy(&isolation_run.stderr));
     assert!(
         !isolation_run.status.success(),
         "a stateful candidate must not run a scenario in v1"
