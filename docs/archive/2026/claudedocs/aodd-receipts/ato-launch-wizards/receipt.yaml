@@ -73,12 +73,12 @@ agent_observation:
     - "Phase 2C: persist user's Approve/Deny decision per-capsule so the wizard is skipped on subsequent launches of trusted capsules (with a re-confirm path for permission changes)."
 
 evidence:
-  - "claudedocs/aodd-receipts/ato-launch-wizards/01-consent-wizard.png"
-  - "claudedocs/aodd-receipts/ato-launch-wizards/02-boot-wizard-early.png"
-  - "claudedocs/aodd-receipts/ato-launch-wizards/03-boot-wizard-progressed.png"
-  - "claudedocs/aodd-receipts/ato-launch-wizards/04-wp2p-consent.png — first WasedaP2P launch attempt: NavigateToUrl(capsule://github.com/Koh0920/WasedaP2P) → consent wizard with real identity (アプリケーション: WasedaP2P, 要求された権限: github.com/Koh0920/WasedaP2P) injected via __ATO_LAUNCH"
-  - "claudedocs/aodd-receipts/ato-launch-wizards/05-flow-consent-shown.png — second WasedaP2P attempt before Approve; identical identity content, proves __ATO_LAUNCH injection is repeatable"
-  - "claudedocs/aodd-receipts/ato-launch-wizards/06-flow-approved-appwindow-boot.png — post-approve: Control Bar URL pill switched to capsule://github.com/Koh0920/WasedaP2P, AppWindow spawned with WasedaP2P content (CodeLab / ネットワーク / Safety summary / ターミナル placeholder cards), boot wizard overlay shows all 6 launch-ceremony steps complete"
+  - "docs/archive/2026/claudedocs/aodd-receipts/ato-launch-wizards/01-consent-wizard.png"
+  - "docs/archive/2026/claudedocs/aodd-receipts/ato-launch-wizards/02-boot-wizard-early.png"
+  - "docs/archive/2026/claudedocs/aodd-receipts/ato-launch-wizards/03-boot-wizard-progressed.png"
+  - "docs/archive/2026/claudedocs/aodd-receipts/ato-launch-wizards/04-wp2p-consent.png — first WasedaP2P launch attempt: NavigateToUrl(capsule://github.com/Koh0920/WasedaP2P) → consent wizard with real identity (アプリケーション: WasedaP2P, 要求された権限: github.com/Koh0920/WasedaP2P) injected via __ATO_LAUNCH"
+  - "docs/archive/2026/claudedocs/aodd-receipts/ato-launch-wizards/05-flow-consent-shown.png — second WasedaP2P attempt before Approve; identical identity content, proves __ATO_LAUNCH injection is repeatable"
+  - "docs/archive/2026/claudedocs/aodd-receipts/ato-launch-wizards/06-flow-approved-appwindow-boot.png — post-approve: Control Bar URL pill switched to capsule://github.com/Koh0920/WasedaP2P, AppWindow spawned with WasedaP2P content (CodeLab / ネットワーク / Safety summary / ターミナル placeholder cards), boot wizard overlay shows all 6 launch-ceremony steps complete"
   - "log excerpt: /tmp/ato-desktop-flow2.log — 'Focus-mode NavigateToUrl url=capsule://github.com/Koh0920/WasedaP2P' followed by 'ForceApprovePending: consuming pending target route=CapsuleHandle { handle: \"github.com/Koh0920/WasedaP2P\", label: \"WasedaP2P\" }'"
 
 files_changed:

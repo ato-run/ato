@@ -15,13 +15,16 @@ Japanese/mixed source documents are labelled below and retain their original tex
 | [Dev notes](../../dev-notes/) | Archive; past Desktop/installation audits |
 | [Receipts](../../receipts/) | Archive; dated implementation acceptance evidence |
 | [AODD](../../aodd/) | Archive; historical acceptance and community-publish records |
+| [AODD desktop Focus View evidence (claudedocs)](claudedocs/README.md) | Archive; 50 YAML receipts + 103 screenshots, 2026-05-09..05-16, for the retired GPUI + Wry shell; moved from `claudedocs/` in the 2026-10-28 cleanup |
 | [Recipe evaluations](../../recipes/) | Archive for dated evaluations/plans; bounded behavior notes retain their individual status |
 | [Raw ops evidence](../../ops/README.md) | Archive; original JSON/log/image/archive paths preserved |
 
 ## Moved documents
 
 The table lists every archived move. Former paths retain compatibility pages
-and heading anchors. [moves.tsv](documentation-reorganization/moves.tsv) also
+and heading anchors, except where a file had no inbound reference and was
+archived without a stub (the legacy Ato development roadmap below).
+[moves.tsv](documentation-reorganization/moves.tsv) also
 lists current runbooks and architecture moves. The
 [complete inventory](documentation-reorganization/inventory.tsv) covers retained
 files and classifies each into Concepts, Specifications, Guides, Operations or
@@ -237,3 +240,4 @@ Archive, including draft status and baseline checksums.
 | [Sandbox](legacy/sandbox.md) | en | `docs/sandbox.md` |
 | [Snapshot v1 Compatibility Contract](legacy/snapshot-v1-compatibility.md) | en | `docs/snapshot-v1-compatibility.md` |
 | [Launch Preparation Bridge Contract (#581 ↔ #593)](legacy/launch-preparation-plan.md) | en | `docs/specs/launch-preparation-plan.md` |
+| [Ato development roadmap — remaining work (verified 2026-09-01)](legacy/OPEN_ISSUES_ROADMAP.md) | ja+en | `OPEN_ISSUES_ROADMAP.md` |
