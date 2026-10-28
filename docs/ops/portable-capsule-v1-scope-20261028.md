@@ -6,6 +6,8 @@
 
 ## 0. 文書の位置づけと根拠
 
+> 本文中の `.tmp/...` は作業記録のローカルパス（リポジトリ外）であり、恒久的な参照先ではない。恒久記録はこの文書と各 PR/commit である。
+
 - コード根拠: ato `3d338309`（origin/stg。#1609 の fixture 2 行 + #1610 docs-only。意味論は #1609 の 2 行のみ）、ato-api `d95fab7f`（origin/stg。#941 SSRF fail-closed、#942 MCP export scope、#945 direct-upload envelope をマージ）、ato-pwa `d57e67d2`（origin/stg）。
 - 配備済み staging: API `ato-store-staging` version `914ad323-335f-4b91-8463-02b44cd518ed`（stg `d95fab7f`、health 200）、PWA version `e2672da9-f729-4720-a367-dc4eb209d638` / asset `assets/index-DO1Hh8Ko.js`（stg `d57e67d2`）、hosted runner binary `ato-connected-realization-worker-9fbfe8f7`（sha256 `e8816a3c…ef775`、6 slot active）。
 - 追加で読んだ作業ブランチ: ato-api `cc37c8f9`/`9340d477`（#941/#942 のブランチ。export/import 関連ファイルは未変更）、ato `17442ceb5`（#1609 の fixture 修正）。
