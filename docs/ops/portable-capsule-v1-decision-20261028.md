@@ -232,7 +232,11 @@ stg を staging に配備（PWA version e2672da9、stg d57e67d2）し、修正�
 
 ### 11.2d 動的 process + filesystem state の制約
 
-Portable Notes の python process + sqlite volume fixture は、staging hosted runner で path must be shorter than SUN_LEN により verification failed（receipt: execution.attempt_interrupted=true, fully_satisfied=false）。with-data の E2 は上記の静的 browser-state lane で代替した。filesystem volume の移送は v1 の対象外であり、hosted runner の unix socket 長制限は未対応条件として記録する。
+Portable Notes の python process + sqlite volume fixture は、staging hosted runner で path must be shorter than SUN_LEN により verification failed していた（receipt: execution.attempt_interrupted=true, fully_satisfied=false）。
+
+原因は process launch の isolated network が <runtime_root>/egress.sock を直接 bind していたこと（checkout path が長い）。ato #1608 で、native Terminal / ingress connect と同じ /proc/self/fd/<dirfd>/<name> 経由の bind に変更した。
+
+staging hosted runner を 9fbfe8f7 に更新後、Portable Notes の **python process** で import → verification verified、receipt fully_satisfied=true、realization=process、app_url 200 を確認した。OCI と python の両 derivation が staging で成立する。
 
 ### 11.2e Portable Notes（OCI derivation + filesystem volume）の with-data
 
@@ -310,8 +314,31 @@ UI だけで以下を実施した（スクリプト: .tmp/portable-capsule-20261
 
 - PWA UI の import は PASS（§11.2c / §11.2g）。staging は現時点で stg d57e67d2 / PWA version e2672da9。
 - MCP 実ファイル import は PASS（§11.3b）。URL は公開 HTTPS である必要があり、期限切れ signed URL はダウンロード失敗として拒否される。SSRF 対策は host 判定 + redirect 禁止までで、DNS rebinding の完全防御は将来課題。
-- python process derivation は hosted runner の SUN_LEN 制限で未修正（§11.2d）。OCI では PASS。filesystem volume の移送は OCI で確認済み、process は未対応。
+- python process の SUN_LEN は ato #1608 で修正し、staging hosted runner 9fbfe8f7 の実 E2E で PASS（§11.2d）。
+- stg の ato lib test は StateAttachmentV1.backing の fixture 不足でコンパイルできず、ネットワーク socket の Linux unit test は host 上で実行できなかった（release build と実 E2E で確認）。
 - 19 個の validated capsule_bundles が staging に残存（immutable trigger により削除不可、owner は削除済み。active Instance なし）。
+
+### 11.6 回帰テストの対応（不変条件）
+
+| 不変条件 | 既存テスト / 追加テスト |
+|---|---|
+| I1 Identity（K 不変） | ato-api src/tests/portable-application-exports.test.ts、portable-instance-snapshot-import.test.ts |
+| I2 Closure | ato-api capsule bundle validation の test（bundle/validator 系） |
+| I3 Independent Authority | ato-api portable-application-exports / portable-import-recovery の ownership ケース |
+| I4 State Preservation | ato-api portable-instance-snapshot.test.ts、portable-instance-snapshot-import.test.ts |
+| I5 Verified Realization / receipt 環境 | ato-api portable-verification-ingress.test.ts、runtime launch spec v2/v3 の receipt test |
+| I6 Atomic Import / 冪等性 | ato-api portable-import-recovery.test.ts（19 tests）、capsule-import-migration-chain |
+| 追加（今回） | ato-pwa portableApplicationClient.test.ts の Capsule route selection 3 tests、ato-api management-mcp-portable-export-import.test.ts（10 tests: scope、実 envelope、redirect、private host、prepare/upload/complete） |
+
+PWA client suite 22 tests、MCP suite 10 tests、tsc は PASS。
+
+### 11.7 Runner rollout（staging）
+
+- 対象: ato-hosted-runner-slot1..6（ubuntu-sugamo）。
+- 新 binary: /usr/local/bin/ato-connected-realization-worker-9fbfe8f7（sha256 e8816a3c...）。
+- 各 slot に最優先 drop-in zzzzzzzzzzzzzzzzzzzzz-runner-9fbfe8f7.conf を追加し、daemon-reload → restart。全 slot active。
+- ロールバック: 旧 drop-in を /home/ekohsuke/runner-dropins-backup-20261028c-slot{1..6}/ に保存済み。新 drop-in を削除して backup を戻し、daemon-reload → restart。
+- 注意: slot 再起動で実行中 lease は中断される。切替前に managed workload が無いことを確認した。
 
 ## 12. 受入条件
 
