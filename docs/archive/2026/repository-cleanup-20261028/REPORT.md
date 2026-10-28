@@ -264,17 +264,17 @@ file.
 ## 8. GitHub Pages, deployments and environment
 
 Details and the operator checklist: [GITHUB-SETTINGS.md](GITHUB-SETTINGS.md);
-the 132-deployment pre-deletion record: [deployments.tsv](deployments.tsv).
+the 133-deployment pre-deletion record: [deployments.tsv](deployments.tsv).
 
 | Item | Pre-state (2026-10-28) |
 |---|---|
 | Pages | enabled, `build_type=workflow`, site <https://ato-run.github.io/ato/>, no custom domain, HTTPS enforced |
-| Last Pages workflow run (cutoff) | id `40591978386`, 2026-10-27T22:04:53Z |
-| Deployments | 132, all `github-pages`/`main`/`deploy`; 79 success, 7 error, 46 inactive |
-| Last deployment (cutoff) | id `7371565372`, sha `f55c4b34…`, 2026-10-27T22:05:18Z |
+| Last Pages workflow run (cutoff) | id `40667376436`, 2026-10-28T09:50:23Z |
+| Deployments | 133, all `github-pages`/`main`/`deploy`; 80 success, 7 error, 46 inactive |
+| Last deployment (cutoff) | id `7382160739`, sha `08144622…`, 2026-10-28T09:51:52Z |
 | Environments | 1: `github-pages` (id `14898949998`), branch policy `main` only, no required reviewers |
 
-Result fields are placeholders: Pages disable, the 132 deployment deletions and
+Result fields are placeholders: Pages disable, the 133 deployment deletions and
 the environment deletion are repository-admin actions and were **not** performed
 by this documentation pass (no GitHub DELETE/PUT/POST was executed). The
 workflow removal is staged in the working tree only and must reach `main`
@@ -349,7 +349,7 @@ is the final state.
    `ADR-038-formation-verification-state-bindings.md` both use 038.
 8. **claudedocs cross-repo ownership** (`ato-run/ato-desktop`) and the four
    open-status receipts.
-9. **Pages administrator follow-up**: disable Pages, purge 132 deployments,
+9. **Pages administrator follow-up**: disable Pages, purge 133 deployments,
    delete the `github-pages` environment, then fill the result table in
    [GITHUB-SETTINGS.md](GITHUB-SETTINGS.md). Irreversible deployment deletion must
    not run before [deployments.tsv](deployments.tsv) is preserved in the merge.
