@@ -89,12 +89,15 @@ split visible inside the live-looking directories that were left alone.
 (`docs/index.html`, `docs/_sidebar.md`, `docs/_navbar.md`,
 `docs/rfcs/index.html`, `docs/rfcs/_sidebar.md`, both `.nojekyll`,
 `scripts/docs-site-check.mjs`) are removed in the same branch by the Pages
-change. The Pages/Docsify site is retired from this repository change;
-the GitHub-side disable is recorded in [GITHUB-SETTINGS.md](GITHUB-SETTINGS.md)
-and executed separately, so the live site may keep serving until that step. The
-former `https://ato-run.github.io/ato/` URLs are expected to 404 after it. That external link
-loss is accepted and cannot be redirected from this repository;
-in-repository links must keep working and are validated in §9.
+change. The GitHub-side disable, deployment purge and environment deletion
+were executed on 2026-10-28 and are recorded in
+[GITHUB-SETTINGS.md](GITHUB-SETTINGS.md): the site now returns 404, `has_pages`
+is false, deployments are 0 and the environment is gone. The workflow file
+remains on `main` until the normal release promotion, but it was disabled with
+`gh workflow disable` before Pages was deleted. The former
+`https://ato-run.github.io/ato/` URL loss is accepted and cannot be redirected
+from this repository; in-repository links must keep working and are validated
+in §9.
 
 Consequence for the claudedocs decision: the earlier objection that archiving
 171 MiB under `docs/` would bloat the Pages artifact no longer applies once the
@@ -274,13 +277,17 @@ the 133-deployment pre-deletion record: [deployments.tsv](deployments.tsv).
 | Last deployment (cutoff) | id `7382160739`, sha `08144622…`, 2026-10-28T09:51:52Z |
 | Environments | 1: `github-pages` (id `14898949998`), branch policy `main` only, no required reviewers |
 
-Result fields are placeholders: Pages disable, the 133 deployment deletions and
-the environment deletion are repository-admin actions and were **not** performed
-by this documentation pass (no GitHub DELETE/PUT/POST was executed). The
-workflow removal is staged in the working tree only and must reach `main`
-through the normal release path before Pages is disabled, otherwise the next
-`main` push touching `docs/**`/`README.md` would run a workflow whose Pages site
-no longer exists.
+| Result (2026-10-28 UTC) | Value |
+|---|---|
+| Pages workflow | disabled_manually on `main` before deletion; file removed on the PR branch |
+| Pages site | disabled 10:16:35; `has_pages=false`; `GET /pages` 404; site URL 404 |
+| Deployments | 133/133 deleted 10:18:28–10:22:09, 0 failures, 0 remaining |
+| Environment | `github-pages` deleted 10:22:17; environments `total_count=0` |
+| New Pages deployment | none after the cutoff; no Docs Pages run newer than `40667376436` |
+
+The exact command/result table is in [GITHUB-SETTINGS.md](GITHUB-SETTINGS.md).
+This was an administrator action outside the documentation change; no
+`stg`/`production` release environment or workflow was modified.
 
 ## 9. Link validation
 
@@ -299,7 +306,7 @@ repository; not committed).
 | Check | Result |
 |---|---|
 | Markdown files scanned | 924 |
-| Local links checked | 1,708 |
+| Local links checked | 1,709 |
 | External links not fetched | 1,097 |
 | Failures by scope | historical: 33 |
 | Reviewed historical failures matched | 33 / 33 |
@@ -349,10 +356,11 @@ is the final state.
    `ADR-038-formation-verification-state-bindings.md` both use 038.
 8. **claudedocs cross-repo ownership** (`ato-run/ato-desktop`) and the four
    open-status receipts.
-9. **Pages administrator follow-up**: disable Pages, purge 133 deployments,
-   delete the `github-pages` environment, then fill the result table in
-   [GITHUB-SETTINGS.md](GITHUB-SETTINGS.md). Irreversible deployment deletion must
-   not run before [deployments.tsv](deployments.tsv) is preserved in the merge.
+9. **Pages administrator follow-up — completed 2026-10-28.** Pages was disabled,
+   the 133 deployments were purged after [deployments.tsv](deployments.tsv) was
+   committed, and the `github-pages` environment was deleted. The workflow file
+   remains on `main` until the normal release promotion (disabled meanwhile);
+   the full result table is in [GITHUB-SETTINGS.md](GITHUB-SETTINGS.md).
 10. **External Pages links**: former `ato-run.github.io/ato/` deep links stop
     resolving; accepted, cannot be redirected from this repository.
 11. **Roadmap content**: archiving the roadmap leaves 45 unstarted tasks without a

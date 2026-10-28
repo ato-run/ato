@@ -100,12 +100,14 @@ under `ops/`, `specs/` and the `docs/` root, and the historical collections in
 they keep external issue/PR references (including `docs/...` links quoted in
 old issues and PRs) resolving, and scripts and tests still read some of them.
 
-GitHub Pages hosting is retired by this change; the GitHub-side disable
-and deployment cleanup are recorded in the
-[pre-state record](archive/2026/repository-cleanup-20261028/GITHUB-SETTINGS.md).
-The former `ato-run.github.io/ato/` URLs are expected to stop resolving, and
-that link loss is accepted; a few external — and therefore unfixable from this
-repository — broken links remain, while in-repository links must stay valid.
+GitHub Pages hosting is retired: the repository-side workflow and site assets
+are removed, and the GitHub-side disable, 133-deployment purge and
+`github-pages` environment deletion were completed on 2026-10-28
+([result record](archive/2026/repository-cleanup-20261028/GITHUB-SETTINGS.md)).
+The former `ato-run.github.io/ato/` URLs now return 404; that external link
+loss is accepted and cannot be redirected from this repository. A few
+historical links remain unresolved by design, while in-repository links stay
+valid and are checked by docs CI.
 
 The [inventory](archive/2026/documentation-reorganization/inventory.tsv) covers
 all baseline docs attachments and repository-wide prose. The
