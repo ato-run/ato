@@ -1,0 +1,183 @@
+# Portable Capsule v1 — 形式選定と不変条件（2026-10-28）
+
+状態: docs-only 決定記録。実装変更なし。
+対象: 異なる ato.run アカウント間で Private Capsule を Export / Import し、同じ K を再現できること（PWA↔PWA）。
+範囲外: PWA↔ローカル、CPU/GPU 異種環境、Formation Worker 最適化、Production 変更、CI 実装。
+
+## 0. 結論
+
+**新しい .capsule 形式は導入しない。** 既存の versioned capsule bundle（wire v3 = ato.portable-application/1、wire v4 = ato.portable-application/2）をそのまま Export Artifact として採用する。形式選定は選択肢 A（既存形式の再利用）で、B（最小拡張）・C（汎用 archive + manifest）・D（新 wire 導入）は現時点の要件では不要。
+
+理由:
+- K/D identity、object closure、state/asset、cross-account import、atomicity は既存 v3/v4 と既存 export/import job で表現・検証できる。新しい形式は既存 validator / receipt / bundle table と二重実装になる。
+- Export の成果物は既に v4 bundle（profile ato.portable-application/2、portability manifest、任意の instance_snapshot_ref）として生成され、既存の capsule_bundles validation → import-app 経路で Import できる。
+- v2 の ComputationRef と v3/v4 の ContractRef は decoder が version で分岐し、読み替えない（既存実装）。
+
+v1 の保証対象は「app-only（K/D の再現）」と「with-data（browser state / Data Resource / Instance Asset の snapshot）」に限定する。filesystem volume / process memory / bindings / secrets は後続。
+
+## 1. 概念の分離
+
+| 概念 | 定義 | 既存の実体 |
+|---|---|---|
+| Capsule | K によって同一性が定義される計算 | ContractRef = sha256(JCS(BoundContract))（wire v3/v4） |
+| Derivation (D) | K を実現する経路 | DerivationRef = sha256(JCS(BoundDerivation))。bundle の derivations[] |
+| Bundle | K / D / 必要な object closure の論理的集合 | PortableApplicationBundle（index + payloads） |
+| Export Artifact | Bundle を持ち運ぶ具体ファイル | 同じ .capsule bytes（MIME application/vnd.ato.capsule） |
+| Application / Instance | ato.run の所有・実行・状態管理単位 | capsules / discover listing / compute_instances / portable_application_imports |
+
+Identity はファイル形式・転送方法・アカウントに依存しない。bundle の SHA-256 は transport integrity と provenance のみで、K の代用にしない。
+
+## 2. 既存形式の棚卸し
+
+| 形式 | version/profile | ルート | 用途 | 状態 |
+|---|---|---|---|---|
+| v2 | 2 / computation-root | root_computation_ref | 旧 computation capsule | 既存 reader 維持。v3 へ読み替えない |
+| v3 | 3 / ato.portable-application/1 | root_contract_ref | contract-root、完全埋め込み closure。static / process / OCI | 実装済み。CLI / PWA / hosted import |
+| v4 | 4 / ato.portable-application/2 | root_contract_ref + portability manifest + optional instance_snapshot_ref | dependency transport（thin/cached/offline）、state/asset snapshot | 実装済み。hosted export の出力形式 |
+
+根拠:
+- decoder dispatch: lib/objects/src/portable_bundle.rs（version 2 → ComputationV2、3 → PortableApplicationV3、4 → PortableApplicationV4）。unknown profile は fail closed。
+- v3 RFC: docs/rfcs/draft/PORTABLE_APPLICATION_BUNDLE_V3.md（K = root_contract_ref、完全 closure、hosted import は source ZIP に戻さず static application として materialize）。
+- v4 RFC: docs/rfcs/draft/PORTABLE_DEPENDENCY_EXPORT.md（packing は transport 決定で K/D を変えない。thin/cached/offline、offline は external object 禁止）。
+- export RFC: ato-api docs/rfcs/draft/portable-application-export.md（capture fence、job lifecycle、asset rebinding、limits）。
+- export/import 実装: ato-api src/routes/portable_application_exports.ts、src/routes/capsule_bundles.ts、src/services/portable_instance_export.ts、src/services/portable_instance_snapshot.ts。
+- PWA: ExportAtoAppAction（include saved data / portability / volume checkpoint）、CreateAppPage の .capsule import、api/portableApplicationExportClient.ts、api/portableApplicationClient.ts。
+- Rust authority: apps/portable-application/src/{hosted_export,instance_snapshot,portability_export,portability_plan}.rs、validator（ato-portable-validator）。
+
+## 3. 選択肢の評価
+
+評価軸: K/D identity、closure、state/asset、cross-account safety、既存 reader/writer 互換、Rust/TS 重複、実装・保守・移行コスト、CPU/GPU 後続。
+
+| 案 | 内容 | 判定 | 理由 |
+|---|---|---|---|
+| A | 既存 v3/v4 bundle をそのまま Export Artifact に | **採用** | 既に export 出力が v4、import が v3/v4 を受理。K/D 維持、closure 検証、snapshot、receipt が既存。追加 codec 不要 |
+| B | 既存形式の最小拡張 | 不採用（保留） | v1 の要件は v3/v4 で満たす。拡張が必要になる具体的反例が無い。将来、with-data の filesystem volume を保証する時に v4 の snapshot schema を拡張する可能性はあるが、新 wire version は不要 |
+| C | 汎用 archive（tar/zip）+ manifest で移送 | 不採用 | closure の canonical bytes、object ordering、digest 参照、K/D binding を再実装することになる。専用 manifest は結局 v3/v4 の index と同型になり、二重 canonicalizer になる。標準 archive は transport には使えるが、意味の authority にはならない |
+| D | 新しい wire v3 を導入 | 不採用（既に存在） | v3（ato.portable-application/1）は既に実装済み。これを超える新 version を今作る根拠が無い。v2 → v3 の読み替えは禁止 |
+
+新形式が不可避になる条件（現時点で該当なし）:
+1. v3/v4 で表現できない K/D 関係が必要になった。
+2. closure の完全性を v3/v4 の schema で証明できない object 種別が増えた。
+3. cross-account で receiver が検証できない state/asset 種別が必須になった。
+4. 既存 reader の互換を壊さずに field を追加できない（その場合も version bump で足りるか先に検討）。
+
+## 4. YAGNI（今回作らない）
+
+- 新しい汎用 archive framework / 新しい manifest 形式。
+- 任意 OS / GPU / 大規模モデル向け streaming transport。
+- 自動 Derivation 最適化 / 新しい Formation Engine / D scheduler。
+- TypeScript 側の canonicalizer / ContractRef 再計算 / validator の再実装。
+- K/D の意味的等価性の一般証明。
+- filesystem volume / process memory / bindings / secrets の移送。
+- 将来用途だけの metadata / extension point。
+- 独自の MCP Import Engine（既存 service を呼ぶ tool のみ）。
+
+## 5. 最小形式仕様（v1）
+
+### 5.1 Export Artifact
+
+- 1 ファイル。拡張子 .capsule、MIME application/vnd.ato.capsule。
+- JSON envelope: index + payloads。index は version / profile / root_contract_ref / application_ref / derivations[] / objects[] / 任意の instance_snapshot_ref / 任意の portability。
+- Export job の出力は **v4（ato.portable-application/2）**。app-only でも portability manifest を持つ（thin / cached / offline）。
+- with-data のとき instance_snapshot_ref が追加され、snapshot は K に bind された observation として扱う。
+- 完全な closure: index.objects は reachable set と一致。外部 object は portability manifest が明示（offline では禁止）。
+- 256 MiB transport 上限、objects 10,000、payload 64 MiB、decoded 256 MiB（既存 limits）。
+
+### 5.2 Import
+
+- 受理 version: 3 または 4。v2 は Portable Application import では拒否。
+- prepare → PUT content → complete → validation job（Rust validator agent）→ import-app。
+- validation は canonical encoding、payload digest、descriptor size、reference closure、external object set、snapshot binding を検証する。
+- import-app は新しい Application / Instance を作る。既存 import の receipt / lease / secret / grant を継承しない。
+- 同一 idempotency key の再送は同じ結果、異なる入力は 409。reconcile で失敗・中断を回復する。
+
+### 5.3 拒否条件
+
+- version 不明 / profile 不明 / v2 を portable として解釈。
+- payload digest 不一致、size 不一致、closure 欠落、重複 reference、未宣言 external object。
+- offline なのに external object がある。
+- instance_snapshot が K の observation と一致しない。
+- 改ざんされた receipt / bundle_sha256。
+- 受取側で capability 不足（version ではなく admission の問題として別コード）。
+
+## 6. 不変条件（I1–I7）
+
+表記: Export(A, E, mode) → artifact。Import(B, artifact) → ApplicationB, InstanceB。Execute(D, Target) → C。Verify(C, K) → Receipt。
+
+| ID | 事前条件 | 事後条件 | 責務 | 検証方法 | 現状 |
+|---|---|---|---|---|---|
+| I1 Identity | artifact が v3/v4、index.root_contract_ref が canonical BoundContract の digest | Import 後の app の K = 元の K（app-only） | Rust validator（decode / digest）、API は保持のみ | ContractRef 比較、bundle の root_contract_ref | 実装済み（要 E2E 証跡） |
+| I2 Closure | index の objects が宣言され payload が揃う | 必要 object が欠落せず、digest/size/参照関係が一致 | Rust validator（canonical / reachable set） | 欠落・改ざん negative test、reachable set 比較 | 実装済み |
+| I3 Independent Authority | Import は B の認証で実行 | B の新 Application/Instance。A の Secrets/Grant/Token/Lease を継承しない | API（owner / auth）、DB（新 row） | A の cookie/token を使わない E2E、DB 検査 | 実装済み（要 E2E） |
+| I4 State Preservation | with-data の capture fence が一致 | snapshot と Asset が整合し、B で再現。必要なら新しい Snapshot K を seal | Rust validator（snapshot bind）、API（capture / asset copy） | data/asset digest 比較、編集・再起動・再 Export | 実装済み（volume は対象外） |
+| I5 Verified Realization | Import 後の run が対象 K を実行 | Receipt が fully_satisfied / verification_status=verified | Runtime verifier（実際の HTTP / observation） | 実 Run の receipt。format validation だけでは PASS にしない | 実装済み（import-app の receipt） |
+| I6 Atomic Import | 失敗・crash・retry | 不完全 Instance / 重複 Import を残さない | API（idempotency / claim / reconcile） | crash/retry negative test、重複 POST | 実装済み（要 E2E） |
+| I7 Privacy | Private Capsule | Discover 公開や A の権限付与に繋がらない | API（private default、publish は別操作） | B の listing / visibility 検査 | 実装済み |
+
+証明責務の分離:
+- 形式的に証明できる性質: 形式の canonical encoding、digest、closure、descriptor 整合（Rust validator）。
+- Verifier に依存する性質: 実際の Run が K を満たすこと（runtime verification receipt）。「任意のアプリの意味的等価性」は主張しない。
+- 製品の認可: ownership / account / publish / secrets（API と product policy）。ここは形式仕様の外。
+
+## 7. 状態機械とクラッシュ安全性
+
+Export（既存）: capturing → queued → claimed → uploading → validating → ready / failed。
+Import（既存）: reserved → preparing → running → verified / failed。cancel / reconcile / retry は idempotency key と claim fence で直列化。
+
+クラッシュ安全性:
+- Export: 冪等キーを capture 前に確保。capture claim は期限付き。validator claim は agent / claim / expiry で fence。uploaded output は D1 batch で validation queue に遷移。
+- Import: 予約 row を INSERT OR IGNORE で確保。allocation は一度だけ。reconcile が失敗・中断を回復。
+- 重複: 同一キーの再送は同じ job、異なる入力は 409。
+
+TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempotency + claim fence で直列化され、新しい並行プロトコルを追加しないため。ただし E4 で crash / retry / concurrent import の負例を実測し、未検証の race が残る場合は別途モデル化する。
+
+## 8. Discover / Library の責務
+
+| 機能 | 責務 | しないこと |
+|---|---|---|
+| Discover | 公開 Application の発見・体験。Add は既存 Release を解決する | Add のたびに新しい K/D を生成しない |
+| Library | 自分の Application と追加した Application の管理、保存 Release の識別、Export、closure の取得可能性の保証 | Add で即時に実体複製しない（参照でよい） |
+
+保持条件:
+- Export 可能なのは verified portable import を持つ Instance（portable_export_available）。
+- Export は source bundle と instance snapshot を読む。source bundle が無い場合は明示エラーにし、黙って別 Release に差し替えない。
+- 既存 Library 項目を条件未達という理由で黙って削除しない。Export 不可の理由を返す。
+- ライセンスは Discover listing / instance の metadata を保持し、Export に含める（公開範囲の判定には使わない）。
+
+## 9. 既存ギャップ（本監査時点）
+
+1. **MCP tools が無い**: Library exportability / Export / Import pre-validation / Import commit / Import status・receipt を MCP から実行する tool が無い（管理 MCP 39 tools に export/import は含まれない）。PWA と API の service は既存。
+2. **cross-account E2E の証跡が無い**: A→Export→B Import の実アカウント試験が未実施。コード上は B が自分の bundle として upload するため成立する見込み。
+3. **with-data の範囲**: browser state / Data Resource / Instance Asset は実装済み。filesystem volume / process memory / bindings / secrets は対象外。
+4. **保持ポリシー**: capsule_bundles の cleanup は uploading 期限切れのみ。validated bundle の長期保持・quota eviction は UNVERIFIED。
+5. **docs**: export/import の user-facing 手順と保証範囲が未整理。
+
+## 10. 最小実装計画（形式変更なし）
+
+1. **MCP tools（P0）**: 既存 REST を呼ぶ薄い tool。
+   - check_library_exportability（instance の portable_export_available / 理由）
+   - export_app（instance_id, include_saved_data, portability, idempotency_key）→ export job
+   - get_export（job 状態 + download_url）
+   - validate_import（file param または bundle upload）→ 事前検証
+   - import_app（bundle_id, derivation_ref, idempotency_key）→ 新 Instance
+   - get_import（status / verification_receipt）
+   独立の Import Engine / Canonicalizer は作らない。
+2. **E2E**: Portable Notes fixture で E1–E4。
+3. **docs**: PWA 手順、Export Artifact の説明、未対応条件。
+
+## 11. 受入条件
+
+| ID | 内容 | PASS 条件 |
+|---|---|---|
+| E1 app-only | A Export → B Import | K 一致、object digest 一致、B に新 Application/Instance、K 検証 PASS、A 依存なし |
+| E2 with-data | 本文・進捗・画像 Asset | 状態・Asset 一致、B で編集・再起動、再 Export 可能、snapshot K が正しい |
+| E3 独立性 | 別アカウント / 別 browser profile / 別 Instance | A の Cookie / Token / Live Instance を使わない |
+| E4 負例 | 欠落 object、改ざん、不正権限、Asset 越境、状態更新競合、Import 途中 crash、無効 receipt、非対応 version | 拒否または回復。形式テストと実製品 E2E を混同しない |
+
+## 12. 未対応 / UNVERIFIED
+
+- cross-account の実アカウント E2E（本監査では未実施）。
+- validated capsule_bundles の長期保持 / quota eviction。
+- v4 import の hosted 経路の実 staging 動作（コードと unit test はある）。
+- filesystem volume の with-data 保証（v1 対象外）。
+- Export Artifact の MCP 経由ダウンロード方法（tool の返し方）は実装時に確定。MCP は bytes を直接返さず、PWA / 署名 URL へ誘導する案を優先。
