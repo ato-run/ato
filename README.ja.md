@@ -59,7 +59,13 @@ Atoは実験的なプロジェクトです。このリポジトリには計算�
 
 異なるホスト間の汎用的な復元、プロセスメモリの復元、AIによる自律的なFormationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixなどのツールの代替を目的とするものではありません。Contractの一致だけでは、状態の継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[状態の継続性](docs/concepts/state-continuity.md)を参照してください。
 
+## ロードマップと作業管理
+
+作業は[GitHub Issues](https://github.com/ato-run/ato/issues)（ボードを使う場合はGitHub Projects）で管理します。このリポジトリにMarkdownのロードマップは置きません。[アーカイブ済みのロードマップ](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)は履歴として残した資料で、更新しません。
+
 ## ドキュメント
+
+一般的な利用者向けドキュメントは[ato.runのドキュメント](https://ato.run/docs/)が所有します。このリポジトリはランタイム、CLI、仕様、運用の技術ドキュメントを所有します（[ドキュメント目次](docs/README.md)）。
 
 - [Getting started](docs/guides/getting-started.md)・[Formationガイド](docs/guides/formation.md)
 - [基本概念](docs/concepts/computation.md)・[アプリケーション契約](docs/concepts/application-contracts.md)・[用語集](docs/glossary-reference.md)

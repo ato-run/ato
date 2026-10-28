@@ -1,5 +1,7 @@
 # Materialization
 
+Status: Current technical reference.
+
 Continuing the [compiler-error example](computation.md): Alice sealed `C42`
 into a Capsule and sent it to Bob. Two different questions are involved:
 
