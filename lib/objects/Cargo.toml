@@ -2,7 +2,7 @@
 name = "ato-objects"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 description = "Verified persistence and transport for addressable Ato objects"
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
