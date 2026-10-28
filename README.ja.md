@@ -12,7 +12,7 @@ Atoは、検証可能で移転可能なソフトウェアのためのオープ�
 
 ## 試す
 
-[Discover](https://ato.run/)で公開アプリを開けます。開発者向けのローカル例は、このcheckoutの指定Rust toolchainで実行します。
+[Discover](https://ato.run/)で公開アプリを探し、[2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)を試せます。開発者向けのローカル例は、このcheckoutの指定Rust toolchainで実行します。
 
 ```sh
 cargo build -p ato-cli --bin ato --locked
