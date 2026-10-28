@@ -138,7 +138,34 @@ impl ValidatorAgent {
                     )?;
                 }
             }
-            report(&job, &bundle, &validated, bytes.len() as u64)
+            let (mut report, workspace_bytes) =
+                report_with_workspace_bytes(&job, &bundle, &validated, bytes.len() as u64)?;
+            if let Some(workspace_bytes) = workspace_bytes {
+                match workspace_artifact_transport(workspace_bytes.len()) {
+                    WorkspaceArtifactTransport::Inline => {
+                        report.workspace.artifact_base64 = Some(
+                            base64::engine::general_purpose::STANDARD.encode(&workspace_bytes),
+                        );
+                    }
+                    WorkspaceArtifactTransport::Separate => {
+                        // Above the inline bound the tar travels as bytes so the
+                        // ack stays inside the API's base64 ceiling. An API that
+                        // predates the lane answers 404/405; keep the old inline
+                        // form then, because that API only accepted inline.
+                        if self.api.upload_workspace(
+                            &job,
+                            &report.workspace.artifact_digest,
+                            &workspace_bytes,
+                        )? == WorkspaceUpload::LegacyEndpoint
+                        {
+                            report.workspace.artifact_base64 = Some(
+                                base64::engine::general_purpose::STANDARD.encode(&workspace_bytes),
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(report)
         })();
         match result {
             Ok(report) => {
@@ -549,7 +576,11 @@ pub struct PortableStateReport {
 pub struct PortableWorkspaceReport {
     pub tree_ref: String,
     pub artifact_digest: String,
-    pub artifact_base64: String,
+    /// Inline workspace tar (base64). Omitted when the artifact traveled over
+    /// the separate binary upload lane, which the API accepts when the inline
+    /// form would exceed the ack payload bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_base64: Option<String>,
     pub file_count: usize,
     pub total_size: u64,
 }
@@ -608,12 +639,38 @@ pub struct ValidationStatus {
     pub status: &'static str,
 }
 
-fn report(
+/// Packed workspace artifact larger than this travels over the separate binary
+/// upload lane instead of riding inside the ack payload as base64. The API's
+/// ack schema bounds `report.workspace.artifact_base64` at 24 MiB of characters
+/// (~18 MiB of bytes), so 8 MiB keeps the rest of the report inside the bound.
+const WORKSPACE_INLINE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceArtifactTransport {
+    /// Keep the tar in `report.workspace.artifact_base64`.
+    Inline,
+    /// Upload the tar to `.../validation-jobs/:job/workspace` and omit base64.
+    Separate,
+}
+
+fn workspace_artifact_transport(workspace_bytes: usize) -> WorkspaceArtifactTransport {
+    if workspace_bytes > WORKSPACE_INLINE_MAX_BYTES {
+        WorkspaceArtifactTransport::Separate
+    } else {
+        WorkspaceArtifactTransport::Inline
+    }
+}
+
+/// Build the verification report and return the packed workspace tar beside it
+/// so the caller can choose the transport. `artifact_base64` is left unset here:
+/// `report()` fills it for the inline path, and `validate_bundle` leaves it
+/// unset when the separate upload succeeded.
+fn report_with_workspace_bytes(
     job: &ValidationJob,
     bundle: &ato_objects::PortableApplicationBundle,
     validated: &[ValidatedPortableApplication],
     decoded_size: u64,
-) -> Result<PortableBundleVerificationReport> {
+) -> Result<(PortableBundleVerificationReport, Option<Vec<u8>>)> {
     let all_routes = validated;
     let first = validated
         .first()
@@ -684,7 +741,7 @@ fn report(
     let workspace_bytes = pack_workspace(bundle, validated)?;
     let routes = validated_routes(all_routes)?;
     let instance_snapshot = snapshot_report(bundle)?;
-    Ok(PortableBundleVerificationReport {
+    let report = PortableBundleVerificationReport {
         format_version: bundle.index.version,
         bundle_sha256: job.transport_digest.clone(),
         profile: bundle.index.profile.clone(),
@@ -750,14 +807,31 @@ fn report(
         workspace: PortableWorkspaceReport {
             tree_ref: validated.tree_ref.to_string(),
             artifact_digest: bundle_sha256(&workspace_bytes),
-            artifact_base64: base64::engine::general_purpose::STANDARD.encode(&workspace_bytes),
+            artifact_base64: None,
             file_count: validated.tree.entries.len(),
             total_size: validated.tree.entries.iter().map(|entry| entry.size).sum(),
         },
         object_count: bundle.index.objects.len(),
         decoded_size,
         validation: ValidationStatus { status: "valid" },
-    })
+    };
+    Ok((report, Some(workspace_bytes)))
+}
+
+/// Build the report with the workspace tar inline in the ack payload.
+fn report(
+    job: &ValidationJob,
+    bundle: &ato_objects::PortableApplicationBundle,
+    validated: &[ValidatedPortableApplication],
+    decoded_size: u64,
+) -> Result<PortableBundleVerificationReport> {
+    let (mut report, workspace_bytes) =
+        report_with_workspace_bytes(job, bundle, validated, decoded_size)?;
+    if let Some(workspace_bytes) = workspace_bytes {
+        report.workspace.artifact_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(&workspace_bytes));
+    }
+    Ok(report)
 }
 
 fn snapshot_content_refs(snapshot: &InstanceSnapshotV1) -> impl Iterator<Item = &str> {
@@ -1033,6 +1107,14 @@ fn optional_static_route(
     }
 }
 
+/// Outcome of the separate workspace-artifact upload lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceUpload {
+    Uploaded,
+    /// The API predates the lane (404/405): fall back to the inline ack form.
+    LegacyEndpoint,
+}
+
 struct HttpValidatorApi {
     client: Client,
     base_url: String,
@@ -1283,6 +1365,45 @@ impl HttpValidatorApi {
             );
         }
         Ok(())
+    }
+
+    /// Upload the packed workspace tar for a claimed job.
+    ///
+    /// Returns `LegacyEndpoint` when the API does not expose the lane (404/405);
+    /// that is the caller's signal to keep the artifact inline in the ack.
+    fn upload_workspace(
+        &self,
+        job: &ValidationJob,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<WorkspaceUpload> {
+        let path = format!(
+            "/v1/capsule-bundles/validation-jobs/{}/workspace",
+            job.job_id
+        );
+        let response = self
+            .claimed(
+                self.client
+                    .put(self.url(&path))
+                    .header("content-type", "application/octet-stream")
+                    .header("x-ato-workspace-digest", digest)
+                    .body(bytes.to_vec()),
+                &job.claim_id,
+            )
+            .send()?;
+        if response.status().is_success() {
+            return Ok(WorkspaceUpload::Uploaded);
+        }
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            return Ok(WorkspaceUpload::LegacyEndpoint);
+        }
+        bail!(
+            "workspace upload returned {status}: {}",
+            response.text().unwrap_or_default()
+        );
     }
 
     fn ack_verified(
@@ -1815,6 +1936,85 @@ mod tests {
         assert!(wire["surface"].get("profile").is_none());
         assert!(wire["routes"][0].get("native_surface").is_none());
         assert!(wire["routes"][0].get("session_surface").is_none());
+    }
+
+    #[test]
+    fn workspace_artifact_above_the_inline_bound_is_uploaded_separately() {
+        assert_eq!(WORKSPACE_INLINE_MAX_BYTES, 8 * 1024 * 1024);
+        // At or below the bound the artifact stays inline (unchanged behavior).
+        assert_eq!(
+            workspace_artifact_transport(0),
+            WorkspaceArtifactTransport::Inline
+        );
+        assert_eq!(
+            workspace_artifact_transport(WORKSPACE_INLINE_MAX_BYTES),
+            WorkspaceArtifactTransport::Inline
+        );
+        // One byte past the bound takes the separate binary upload lane.
+        assert_eq!(
+            workspace_artifact_transport(WORKSPACE_INLINE_MAX_BYTES + 1),
+            WorkspaceArtifactTransport::Separate
+        );
+    }
+
+    #[test]
+    fn separate_workspace_upload_ack_omits_the_inline_base64() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k");
+        let (bytes, bundle) = build_static_bundle(&source, "Ato workspace transport").unwrap();
+        let (_, validated) = validate_bytes_all(&bytes).unwrap();
+        let job = ValidationJob {
+            job_id: "bvj_workspace".to_owned(),
+            claim_id: "claim".to_owned(),
+            claim_expires_at: "2026-10-29T00:00:00Z".to_owned(),
+            retry_budget_ms: None,
+            bundle_id: "bnd_01WORKSPACE".to_owned(),
+            transport_digest: bundle_sha256(&bytes),
+            size_bytes: bytes.len() as u64,
+            claimed_parent_root: None,
+            download_url: "/bundle".to_owned(),
+            observe_url: None,
+            selected_derivation_ref: None,
+            run_id: None,
+            lease_id: None,
+            attempt_id: None,
+            execution_id: None,
+            realization: None,
+            endpoint: None,
+            execution_evidence: None,
+            instance_snapshot_ref: None,
+        };
+
+        // Inline path (report()): base64 present in the ack, as before this change.
+        let inline = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
+        assert!(inline.workspace.artifact_base64.is_some());
+        let inline_wire =
+            serde_json::to_value(ValidationAck::Verified { report: &inline }).unwrap();
+        assert!(inline_wire["report"]["workspace"]["artifact_base64"].is_string());
+
+        // Separate path: artifact_base64 is omitted and artifact_digest is exactly
+        // the digest the upload lane presents as x-ato-workspace-digest.
+        let (separate, workspace_bytes) =
+            report_with_workspace_bytes(&job, &bundle, &validated, bytes.len() as u64).unwrap();
+        let workspace_bytes = workspace_bytes.unwrap();
+        assert_eq!(
+            separate.workspace.artifact_digest,
+            bundle_sha256(&workspace_bytes)
+        );
+        assert!(separate.workspace.artifact_base64.is_none());
+        let separate_wire =
+            serde_json::to_value(ValidationAck::Verified { report: &separate }).unwrap();
+        assert!(
+            separate_wire["report"]["workspace"]
+                .get("artifact_base64")
+                .is_none()
+        );
+        // Only the removed field differs: every other ack byte stays identical.
+        let mut inline_without_base64 = inline_wire;
+        inline_without_base64["report"]["workspace"]
+            .as_object_mut()
+            .unwrap()
+            .remove("artifact_base64");
+        assert_eq!(inline_without_base64, separate_wire);
     }
 
     #[test]
