@@ -142,14 +142,13 @@ user-facing page is not edited from a documentation-maintenance change.
 
 ## 4. Documentation inventory result
 
-Baseline inventory: 1,152 tracked files under `docs/` (826 Markdown),
-33,117,169 bytes. Full per-file disposition:
-[docs-inventory.tsv](docs-inventory.tsv) (1,152 rows) with columns
+Inventory scope: 1,153 tracked docs files — the 1,152-file `2a3b75c33` baseline plus one operating reference added on `stg` before the rebase (827 Markdown), 33,122,959 bytes. The 153 archived `claudedocs/` files and the five new audit-record files are recorded separately (`claudedocs-moves.tsv` and this directory). Full per-file disposition:
+[docs-inventory.tsv](docs-inventory.tsv) (1,153 rows) with columns
 `path, category, decision, canonical_owner, status, rationale`.
 
 | Category | Files | Decision used | Result |
 |---|---|---|---|
-| Technical-Current | 53 | `keep` (46), `retire-pages-asset` (7 site-chrome files) | 46 kept, 7 site assets retired with Pages |
+| Technical-Current | 54 | `keep` (47), `retire-pages-asset` (7 site-chrome files) | 47 kept, 7 site assets retired with Pages |
 | Technical-Draft | 101 | `keep` | 101 kept, 12 got their missing `Status: Draft.` line |
 | Duplicate (compatibility redirect) | 215 | `retain-compatibility-stub` | 215 kept |
 | Historical-Archive | 781 | `retain-in-place` | 781 kept (328 already under `docs/archive/`) |
@@ -299,9 +298,9 @@ repository; not committed).
 
 | Check | Result |
 |---|---|
-| Markdown files scanned | 922 |
-| Local links checked | 1,703 |
-| External links not fetched | 1,096 |
+| Markdown files scanned | 924 |
+| Local links checked | 1,708 |
+| External links not fetched | 1,097 |
 | Failures by scope | historical: 33 |
 | Reviewed historical failures matched | 33 / 33 |
 | Unexpected failures | **0** |
