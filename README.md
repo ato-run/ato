@@ -1,58 +1,18 @@
 # Ato
 
-Ato is a computing interface for preserving, sharing and continuing work from
-a named point. Its semantic center is an evolving **Computation**:
-`C ──α──▶ C′`. A **Capsule** seals an immutable, addressable continuation;
-a **Run** resumes it and develops a new future. Records preserve evidence of
-what happened. Physical processes, source trees, containers and snapshots are
-ways to realize that work.
+Ato is an open-source runtime and computation model for verifiable, transferable software.
 
-The Web service **ato.run** is the primary product surface. This repository
-contains the runtime, CLI, Protocol/Adapter integrations and supporting tools
-used by developer and automation workflows. English is the default language
-of current documentation. [日本語の概要 / Japanese](README.ja.md).
+[ato.run](https://ato.run/) is a platform built on Ato for discovering, trying, saving, and sharing runnable software. This repository contains the runtime, CLI, adapters, and the model behind it. [About Ato](https://ato.run/about/) · [日本語](README.ja.md)
 
-## Read and build
+## What you can do
 
-| Goal | Start here |
-|---|---|
-| What is Ato? | [Computation](docs/concepts/computation.md) |
-| Core Concepts | [Capsule / Contract K / Derivation D / Source](docs/concepts/application-contracts.md), [glossary](docs/glossary-reference.md) |
-| Architecture | [Architecture map](docs/architecture/README.md) |
-| Getting Started | [Build the CLI and verify a sample](docs/guides/getting-started.md) |
-| Capsule Specification | [Accepted specifications and implementation-track contracts](docs/specifications/README.md), [bundle profiles](docs/capsule.md) |
-| Formation Guide | [Form and verify an application](docs/guides/formation.md) |
-| Runner / Hosting | [Execution paths and admission boundaries](docs/guides/runner-hosting.md) |
-| Contributing | [Development workflow](CONTRIBUTING.md) |
-| Operations | [Update, rollback, deployment identity and provisioning](docs/operations/README.md) |
+- Discover and try public software on [ato.run](https://ato.run/).
+- Build the CLI and run a supplied portable application, then inspect its verification receipt.
+- Explore how a shared contract can describe the observable requirements for different declared execution paths. Availability depends on the host and selected route.
 
-[All documentation](docs/README.md) includes RFC status, historical evidence
-and the complete inventory.
+## Try it
 
-## The model
-
-“Everything can be a Capsule” is an architecture principle: a computation
-with a defined boundary, typed interactions and continuation semantics can
-use the same interface. Applications, build work and agent tasks do not need
-separate top-level semantic primitives. Setup and launch can use existing
-tools such as Docker, Nix, scripts or agents.
-
-The computation-root profile identifies a Capsule by `ComputationRef` and uses
-wire v2. The portable application profile identifies the observable Contract
-K by `ContractRef`; a Derivation D describes a way to realize it. Wire v3/v4
-carry that profile. The transport file hash is distinct from either identity.
-The [specification index](docs/specifications/README.md) marks which contracts
-are accepted and which remain draft despite implemented code.
-
-Compatibility means preserving K and producing a verified new realization.
-It does not imply preserving the old implementation indefinitely. Equal K
-does not by itself guarantee state continuity, safe side effects, a security
-patch or a safe rollout. See [compatibility](docs/concepts/compatibility.md)
-and [state continuity](docs/concepts/state-continuity.md).
-
-## First local example
-
-With the repository's pinned Rust toolchain:
+Explore the [live Discover experience](https://ato.run/). For a local developer example, build this checkout with its pinned Rust toolchain:
 
 ```sh
 cargo build -p ato-cli --bin ato --locked
@@ -61,25 +21,30 @@ target/debug/ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 
-The [Getting Started guide](docs/guides/getting-started.md) explains the
-input, receipt and failure boundary. This example uses the supplied static portable
-application; Python, OCI, GPU, state and external services need their own
-declared routes and host admission. Do not infer production availability or
-general cross-host/process-memory restoration from a successful sample.
+The [getting started guide](docs/guides/getting-started.md) explains the fixture, receipt, and execution requirements. This example verifies a static application; it does not establish general cross-host portability.
+
+## The model
+
+A **Contract K** specifies observable conditions that a realization must satisfy. A **Derivation D** describes a declared way to realize those conditions. A **Capsule** is a sealed, immutable, addressable continuation point; a **Run** resumes it and evolves. A verification **receipt** records the selected D and the actual observations against K. It is evidence, not the computation itself.
+
+The computation-root profile uses a `ComputationRef` and wire v2. The portable application profile uses a `ContractRef` and wire v3/v4; its transport file hash identifies bytes, not semantic identity. The portable application specifications are [implementation-track drafts](docs/specifications/README.md), not accepted RFCs. See [K and D](docs/concepts/application-contracts.md), [Computation](docs/concepts/computation.md), and the [theoretical background](docs/theory/capsule-process-model.md) for the detailed model.
+
+## Status and limitations
+
+Ato is experimental. This checkout includes computation objects, lifecycle commands, adapters, portable bundle handling and the supplied static verification example. Python, OCI, GPU, state, and external services have separate declared requirements and admission boundaries; code in this repository does not establish availability on ato.run production.
+
+General recovery across heterogeneous hosts, process-memory restoration, and autonomous AI Formation are research or development work, not generally available capabilities. Ato does not promise that every application runs everywhere or replace environment tools such as Docker and Nix. Equal K alone does not guarantee state continuity or safe side effects. See [compatibility](docs/concepts/compatibility.md) and [state continuity](docs/concepts/state-continuity.md).
+
+## Documentation and contact
+
+- [Documentation index](docs/README.md), [specifications](docs/specifications/README.md), [formation](docs/guides/formation.md), and [runner and hosting](docs/guides/runner-hosting.md)
+- [Contributing](CONTRIBUTING.md) and [GitHub issues](https://github.com/ato-run/ato/issues)
+- [ato.run documentation](https://ato.run/docs/) and [contact](https://ato.run/legal/contact/)
 
 <!-- Compatibility anchors from the previous documentation entry. -->
-<a id="main-use-cases"></a>
-<a id="design-principle-everything-can-be-a-capsule"></a>
-<a id="core-model"></a>
-<a id="capsule--run--replay--continue"></a>
-<a id="core--kernel-and-adapter"></a>
-<a id="materialization"></a>
-<a id="the-computation-theory-behind-it"></a>
-<a id="basic-lifecycle"></a>
-<a id="capsuletoml-example"></a>
-<a id="project-scope"></a>
-<a id="current-implementation-status"></a>
-
-<!-- Additional Docsify slug aliases (including numeric prefixes). -->
-<a id="capsule-run-replay-continue"></a>
-<a id="core-kernel-and-adapter"></a>
+<a id="main-use-cases"></a><a id="design-principle-everything-can-be-a-capsule"></a>
+<a id="core-model"></a><a id="capsule--run--replay--continue"></a>
+<a id="core--kernel-and-adapter"></a><a id="materialization"></a>
+<a id="the-computation-theory-behind-it"></a><a id="basic-lifecycle"></a>
+<a id="capsuletoml-example"></a><a id="project-scope"></a><a id="current-implementation-status"></a>
+<a id="capsule-run-replay-continue"></a><a id="core-kernel-and-adapter"></a>
