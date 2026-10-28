@@ -1,41 +1,45 @@
-# Ato（日本語の概要）
+# Ato
 
-Language: Japanese. 正式ドキュメントの基本言語は英語です。
-[English README](README.md) と [ドキュメント目次](docs/README.md)を正本への入口として使用してください。
+Atoは、検証可能で移転可能なソフトウェアのためのオープンソースのランタイムと計算モデルです。
 
-Atoは、計算のある地点を保存し、共有し、その先を続けるためのcomputing interfaceです。
-中心となる **Computation** は、その地点から先に進める残余計算です。
-**Capsule** はsealされた不変でaddressableな継続地点、**Run** はそこから進む評価体です。
-Recordは観測された変化の証拠です。コンテナやVM、ファイルやSnapshotは実現方法であり、
-すべてのCapsuleのidentityを定義するものではありません。
+[ato.run](https://ato.run/)はAtoを利用して、動作するソフトウェアを発見・試用・保存・共有するプラットフォームです。このリポジトリにはランタイム、CLI、Adapterと計算モデルが含まれます。[About](https://ato.run/about/) · [English](README.md)
 
-現在の主なproduct入口はWebサービスの **ato.run** です。このリポジトリはruntime、CLI、
-Protocol、Adapterと関連ツールを含みます。CLIは開発者・automation向けの入口です。
+## できること
 
-| 読みたい内容 | 入口（英語） |
-|---|---|
-| Atoの思想 | [Computation](docs/concepts/computation.md) |
-| Capsule / Contract K / Derivation D / Source | [Core Concepts](docs/concepts/application-contracts.md) |
-| アーキテクチャ | [Architecture](docs/architecture/README.md) |
-| 最初の実行・検証 | [Getting Started](docs/guides/getting-started.md) |
-| 正式仕様・実装契約 | [Specifications](docs/specifications/README.md) |
-| Formation | [Formation Guide](docs/guides/formation.md) |
-| Runner / Hosting | [Runner Guide](docs/guides/runner-hosting.md) |
-| 開発への参加 | [Contributing](CONTRIBUTING.md) |
-| 運用・Rollback | [Operations](docs/operations/README.md) |
+- [ato.run](https://ato.run/)で公開ソフトウェアを探して試す。
+- CLIをビルドし、同梱のportable applicationを実行して検証receiptを確認する。
+- 同じ契約を満たす複数の宣言された実行経路を検討する。利用可否はホストと選択した経路に依存する。
 
-Computation-root profileは`ComputationRef`をidentityとしwire v2で運びます。
-Portable application profileはContract Kの`ContractRef`をidentityとし、Derivation Dが
-その実現方法を記述します。wire v3/v4を既存v2のrefへ読み替えません。
-Bundle全体のSHA-256はtransportの同一性を示す値です。
+## 試す
 
-互換性とはContract Kの維持と検証済みの再実現です。ただしKの同一性だけで、
-既存データの継続、副作用の安全性、脆弱性修正や安全なrolloutまで保証しません。
-[互換性](docs/concepts/compatibility.md)と[State Continuity](docs/concepts/state-continuity.md)を参照してください。
+[Discover](https://ato.run/)で公開アプリを探し、[2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)を試せます。開発者向けのローカル例は、このcheckoutの指定Rust toolchainで実行します。
 
-accepted RFC、Draft、実装、配備結果は別々に確認します。Draftに実装があっても、
-正式仕様への昇格や本番での有効化を意味しません。過去の日本語の検証記録は、
-言語を明示して[Archive](docs/archive/README.md)に保持しています。
+```sh
+cargo build -p ato-cli --bin ato --locked
+mkdir -p .tmp/getting-started
+target/debug/ato run samples/interop-static.capsule --no-open \
+  --verification-receipt .tmp/getting-started/receipt.json
+```
+
+[Getting Started](docs/guides/getting-started.md)にfixture、receipt、実行条件を記載しています。この例の成功は、一般的なホスト間移植性の証明ではありません。
+
+## モデル
+
+**Contract K**は実現が満たすべき観測可能な条件、**Derivation D**はその実現方法を記述します。**Capsule**はsealされた不変でaddressableな継続地点、**Run**はそこから進む評価体です。検証**receipt**は選択したDと実際の観測を記録する証拠です。
+
+Computation-root profileは`ComputationRef`とwire v2、portable application profileは`ContractRef`とwire v3/v4を使います。ファイルのhashはtransport bytesの同一性であり、semantic identityではありません。Portable applicationの仕様は[実装段階のdraft](docs/specifications/README.md)です。詳細は[KとD](docs/concepts/application-contracts.md)、[Computation](docs/concepts/computation.md)、[計算理論](docs/theory/capsule-process-model.md)を参照してください。
+
+## 現状と制約
+
+Atoは実験的なプロジェクトです。このcheckoutには計算オブジェクト、ライフサイクルコマンド、Adapter、portable bundle処理と静的な検証例があります。Python、OCI、GPU、state、外部サービスにはそれぞれ宣言された条件とadmissionが必要で、コードの存在はato.run本番での利用可能性を意味しません。
+
+異種ホスト間の汎用的な復元、process memoryの復元、AIによる自律的Formationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixの代替を目的とするものではありません。Kの一致だけでデータの継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[State Continuity](docs/concepts/state-continuity.md)を参照してください。
+
+## ドキュメントと連絡先
+
+- [ドキュメント目次](docs/README.md)、[仕様](docs/specifications/README.md)、[Formation](docs/guides/formation.md)、[Runner](docs/guides/runner-hosting.md)
+- [貢献方法](CONTRIBUTING.md)・[GitHub issues](https://github.com/ato-run/ato/issues)
+- [ato.run Docs](https://ato.run/ja/docs/)・[お問い合わせ](https://ato.run/legal/contact/)
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="ato"></a>
