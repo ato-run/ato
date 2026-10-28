@@ -1126,11 +1126,21 @@ pub fn build_static_bundle(
     source_root: &Path,
     title: &str,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_static_bundle_with_schema(source_root, title, PORTABLE_TREE_SCHEMA)
+}
+
+/// Static packer with an explicit tree schema. ato.portable-tree/2 allows
+/// arbitrary binary media (audio, fonts), which the v1 tree rejects.
+pub fn build_static_bundle_with_schema(
+    source_root: &Path,
+    title: &str,
+    tree_schema: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if title.trim().is_empty() {
         return Err(profile("application title must not be empty"));
     }
     let draft = read_authoring_draft(source_root)?;
-    let (mut objects, tree_ref) = build_portable_tree(source_root)?;
+    let (mut objects, tree_ref) = build_portable_tree_with_schema(source_root, tree_schema, &[])?;
     let (contract, derivation) = bind(
         &draft,
         &BindingContext {
