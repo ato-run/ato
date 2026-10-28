@@ -217,6 +217,24 @@ B の .capsule import を PWA の Add App 画面から実行する試みは、st
 
 Portable Notes の python process + sqlite volume fixture は、staging hosted runner で path must be shorter than SUN_LEN により verification failed（receipt: execution.attempt_interrupted=true, fully_satisfied=false）。with-data の E2 は上記の静的 browser-state lane で代替した。filesystem volume の移送は v1 の対象外であり、hosted runner の unix socket 長制限は未対応条件として記録する。
 
+### 11.2e Portable Notes（OCI derivation + filesystem volume）の with-data
+
+Portable Notes fixture（python process と OCI の 2 derivation、filesystem state）を **OCI derivation** で import し、with-data を検証した。
+
+| 項目 | 結果 |
+|---|---|
+| A: OCI notes を import | PASS。verification verified、receipt fully_satisfied=true、realization=oci、実行コンテナ起動 |
+| A: ノート作成 | PASS（/api/notes 201） |
+| A: PWA UI で with-data export | PASS。v4、instance_snapshot_ref あり、約 32 KiB |
+| B: artifact import | PASS。verification verified、receipt fully_satisfied=true |
+| B: filesystem 状態の再現 | PASS。A のノートが SQLite から復元 |
+| B: 追記 | PASS。2 件目のノートが保存 |
+| B: 再起動 | PASS。stop → wake 後も 2 件保持（wake は recovery 待ちのため数回リトライ） |
+| B: 再 Export | PASS。app-only export 開始（ready） |
+| I3 独立性 | PASS（A は B の Instance を 404） |
+
+python process derivation は hosted runner で path must be shorter than SUN_LEN により verification failed のまま（§11.2d）。with-data の Portable Notes 受入は OCI derivation で成立した。
+
 ### 11.3 MCP smoke（staging、delegated token）
 
 | 項目 | 結果 |
