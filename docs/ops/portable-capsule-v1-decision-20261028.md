@@ -211,7 +211,7 @@ TLA+ 等のモデル検査: v1 では導入しない。既存の D1 CAS + idempo
 
 ### 11.2c PWA UI import の未検証
 
-B の .capsule import を PWA の Add App 画面から実行する試みは、staging の配備済み PWA build（524daddb）でファイル選択後に画面が反応せず、import を開始できなかった（Playwright の filechooser / setInputFiles の双方）。API 経由の import は成功しているため、service 側ではなく配信中の PWA bundle と current main（867f73bd）の差、または capsule 選択ハンドラの問題と推定される。UNVERIFIED として残す。切り分けには main の PWA を staging / dev preview に配備して再試験する必要がある。
+B の .capsule import を PWA の Add App 画面から実行する試みは、staging の配備済み PWA build（524daddb）でファイル選択後に画面が反応せず、import を開始できなかった（Playwright の filechooser / setInputFiles の双方）。API 経由の import は成功しているため、service 側ではなく配信中の PWA bundle と current main（867f73bd）の差、または capsule 選択ハンドラの問題と推定される。異なるアカウントで 4 回再試行したが、いずれも prepare が ERR_ABORTED で中断した。UNVERIFIED として残す。切り分けには main の PWA を staging / dev preview に配備して再試験する必要がある。
 
 ### 11.2d 動的 process + filesystem state の制約
 
