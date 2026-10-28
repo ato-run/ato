@@ -244,6 +244,18 @@ Never backport from `nightly` to `release/*`.
    - `CAPSULE_CLI_LIFECYCLE.md` — public CLI behavior
 3. **Missing specs**: If implementing important logic not in specs, document it as a new RFC in `docs/rfcs/draft/`
 
+### Documentation ownership
+
+- General user documentation is owned by [ato.run docs](https://ato.run/docs/);
+  `docs/` in this repository is technical documentation (architecture, RFC/ADR,
+  protocol and implementation specifications, operations, archive). See
+  `docs/README.md`.
+- Roadmap and work tracking are GitHub Issues/Projects. Do not add a Markdown
+  roadmap; `docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md` is historical.
+- Prefer an explicit `Status: Current|Draft|Archived` line; directory position
+  (`rfcs/accepted`, `rfcs/draft`, `archive/`) carries status when a page has
+  none. `Current` does not imply implemented, deployed or verified.
+
 ### Component Responsibilities
 
 - **lib/computation**: canonical Computation values, Ports, identity, and pure wiring

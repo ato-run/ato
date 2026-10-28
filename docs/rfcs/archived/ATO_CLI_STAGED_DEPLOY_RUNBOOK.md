@@ -1,5 +1,7 @@
 # Ato CLI Staged Deploy Runbook (staging -> production)
 
+Status: Archived.
+
 `install.sh` (`apps/ato-store-web/install.sh`) を起点に、`ato` 配布物・Store API・Store Web を段階展開するための手順。
 
 ## 1. Scope

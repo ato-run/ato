@@ -1,5 +1,7 @@
 # Runtime Evolution Authority v1
 
+Status: Draft.
+
 ## Decision
 
 A hosted Run owns one logical `ComputationRef` head independently of its VM,
