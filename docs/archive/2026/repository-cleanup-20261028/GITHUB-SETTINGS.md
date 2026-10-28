@@ -6,7 +6,7 @@ the result fields are placeholders for the person who runs the admin steps.
 Evidence: the read-only audit at `.tmp/repo-cleanup-20261028/audit/pages/`
 (pages-deployments-audit.md, deployments.tsv, raw/ GET responses). The
 authoritative per-deployment record is [deployments.tsv](deployments.tsv)
-(132 rows + header, newest first), copied from that audit before deletion.
+(133 rows + header, newest first), copied from that audit and refreshed immediately before deletion.
 
 ## 1. Pre-state (read-only, 2026-10-28)
 
@@ -25,18 +25,18 @@ authoritative per-deployment record is [deployments.tsv](deployments.tsv)
 | `status` | null (expected for `build_type=workflow`; state lives in deployments) |
 | Publishing workflow | `.github/workflows/rfc-docs-pages.yml` (deleted in this cleanup) |
 | Workflow runs | 159 total: 124 success, 35 cancelled, 0 failed |
-| Cutoff — last run | id `40591978386`, 2026-10-27T22:04:53Z, success |
+| Cutoff — last run | id `40667376436`, 2026-10-28T09:50:23Z, success (a newer run than the audit snapshot) |
 
 ### Deployments
 
 | Field | Value |
 |---|---|
-| Count | 132, all `environment=github-pages`, `ref=main`, `task=deploy` |
-| Date range (UTC) | 2026-05-04T16:26:21Z .. 2026-10-27T22:05:18Z |
-| Id range | `4572584920` .. `7371565372` |
+| Count | 133, all `environment=github-pages`, `ref=main`, `task=deploy` |
+| Date range (UTC) | 2026-05-04T16:26:21Z .. 2026-10-28T09:51:52Z |
+| Id range | `4572584920` .. `7382160739` |
 | Latest states | 79 `success`, 7 `error`, 46 `inactive` |
-| Creator | `Koh0920` (132/132) |
-| Cutoff — last deployment | id `7371565372`, sha `f55c4b34edd9960ba843c603c91e48a96ce09630` (= origin/main at audit time), created 2026-10-27T22:05:18Z |
+| Creator | `Koh0920` (133/133) |
+| Cutoff — last deployment | id `7382160739`, sha `08144622dc3801590167e8099ca42ddcaef71788` (= origin/main at purge time), created 2026-10-28T09:51:52Z |
 
 ### Environment
 
@@ -68,14 +68,14 @@ branch `docs/repo-cleanup-20261028`).
 Stage 2 — disable Pages, only after Stage 1 has reached `main`:
 
 1. Preflight: confirm no queued/in-progress Docs Pages run and that the deployment
-   count is still 132 with last run `40591978386`.
+   count is still 133 with last run `40667376436`.
 2. `DELETE /repos/ato-run/ato/pages` → expect `204`; `has_pages` becomes false and
    `GET /pages` returns `404`. On `409`, wait for in-flight builds and retry.
 
-Stage 3 — purge the 132 deployment records (irreversible; [deployments.tsv](deployments.tsv)
+Stage 3 — purge the 133 deployment records (irreversible; [deployments.tsv](deployments.tsv)
 is the preserved record). Oldest-first; mark a non-`inactive` deployment inactive
 with `POST /deployments/{id}/statuses {"state":"inactive"}` before deleting it;
-delete the current active deployment (`7371565372`) last.
+delete the current active deployment (`7382160739`) last.
 
 Stage 4 — `DELETE /repos/ato-run/ato/environments/github-pages` → expect `204`.
 If GitHub refuses the auto-created environment, use the UI fallback or leave it
@@ -107,10 +107,10 @@ deployments after Pages is disabled so no new deployment is created mid-purge.
 
 | Step | Command / action | Expected | Actual | Timestamp (UTC) | Result |
 |---|---|---|---|---|---|
-| Preflight | read-only GETs, confirm 132 deployments and cutoff ids | unchanged | TBD | TBD | TBD |
+| Preflight | read-only GETs, confirm 133 deployments and cutoff ids | unchanged | TBD | TBD | TBD |
 | Stage 1 merge to `main` | release PR with the workflow/site-asset removal | merged, workflow absent on `main` | TBD | TBD | TBD |
 | Stage 2 | `DELETE /repos/ato-run/ato/pages` | 204 | TBD | TBD | TBD |
-| Stage 3 | purge 132 deployments (mark-inactive then delete) | 0 remaining | TBD | TBD | TBD |
+| Stage 3 | purge 133 deployments (mark-inactive then delete) | 0 remaining | TBD | TBD | TBD |
 | Stage 4 | `DELETE /repos/ato-run/ato/environments/github-pages` | 204 | TBD | TBD | TBD |
 | Stage 5a | `has_pages`, `GET /pages`, environments, deployments | false / 404 / 0 / 0 | TBD | TBD | TBD |
 | Stage 5b | `curl -o /dev/null -w '%{http_code}' https://ato-run.github.io/ato/` | 404 | TBD | TBD | TBD |
