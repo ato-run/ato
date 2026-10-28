@@ -380,6 +380,9 @@ struct StaticBundleArgs {
     /// New bundle file.
     #[arg(short, long, default_value = "static.capsule")]
     output: PathBuf,
+    /// Portable tree schema: v1 (default) or v2. v2 carries arbitrary binary media.
+    #[arg(long, default_value = "v1")]
+    tree_schema: String,
 }
 
 #[derive(Debug, Args)]
@@ -887,7 +890,12 @@ fn native_bundle(args: NativeBundleArgs) -> Result<()> {
 /// Compile an `ato.capsule/1` static Web route into a portable wire v3 bundle
 /// with no build: the packer hashes the tree this route already declares.
 fn static_bundle(args: StaticBundleArgs) -> Result<()> {
-    let (bytes, bundle) = ato_portable_application::build_static_bundle(&args.source, &args.title)
+    let schema = match args.tree_schema.as_str() {
+        "v1" => "ato.portable-tree/1",
+        "v2" => "ato.portable-tree/2",
+        other => anyhow::bail!("unknown --tree-schema {other}"),
+    };
+    let (bytes, bundle) = ato_portable_application::build_static_bundle_with_schema(&args.source, &args.title, schema)
         .with_context(|| format!("compile static bundle from {}", args.source.display()))?;
     fs::write(&args.output, &bytes)
         .with_context(|| format!("write static bundle {}", args.output.display()))?;
