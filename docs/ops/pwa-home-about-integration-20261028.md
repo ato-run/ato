@@ -136,3 +136,19 @@ gh -R ato-run/ato-pwa pr view 561 --json number,state,mergeCommit,body
 ```
 
 コード参照は ato-pwa `origin/stg` = `fb475bba` の内容。行番号はこの commit 時点のものである。
+
+## 9. 追補: 検証後の staging build 前進（2026-10-28T08:40Z）
+
+本文 §3〜§5 の観測後、共有 staging では別タスクが PWA を再度配備した。**検証済みの pin は 2 つあり、混同しない**。
+
+| 検証 | PWA Worker / asset / build | stg | 結果 |
+|---|---|---|---|
+| 第1回（本文 §3） | `5ffddf63-d2d6-4f0e-9743-dcc794c9ecef` / `assets/index-CGL6ctxK.js` / `fb475bb` | `fb475bba`（#561/#563/#565） | **PASS 21/21** |
+| 第2回（本追補） | `1b713b1a-70e6-4bdb-9d9b-dcc5732a3618` / `assets/index-Dx8OzJEF.js` / `9db56a1` | `9db56a1d`（#566 feat/about-imagen-review。`#561/#563/#565` を ancestor に含む） | **PASS 21/21** |
+
+- 第2回は API `914ad323` / stg `d95fab7f` 不変のまま、identity を前後で確認（mid-run 変更なし）。
+- 第2回で追加確認した点: #566 の About 画像 3 種（icon PNG 148,409B / about-capsule-continuation.webp 45,650B / about-tile-puzzle-illustration.webp 55,914B）がすべて 200 `image/*` で、Playwright 上も `complete` かつ `naturalWidth > 0`（broken image 0）。home の `data-nosnippet` は 213 のまま、crawlable link も 213 のまま。
+- 第2回の Portable 回帰（同一 build）: `discover-plaza` = PASS_NOT_EXPORTABLE（正確に 409）、`discover-portable-memos` = PASS（receipt `fully_satisfied=true`、attempt `pav_01M60TQNQSPE3EJRNB4VN1P26C`、K `64368f74…` 保持、B import・app 200・K 一致、cross-account 404）。
+- 証跡: `.tmp/portable-v1-stabilize/integration/latest-build/{REPORT.md,verdict.json,evidence/,screens/}`（第2回）、`.tmp/portable-v1-stabilize/integration/`（第1回）。
+
+**注意**: 2 回の PASS はそれぞれ別 build の観測であり、build 間の等価性を主張しない。共有 staging は今後も前進し得るため、Release Manifest へ固定する際は「どの build を検証したか」を pin と一緒に記録する。production は依然未配備で、§6 のゲート（API release と deploy 順序、pinned-manifest E2E）は未解消のままである。
