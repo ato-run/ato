@@ -1,45 +1,76 @@
 # Ato
 
-Atoは、検証可能で移転可能なソフトウェアのためのオープンソースのランタイムと計算モデルです。
+Atoは、参照可能な地点から作業を保存・共有・継続するためのコンピューティングインターフェースです。計算モデルと、Capsuleを扱うランタイム・CLIを組み合わせています。
 
-[ato.run](https://ato.run/)はAtoを利用して、動作するソフトウェアを発見・試用・保存・共有するプラットフォームです。このリポジトリにはランタイム、CLI、Adapterと計算モデルが含まれます。[About](https://ato.run/about/) · [English](README.md)
+[ato.run](https://ato.run/)は、動作するソフトウェアの発見、試用、保存、共有のためにAto上に構築されたWebサービスです。このリポジトリにはランタイム、CLI、Adapter、関連ツールが含まれます。[About Ato](https://ato.run/about/) · [English](README.md)
 
-## できること
+## なぜAtoなのか
 
-- [ato.run](https://ato.run/)で公開ソフトウェアを探して試す。
-- CLIをビルドし、同梱のportable applicationを実行して検証receiptを確認する。
-- 同じ契約を満たす複数の宣言された実行経路を検討する。利用可否はホストと選択した経路に依存する。
+作業は多くの場合、プロセス、マシン、ソースツリー、特定のスナップショットに結び付いています。別の場所に移すには、環境を再構築し、結果が期待どおりに動くか確認しなければならないことがあります。Atoは、作業の同一性と、それを実現するプロセス・コンテナ・スナップショットなどの物理的な手段を分けるアプローチを探究しています。
 
-## 試す
+アプリケーションの共有、開発作業の継続、長時間のエージェントタスクの引き継ぎを、共通のインターフェースで扱うことを目指しています。これらはモデルのユースケースであり、すべての状態や引き継ぎが現在サポートされているという意味ではありません。以下の例では、現在の静的アプリケーションの検証経路を試せます。
 
-[Discover](https://ato.run/)で公開アプリを探し、[2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)を試せます。開発者向けのローカル例は、このcheckoutの指定Rust toolchainで実行します。
+## 基本概念
+
+- **Computation**：現在地点から継続可能な計算・作業。
+- **Capsule**：封印された、不変で参照可能な継続地点。保存・共有でき、実現する物理的な方法はその同一性を定義しません。
+- **Run**：Capsuleを再開して計算を進める実行。同じCapsuleから複数のRunを始め、それぞれ異なる未来へ進められます。
+
+ポータブルアプリケーションでは、**Contract**が観測可能な要件を記述し、**Derivation**がその実現方法を宣言します。検証**receipt**は、Runで得られた観測結果を記録します。詳細は[Computation](docs/concepts/computation.md)と[アプリケーション契約](docs/concepts/application-contracts.md)を参照してください。
+
+## クイックスタート
+
+### ato.runを試す
+
+ブラウザで[ato.run](https://ato.run/)の公開ソフトウェアを探すか、[2048を試せます](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)。
+
+### CLIを試す
+
+[rust-toolchain.toml](rust-toolchain.toml)で指定されたRustツールチェーンをインストールし、リポジトリをcloneしてCLIをビルドし、同梱の静的アプリケーションbundleを実行します。
 
 ```sh
+git clone https://github.com/ato-run/ato.git
+cd ato
 cargo build -p ato-cli --bin ato --locked
 mkdir -p .tmp/getting-started
 target/debug/ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 
-[Getting Started](docs/guides/getting-started.md)にfixture、receipt、実行条件を記載しています。この例の成功は、一般的なホスト間移植性の証明ではありません。
+CLIはbundleを検証し、宣言された実行経路で実現して、ソースの同一性とHTTP応答をContractに照らし合わせ、receiptを書き出します。成功後、`.tmp/getting-started/receipt.json`で選択されたDerivationと観測結果を確認できます。必要な観測がすべて満たされると`fully_satisfied`は`true`になります。`--no-open`はブラウザを開かずに検証して終了します。詳細、他の経路、失敗時の境界は[Getting started](docs/guides/getting-started.md)を参照してください。公開済みのCLI成果物は[GitHub Releases](https://github.com/ato-run/ato/releases)にあります。
 
-## モデル
+例えば、Python 3でreceiptを確認できます。成功時の出力例は次のとおりです。
 
-**Contract K**は実現が満たすべき観測可能な条件、**Derivation D**はその実現方法を記述します。**Capsule**はsealされた不変でaddressableな継続地点、**Run**はそこから進む評価体です。検証**receipt**は選択したDと実際の観測を記録する証拠です。
+```sh
+python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
+```
 
-Computation-root profileは`ComputationRef`とwire v2、portable application profileは`ContractRef`とwire v3/v4を使います。ファイルのhashはtransport bytesの同一性であり、semantic identityではありません。Portable applicationの仕様は[実装段階のdraft](docs/specifications/README.md)です。詳細は[KとD](docs/concepts/application-contracts.md)、[Computation](docs/concepts/computation.md)、[計算理論](docs/theory/capsule-process-model.md)を参照してください。
+```text
+fully_satisfied: True
+app-proof: satisfied
+source-identity: satisfied
+```
 
-## 現状と制約
+この静的な例は、一般的なホスト間移植性やプロセスメモリの復元を実証するものではありません。
 
-Atoは実験的なプロジェクトです。このcheckoutには計算オブジェクト、ライフサイクルコマンド、Adapter、portable bundle処理と静的な検証例があります。Python、OCI、GPU、state、外部サービスにはそれぞれ宣言された条件とadmissionが必要で、コードの存在はato.run本番での利用可能性を意味しません。
+## 現在の状況
 
-異種ホスト間の汎用的な復元、process memoryの復元、AIによる自律的Formationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixの代替を目的とするものではありません。Kの一致だけでデータの継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[State Continuity](docs/concepts/state-continuity.md)を参照してください。
+Atoは実験的なプロジェクトです。このリポジトリには計算オブジェクト、ライフサイクルコマンド、Adapter、ポータブルbundleの処理、上記の静的な検証例が含まれます。Python、OCI、GPU、状態、外部サービスには、それぞれ宣言された経路とホストでの実行許可が必要です。コードの存在はato.run本番での利用可能性を意味しません。
 
-## ドキュメントと連絡先
+異なるホスト間の汎用的な復元、プロセスメモリの復元、AIによる自律的なFormationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixなどのツールの代替を目的とするものではありません。Contractの一致だけでは、状態の継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[状態の継続性](docs/concepts/state-continuity.md)を参照してください。
 
-- [ドキュメント目次](docs/README.md)、[仕様](docs/specifications/README.md)、[Formation](docs/guides/formation.md)、[Runner](docs/guides/runner-hosting.md)
-- [貢献方法](CONTRIBUTING.md)・[GitHub issues](https://github.com/ato-run/ato/issues)
-- [ato.run Docs](https://ato.run/ja/docs/)・[お問い合わせ](https://ato.run/legal/contact/)
+## ドキュメント
+
+- [Getting started](docs/guides/getting-started.md)・[Formationガイド](docs/guides/formation.md)
+- [基本概念](docs/concepts/computation.md)・[アプリケーション契約](docs/concepts/application-contracts.md)・[用語集](docs/glossary-reference.md)
+- [アーキテクチャ](docs/architecture/README.md)・[仕様](docs/specifications/README.md)
+- [Runnerとホスティング](docs/guides/runner-hosting.md)・[運用](docs/operations/README.md)・[ドキュメント目次](docs/README.md)
+
+## 貢献とライセンス
+
+[貢献方法](CONTRIBUTING.md)と[GitHub issues](https://github.com/ato-run/ato/issues)を参照してください。
+
+ルートにはリポジトリ全体に適用されるライセンスファイルがありません。一部のコンポーネントはmanifestでライセンスを宣言しています。例えば、[CLIのmanifest](apps/cli/Cargo.toml)は`Apache-2.0 OR MPL-2.0`を宣言し、[CLIのライセンスファイル](apps/cli/LICENSE)にはApache 2.0の本文が含まれます。対象コンポーネントのライセンス情報を確認してください。リポジトリ全体への許諾はここでは定められていません。
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="ato"></a>
@@ -54,8 +85,6 @@ Atoは実験的なプロジェクトです。このcheckoutには計算オブジ
 <a id="capsuletoml-の例"></a>
 <a id="プロジェクトのスコープ"></a>
 <a id="現在の実装状態"></a>
-
-<!-- Additional Docsify slug aliases (including numeric prefixes). -->
 <a id="capsule-run-replay-continue"></a>
 <a id="core-kernel-と-adapter"></a>
 <a id="設計原則：everything-can-be-a-capsule"></a>

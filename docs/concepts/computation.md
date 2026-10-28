@@ -13,6 +13,14 @@ A **Computation** is the work remaining from a current point, not a
 transcript of everything that happened before it. In process-theory terms
 this is an evolving *residual computation*.
 
+## A common Capsule interface
+
+“Everything can be a Capsule” is an architecture principle: a computation
+with a defined boundary, typed interactions, and continuation semantics can
+use the same Capsule interface. Applications, build work, and agent tasks can
+be described through this common model. This does not mean every object is
+automatically a Capsule or that all workloads can currently be restored.
+
 ## Evolution
 
 ```text
