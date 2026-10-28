@@ -29,6 +29,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          # Match rust-ci.yml on disposable hosted runners; production is unchanged.
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true
       - if: runner.os == 'Windows'
         name: Windows durable attempt journal
         run: cargo test -p ato-runtime-attempt --lib journal::tests -- --test-threads=1
