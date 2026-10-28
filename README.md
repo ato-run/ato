@@ -100,7 +100,19 @@ Docker and Nix. Matching a Contract alone does not guarantee state continuity
 or safe side effects. See [compatibility](docs/concepts/compatibility.md) and
 [state continuity](docs/concepts/state-continuity.md).
 
+## Roadmap and work tracking
+
+Work is tracked in [GitHub Issues](https://github.com/ato-run/ato/issues) (and
+GitHub Projects when a board is used). There is no Markdown roadmap in this
+repository; [the archived roadmap](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)
+is historical evidence and is not updated.
+
 ## Documentation
+
+General user documentation is owned by the
+[ato.run documentation](https://ato.run/docs/). This repository owns the
+technical documentation for the runtime, CLI, specifications and operations
+([documentation index](docs/README.md)).
 
 - [Getting started](docs/guides/getting-started.md) and [Formation guide](docs/guides/formation.md)
 - [Concepts](docs/concepts/computation.md), [application contracts](docs/concepts/application-contracts.md), and [glossary](docs/glossary-reference.md)

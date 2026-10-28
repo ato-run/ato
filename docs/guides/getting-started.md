@@ -1,5 +1,11 @@
 # Getting started
 
+Status: Current technical reference.
+
+General installation and the user-facing CLI quickstart are owned by
+[ato.run CLI quickstart](https://ato.run/docs/cli-quickstart/); this page is the
+repository build and verification guide.
+
 ## Install the CLI
 
 There are two supported ways to get `ato` today. Both produce the same

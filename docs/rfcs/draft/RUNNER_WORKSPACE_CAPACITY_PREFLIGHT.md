@@ -1,5 +1,7 @@
 # Runner workspace capacity preflight (draft)
 
+Status: Draft.
+
 Existing workspace and VolumeStore admission retain their limits. Before a lease
 creates local files, observe available space on the nearest existing work-root
 ancestor and refuse a completely full filesystem with a typed failure. Before

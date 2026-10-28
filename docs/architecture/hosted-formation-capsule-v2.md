@@ -1,5 +1,7 @@
 # Hosted Formation of `ato.capsule/2` sources (Gate A)
 
+Status: Current architecture explanation; dated measurements are not a deployment statement.
+
 > Implementation explanation with dated measurements. Language: en.
 > This page does not adopt a specification or certify current deployment.
 
