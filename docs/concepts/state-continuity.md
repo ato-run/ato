@@ -1,5 +1,7 @@
 # Instance, Run, Lease and state continuity
 
+Status: Current technical reference.
+
 An **Instance** is the mutable application ownership/data context operated by
 the portable application's local or hosted lifecycle. An immutable Capsule can
 be imported into independent Instances. A **Run** is one active evaluation;

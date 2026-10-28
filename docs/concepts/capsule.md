@@ -1,5 +1,11 @@
 # Capsule and Run
 
+Status: Current technical reference.
+
+A shorter, user-facing explanation is owned by
+[ato.run Capsule](https://ato.run/docs/capsule/); this page is the technical
+model reference.
+
 Continuing the [compiler-error example](computation.md): Alice hits
 `error[E0277]` at point `C42`. Computation, Capsule, and Run describe
 different parts of what happens to `C42` next.

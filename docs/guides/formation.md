@@ -1,5 +1,7 @@
 # Formation guide
 
+Status: Current technical reference.
+
 Read [K, D and Source](../concepts/application-contracts.md) first. Decide which
 observations must survive a new realization, which source identity must be
 bound, and which execution route is explicitly authorized. A successful build

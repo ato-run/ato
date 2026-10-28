@@ -1,5 +1,7 @@
 # Store Web Staging Runbook
 
+Status: Archived.
+
 `apps/ato-store-web` を staging で検証するための手順。
 
 ## 1. 前提
