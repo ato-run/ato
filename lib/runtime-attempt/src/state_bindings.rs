@@ -213,6 +213,7 @@ mod tests {
                     mount_target: "/data".into(),
                     access: StateAccessV1::ReadWrite,
                     writer_fence: Some(7),
+                    // Fixture is revision-backed; a runner volume is not under test.
                     backing: None,
                 },
                 slot: BoundState {
