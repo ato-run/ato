@@ -294,7 +294,6 @@ impl HostBridge {
 
     fn start_inner(socket: &std::path::Path, target: Option<std::net::SocketAddr>) -> Result<Self> {
         use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
         use std::sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
