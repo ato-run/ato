@@ -29,6 +29,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Stateful portable-process scenarios require the Linux isolation adapter.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - if: runner.os == 'Windows'
         name: Windows durable attempt journal
         run: cargo test -p ato-runtime-attempt --lib journal::tests -- --test-threads=1
