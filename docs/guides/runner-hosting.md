@@ -1,5 +1,7 @@
 # Runner and Hosting
 
+Status: Current technical reference.
+
 A Runner realizes authorized work under host-specific limits. It does not
 define K or replace the Rust verifier. The Web product at ato.run is the main
 product entry; the CLI serves developer and automation workflows. Runtime

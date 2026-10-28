@@ -1,5 +1,7 @@
 # D-conversion repair pilot (unmerged)
 
+Status: Draft.
+
 The first 100-app exploration arm added no generated-D PASS. Its preserved
 diagnostic append is `docs/ops/formation-exploration-diagnostics.{json,md}`.
 The following changes are bounded repairs for a separate small OSS pilot;

@@ -1,5 +1,7 @@
 # Provisioning the `single-jsx/v1` compiler
 
+Status: operating procedure; verify the deployed binary and environment before use.
+
 `single-jsx/v1` compiles one authored `.jsx` file into a static document with
 the **network denied**. That is only true because the compiler and the React it
 links are already on the builder when the build starts — so putting them there

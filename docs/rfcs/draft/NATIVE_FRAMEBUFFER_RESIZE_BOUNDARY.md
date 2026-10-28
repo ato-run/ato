@@ -1,5 +1,7 @@
 # Native framebuffer resize boundary (draft)
 
+Status: Draft.
+
 This extends the existing physical Surface assertion and the bounded RFB
 listener. It does not change K, the initial D viewport, the frozen application
 probe, the selected Capsule, or the Run. There is no host desktop selection.
