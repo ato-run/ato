@@ -663,8 +663,8 @@ fn workspace_artifact_transport(workspace_bytes: usize) -> WorkspaceArtifactTran
 
 /// Build the verification report and return the packed workspace tar beside it
 /// so the caller can choose the transport. `artifact_base64` is left unset here:
-/// `report()` fills it for the inline path, and `validate_bundle` leaves it
-/// unset when the separate upload succeeded.
+/// `validate_bundle` fills it for the inline path and leaves it unset when the
+/// separate upload succeeded.
 fn report_with_workspace_bytes(
     job: &ValidationJob,
     bundle: &ato_objects::PortableApplicationBundle,
@@ -819,6 +819,7 @@ fn report_with_workspace_bytes(
 }
 
 /// Build the report with the workspace tar inline in the ack payload.
+#[cfg(test)]
 fn report(
     job: &ValidationJob,
     bundle: &ato_objects::PortableApplicationBundle,
