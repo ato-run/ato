@@ -367,6 +367,7 @@ fn render_native_surface(
             output_delimiter,
             max_output_bytes,
             timeout_ms,
+            ready_output,
         },
     ] = native.operations.as_slice()
     else {
@@ -384,7 +385,7 @@ fn render_native_surface(
             ))
         })
     };
-    Ok(serde_json::json!({
+    let mut table = serde_json::json!({
         "kind": native.surface.kind(),
         "profile": native.surface.profile(),
         "cols": cols,
@@ -396,7 +397,11 @@ fn render_native_surface(
         "probe_output_delimiter": text("probe_output_delimiter", output_delimiter)?,
         "probe_max_output_bytes": max_output_bytes,
         "probe_timeout_ms": timeout_ms,
-    }))
+    });
+    if !ready_output.is_empty() {
+        table["probe_ready_output"] = text("probe_ready_output", ready_output)?.into();
+    }
+    Ok(table)
 }
 
 // ─────────────────────────────────────────────────────────────────── the tables
@@ -561,6 +566,7 @@ fn read_native_surface(
             "probe_output_delimiter",
             "probe_max_output_bytes",
             "probe_timeout_ms",
+            "probe_ready_output",
         ],
     )?;
     let integer = |field: &str| -> Result<i64, AuthoringError> {
@@ -628,6 +634,10 @@ fn read_native_surface(
             output_delimiter: required_str(table, "probe_output_delimiter", WHAT)?.into_bytes(),
             max_output_bytes,
             timeout_ms,
+            ready_output: match table.get("probe_ready_output") {
+                None => Vec::new(),
+                Some(_) => required_str(table, "probe_ready_output", WHAT)?.into_bytes(),
+            },
         }],
     };
     adapter

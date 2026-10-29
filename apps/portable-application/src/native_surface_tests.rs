@@ -107,6 +107,7 @@ pub(crate) fn fixture(pixel: bool) -> PortableApplicationBundle {
             output_delimiter: b"END".to_vec(),
             max_output_bytes: 4096,
             timeout_ms: 1000,
+            ready_output: Vec::new(),
         }
     };
     derivation.ports = vec![
@@ -310,6 +311,7 @@ fn native_profile_refuses_missing_k_digest_unobserved_actions_and_unsupported_ro
                     output_delimiter: b"DONE".to_vec(),
                     max_output_bytes: 100,
                     timeout_ms: 1000,
+                    ready_output: Vec::new(),
                 },
             );
         },
