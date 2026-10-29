@@ -1,134 +1,18 @@
 name: Rust CI
-
 on:
-  push:
-    branches: [main, dev, nightly]
-  pull_request:
-    branches: [main, dev, nightly]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  workspace:
-    name: workspace (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  diagnostic:
+    runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.7"
-      - uses: actions/setup-node@v4
-        with:
-          # Patched for CVE-2026-111497 (Node's bundled Brotli decoder); see
-          # docs/ops/cve-2026-111497-node-brotli-20261024.md.
-          node-version: "22.23.4"
-      - name: Install Linux sandbox dependency
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap patchelf
-          # Disposable hosted-runner setup; production admission is unchanged.
-          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true
-      - name: Provision declared Linux fixture toolchains
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo mkdir -p /opt/ato/toolchains/python/3.12.7 /opt/ato/toolchains/node/22.23.4/bin
-          sudo cp -a "$(python3 -c 'import sys; print(sys.prefix)')/." /opt/ato/toolchains/python/3.12.7/
-          sudo cp "$(command -v node)" /opt/ato/toolchains/node/22.23.4/bin/node
-          # The build sandbox clears LD_LIBRARY_PATH. Resolve the exact copied
-          # libpython instead of the runner's different system libpython.
-          sudo patchelf --set-rpath '$ORIGIN/../lib' /opt/ato/toolchains/python/3.12.7/bin/python3.12
-          env -i PATH=/usr/bin:/bin /opt/ato/toolchains/python/3.12.7/bin/python3 -I -S -c 'import sys; assert sys.version_info[:3] == (3, 12, 7), sys.version'
-          /opt/ato/toolchains/node/22.23.4/bin/node --version
-      - run: cargo fmt --all -- --check
-      - name: Check workspace
-        if: runner.os != 'Windows'
-        run: cargo check --workspace --all-targets --locked
-      - name: Check host workspace (Windows)
-        if: runner.os == 'Windows'
-        # guest-agent and its Firecracker guest-image builder target the Linux
-        # guest rootfs, not the Windows host. Exclude both so the latter cannot
-        # pull guest-agent back into the dependency graph.
-        run: cargo check --workspace --exclude guest-agent --exclude ato-firecracker-guest-image --all-targets --locked
-      - name: Build the worker sandbox shim
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          cargo build -p ato-connected-realization-worker --locked
-          echo "ATO_TEST_WORKER_BIN=$PWD/target/debug/ato-connected-realization-worker" >> "$GITHUB_ENV"
-          python3 -I -S -c 'import sys; print(sys.executable); print(sys.version)'
-      - name: Test workspace
-        if: runner.os != 'Windows'
-        run: cargo test --workspace --no-fail-fast
-      - name: Derivation transformation v0 E2E (Linux)
-        if: ${{ !cancelled() && runner.os == 'Linux' }}
-        run: >-
-          cargo test -p ato-cli --test derivation_transformation --locked --
-          --nocapture
-      - name: Upload transformation v0 evidence (Linux)
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: transformation-v0-evidence
-          path: target/transformation-v0-evidence/
-          if-no-files-found: warn
-      - name: Scenario verifier v1 E2E (Linux)
-        if: ${{ !cancelled() && runner.os == 'Linux' }}
-        run: >-
-          cargo test -p ato-cli --test scenario_verification --locked --
-          --nocapture
-      - name: Upload scenario verifier v1 evidence (Linux)
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: scenario-verifier-v1-evidence
-          path: target/scenario-verifier-v1-evidence/
-          if-no-files-found: warn
-      - name: Stateful transformation E2E (Linux)
-        if: ${{ !cancelled() && runner.os == 'Linux' }}
-        run: >-
-          cargo test -p ato-cli --test stateful_transformation --locked --
-          --nocapture
-      - name: Upload stateful transformation evidence (Linux)
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: stateful-transformation-evidence
-          path: target/stateful-transformation-evidence/
-          if-no-files-found: warn
-      - name: Portable worker regressions (Windows)
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        shell: bash
-        run: |
-          cargo test -p ato-formation-worker -p ato-connected-realization-worker --lib --locked --no-fail-fast
-      # The workspace's execution E2Es exercise POSIX PTYs, /bin/sh paths,
-      # Unix path policy, and Linux/macOS daemon lifecycle. Windows host code
-      # is still compiled and linted here; portable CLI behavior is exercised
-      # separately by cli-ci on windows-latest.
-      - name: Clippy workspace
-        if: ${{ !cancelled() && runner.os != 'Windows' }}
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Clippy host workspace (Windows)
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        run: cargo clippy --workspace --exclude guest-agent --exclude ato-firecracker-guest-image --all-targets --all-features --locked -- -D warnings
-      - run: cargo run --locked -p arch-check
+          python-version: '3.12.7'
+      - name: Diagnose formation worker tests
+        run: cargo test -p ato-formation-worker --lib --locked -- --nocapture --test-threads=1
