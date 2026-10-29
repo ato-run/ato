@@ -16,8 +16,10 @@ The image is pulled by digest from Docker Hub; the Capsule carries only
 
 ## Usage
 
-The shell starts in `ATO_OUTPUT_DIR` when the Run has an output grant
-(otherwise in the read-only workspace `/app`):
+The shell starts in `ATO_OUTPUT_DIR` when the Run has an output grant, and
+otherwise in `/tmp` (a 64 MiB tmpfs that disappears when the Run ends). Hosted
+OCI Runners grant outputs only on host-boundary Runners today, so on a shared
+Runner use `/tmp` for intermediate files and print results to the Terminal:
 
 ```sh
 pandoc /app/example.md -s -o example.html
