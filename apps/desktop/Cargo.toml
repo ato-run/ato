@@ -6,7 +6,7 @@ version = "0.7.9"
 edition = "2024"
 authors = ["ato-run"]
 description = "Desktop launcher for Ato computations"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 publish = false
 build = "build.rs"
 
