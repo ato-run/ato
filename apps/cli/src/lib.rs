@@ -895,8 +895,12 @@ fn static_bundle(args: StaticBundleArgs) -> Result<()> {
         "v2" => "ato.portable-tree/2",
         other => anyhow::bail!("unknown --tree-schema {other}"),
     };
-    let (bytes, bundle) = ato_portable_application::build_static_bundle_with_schema(&args.source, &args.title, schema)
-        .with_context(|| format!("compile static bundle from {}", args.source.display()))?;
+    let (bytes, bundle) = ato_portable_application::build_static_bundle_with_schema(
+        &args.source,
+        &args.title,
+        schema,
+    )
+    .with_context(|| format!("compile static bundle from {}", args.source.display()))?;
     fs::write(&args.output, &bytes)
         .with_context(|| format!("write static bundle {}", args.output.display()))?;
     println!("Packed: {}", args.output.display());
