@@ -138,10 +138,13 @@ fn respond(stream: &mut TcpStream, status: &str, body: &[u8]) {
     if let Err(error) = header {
         // Deadline tests deliberately close the readback socket before the
         // delayed response. Keep the server alive to observe owned cleanup.
-        assert!(matches!(
-            error.kind(),
-            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-        ));
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "unexpected response write error: {error:?}"
+        );
         return;
     }
     let _ = stream.write_all(body);
