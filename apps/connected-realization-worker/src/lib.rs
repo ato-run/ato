@@ -2933,7 +2933,15 @@ impl ConnectedWorker {
         let last_heartbeat = std::cell::Cell::new(Instant::now());
         let mut stop = || -> Result<bool> {
             #[cfg(unix)]
-            if native.is_some_and(|native| native.is_finished()) {
+            if let Some(native) = native
+                && native.is_finished()
+            {
+                // A Terminal program that exits by itself has finished its
+                // session: stop, save outputs and report stopped as usual.
+                // Its exit code is kept in the stop evidence.
+                if native.ended_by_workload_exit() {
+                    return Ok(true);
+                }
                 bail!("Native workload lifecycle ended while ACTIVE");
             }
             // A group is one Application: a service that exits while ACTIVE
