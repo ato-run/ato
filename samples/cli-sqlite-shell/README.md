@@ -26,7 +26,9 @@ the whole exchange (banner, prompt, echoed input, answer, prompt):
 
 ## Saving a database
 
-The root filesystem is read-only. When the Run has an output grant,
+The root filesystem is read-only. Hosted OCI Runners grant outputs only on
+host-boundary Runners today; on a shared Runner the database lives in memory
+for the session. When the Run has an output grant,
 `ATO_OUTPUT_DIR` is `/.ato-data/outputs` and files written there are saved as
 Instance Assets after the Run stops:
 
