@@ -123,11 +123,16 @@ technical documentation for the runtime, CLI, specifications and operations
 
 See [Contributing](CONTRIBUTING.md) and [GitHub issues](https://github.com/ato-run/ato/issues).
 
-There is no repository-wide license file in the root. Some components
-state their licenses in their manifests; for example, the
-[CLI manifest](apps/cli/Cargo.toml) declares `Apache-2.0 OR MPL-2.0`, and the
-[CLI license file](apps/cli/LICENSE) contains Apache 2.0. Check the relevant
-component's license information; a repository-wide grant is not specified here.
+Project-authored code is licensed under the [Mozilla Public License 2.0](LICENSE)
+(`MPL-2.0`). Third-party code, dependencies, patches containing upstream code,
+and materials with their own license notices retain their respective terms.
+For example, the CPython fixture, WiX templates, and release workflow retain
+their upstream licenses; the AODD skill retains its MIT license. The CLI's
+[Apache license text](apps/cli/LICENSE-APACHE) is retained for the WiX template
+and previously distributed versions. Previously granted licenses remain in effect.
+
+This code license does not establish a new license for the Capsule Process
+Model's theoretical documents.
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="main-use-cases"></a><a id="design-principle-everything-can-be-a-capsule"></a>

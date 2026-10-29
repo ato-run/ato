@@ -3,7 +3,7 @@ name = "ato-runtime-attempt"
 version = "0.1.0"
 edition = "2024"
 description = "The Runtime's attempt: admission, start record, execution, observation, verification and receipt"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 
 [package.metadata.dist]
