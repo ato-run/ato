@@ -141,7 +141,9 @@ fn respond(stream: &mut TcpStream, status: &str, body: &[u8]) {
         assert!(
             matches!(
                 error.kind(),
-                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
             ),
             "unexpected response write error: {error:?}"
         );
