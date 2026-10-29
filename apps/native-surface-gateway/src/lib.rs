@@ -118,6 +118,7 @@ pub async fn capture_and_start_native_probe(
                     input,
                     output_delimiter,
                     max_output_bytes,
+                    ready_output,
                     ..
                 },
             ) => timeout(
@@ -126,6 +127,7 @@ pub async fn capture_and_start_native_probe(
                     path,
                     *cols,
                     *rows,
+                    ready_output,
                     input,
                     output_delimiter,
                     *max_output_bytes as usize,
@@ -167,10 +169,12 @@ pub async fn capture_and_start_native_probe(
     start_frozen_listener(listen_addr, measured).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn capture_terminal(
     path: &std::path::Path,
     cols: u16,
     rows: u16,
+    ready_output: &[u8],
     input: &[u8],
     delimiter: &[u8],
     max_bytes: usize,
@@ -195,6 +199,27 @@ async fn capture_terminal(
     // already waiting before input stand in for this operation's response.
     // Wait for readability, rather than cancelling a partially read frame.
     let mut result = Vec::new();
+    // An authored prompt means "type only once this is on screen". Waiting for
+    // it, instead of for a short quiet period, keeps a slow-starting program
+    // from receiving input ahead of its own banner.
+    while !result.ends_with(ready_output) {
+        let (kind, bytes) = read_guest_frame(&mut stream).await?;
+        anyhow::ensure!(
+            kind == FRAME_OUTPUT && !bytes.is_empty(),
+            "native terminal observation ended before its startup prompt"
+        );
+        anyhow::ensure!(
+            result.len().saturating_add(bytes.len()) <= max_bytes,
+            "native terminal observation exceeded output limit"
+        );
+        result.extend_from_slice(&bytes);
+        anyhow::ensure!(
+            !result
+                .windows(delimiter.len())
+                .any(|window| window == delimiter),
+            "native terminal completion was already present before input"
+        );
+    }
     while timeout(Duration::from_millis(20), stream.readable())
         .await
         .is_ok()
@@ -344,6 +369,7 @@ mod tests {
                 output_delimiter: b"END\r\n".to_vec(),
                 max_output_bytes: 128,
                 timeout_ms: 1000,
+                ready_output: Vec::new(),
             }],
         }
     }
@@ -443,6 +469,147 @@ mod tests {
             .unwrap()
             .unwrap();
         response
+    }
+
+    /// A program that prints its banner and prompt some time after the PTY
+    /// is ready. Input that arrives before the prompt is recorded, so a probe
+    /// that types too early is visible instead of being masked by echo order.
+    fn slow_prompt_fixture(
+        prompt_delay: Duration,
+        show_prompt: bool,
+    ) -> (Fixture, Arc<AtomicUsize>) {
+        let cwd = std::env::current_dir().unwrap();
+        let parent = cwd
+            .ancestors()
+            .find(|path| path.file_name().is_some_and(|name| name == ".tmp"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cwd.join(".tmp"));
+        std::fs::create_dir_all(&parent).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("np-")
+            .tempdir_in(parent)
+            .unwrap();
+        let path = directory.path().join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let actions = Arc::new(AtomicUsize::new(0));
+        let early_inputs = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&actions);
+        let early = Arc::clone(&early_inputs);
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut handshake = [0_u8; 13];
+            stream.read_exact(&mut handshake).await.unwrap();
+            stream.write_all(b"OK 1026\n").await.unwrap();
+            write_guest_frame(
+                &mut stream,
+                FRAME_CONTROL,
+                br#"{"type":"ready","cols":100,"rows":30}"#,
+            )
+            .await
+            .unwrap();
+            let (resize_kind, _) = read_guest_frame(&mut stream).await.unwrap();
+            assert_eq!(resize_kind, FRAME_CONTROL);
+            let started = tokio::time::sleep(prompt_delay);
+            tokio::pin!(started);
+            tokio::select! {
+                _ = &mut started => {}
+                frame = read_guest_frame(&mut stream) => {
+                    if frame.is_ok_and(|(kind, _)| kind == FRAME_INPUT) {
+                        early.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return;
+                }
+            }
+            write_guest_frame(&mut stream, FRAME_OUTPUT, b"tool 1.0\r\n")
+                .await
+                .unwrap();
+            if !show_prompt {
+                std::future::pending::<()>().await;
+            }
+            write_guest_frame(&mut stream, FRAME_OUTPUT, b"> ")
+                .await
+                .unwrap();
+            let (input_kind, input) = read_guest_frame(&mut stream).await.unwrap();
+            assert_eq!(input_kind, FRAME_INPUT);
+            assert_eq!(&input, b"compute\n");
+            count.fetch_add(1, Ordering::SeqCst);
+            write_guest_frame(&mut stream, FRAME_OUTPUT, b"compute\r\n42 END\r\n")
+                .await
+                .unwrap();
+        });
+        (
+            Fixture {
+                _directory: directory,
+                path,
+                task,
+                actions,
+            },
+            early_inputs,
+        )
+    }
+
+    fn prompted_adapter() -> NativeSurfaceAdapter {
+        let mut adapter = adapter();
+        if let NativeProbeOperation::TerminalExchange { ready_output, .. } =
+            &mut adapter.operations[0]
+        {
+            *ready_output = b"> ".to_vec();
+        }
+        adapter
+    }
+
+    #[tokio::test]
+    async fn an_authored_prompt_holds_input_until_a_slow_program_shows_it() {
+        let (fixture, early) = slow_prompt_fixture(Duration::from_millis(200), true);
+        let mut handle = capture_and_start_native_probe(
+            "127.0.0.1:0".parse().unwrap(),
+            NativeProbeTarget::Terminal(fixture.path.clone()),
+            &prompted_adapter(),
+        )
+        .await
+        .unwrap();
+        let response = request(
+            handle.local_addr(),
+            b"GET /result HTTP/1.1\r\nHost: private\r\n\r\n",
+        )
+        .await;
+        assert!(response.ends_with(b"\r\n\r\ntool 1.0\r\n> compute\r\n42 END\r\n"));
+        assert_eq!(early.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.actions.load(Ordering::SeqCst), 1);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn without_an_authored_prompt_input_may_precede_a_slow_banner() {
+        let (fixture, early) = slow_prompt_fixture(Duration::from_millis(200), true);
+        let error = capture_and_start_native_probe(
+            "127.0.0.1:0".parse().unwrap(),
+            NativeProbeTarget::Terminal(fixture.path.clone()),
+            &adapter(),
+        )
+        .await
+        .err()
+        .expect("the fixture closes once it receives input before its prompt");
+        assert!(error.to_string().contains("end of file"), "{error}");
+        assert_eq!(early.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_never_appears_fails_within_the_operation_deadline() {
+        let (fixture, early) = slow_prompt_fixture(Duration::ZERO, false);
+        let started = std::time::Instant::now();
+        let error = capture_and_start_native_probe(
+            "127.0.0.1:0".parse().unwrap(),
+            NativeProbeTarget::Terminal(fixture.path.clone()),
+            &prompted_adapter(),
+        )
+        .await
+        .err()
+        .expect("no prompt means no input and no result");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(early.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.actions.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

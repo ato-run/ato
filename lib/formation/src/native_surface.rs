@@ -93,6 +93,13 @@ pub enum NativeProbeOperation {
         output_delimiter: Vec<u8>,
         max_output_bytes: u32,
         timeout_ms: u64,
+        /// Startup framing, not an expected answer: the input is typed only
+        /// once the startup output ends with these bytes (a prompt). Without
+        /// it a slow-starting program can receive the input before its banner,
+        /// so the observed bytes would depend on timing. The bytes waited for
+        /// stay in the captured output. Old D bytes omit the empty value.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ready_output: Vec<u8>,
     },
     PixelKeyFrame {
         path: String,
@@ -196,11 +203,14 @@ impl NativeSurfaceAdapter {
                         input,
                         output_delimiter,
                         max_output_bytes,
+                        ready_output,
                         ..
                     },
                 ) => {
                     total_output += u64::from(*max_output_bytes);
-                    !input.is_empty()
+                    ready_output.len() <= 256
+                        && ready_output.len() <= *max_output_bytes as usize
+                        && !input.is_empty()
                         && input.len() <= 4096
                         && input
                             .iter()
