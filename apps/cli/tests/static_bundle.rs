@@ -122,7 +122,6 @@ fn refuses_a_directory_without_an_authoring_file() {
     );
 }
 
-
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
     for entry in fs::read_dir(src).unwrap() {
@@ -140,19 +139,43 @@ fn copy_dir(src: &Path, dst: &Path) {
 fn v1_rejects_binary_media_and_v2_carries_it() {
     let dir = tempfile::tempdir().expect("temp dir");
     copy_dir(&sample(), dir.path());
-    fs::write(dir.path().join("audio.ogg"), [0x4f, 0x67, 0x67, 0x53, 0x00, 0x01]).unwrap();
+    fs::write(
+        dir.path().join("audio.ogg"),
+        [0x4f, 0x67, 0x67, 0x53, 0x00, 0x01],
+    )
+    .unwrap();
     let out_v1 = dir.path().join("v1.capsule");
     let v1 = ato()
-        .args(["__static-bundle", dir.path().to_str().unwrap(), "--title", "v1", "-o", out_v1.to_str().unwrap()])
+        .args([
+            "__static-bundle",
+            dir.path().to_str().unwrap(),
+            "--title",
+            "v1",
+            "-o",
+            out_v1.to_str().unwrap(),
+        ])
         .output()
         .expect("v1 run");
     assert!(!v1.status.success(), "v1 tree must reject audio.ogg");
     assert!(String::from_utf8_lossy(&v1.stderr).contains("unsupported media type"));
     let out_v2 = dir.path().join("v2.capsule");
     let v2 = ato()
-        .args(["__static-bundle", dir.path().to_str().unwrap(), "--title", "v2", "-o", out_v2.to_str().unwrap(), "--tree-schema", "v2"])
+        .args([
+            "__static-bundle",
+            dir.path().to_str().unwrap(),
+            "--title",
+            "v2",
+            "-o",
+            out_v2.to_str().unwrap(),
+            "--tree-schema",
+            "v2",
+        ])
         .output()
         .expect("v2 run");
-    assert!(v2.status.success(), "v2 tree must accept audio.ogg: {}", String::from_utf8_lossy(&v2.stderr));
+    assert!(
+        v2.status.success(),
+        "v2 tree must accept audio.ogg: {}",
+        String::from_utf8_lossy(&v2.stderr)
+    );
     assert!(out_v2.exists());
 }
