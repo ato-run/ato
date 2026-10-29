@@ -140,7 +140,9 @@ fn respond(stream: &mut TcpStream, status: &str, body: &[u8]) {
         // delayed response. Keep the server alive to observe owned cleanup.
         assert!(matches!(
             error.kind(),
-            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
         ));
         return;
     }
