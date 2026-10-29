@@ -12,8 +12,12 @@ while [ "$(stty size 2>/dev/null)" != "40 120" ]; do
 	fi
 	sleep 0.01
 done
+# Saved outputs when the Run has an output grant; otherwise the Run's own
+# tmpfs, which disappears when the Run ends.
 if [ -n "$ATO_OUTPUT_DIR" ] && [ -d "$ATO_OUTPUT_DIR" ]; then
 	cd "$ATO_OUTPUT_DIR" || exit 1
+else
+	cd /tmp || exit 1
 fi
 export PS1='pandoc$ '
 exec /bin/sh -i
