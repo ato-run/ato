@@ -3,7 +3,7 @@ name = "ato-formation"
 version = "0.1.0"
 edition = "2024"
 description = "Formation domain: source closure, program intent, effective build plan"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 
 [package.metadata.dist]
