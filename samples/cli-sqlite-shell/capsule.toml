@@ -1,0 +1,63 @@
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "oci.image"
+version = "docker.io/library/python@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34"
+[[runtime]]
+name = "oci.platform"
+version = "linux/amd64"
+[[runtime]]
+name = "oci.memory_bytes"
+version = "268435456"
+[[runtime]]
+name = "oci.cpu_limit_millis"
+version = "500"
+[[runtime]]
+name = "oci.pids_limit"
+version = "32"
+[[runtime]]
+name = "oci.user"
+version = "65532:65532"
+
+[[derive.step]]
+id = "serve"
+use = "ato.oci@1"
+op = "serve"
+argv = ["python3", "-I", "launch.py"]
+cwd = "."
+
+[derive.native_surface]
+kind = "terminal"
+profile = "ato.terminal-surface.v1"
+cols = 120
+rows = 40
+port = "app.native"
+probe_port = "app.probe"
+probe_path = "/result"
+probe_input = "SELECT 'E' || 'ND';\n"
+probe_output_delimiter = "('END',)\r\nsqlite> "
+probe_max_output_bytes = 4096
+probe_timeout_ms = 15000
+probe_ready_output = "sqlite> "
+
+[[port]]
+id = "app.native"
+use = "ato.pty@1"
+from = "serve"
+
+[[port]]
+id = "app.probe"
+use = "ato.http@1"
+from = "serve"
+
+[[contract.require]]
+id = "shell-answers"
+use = "ato.contract.http@1"
+port = "app.probe"
+path = "/result"
+expect = { status = 200, body_digest = "sha256:bcaa6a7c52f3415b69fc8941d730a513c154c914c0fcd6b7348d79d4522afb89" }
