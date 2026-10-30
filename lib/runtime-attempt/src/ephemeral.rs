@@ -34,7 +34,8 @@ use std::time::Duration;
 use crate::control::{AttemptPhase, ExecutionControl};
 use crate::launch::process_executor::{
     LaunchedProcess, LoopbackReadinessProbe, ProcessLaunchHost, ReadinessProbe,
-    launch_process_with, launch_process_with_scoped_network, wait_until_ready,
+    launch_process_isolated, launch_process_with, launch_process_with_scoped_network,
+    wait_until_ready,
 };
 use crate::launch::resolved::{
     ResolvedEndpoint, ResolvedRuntimeLaunchContext, ResolvedStateAttachment,
@@ -171,14 +172,14 @@ impl TemporaryRealization {
     /// Launch the candidate through the Runtime's process executor and wait
     /// until every required port accepts connections.
     pub fn launch(request: &TemporaryRealizationRequest<'_>) -> Result<Self> {
-        Self::launch_inner(request, None, &[], None, None)
+        Self::launch_inner(request, None, &[], None, None, false)
     }
 
     pub fn launch_scoped(
         request: &TemporaryRealizationRequest<'_>,
         runtime_gate: &Path,
     ) -> Result<Self> {
-        Self::launch_inner(request, Some(runtime_gate), &[], None, None)
+        Self::launch_inner(request, Some(runtime_gate), &[], None, None, false)
     }
 
     pub fn launch_scoped_with_variables(
@@ -186,7 +187,7 @@ impl TemporaryRealization {
         runtime_gate: &Path,
         variables: &[crate::variables::ResolvedVariable],
     ) -> Result<Self> {
-        Self::launch_inner(request, Some(runtime_gate), variables, None, None)
+        Self::launch_inner(request, Some(runtime_gate), variables, None, None, false)
     }
 
     pub fn launch_controlled(
@@ -195,7 +196,7 @@ impl TemporaryRealization {
         variables: &[crate::variables::ResolvedVariable],
         control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Self> {
-        Self::launch_inner(request, runtime_gate, variables, None, control)
+        Self::launch_inner(request, runtime_gate, variables, None, control, false)
     }
 
     /// Launch with state already assigned by the authenticated control plane.
@@ -208,7 +209,15 @@ impl TemporaryRealization {
         state: Option<&crate::state_bindings::VerificationStateBindings<'_>>,
         control: Option<&crate::control::ExecutionControl>,
     ) -> Result<Self> {
-        Self::launch_inner(request, runtime_gate, variables, state, control)
+        Self::launch_inner(request, runtime_gate, variables, state, control, false)
+    }
+    /// An unattended untrusted candidate cannot share the builder's network.
+    /// This separate entry point never falls back to host-boundary isolation.
+    pub fn launch_private_isolated(
+        request: &TemporaryRealizationRequest<'_>,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Self> {
+        Self::launch_inner(request, None, &[], None, control, true)
     }
     fn launch_inner(
         request: &TemporaryRealizationRequest<'_>,
@@ -216,6 +225,7 @@ impl TemporaryRealization {
         variables: &[crate::variables::ResolvedVariable],
         state: Option<&crate::state_bindings::VerificationStateBindings<'_>>,
         control: Option<&crate::control::ExecutionControl>,
+        require_private_isolation: bool,
     ) -> Result<Self> {
         let check = || control.map_or(Ok(()), |c| c.remaining(AttemptPhase::Launch).map(|_| ()));
         check()?;
@@ -487,6 +497,7 @@ impl TemporaryRealization {
                 }
                 launch_process_with_scoped_network(&spec, &context, &host, socket, &ingress_root)?
             }
+            None if require_private_isolation => launch_process_isolated(&spec, &context, &host)?,
             None => launch_process_with(&spec, &context, &host)?,
         };
         realization.launched = Some(launched);
