@@ -365,7 +365,9 @@ pub fn run_claimed_job_with_ledger(
         && crate::v2_frontend::owns(text).map_err(anyhow::Error::new)?
     {
         if private_isolated {
-            return Err(anyhow::anyhow!("private Formation portable frontend unsupported").into());
+            return Err(anyhow::anyhow!(
+                "private Formation portable frontend unsupported"
+            ));
         }
         return crate::v2_frontend::run(crate::v2_frontend::V2Request {
             api: context.api,
