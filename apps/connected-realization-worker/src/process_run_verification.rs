@@ -72,9 +72,9 @@ fn check_assignment<'a>(
         derivation.state.is_empty()
             && derivation.inputs.len() == 1
             && derivation.ports.len() == 1
-            && endpoint_name == "http"
             && spec.endpoints.len() == 1
-            && spec.endpoints[0].name == "http"
+            && spec.endpoints[0].name == endpoint_name
+            && (endpoint_name == derivation.ports[0].id || endpoint_name == "http")
             && spec.endpoints[0].protocol == "http"
             && derivation.ports[0].protocol == ato_formation::authoring::HTTP_PROTOCOL
             && spec.endpoints[0].guest_port == derivation.ports[0].guest_port,
@@ -501,6 +501,20 @@ mod tests {
         assert!(probe_url(8080, "/\\attacker.invalid/path").is_none());
         assert!(probe_url(8080, "http://attacker.invalid/").is_none());
         assert!(probe_url(8080, "/x#fragment").is_none());
+    }
+
+    #[test]
+    fn accepts_the_exact_logical_port_and_only_the_historical_http_alias() {
+        let (assignment, mut spec) = example();
+        if let RuntimeLaunchSpec::V1(ref mut launch) = spec {
+            launch.endpoints[0].name = "app.http".into();
+        }
+        assert!(check_assignment(&assignment, "run1", "lease1", &spec, "app.http").is_ok());
+        assert!(check_assignment(&assignment, "run1", "lease1", &spec, "http").is_err());
+        if let RuntimeLaunchSpec::V1(ref mut launch) = spec {
+            launch.endpoints[0].name = "other".into();
+        }
+        assert!(check_assignment(&assignment, "run1", "lease1", &spec, "other").is_err());
     }
 
     #[test]
