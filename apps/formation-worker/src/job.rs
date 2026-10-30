@@ -809,18 +809,9 @@ fn compose_result(
     let plan = &planned.plan;
     let serve = plan.serving(&planned.derivation);
     let public_env = plan.process_environment(&planned.derivation);
-    let readiness_path = planned
-        .contract
-        .requirements
-        .iter()
-        .find(|r| r.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER)
-        .and_then(|r| r.path.as_ref());
-    // What the result actually exports is decided here, once, and the readiness
-    // contract is derived from it. A Static Web candidate runs in the browser
-    // and exports nothing, so naming the Contract's HTTP port there is a claim
-    // about a port that does not exist — the control plane refuses it with
-    // `readiness names port "http", which is not exported`. The HTTP Contract
-    // observation itself is unaffected: it is still verified for every lane.
+    // Preserve the Derivation's logical Port identity all the way to the
+    // Runner. Formation and ordinary Runs derive their injected port variable
+    // from this same name; replacing it with "http" changes the process ABI.
     let exported_ports = planned
         .derivation
         .ports
@@ -828,24 +819,26 @@ fn compose_result(
         .filter(|port| plan.lane.is_process() && port.from == serve.id)
         .map(|port| {
             serde_json::json!({
-                "name": "http", "protocol": "http", "guest_port": port.guest_port,
+                "name": port.id, "protocol": "http", "guest_port": port.guest_port,
             })
         })
         .collect::<Vec<_>>();
-    let readiness_contracts = if exported_ports
+    let readiness_contracts = planned
+        .contract
+        .requirements
         .iter()
-        .any(|port| port.get("name").and_then(serde_json::Value::as_str) == Some("http"))
-    {
-        readiness_path
-            .map(|path| {
-                vec![serde_json::json!({
-                    "kind": "http", "port_name": "http", "path": path,
-                })]
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+        .filter(|requirement| {
+            requirement.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER
+        })
+        .find_map(|requirement| {
+            let name = requirement.port.as_deref()?;
+            let path = requirement.path.as_ref()?;
+            exported_ports
+                .iter()
+                .any(|port| port.get("name").and_then(serde_json::Value::as_str) == Some(name))
+                .then(|| vec![serde_json::json!({"kind": "http", "port_name": name, "path": path})])
+        })
+        .unwrap_or_default();
     let (kind, candidate) = match plan.lane {
         Lane::PythonProcess | Lane::Process => (
             "process_workspace",
@@ -1188,6 +1181,7 @@ status = 200
             .as_array()
             .expect("exported_ports is a list");
         assert!(!exported.is_empty(), "a serving process exports its port");
+        assert_eq!(exported[0]["name"], json!("app.http"));
 
         let readiness = result["readiness_contracts"]
             .as_array()
