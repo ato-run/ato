@@ -181,6 +181,9 @@ fn advertised_capabilities(
     if has_accelerator {
         capabilities.push(GPU_CAPABILITY);
     }
+    if !host_boundary {
+        capabilities.push(runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE);
+    }
     capabilities
 }
 
@@ -7458,8 +7461,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(host_boundary.contains(&"isolation:runtime_launch=host-boundary-v1"));
         assert!(!host_boundary.contains(&"gpu"));
 
-        // The default mode is unchanged, byte for byte.
-        assert_eq!(advertised_capabilities(base.clone(), false, false), base);
+        assert!(!host_boundary.contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE));
+        let namespace = advertised_capabilities(base.clone(), false, false);
+        assert!(namespace.contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE));
+        assert!(base.iter().all(|capability| namespace.contains(capability)));
     }
 
     #[test]
