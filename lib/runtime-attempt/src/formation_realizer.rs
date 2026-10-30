@@ -44,6 +44,38 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     })
 }
 
+fn private_build_supported(
+    actions: &[ato_formation::execution::BuildAction],
+    toolchains: &BTreeMap<String, String>,
+) -> bool {
+    actions.iter().all(|action| match action {
+        ato_formation::execution::BuildAction::Authored { .. } => false,
+        ato_formation::execution::BuildAction::Prerequisite(step) => {
+            let runtime = match step.name.as_str() {
+                "verify-provisioned-python" => "python",
+                "verify-provisioned-node" => "node",
+                _ => return false,
+            };
+            let Some(version) = toolchains.get(runtime) else { return false };
+            let parts: Vec<_> = version.split('.').map(str::parse::<u32>).collect();
+            let [Ok(major), Ok(minor), Ok(patch)] = parts.as_slice() else { return false };
+            let expected = if runtime == "python" {
+                vec![format!("{}/bin/python3", ato_formation::intent::python_home(version)),
+                    "-I".into(), "-S".into(), "-c".into(),
+                    format!("import sys; assert sys.version_info[:3] == ({major}, {minor}, {patch}), 'pinned Python version mismatch'")]
+            } else {
+                vec![format!("{}/bin/node", ato_formation::intent::node_home(version)), "-e".into(),
+                    format!("if (process.versions.node !== '{}') process.exit(1)", version)]
+            };
+            step.argv == expected && !step.needs_network
+                && step.network_phase.is_none()
+                && step.env.is_empty()
+                && step.cwd_relative.is_empty()
+                && step.toolchain_access == ato_formation::intent::ToolchainAccess::ReadOnly
+        }
+    })
+}
+
 impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
@@ -57,6 +89,14 @@ impl CandidateRealizer for FormationRealizer<'_> {
             return refused(
                 "private_formation_policy_unsupported",
                 "private Formation requires a stateless, single-HTTP-port process with denied build network",
+            );
+        }
+        if self.require_private_isolation
+            && !private_build_supported(&planned.plan.actions, &planned.plan.toolchains)
+        {
+            return refused(
+                "private_formation_build_unsupported",
+                "private Formation accepts only preinstalled toolchains and no authored build steps",
             );
         }
         if planned.derivation.source_oci.is_some()
@@ -130,6 +170,54 @@ impl CandidateRealizer for FormationRealizer<'_> {
             require_private_isolation: self.require_private_isolation,
         }
         .realize(executed, attempt_id, attempt_root)
+    }
+}
+
+#[cfg(test)]
+mod private_build_tests {
+    use super::*;
+    use ato_formation::execution::BuildAction;
+    use ato_formation::intent::{BuildStepV1, ToolchainAccess};
+
+    #[test]
+    fn private_build_rejects_authored_and_privileged_work() {
+        let mut step = BuildStepV1 {
+            name: "verify-provisioned-python".into(),
+            argv: vec!["/opt/ato/toolchains/python/3.12.7/bin/python3".into(), "-I".into(), "-S".into(), "-c".into(),
+                "import sys; assert sys.version_info[:3] == (3, 12, 7), 'pinned Python version mismatch'".into()],
+            needs_network: false,
+            network_phase: None,
+            cwd_relative: String::new(),
+            env: BTreeMap::new(),
+            toolchain_access: ToolchainAccess::ReadOnly,
+        };
+        let tools = BTreeMap::from([("python".to_owned(), "3.12.7".to_owned())]);
+        assert!(private_build_supported(&[], &tools));
+        assert!(private_build_supported(
+            &[BuildAction::Prerequisite(step.clone())],
+            &tools
+        ));
+        assert!(!private_build_supported(
+            &[BuildAction::Authored { step: 0 }],
+            &tools
+        ));
+        let mut forged = step.clone();
+        forged.argv = vec!["/app/attacker".into()];
+        assert!(!private_build_supported(
+            &[BuildAction::Prerequisite(forged)],
+            &tools
+        ));
+        step.needs_network = true;
+        assert!(!private_build_supported(
+            &[BuildAction::Prerequisite(step.clone())],
+            &tools
+        ));
+        step.needs_network = false;
+        step.toolchain_access = ToolchainAccess::Provision;
+        assert!(!private_build_supported(
+            &[BuildAction::Prerequisite(step)],
+            &tools
+        ));
     }
 }
 
