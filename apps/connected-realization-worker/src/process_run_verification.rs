@@ -51,11 +51,10 @@ fn check_assignment<'a>(
     let RuntimeLaunchSpec::V1(spec) = spec else {
         bail!("unsupported launch profile")
     };
-    ensure!(
-        matches!(spec.realization, LaunchRealizationV1::Process(_))
-            && spec.state_attachments.is_empty(),
-        "unsupported realization"
-    );
+    let LaunchRealizationV1::Process(process) = &spec.realization else {
+        bail!("unsupported realization")
+    };
+    ensure!(spec.state_attachments.is_empty(), "unsupported realization");
     ensure!(
         assignment.run_id == run_id
             && assignment.lease_id == lease_id
@@ -77,9 +76,32 @@ fn check_assignment<'a>(
             && spec.endpoints.len() == 1
             && spec.endpoints[0].name == "http"
             && spec.endpoints[0].protocol == "http"
-            && derivation.ports[0].protocol == "http"
+            && derivation.ports[0].protocol == ato_formation::authoring::HTTP_PROTOCOL
             && spec.endpoints[0].guest_port == derivation.ports[0].guest_port,
         "unsupported route"
+    );
+    let serving: Vec<_> = derivation
+        .steps
+        .iter()
+        .filter(|step| step.op == "serve")
+        .collect();
+    let [serve] = serving.as_slice() else {
+        bail!("unsupported serving route")
+    };
+    ensure!(
+        serve.protocol == ato_formation::authoring::PROCESS_PROTOCOL
+            && derivation
+                .steps
+                .last()
+                .is_some_and(|last| last.id == serve.id)
+            && derivation.ports[0].from == serve.id
+            && serve.argv == process.argv
+            && serve.cwd == spec.workspace.cwd_relative
+            && serve.env.iter().all(|(name, value)| spec
+                .public_env
+                .iter()
+                .any(|actual| actual.name == *name && actual.value == *value)),
+        "serving route mismatch"
     );
     let input = &derivation.inputs[0];
     ensure!(
@@ -275,7 +297,8 @@ mod tests {
         ]})).unwrap();
         let derivation: BoundDerivation = serde_json::from_value(json!({"schema":"ato.derivation/1", "inputs":[
             {"id":"workspace", "protocol":"ato.workspace@1", "content_ref":source}],
-            "steps":[], "ports":[{"id":"app.http", "protocol":"http", "from":"serve", "guest_port":8000}], "state":[], "effects":"pure"})).unwrap();
+            "steps":[{"id":"serve", "protocol":"ato.process@1", "op":"serve", "argv":["python3"]}],
+            "ports":[{"id":"app.http", "protocol":"ato.http@1", "from":"serve", "guest_port":8000}], "state":[], "effects":"pure"})).unwrap();
         let k = contract.contract_ref().unwrap();
         let d = derivation.derivation_ref().unwrap();
         let assignment = Assignment {
@@ -365,6 +388,112 @@ mod tests {
         }
     }
 
+    // The exact authored K/D shape used by the previously approved public
+    // staging server fixture (ato-run/ato-e2e-compute-server@2801f21).
+    #[test]
+    fn authored_server_fixture_maps_logical_http_and_source_identity() {
+        use ato_formation::authoring::{BindingContext, bind};
+        let draft = ato_formation::capsule_toml::parse_capsule_toml(
+            r#"
+            schema = "ato.capsule/1"
+            [[input]]
+            id = "workspace"
+            use = "ato.workspace@1"
+            path = "."
+            [[runtime]]
+            name = "python"
+            version = "3.12.7"
+            [[derive.step]]
+            id = "app"
+            use = "ato.process@1"
+            op = "serve"
+            argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "server.py"]
+            [[port]]
+            id = "app.http"
+            use = "ato.http@1"
+            from = "app"
+            guest_port = 8080
+            [[contract.require]]
+            id = "root"
+            use = "ato.contract.http@1"
+            port = "app.http"
+            method = "GET"
+            path = "/"
+            [contract.require.expect]
+            status = 200
+            [[contract.require]]
+            id = "source"
+            use = "ato.contract.workspace@1"
+            input = "workspace"
+            [contract.require.expect]
+            digest = "capture"
+        "#,
+        )
+        .unwrap();
+        let (mut assignment, mut launch) = example();
+        let (contract, derivation) = bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: &assignment.source_closure_ref,
+            },
+        )
+        .unwrap();
+        assignment.contract_ref = contract.contract_ref().unwrap();
+        assignment.derivation_ref = derivation.derivation_ref().unwrap();
+        assignment.frozen_input = FrozenVerificationInput {
+            schema: "ato.frozen-verification-input/1".into(),
+            contract_ref: assignment.contract_ref.clone(),
+            derivation_ref: assignment.derivation_ref.clone(),
+            contract,
+            derivation,
+        };
+        if let RuntimeLaunchSpec::V1(ref mut spec) = launch {
+            let LaunchRealizationV1::Process(ref mut process) = spec.realization else {
+                unreachable!()
+            };
+            process.argv = vec![
+                "/opt/ato/toolchains/python/3.12.7/bin/python3".into(),
+                "-B".into(),
+                "server.py".into(),
+            ];
+            spec.endpoints[0].guest_port = Some(8080);
+        }
+        let spec = check_assignment(&assignment, "run1", "lease1", &launch, "http").unwrap();
+        let observation = RuntimeHttpObservation::from_response("app.http", "GET", "/", 200, b"ok");
+        let execution = VerificationExecutionEvidence {
+            realization: "process".into(),
+            runtime_executable: None,
+            runtime_version: None,
+            pid: None,
+            container_id: None,
+            image: None,
+            platform: None,
+            endpoint: None,
+            run_id: None,
+            lease_id: Some("lease1".into()),
+            attempt_id: Some("lease1".into()),
+            request_id: None,
+            dependency_fetches: Vec::new(),
+            portability_profile: None,
+            embedded_oci_image_loaded: None,
+            services: Vec::new(),
+        };
+        let result = verify_observed_candidate(
+            &spec,
+            vec![observation],
+            Vec::new(),
+            execution,
+            &ReceiptContext {
+                target: VerificationTargetKind::AtoRunHosted,
+                bundle_sha256: None,
+                portability_profile: None,
+                run_id: Some("run1"),
+            },
+        );
+        assert!(result.receipt.fully_satisfied);
+        assert_eq!(result.receipt.observations.len(), 2);
+    }
+
     #[test]
     fn observation_target_cannot_escape_the_allocated_loopback_port() {
         assert!(probe_url(8080, "/health?ready=1").is_some());
@@ -384,6 +513,13 @@ mod tests {
         assert!(check_assignment(&assignment, "run1", "lease1", &spec, "http").is_err());
         let (mut assignment, spec) = example();
         assignment.frozen_input.contract.requirements[0].status = Some(404);
+        assert!(check_assignment(&assignment, "run1", "lease1", &spec, "http").is_err());
+        let (assignment, mut spec) = example();
+        if let RuntimeLaunchSpec::V1(ref mut launch) = spec {
+            if let LaunchRealizationV1::Process(ref mut process) = launch.realization {
+                process.argv[0] = "different".into();
+            }
+        }
         assert!(check_assignment(&assignment, "run1", "lease1", &spec, "http").is_err());
         let (mut assignment, spec) = example();
         assignment.materialization_ref = format!("sha256:{}", "d".repeat(64));
