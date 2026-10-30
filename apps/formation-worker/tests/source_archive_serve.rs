@@ -40,6 +40,15 @@ fn read_request(stream: &mut TcpStream) -> Option<String> {
 
 #[test]
 fn supervised_worker_polls_both_queues_and_honours_source_drain() {
+    check_supervised_queues(false);
+}
+
+#[test]
+fn dedicated_source_worker_never_polls_normal_queue_and_honours_source_drain() {
+    check_supervised_queues(true);
+}
+
+fn check_supervised_queues(source_only: bool) {
     assert!(
         ato_formation_worker::sandbox::containment_available(),
         "a real worker requires bubblewrap containment"
@@ -89,20 +98,24 @@ fn supervised_worker_polls_both_queues_and_honours_source_drain() {
             );
         }
     });
-    let mut worker = Command::new(env!("CARGO_BIN_EXE_ato-formation-worker"))
-        .args([
-            "serve",
-            "--api-base",
-            &base,
-            "--work-root",
-            work.path().to_str().unwrap(),
-            "--worker-id",
-            "test-worker",
-            "--poll-ms",
-            "20",
-            "--heartbeat-ms",
-            "1000",
-        ])
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ato-formation-worker"));
+    command.args([
+        "serve",
+        "--api-base",
+        &base,
+        "--work-root",
+        work.path().to_str().unwrap(),
+        "--worker-id",
+        "test-worker",
+        "--poll-ms",
+        "20",
+        "--heartbeat-ms",
+        "1000",
+    ]);
+    if source_only {
+        command.args(["--queue", "source-only"]);
+    }
+    let mut worker = command
         .env("ATO_FORMATION_TOKEN", "fixture-token")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -141,9 +154,13 @@ fn supervised_worker_polls_both_queues_and_honours_source_drain() {
         .map(|(i, _)| i)
         .collect::<Vec<_>>();
     assert_eq!(source.len(), 2, "{trace:?}");
-    assert!(
-        normal.iter().any(|i| *i > source[0] && *i < source[1]),
-        "{trace:?}"
-    );
+    if source_only {
+        assert!(normal.is_empty(), "{trace:?}");
+    } else {
+        assert!(
+            normal.iter().any(|i| *i > source[0] && *i < source[1]),
+            "{trace:?}"
+        );
+    }
     assert!(normal.iter().all(|i| *i < source[1]), "{trace:?}");
 }

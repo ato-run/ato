@@ -13,6 +13,7 @@
 //! | `--api-base` | control plane base URL (required) |
 //! | `--work-root` | worker-owned directory; holds `worker-update.json` |
 //! | `--worker-id` | identity this process claims as |
+//! | `--queue` | `all` (default) or `source-only`; requires a dedicated runner identity |
 //! | `--poll-ms` | idle poll interval (default 2000) |
 //! | `--heartbeat-ms` | lifecycle/identity report interval (default 15000) |
 //! | `--expect-version` | refuse to serve unless the binary reports this version |
@@ -534,6 +535,7 @@ fn serve(args: &[String]) -> Result<()> {
     );
     let expect_version = flag(args, "--expect-version");
     let expect_digest = flag(args, "--expect-digest");
+    let source_only = source_only_queue(args)?;
     let token = std::env::var("ATO_FORMATION_TOKEN")
         .map_err(|_| anyhow!("ATO_FORMATION_TOKEN is required"))?;
 
@@ -560,6 +562,9 @@ fn serve(args: &[String]) -> Result<()> {
     let api = FormationApi::new(client, api_base.clone(), token.clone());
     let source_api = match SourceArchiveApi::new(api_base.clone(), token.clone()) {
         Ok(api) => Some(api),
+        Err(error) if source_only => {
+            return Err(error.context("source-only polling is unavailable for this API origin"));
+        }
         Err(_) => {
             eprintln!("[formation] source-only polling unavailable for this API origin");
             None
@@ -726,7 +731,7 @@ fn serve(args: &[String]) -> Result<()> {
         // Alternate source and ordinary work so a continuously busy queue
         // cannot starve the other. Source-only uses its dedicated claim and
         // physical materializer; it never enters the application build lane.
-        let source_polled = poll_source && source_api.is_some();
+        let source_polled = (source_only || poll_source) && source_api.is_some();
         poll_source = !poll_source;
         if let Some(source_api) = source_api.as_ref().filter(|_| source_polled) {
             match source_api.claim_next_controlled(worker_id) {
@@ -766,6 +771,13 @@ fn serve(args: &[String]) -> Result<()> {
             {
                 break;
             }
+        }
+
+        // Dedicated source workers must never consume the normal Formation
+        // queue. Give the source-only endpoint the same bounded idle interval.
+        if source_only {
+            pause(&state, idle);
+            continue;
         }
 
         // A poll that fails is a transient control-plane or network problem,
@@ -1081,6 +1093,57 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
         .map(String::as_str)
+}
+
+fn source_only_queue(args: &[String]) -> Result<bool> {
+    let mut mode = None;
+    for (index, arg) in args.iter().enumerate() {
+        let value = if arg == "--queue" {
+            Some(args.get(index + 1).map(String::as_str).unwrap_or(""))
+        } else if let Some(value) = arg.strip_prefix("--queue=") {
+            Some(value)
+        } else if arg.starts_with("--queue") {
+            return Err(anyhow!("unrecognised --queue option"));
+        } else {
+            None
+        };
+        if let Some(value) = value
+            && mode.replace(value).is_some()
+        {
+            return Err(anyhow!("--queue must be specified at most once"));
+        }
+    }
+    match mode {
+        None => Ok(false),
+        Some("all") => Ok(false),
+        Some("source-only") => Ok(true),
+        _ => Err(anyhow!("--queue must be all or source-only")),
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::source_only_queue;
+
+    #[test]
+    fn queue_mode_is_explicit_and_malformed_modes_fail_closed() {
+        let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+        assert!(!source_only_queue(&args(&[])).unwrap());
+        assert!(!source_only_queue(&args(&["--queue", "all"])).unwrap());
+        assert!(source_only_queue(&args(&["--queue", "source-only"])).unwrap());
+        assert!(source_only_queue(&args(&["--queue=source-only"])).unwrap());
+        for bad in [
+            vec!["--queue"],
+            vec!["--queue", "--worker-id"],
+            vec!["--queue", "source"],
+            vec!["--queue="],
+            vec!["--queue-source-only"],
+            vec!["--queue", "source-only", "--queue", "all"],
+            vec!["--queue=source-only", "--queue=all"],
+        ] {
+            assert!(source_only_queue(&args(&bad)).is_err(), "{bad:?}");
+        }
+    }
 }
 
 #[cfg(test)]
