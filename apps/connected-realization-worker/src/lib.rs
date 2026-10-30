@@ -14,6 +14,7 @@ pub mod host_resources;
 #[cfg(all(test, target_os = "linux"))]
 mod managed_hosted_tests;
 mod native_pixel_config;
+mod process_run_verification;
 pub mod runtime_launch;
 mod slot_state;
 
@@ -2931,6 +2932,9 @@ impl ConnectedWorker {
 
         // ACTIVE. The control plane decides when this ends.
         let last_heartbeat = std::cell::Cell::new(Instant::now());
+        // Retrying observation is separate from readiness. A transient API
+        // failure must not turn a usable Run into a false success or failure.
+        let mut verification_retry = Some(Instant::now());
         let mut stop = || -> Result<bool> {
             #[cfg(unix)]
             if let Some(native) = native
@@ -2957,7 +2961,7 @@ impl ConnectedWorker {
                 self.heartbeat_best_effort(1);
                 last_heartbeat.set(Instant::now());
             }
-            poll_runtime_launch_control(
+            if poll_runtime_launch_control(
                 || self.control_stop_requested_runtime(&lease.id, native_lane),
                 || {
                     self.refresh_runtime_authorization(
@@ -2966,7 +2970,28 @@ impl ConnectedWorker {
                         native_lane,
                     )
                 },
-            )
+            )? {
+                return Ok(true);
+            }
+            if verification_retry.is_some_and(|at| Instant::now() >= at) {
+                match process_run_verification::report(
+                    &self.api,
+                    lease,
+                    spec,
+                    active,
+                    endpoint_name,
+                ) {
+                    Ok(()) => verification_retry = None,
+                    Err(_) => {
+                        eprintln!(
+                            "[run-verification] run={} observation unavailable; retrying",
+                            lease.run_id
+                        );
+                        verification_retry = Some(Instant::now() + Duration::from_secs(15));
+                    }
+                }
+            }
+            Ok(false)
         };
         runtime_launch::lease::wait_for_stop(&mut stop, Duration::from_millis(500), hard_deadline)?;
         Ok(execution_id)
