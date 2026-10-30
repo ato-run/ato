@@ -520,6 +520,49 @@ fn dedicated_claim_never_falls_back_to_the_application_claim_route() {
 }
 
 #[test]
+fn controlled_source_claim_distinguishes_idle_stop_and_transport_failure() {
+    for (status, body, expected) in [
+        ("200 OK", json!({"job_id": null}), "idle"),
+        ("200 OK", json!({}), "error"),
+        (
+            "409 Conflict",
+            json!({"error": "runner_drained"}),
+            "drained",
+        ),
+        (
+            "409 Conflict",
+            json!({"error": "runner_update_required", "target_version": "0.1.1", "target_digest": "abc"}),
+            "update",
+        ),
+        ("409 Conflict", json!({"error": "other"}), "error"),
+        ("503 Unavailable", json!({"error": "unavailable"}), "error"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (_, path, _, _) = request(&mut stream).unwrap();
+            assert!(path.starts_with("/v1/internal/formation/source-archives/claim?"));
+            respond(&mut stream, status, &serde_json::to_vec(&body).unwrap());
+        });
+        let api = SourceArchiveApi::new(url, "runner-token-canary".into()).unwrap();
+        let result = api.claim_next_controlled("source_worker");
+        match expected {
+            "idle" => assert!(matches!(result.unwrap(), SourceArchiveClaimOutcome::Idle)),
+            "drained" => assert!(matches!(
+                result.unwrap(),
+                SourceArchiveClaimOutcome::Stopped(crate::api::ClaimRefusal::Drained)
+            )),
+            "update" => assert!(
+                matches!(result.unwrap(), SourceArchiveClaimOutcome::Stopped(crate::api::ClaimRefusal::UpdateRequired { target_version: Some(version), target_digest: Some(digest) }) if version == "0.1.1" && digest == "abc")
+            ),
+            _ => assert!(result.is_err()),
+        }
+        task.join().unwrap();
+    }
+}
+
+#[test]
 fn application_executor_refuses_source_output_before_fetch_or_ledger_reservation() {
     struct NoPack;
     impl crate::job::TreePacker for NoPack {

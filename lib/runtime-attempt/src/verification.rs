@@ -13,7 +13,7 @@
 //! is given what was observed and returns what that establishes. What happens
 //! to the candidate afterwards is its owner's and is not in the receipt.
 
-use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
+use ato_formation::authoring::{BoundContract, BoundDerivation, HTTP_CONTRACT_VERIFIER};
 use ato_formation::scenario::ScenarioObservation;
 use ato_formation::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2, ContractVerification, ContractVerificationReceipt,
@@ -22,6 +22,62 @@ use ato_formation::verify::{
 };
 
 use crate::spec::AttemptSpec;
+
+/// Immutable verification input retained at Formation for later Run attempts.
+/// The value is evidence input, not itself a receipt or an authorization to run.
+pub const FROZEN_VERIFICATION_SCHEMA: &str = "ato.frozen-verification-input/1";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenVerificationInput {
+    pub schema: String,
+    pub contract_ref: String,
+    pub derivation_ref: String,
+    pub contract: BoundContract,
+    pub derivation: BoundDerivation,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum FrozenVerificationInputError {
+    #[error("unsupported frozen verification input schema")]
+    UnsupportedSchema,
+    #[error("invalid canonical Contract or Derivation")]
+    InvalidCanonicalValue,
+    #[error("Contract does not match the assigned ContractRef")]
+    ContractMismatch,
+    #[error("Derivation does not match the assigned DerivationRef")]
+    DerivationMismatch,
+}
+
+impl FrozenVerificationInput {
+    /// Check both the transported values and their assignment. These checks
+    /// deliberately do not observe a workload or claim K is satisfied.
+    pub fn validate_assignment(
+        &self,
+        contract_ref: &str,
+        derivation_ref: &str,
+    ) -> Result<(), FrozenVerificationInputError> {
+        use FrozenVerificationInputError::*;
+        if self.schema != FROZEN_VERIFICATION_SCHEMA {
+            return Err(UnsupportedSchema);
+        }
+        let actual_contract = self
+            .contract
+            .contract_ref()
+            .map_err(|_| InvalidCanonicalValue)?;
+        if self.contract_ref != contract_ref || actual_contract != contract_ref {
+            return Err(ContractMismatch);
+        }
+        let actual_derivation = self
+            .derivation
+            .derivation_ref()
+            .map_err(|_| InvalidCanonicalValue)?;
+        if self.derivation_ref != derivation_ref || actual_derivation != derivation_ref {
+            return Err(DerivationMismatch);
+        }
+        Ok(())
+    }
+}
 
 /// The only HTTP method a Contract observation is made with.
 pub const HTTP_OBSERVATION_METHOD: &str = "GET";
@@ -219,6 +275,51 @@ mod tests {
             "effects": "pure"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn frozen_input_round_trip_checks_both_canonical_values_and_assignment() {
+        let contract = contract();
+        let derivation = derivation();
+        let contract_ref = contract.contract_ref().unwrap();
+        let derivation_ref = derivation.derivation_ref().unwrap();
+        let frozen = FrozenVerificationInput {
+            schema: FROZEN_VERIFICATION_SCHEMA.to_owned(),
+            contract_ref: contract_ref.clone(),
+            derivation_ref: derivation_ref.clone(),
+            contract,
+            derivation,
+        };
+        let mut decoded: FrozenVerificationInput =
+            serde_json::from_slice(&serde_json::to_vec(&frozen).unwrap()).unwrap();
+        assert_eq!(
+            decoded.validate_assignment(&contract_ref, &derivation_ref),
+            Ok(())
+        );
+        assert_eq!(
+            decoded.validate_assignment("sha256:another-contract", &derivation_ref),
+            Err(FrozenVerificationInputError::ContractMismatch),
+        );
+        decoded.contract.requirements[0].status = Some(404);
+        assert_eq!(
+            decoded.validate_assignment(&contract_ref, &derivation_ref),
+            Err(FrozenVerificationInputError::ContractMismatch),
+        );
+        decoded = frozen.clone();
+        decoded.derivation.ports[0].from = "other".into();
+        assert_eq!(
+            decoded.validate_assignment(&contract_ref, &derivation_ref),
+            Err(FrozenVerificationInputError::DerivationMismatch),
+        );
+        decoded = frozen.clone();
+        decoded.schema = "ato.frozen-verification-input/2".into();
+        assert_eq!(
+            decoded.validate_assignment(&contract_ref, &derivation_ref),
+            Err(FrozenVerificationInputError::UnsupportedSchema),
+        );
+        let mut unknown = serde_json::to_value(frozen).unwrap();
+        unknown["unrecognized"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<FrozenVerificationInput>(unknown).is_err());
     }
 
     fn digest(body: &[u8]) -> String {
