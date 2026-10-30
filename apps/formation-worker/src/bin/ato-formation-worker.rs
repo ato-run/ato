@@ -51,6 +51,9 @@ use ato_formation_worker::lifecycle::{
 };
 use ato_formation_worker::pack::pack_tree;
 use ato_formation_worker::sandbox::{BuildLimits, require_containment};
+use ato_formation_worker::source_archive::{
+    SourceArchiveApi, SourceArchiveClaimOutcome, materialize_source_archive,
+};
 
 /// What produced this binary.
 ///
@@ -555,6 +558,13 @@ fn serve(args: &[String]) -> Result<()> {
         .timeout(Duration::from_secs(900))
         .build()?;
     let api = FormationApi::new(client, api_base.clone(), token.clone());
+    let source_api = match SourceArchiveApi::new(api_base.clone(), token.clone()) {
+        Ok(api) => Some(api),
+        Err(_) => {
+            eprintln!("[formation] source-only polling unavailable for this API origin");
+            None
+        }
+    };
     let shim = std::env::current_exe().context("cannot locate this worker's own binary")?;
     let fetcher = PinnedSourceFetcher::new(api_base, token)?;
     let context = JobContext {
@@ -705,11 +715,57 @@ fn serve(args: &[String]) -> Result<()> {
     // `Some` when the loop stopped because the control plane said so, rather
     // than a signal. It carries the target binary from the refusal.
     let mut refusal: Option<ClaimRefusal> = None;
+    let mut poll_source = true;
     loop {
         // Checked before every claim: after a stop or a drain directive the
         // worker must never take another attempt fence.
         if STOP_REQUESTED.load(Ordering::SeqCst) || state.drain_requested.load(Ordering::SeqCst) {
             break;
+        }
+
+        // Alternate source and ordinary work so a continuously busy queue
+        // cannot starve the other. Source-only uses its dedicated claim and
+        // physical materializer; it never enters the application build lane.
+        let source_polled = poll_source && source_api.is_some();
+        poll_source = !poll_source;
+        if let Some(source_api) = source_api.as_ref().filter(|_| source_polled) {
+            match source_api.claim_next_controlled(worker_id) {
+                Ok(SourceArchiveClaimOutcome::Work(claim)) => {
+                    *lock(&state.current_attempt) = Some(claim.attempt_id.clone());
+                    match materialize_source_archive(&source_api, &fetcher, &claim, &work_root) {
+                        Ok(_) => println!(
+                            "[formation] source job={} attempt={} materialized",
+                            claim.job_id, claim.attempt_id
+                        ),
+                        Err(_) => {
+                            eprintln!(
+                                "[formation] source job={} attempt={} failed",
+                                claim.job_id, claim.attempt_id
+                            );
+                            if source_api.report_failure(&claim).is_err() {
+                                eprintln!(
+                                    "[formation] source archive failure report was not accepted"
+                                );
+                            }
+                        }
+                    }
+                    *lock(&state.current_attempt) = None;
+                    continue;
+                }
+                Ok(SourceArchiveClaimOutcome::Idle) => {}
+                Ok(SourceArchiveClaimOutcome::Stopped(stop)) => {
+                    refusal = Some(stop);
+                    state.drain_requested.store(true, Ordering::SeqCst);
+                    break;
+                }
+                Err(_) => eprintln!("[formation] source claim failed"),
+            }
+            // A heartbeat may have requested drain while the source poll was
+            // in flight. Do not ask the other queue after that directive.
+            if STOP_REQUESTED.load(Ordering::SeqCst) || state.drain_requested.load(Ordering::SeqCst)
+            {
+                break;
+            }
         }
 
         // A poll that fails is a transient control-plane or network problem,
@@ -718,7 +774,9 @@ fn serve(args: &[String]) -> Result<()> {
         let work = match api.claim_next_controlled(worker_id) {
             Ok(ClaimOutcome::Work(work)) => work,
             Ok(ClaimOutcome::Idle) => {
-                pause(&state, idle);
+                if source_polled || source_api.is_none() {
+                    pause(&state, idle);
+                }
                 continue;
             }
             // The control plane's stop signal is authoritative even if the
