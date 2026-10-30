@@ -164,6 +164,7 @@ impl ExplorationRealizer<'_> {
             planned: self.planned,
             shim: self.shim,
             network: NetworkPolicy::Scoped,
+            require_private_isolation: false,
         }
         .realize_controlled(
             executed,
