@@ -36,6 +36,7 @@ use ato_runtime_attempt::{
     executor::{AttemptExecution, AttemptExecutor, ExecutedCandidate, LocalAttemptExecutor},
     formation_realizer::FormationRealizer,
     journal::{AttemptJournal, AttemptLedger, AttemptRecordState},
+    verification::{FROZEN_VERIFICATION_SCHEMA, FrozenVerificationInput},
 };
 
 pub use ato_runtime_attempt::plan::{
@@ -856,7 +857,7 @@ fn compose_result(
     }))?);
     let formation_key = format!("v2:{inputs_digest}");
 
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "protocol": "ato.formation-result.v2",
         "job_id": attempt.job_id,
         "attempt_id": attempt.attempt_id,
@@ -940,7 +941,21 @@ fn compose_result(
         "deterministic_inputs_digest": inputs_digest,
         "verification_receipt": receipt,
         "outcomes": outcomes,
-    }))
+    });
+    if plan.lane.is_process() && planned.derivation.state.is_empty() {
+        // Preserve exactly what Formation verified. This is not a Run receipt:
+        // the later Run must observe its own workload using the same K and D.
+        let frozen = FrozenVerificationInput {
+            schema: FROZEN_VERIFICATION_SCHEMA.to_owned(),
+            contract_ref: contract_ref.to_owned(),
+            derivation_ref: derivation_ref.to_owned(),
+            contract: planned.contract.clone(),
+            derivation: planned.derivation.clone(),
+        };
+        frozen.validate_assignment(contract_ref, derivation_ref)?;
+        result["frozen_verification_input"] = serde_json::to_value(frozen)?;
+    }
+    Ok(result)
 }
 
 /// Where a job's scratch lives, so a caller can clean it up.
@@ -1096,6 +1111,25 @@ status = 200
             &AttemptOutcomes::not_run("test"),
         )
         .expect("composes")
+    }
+
+    #[test]
+    fn process_result_retains_the_exact_bound_verification_input() {
+        let planned = process_plan();
+        let result = compose(&planned);
+        let input: FrozenVerificationInput =
+            serde_json::from_value(result["frozen_verification_input"].clone()).unwrap();
+        assert_eq!(input.contract, planned.contract);
+        assert_eq!(input.derivation, planned.derivation);
+        assert_eq!(
+            input.validate_assignment(&planned.contract_ref, &planned.derivation_ref),
+            Ok(())
+        );
+        assert!(
+            compose(&static_plan())
+                .get("frozen_verification_input")
+                .is_none()
+        );
     }
 
     #[test]
