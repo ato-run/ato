@@ -2733,6 +2733,7 @@ fn execute_planned_ticket(
         builder: &builder,
         shim: &config.shim,
         network,
+        require_private_isolation: false,
     };
     let network_refusal = |phase| scoped.as_ref().and_then(|gates| gates.first_refusal(phase));
     let exploring = ticket

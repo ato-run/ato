@@ -51,6 +51,10 @@ use super::workspace::{WorkspaceTransport, materialize_workspace};
 /// pins the two together, because a silent mismatch does not fail loudly — it
 /// looks like "no runner available" forever.
 pub const RUNTIME_LAUNCH_LEASE_KIND: &str = "runtime_launch";
+/// Admission requires a Runner that understands and enforces this lease flag.
+/// Never advertise this on a host-boundary Runner, whose process shares a host network.
+pub const PRIVATE_ISOLATED_PROCESS_FEATURE: &str =
+    "runtime_feature=private_isolated_bounded_process_v1";
 /// Absolute upper bound accepted from the control plane for one workload.
 /// Public previews may request a shorter lease-owned deadline; omitting the
 /// field preserves the ordinary one-hour safety cap.
@@ -119,6 +123,10 @@ pub struct RuntimeLaunchLeaseCommand {
     /// digest or Capsule identity.
     #[serde(default)]
     pub network_authorization: Option<NetworkAuthorization>,
+    /// Control-plane admission fence; never part of the Contract or Derivation.
+    /// Old workers must never be assigned this flag: the capability above is required.
+    #[serde(default)]
+    pub requires_private_isolation: bool,
 }
 
 impl RuntimeLaunchLeaseCommand {
@@ -471,6 +479,14 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
             && spec.context().compute_instance_id == command.compute_instance_id,
         "launch spec identity does not match its lease command"
     );
+    validate_private_isolation(
+        command,
+        &spec,
+        super::host_boundary::active().is_some(),
+        !command.requires_private_isolation
+            || ato_runtime_attempt::resource_boundary::verify_current().is_ok(),
+    )?;
+
     // A native payload must never fall through to the ordinary OCI executor,
     // even if its separate presentation descriptor is absent or says Web.
     let native = match &spec {
@@ -586,6 +602,49 @@ pub fn validate_surface_origin(origin: &str) -> Result<()> {
 
 pub fn has_native_surface(spec: &RuntimeLaunchSpec) -> bool {
     matches!(spec, RuntimeLaunchSpec::V1(RuntimeLaunchSpecV1 { realization: LaunchRealizationV1::Oci(oci), .. }) if oci.native_surface.is_some())
+}
+
+/// An unreviewed private process may run only in the network namespace path.
+/// The host-boundary fallback shares the host network and is not equivalent.
+fn validate_private_isolation(
+    command: &RuntimeLaunchLeaseCommand,
+    spec: &RuntimeLaunchSpec,
+    host_boundary: bool,
+    resource_bounded: bool,
+) -> Result<()> {
+    if !command.requires_private_isolation {
+        return Ok(());
+    }
+    ensure!(
+        !host_boundary,
+        "private_process_requires_namespace_isolation"
+    );
+    ensure!(
+        resource_bounded,
+        "private_process_requires_bounded_resources"
+    );
+    let RuntimeLaunchSpec::V1(spec) = spec else {
+        bail!("private_process_requires_v1_process")
+    };
+    ensure!(
+        matches!(spec.realization, LaunchRealizationV1::Process(_)),
+        "private_process_requires_v1_process"
+    );
+    ensure!(
+        spec.state_attachments.is_empty()
+            && spec.secret_grants.is_empty()
+            && command.network_authorization.is_none(),
+        "private_process_unsupported_authority"
+    );
+    ensure!(
+        spec.endpoints.len() == 1 && spec.endpoints[0].protocol == "http",
+        "private_process_requires_one_http_endpoint"
+    );
+    ensure!(
+        command.max_duration_secs.is_some(),
+        "private_process_requires_bounded_lifetime"
+    );
+    Ok(())
 }
 
 fn verify_network_authorization(
@@ -1382,6 +1441,7 @@ mod tests {
             max_duration_secs: None,
             execution_authorization: None,
             network_authorization: None,
+            requires_private_isolation: false,
         }
     }
 
@@ -1393,6 +1453,38 @@ mod tests {
         // it looks like "no runner available", forever — so the literal is
         // pinned here rather than referenced.
         assert_eq!(RUNTIME_LAUNCH_LEASE_KIND, "runtime_launch");
+    }
+
+    #[test]
+    fn private_process_requires_namespace_and_refuses_other_authority() {
+        let mut process = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).unwrap();
+        process.state_attachments.clear();
+        process.secret_grants.clear();
+        let mut command = command_for(&process, &process.canonical_digest().unwrap());
+        command.requires_private_isolation = true;
+        command.max_duration_secs = Some(60);
+        let spec = RuntimeLaunchSpec::V1(process.clone());
+        assert!(validate_private_isolation(&command, &spec, false, true).is_ok());
+        assert!(validate_private_isolation(&command, &spec, true, true).is_err());
+        assert!(validate_private_isolation(&command, &spec, false, false).is_err());
+        command.max_duration_secs = None;
+        assert!(validate_private_isolation(&command, &spec, false, true).is_err());
+        command.max_duration_secs = Some(60);
+        command.network_authorization = Some(NetworkAuthorization {
+            egress: vec![],
+            fixed_tcp: vec![],
+            managed_embeddings: vec![],
+        });
+        assert!(validate_private_isolation(&command, &spec, false, true).is_err());
+        command.network_authorization = None;
+        let with_secrets =
+            RuntimeLaunchSpec::V1(RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).unwrap());
+        assert!(validate_private_isolation(&command, &with_secrets, false, true).is_err());
+        let group = group_command(None);
+        let group_spec = verified_spec(&group).unwrap();
+        assert!(validate_private_isolation(&command, &group_spec, false, true).is_err());
+        command.requires_private_isolation = false;
+        assert!(validate_private_isolation(&command, &with_secrets, true, false).is_ok());
     }
 
     #[test]
@@ -1581,6 +1673,7 @@ mod tests {
             max_duration_secs: None,
             execution_authorization: None,
             network_authorization: None,
+            requires_private_isolation: false,
         }
     }
 
