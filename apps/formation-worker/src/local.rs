@@ -367,6 +367,7 @@ fn attempt_one(
             builder: executor,
             shim: &env.shim,
             network,
+            require_private_isolation: false,
         },
         journal,
     );
