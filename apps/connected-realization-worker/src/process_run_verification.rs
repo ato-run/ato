@@ -123,6 +123,44 @@ fn probe_url(port: u16, path: &str) -> Option<url::Url> {
     .then_some(parsed)
 }
 
+fn observe_http(spec: &AttemptSpec<'_>, port: u16) -> Result<Vec<RuntimeHttpObservation>> {
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(2))
+        .build()?;
+    let mut observations = Vec::new();
+    for required in required_http_observations(spec) {
+        // Parsing must not reinterpret a backslash or authority in an
+        // untrusted path as another host, even without redirects or a proxy.
+        let Some(url) = probe_url(port, &required.path) else {
+            continue;
+        };
+        let Ok(response) = client.get(url).send() else {
+            continue;
+        };
+        let status = response.status().as_u16();
+        let Ok(body) = response
+            .take(1024 * 1024 + 1)
+            .bytes()
+            .collect::<std::io::Result<Vec<_>>>()
+        else {
+            continue;
+        };
+        if body.len() > 1024 * 1024 {
+            continue;
+        }
+        observations.push(RuntimeHttpObservation::from_response(
+            required.port_id,
+            "GET",
+            required.path,
+            status,
+            &body,
+        ));
+    }
+    Ok(observations)
+}
+
 pub(super) fn report(
     api: &HttpRunnerApi,
     lease: &ClaimedLease,
@@ -164,40 +202,7 @@ pub(super) fn report(
     let port = active
         .endpoint_port(endpoint_name)
         .context("missing process endpoint")?;
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(2))
-        .build()?;
-    let mut observations = Vec::new();
-    for required in required_http_observations(&spec) {
-        // Parsing must not reinterpret a backslash or authority in an
-        // untrusted path as another host, even without redirects or a proxy.
-        let Some(url) = probe_url(port, &required.path) else {
-            continue;
-        };
-        let Ok(response) = client.get(url).send() else {
-            continue;
-        };
-        let status = response.status().as_u16();
-        let Ok(body) = response
-            .take(1024 * 1024 + 1)
-            .bytes()
-            .collect::<std::io::Result<Vec<_>>>()
-        else {
-            continue;
-        };
-        if body.len() > 1024 * 1024 {
-            continue;
-        }
-        observations.push(RuntimeHttpObservation::from_response(
-            required.port_id,
-            "GET",
-            required.path,
-            status,
-            &body,
-        ));
-    }
+    let observations = observe_http(&spec, port)?;
     let running = active.execution_evidence();
     let execution = VerificationExecutionEvidence {
         realization: "process".into(),
@@ -297,6 +302,67 @@ mod tests {
             "readiness":{"kind":"http","endpoint_name":"http","path":"/","timeout_ms":10000},
             "lifecycle":{"graceful_shutdown_ms":1000,"force_kill_after_ms":2000}}).to_string()).unwrap();
         (assignment, spec)
+    }
+
+    #[test]
+    fn real_http_response_drives_the_frozen_contract_verdict() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let (assignment, launch) = example();
+        let spec = check_assignment(&assignment, "run1", "lease1", &launch, "http").unwrap();
+        for (response_status, expected) in [(200, true), (503, false)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                assert!(
+                    std::str::from_utf8(&request[..n])
+                        .unwrap()
+                        .starts_with("GET / HTTP/1.1")
+                );
+                write!(stream, "HTTP/1.1 {response_status} response\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+            });
+            let observed = observe_http(&spec, port).unwrap();
+            server.join().unwrap();
+            let execution = VerificationExecutionEvidence {
+                realization: "process".into(),
+                runtime_executable: None,
+                runtime_version: None,
+                pid: None,
+                container_id: None,
+                image: None,
+                platform: None,
+                endpoint: None,
+                run_id: None,
+                lease_id: Some("lease1".into()),
+                attempt_id: Some("lease1".into()),
+                request_id: None,
+                dependency_fetches: Vec::new(),
+                portability_profile: None,
+                embedded_oci_image_loaded: None,
+                services: Vec::new(),
+            };
+            let point = verify_observed_candidate(
+                &spec,
+                observed,
+                Vec::new(),
+                execution,
+                &ReceiptContext {
+                    target: VerificationTargetKind::AtoRunHosted,
+                    bundle_sha256: None,
+                    portability_profile: None,
+                    run_id: Some("run1"),
+                },
+            );
+            assert_eq!(point.receipt.fully_satisfied, expected);
+            assert_eq!(point.receipt.contract_ref, assignment.contract_ref);
+            assert_eq!(
+                point.receipt.execution.unwrap().run_id.as_deref(),
+                Some("run1")
+            );
+        }
     }
 
     #[test]
