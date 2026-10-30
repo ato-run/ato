@@ -732,7 +732,7 @@ fn serve(args: &[String]) -> Result<()> {
             match source_api.claim_next_controlled(worker_id) {
                 Ok(SourceArchiveClaimOutcome::Work(claim)) => {
                     *lock(&state.current_attempt) = Some(claim.attempt_id.clone());
-                    match materialize_source_archive(&source_api, &fetcher, &claim, &work_root) {
+                    match materialize_source_archive(source_api, &fetcher, &claim, &work_root) {
                         Ok(_) => println!(
                             "[formation] source job={} attempt={} materialized",
                             claim.job_id, claim.attempt_id
