@@ -229,6 +229,7 @@ impl RetainedCandidateRealizer<'_> {
             } else {
                 NetworkPolicy::Denied
             },
+            require_private_isolation: false,
         };
         drop(_source_timing);
         let mut realized = launcher.realize_controlled(
