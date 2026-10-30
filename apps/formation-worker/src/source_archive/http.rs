@@ -1,4 +1,5 @@
 use super::{Binding, ClaimedSourceArchive, SourceArchiveOutput};
+use crate::api::{ClaimRefusal, interpret_claim_refusal};
 use crate::job::source_fetch;
 use anyhow::{Result, ensure};
 use ato_formation::source::{FileVerifiedArchive, SourceLimits};
@@ -22,6 +23,13 @@ pub struct SourceArchiveApi {
     base: String,
     token: String,
     local: bool,
+}
+
+#[derive(Debug)]
+pub enum SourceArchiveClaimOutcome {
+    Work(Box<ClaimedSourceArchive>),
+    Idle,
+    Stopped(ClaimRefusal),
 }
 
 #[derive(Deserialize)]
@@ -108,6 +116,9 @@ impl SourceArchiveApi {
     pub fn claim_next(&self, worker_id: &str) -> Result<Option<ClaimedSourceArchive>> {
         self.claim_filtered(worker_id, None)
     }
+    pub fn claim_next_controlled(&self, worker_id: &str) -> Result<SourceArchiveClaimOutcome> {
+        self.claim_filtered_controlled(worker_id, None)
+    }
     pub fn claim(&self, worker_id: &str, job_id: &str) -> Result<Option<ClaimedSourceArchive>> {
         ensure!(
             !job_id.is_empty()
@@ -124,6 +135,19 @@ impl SourceArchiveApi {
         worker_id: &str,
         job_id: Option<&str>,
     ) -> Result<Option<ClaimedSourceArchive>> {
+        match self.claim_filtered_controlled(worker_id, job_id)? {
+            SourceArchiveClaimOutcome::Work(claim) => Ok(Some(*claim)),
+            SourceArchiveClaimOutcome::Idle => Ok(None),
+            SourceArchiveClaimOutcome::Stopped(_) => {
+                Err(anyhow::anyhow!("source_archive_worker_stopped"))
+            }
+        }
+    }
+    fn claim_filtered_controlled(
+        &self,
+        worker_id: &str,
+        job_id: Option<&str>,
+    ) -> Result<SourceArchiveClaimOutcome> {
         ensure!(
             !worker_id.is_empty() && worker_id.len() <= 160,
             "source_archive_worker_id_invalid"
@@ -134,12 +158,37 @@ impl SourceArchiveApi {
         if let Some(job_id) = job_id {
             request = request.query(&[("job_id", job_id)]);
         }
-        let value: serde_json::Value = self.control(
-            request.json(&serde_json::json!({})),
-            Instant::now() + Duration::from_secs(30),
-        )?;
-        if value["job_id"].is_null() {
-            return Ok(None);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let response = request
+            .json(&serde_json::json!({}))
+            .timeout(source_fetch::remaining(deadline)?)
+            .send()
+            .map_err(|_| anyhow::anyhow!("source_archive_control_request_failed"))?;
+        let status = response.status();
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_CONTROL_BODY + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| anyhow::anyhow!("source_archive_control_response_failed"))?;
+        ensure!(
+            bytes.len() as u64 <= MAX_CONTROL_BODY,
+            "source_archive_control_response_too_large"
+        );
+        source_fetch::remaining(deadline)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("source_archive_control_response_invalid"))?;
+        if let Some(refusal) = interpret_claim_refusal(status, &value)? {
+            return Ok(SourceArchiveClaimOutcome::Stopped(refusal));
+        }
+        ensure!(
+            status.is_success(),
+            "source_archive_control_rejected_http_{}",
+            status.as_u16()
+        );
+        match value.get("job_id") {
+            Some(serde_json::Value::Null) => return Ok(SourceArchiveClaimOutcome::Idle),
+            Some(serde_json::Value::String(_)) => {}
+            _ => return Err(anyhow::anyhow!("source_archive_claim_invalid")),
         }
         let claim: ClaimedSourceArchive = serde_json::from_value(value)
             .map_err(|_| anyhow::anyhow!("source_archive_claim_invalid"))?;
@@ -148,7 +197,7 @@ impl SourceArchiveApi {
             job_id.is_none_or(|expected| expected == claim.job_id),
             "source_archive_claim_job_mismatch"
         );
-        Ok(Some(claim))
+        Ok(SourceArchiveClaimOutcome::Work(Box::new(claim)))
     }
     pub(super) fn authorize(&self, binding: &Binding, deadline: Instant) -> Result<UploadTicket> {
         let ticket: UploadTicket = self.control(

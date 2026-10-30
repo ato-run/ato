@@ -37,6 +37,7 @@ pub mod native_launch;
 pub mod network_bridge;
 pub mod plan;
 pub mod realize;
+pub mod resource_boundary;
 pub mod retained;
 pub mod scenario;
 pub mod spec;
