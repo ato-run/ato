@@ -78,6 +78,7 @@ pub(crate) struct V2Request<'a> {
     pub source_root: &'a Path,
     pub attempt_root: &'a Path,
     pub work_root: &'a Path,
+    pub worker_id: &'a str,
     pub shim: &'a Path,
     pub closure_ref: &'a SourceClosureRef,
     pub source_evidence: &'a FormationSourceEvidenceV1,
@@ -161,8 +162,64 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
         .into());
     }
 
+    let requires_gpu = validated
+        .derivation
+        .requirements
+        .host
+        .as_ref()
+        .is_some_and(|host| !host.accelerators.is_empty());
+    if ato_runtime_attempt::launch::host_boundary::active().is_some() && !requires_gpu {
+        return Err(formation_failure(
+            "formation_gpu_route_required",
+            FailureStage::Admission,
+            "dedicated GPU Formation requires an explicitly selected GPU Derivation".to_owned(),
+        )
+        .into());
+    }
+    // Keep the validated candidate available for an explicit owner-authorized
+    // GPU retry. Registration is quarantine, never a satisfied result.
+    let prepared_artifact = if requires_gpu {
+        Some(
+            request
+                .api
+                .publish_portable_bundle(
+                    &attempt.attempt_id,
+                    &transport,
+                    validated.contract_ref.as_str(),
+                    &derivation_ref,
+                    &bundle_bytes,
+                )
+                .map_err(|error| {
+                    formation_failure(
+                        CAPSULE_V2_BUNDLE_PUBLICATION_FAILED,
+                        FailureStage::Projection,
+                        format!("GPU candidate registration failed: {error:#}"),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
+    if requires_gpu && ato_runtime_attempt::launch::host_boundary::active().is_none() {
+        return Err(formation_failure(
+            "gpu_host_unavailable",
+            FailureStage::Admission,
+            "GPU verification requires an explicitly authorized dedicated runtime".to_owned(),
+        )
+        .into());
+    }
     let profile = crate::local::probe_local_runtime();
     let cache_root = request.work_root.join("cache");
+    if ato_runtime_attempt::launch::host_boundary::active().is_some() {
+        prepare_gpu_models(&request, validated, &cache_root).map_err(|error| {
+            formation_failure(
+                "model_set_unavailable",
+                FailureStage::Admission,
+                format!("GPU Formation input delivery refused: {error:#}"),
+            )
+        })?;
+    }
     let outcome = run_portable_bundle_attempt(
         &PortableBundleAttempt {
             bundle_bytes: &bundle_bytes,
@@ -175,11 +232,7 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
             request_id: &attempt.job_id,
             attempt_id: &attempt.attempt_id,
             label: "portable_v2",
-            runtime_id: request
-                .work_root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("formation"),
+            runtime_id: request.worker_id,
             profile: &profile,
             authorization: ato_runtime_attempt::admission::EffectAuthorization::Unattended,
             network,
@@ -230,25 +283,29 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
 
     // 7. Register the bundle before the result names it: an artifact ref that
     //    resolves to nothing is worse than a result that was never published.
-    let artifact_ref = request
-        .api
-        .publish_portable_bundle(
-            &attempt.attempt_id,
-            &transport,
-            validated.contract_ref.as_str(),
-            &derivation_ref,
-            &bundle_bytes,
-        )
-        .map_err(|error| {
-            HostedAttemptFailure::new(
-                CAPSULE_V2_BUNDLE_PUBLICATION_FAILED,
-                "publish",
-                outcome.attempt_record.clone(),
-                Some(&receipt),
-                Some(&outcome.outcomes),
-                Some(error),
+    let artifact_ref = if let Some(artifact) = prepared_artifact {
+        artifact
+    } else {
+        request
+            .api
+            .publish_portable_bundle(
+                &attempt.attempt_id,
+                &transport,
+                validated.contract_ref.as_str(),
+                &derivation_ref,
+                &bundle_bytes,
             )
-        })?;
+            .map_err(|error| {
+                HostedAttemptFailure::new(
+                    CAPSULE_V2_BUNDLE_PUBLICATION_FAILED,
+                    "publish",
+                    outcome.attempt_record.clone(),
+                    Some(&receipt),
+                    Some(&outcome.outcomes),
+                    Some(error),
+                )
+            })?
+    };
 
     let verification = outcome.verification.clone().ok_or_else(|| {
         attempt_failure(
@@ -318,6 +375,73 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
 /// One route is the bundle's own answer. More than one requires an explicit
 /// selection: a hosted build must never choose a route on the uploader's
 /// behalf, because the receipt names the route that ran.
+/// Populate the existing verified ModelCache from only this attempt's grants.
+/// No upstream URL or provider credential reaches the workload.
+fn prepare_gpu_models(
+    request: &V2Request<'_>,
+    route: &ValidatedPortableApplication,
+    cache_root: &Path,
+) -> Result<()> {
+    use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry};
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+    request.api.check_gpu_attempt(&request.attempt.attempt_id)?;
+    let mut objects = BTreeMap::new();
+    for set in &route.model_sets {
+        for entry in &set.manifest.objects {
+            let object = ModelSetEntry {
+                path: entry.path.clone(),
+                digest: entry.digest.clone(),
+                bytes: entry.bytes,
+            };
+            if let Some(previous) = objects.insert(entry.digest.clone(), object) {
+                anyhow::ensure!(
+                    previous.bytes == entry.bytes,
+                    "conflicting Model Object sizes"
+                );
+            }
+        }
+    }
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let required = objects
+        .values()
+        .try_fold(0u64, |sum, entry| sum.checked_add(entry.bytes))
+        .context("Model Set size overflow")?;
+    let available = ato_runtime_attempt::host_resources::HostResources::probe(request.attempt_root)
+        .scratch_mib
+        .context("scratch capacity unavailable")?
+        .saturating_sub(512)
+        .saturating_mul(1024 * 1024);
+    anyhow::ensure!(
+        required <= available,
+        "insufficient scratch for declared Model Sets"
+    );
+    let cache = ModelCache::open(cache_root)?;
+    for entry in objects.values() {
+        request.api.check_gpu_attempt(&request.attempt.attempt_id)?;
+        let mut last_check = Instant::now();
+        cache.ensure_bounded(
+            entry,
+            required,
+            |start, end| {
+                request
+                    .api
+                    .gpu_model_range(&request.attempt.attempt_id, &entry.digest, start, end)
+            },
+            || {
+                if last_check.elapsed() >= Duration::from_secs(5) {
+                    request.api.check_gpu_attempt(&request.attempt.attempt_id)?;
+                    last_check = Instant::now();
+                }
+                Ok(())
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn select_derivation(
     bundle: &ato_objects::PortableApplicationBundle,
     requested: Option<&str>,
@@ -604,7 +728,7 @@ fn compose_result(
                 NetworkPolicy::DependencyResolution => "dependency_resolution",
                 NetworkPolicy::Scoped => "phase_scoped_connect",
             },
-            "isolation": network.provenance(),
+            "isolation": if ato_runtime_attempt::launch::host_boundary::active().is_some() { "host-boundary-v1;uid+no_new_privs+landlock;network=denied" } else { network.provenance() },
             "field_origins": {},
         },
         "diagnostics": [],

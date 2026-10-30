@@ -36,6 +36,27 @@ pub fn sandbox_exec(args: &[String]) -> Result<()> {
     if workload.is_empty() {
         return Err(anyhow!("sandbox-exec: no workload to execute"));
     }
+    match (
+        flag(head, "--drop-uid"),
+        flag(head, "--drop-gid"),
+        flag(head, "--chdir"),
+    ) {
+        (None, None, None) => {}
+        (Some(uid), Some(gid), Some(cwd)) => {
+            return crate::launch::sandbox_exec::run_host_boundary(
+                Path::new(policy_path),
+                &workload,
+                uid.parse().map_err(|_| anyhow!("invalid workload UID"))?,
+                gid.parse().map_err(|_| anyhow!("invalid workload GID"))?,
+                Path::new(cwd),
+            );
+        }
+        _ => {
+            return Err(anyhow!(
+                "workload UID, GID and cwd must be supplied together"
+            ));
+        }
+    }
     // Environment and cwd for the workload alone, applied by its `exec`
     // after the restrictions below: never this process's own.
     let mut workload_env = Vec::new();
@@ -103,3 +124,25 @@ fn set_process_limit(limit: u64) {
 
 #[cfg(not(target_os = "linux"))]
 fn set_process_limit(_limit: u64) {}
+
+#[cfg(test)]
+mod host_identity_tests {
+    #[test]
+    fn incomplete_workload_identity_is_refused_before_policy_or_exec() {
+        for flag in ["--drop-uid", "--drop-gid", "--chdir"] {
+            let args = [
+                "--policy",
+                "/nonexistent-test-policy",
+                flag,
+                "10001",
+                "--",
+                "/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            let error = super::sandbox_exec(&args).unwrap_err().to_string();
+            assert!(error.contains("must be supplied together"), "{error}");
+        }
+    }
+}

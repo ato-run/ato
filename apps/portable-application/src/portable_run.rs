@@ -90,7 +90,38 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         self.validated.realization == PortableRealizationKind::LocalProcess
     }
 
+    fn admits_host_requirements(&self) -> bool {
+        ato_runtime_attempt::launch::host_boundary::active().is_some()
+            && self
+                .validated
+                .derivation
+                .requirements
+                .host
+                .as_ref()
+                .is_some_and(|host| !host.accelerators.is_empty())
+    }
+
     fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
+        if let Some(host) = self.validated.derivation.requirements.host.as_ref()
+            && !host.accelerators.is_empty()
+        {
+            let resources =
+                ato_runtime_attempt::host_resources::HostResources::probe(self.runtime_root);
+            if let Err(reason) =
+                ato_runtime_attempt::host_resources::admit_gpu_host(host, &resources)
+            {
+                return refused("gpu_host_unavailable", reason);
+            }
+        }
+        if ato_runtime_attempt::launch::host_boundary::active().is_some()
+            && (self.validated.realization != PortableRealizationKind::LocalProcess
+                || !self.validated.derivation.state.is_empty())
+        {
+            return refused(
+                "formation_gpu_route_unsupported",
+                "dedicated GPU Formation supports process routes without namespace-dependent state mounts",
+            );
+        }
         if !self.validated.model_sets.is_empty() {
             let checked = resolve_model_inputs(
                 &self.validated.model_sets,
@@ -1222,14 +1253,66 @@ fn portable_process_sandbox_command(
     let runtime_root = runtime_root
         .canonicalize()
         .context("canonicalize portable runtime directory")?;
-    let executable = PathBuf::from(executable)
-        .canonicalize()
-        .with_context(|| format!("canonicalize portable runtime {executable}"))?;
+    let executable_path = PathBuf::from(executable);
+    let executable = if executable_path.is_absolute() {
+        executable_path
+    } else {
+        workspace.join(working_dir).join(executable_path)
+    }
+    .canonicalize()
+    .with_context(|| format!("canonicalize portable runtime {executable}"))?;
     let interpreter_root = executable
         .parent()
         .and_then(std::path::Path::parent)
         .context("portable runtime has no readable installation root")?
         .to_path_buf();
+    if let Some(boundary) = ato_runtime_attempt::launch::host_boundary::active() {
+        anyhow::ensure!(
+            state_mounts.is_empty(),
+            "host-boundary cannot supply namespace state mounts"
+        );
+        use ato_runtime_attempt::launch::{
+            host_boundary,
+            resolved::{ResolvedEndpoint, ResolvedReadOnlyInput, ResolvedRuntimeLaunchContext},
+        };
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.clone(),
+            if working_dir == "." { "" } else { working_dir },
+            BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![ResolvedEndpoint {
+                name: "portable".into(),
+                guest_port: None,
+                host_port,
+            }],
+        )?
+        .with_read_only_inputs(
+            input_mounts
+                .iter()
+                .map(|input| ResolvedReadOnlyInput {
+                    input_id: None,
+                    env_name: input.env_name.clone(),
+                    path: input.host_path.clone(),
+                })
+                .collect(),
+        );
+        host_boundary::prepare_ownership(&context, &runtime_root, boundary)?;
+        let policy_path = runtime_root.join("sandbox-policy.json");
+        let mut sandboxed = host_boundary::host_boundary_command(
+            &context,
+            workload,
+            sandbox_shim,
+            &policy_path,
+            &runtime_root,
+            boundary,
+            &[interpreter_root],
+        )?;
+        // The same authority runs in CLI and Worker binaries with different shim names.
+        sandboxed.argv[1] = sandbox_subcommand.to_owned();
+        fs::write(&policy_path, serde_json::to_vec(&sandboxed.policy)?)?;
+        return Ok(sandboxed.argv);
+    }
     if !state_mounts.is_empty() {
         #[cfg(target_os = "linux")]
         {
