@@ -199,6 +199,10 @@ impl Launch {
     }
 
     fn launch(&self) -> anyhow::Result<TemporaryRealization> {
+        self.launch_with_isolation(false)
+    }
+
+    fn launch_with_isolation(&self, private: bool) -> anyhow::Result<TemporaryRealization> {
         let derivation = legacy_execution::derivation(Some(&self.intent));
         let plan = ato_formation::execution::ExecutionPlan {
             lane: self.intent.lane,
@@ -210,7 +214,7 @@ impl Launch {
             toolchain_path: vec![],
             environment_bindings: BTreeMap::new(),
         };
-        TemporaryRealization::launch(&TemporaryRealizationRequest {
+        let request = TemporaryRealizationRequest {
             workspace: self.source.path(),
             scratch: &self.realization_scratch(),
             derivation: &derivation,
@@ -218,8 +222,43 @@ impl Launch {
             ports: &self.ports,
             shim: &shim(),
             attempt_id: "test",
-        })
+        };
+        if private {
+            TemporaryRealization::launch_private_isolated(&request, None)
+        } else {
+            TemporaryRealization::launch(&request)
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires Linux unprivileged namespaces and bubblewrap"]
+fn private_formation_candidate_has_ingress_but_no_host_network_or_credentials() {
+    let host = TcpListener::bind("127.0.0.1:0").unwrap();
+    let host_port = host.local_addr().unwrap().port();
+    let launch = Launch::new(server_argv("private-isolation", 8080), 8080);
+    let server = format!(
+        r#"
+import os, socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+s = socket.socket(); s.settimeout(0.2)
+assert s.connect_ex(('127.0.0.1', {host_port})) != 0, 'host reachable'
+assert 'ATO_RUNNER_TOKEN' not in os.environ
+assert not os.path.exists('/root/.ssh/authorized_keys')
+class Handler(BaseHTTPRequestHandler):
+ def do_GET(self):
+  self.send_response(200); self.end_headers(); self.wfile.write(b'isolated')
+ def log_message(self, *args): pass
+HTTPServer(('127.0.0.1', int(os.environ['ATO_ENDPOINT_APP_HTTP_PORT'])), Handler).serve_forever()
+"#
+    );
+    std::fs::write(launch.source.path().join("server.py"), server).unwrap();
+    let realization = launch
+        .launch_with_isolation(true)
+        .expect("isolated candidate");
+    assert_eq!(get(&realization, "/health"), (200, "isolated".to_owned()));
+    realization.destroy().expect("candidate stopped");
 }
 
 fn get(realization: &TemporaryRealization, path: &str) -> (u16, String) {
