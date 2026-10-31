@@ -135,6 +135,140 @@ pub struct HostedPreparationSource<'a> {
     api: &'a HostedPreparationApi,
     claim: &'a PreparationClaim,
 }
+
+/// Fixed first hosted profile; the Coordinator and provider proxy independently
+/// enforce the same ceilings and runtime admission remains authoritative.
+pub fn provider_profile() -> (
+    crate::runtime_network::proposal::hosted_anthropic::HostedAnthropicConfig,
+    crate::runtime_network::proposal::budget::BudgetPlan,
+) {
+    use crate::runtime_network::proposal::{
+        budget::BudgetPlan, deepseek::PROMPT_VERSION_V3, hosted_anthropic::HostedAnthropicConfig,
+    };
+    (
+        HostedAnthropicConfig {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-6".into(),
+            endpoint: "https://api.anthropic.com".into(),
+            prompt_version: PROMPT_VERSION_V3.into(),
+            max_output_tokens: 1024,
+            timeout_ms: 30_000,
+        },
+        BudgetPlan {
+            max_calls: 1,
+            input_token_cap: 32768,
+            output_token_cap: 1024,
+            input_price: 3_000_000,
+            output_price: 15_000_000,
+            ceiling_usd_micros: 113_664,
+        },
+    )
+}
+
+/// No request is posted here. The caller must save the result under the live
+/// preparation claim and wait for the owner's exact Search confirmation.
+pub fn prepare_claim(
+    fetcher: &dyn SourceFetcher,
+    claim: &PreparationClaim,
+    work_root: &Path,
+) -> Result<crate::runtime_network::Submission> {
+    use super::source_intake::prepare_source_exploration;
+    use crate::runtime_network::{
+        RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy,
+        exploration_driver::hosted_budget_binding,
+    };
+    use std::collections::BTreeMap;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Intent {
+        path: String,
+        status: u16,
+    }
+    let intent: Intent = serde_json::from_value(claim.intent.clone())?;
+    ensure!(
+        intent.status == 200
+            && !intent.path.is_empty()
+            && intent.path.len() <= 512
+            && intent.path.starts_with('/')
+            && intent
+                .path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/_~.%-".contains(&b)),
+        "hosted preparation intent invalid"
+    );
+    let source = &claim.source_origin["result"];
+    let descriptor = &source["archive_descriptor"];
+    let job_id = source["job_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("hosted source job missing"))?;
+    let digest = descriptor["source_archive_digest"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("hosted source digest missing"))?;
+    let tree = descriptor["source_tree_digest"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("hosted source tree missing"))?;
+    let closure = descriptor["source_closure_ref"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("hosted source closure missing"))?;
+    ensure!(
+        identifier(job_id, 6, 128)
+            && job_id.starts_with("fjob_")
+            && descriptor["subdirectory"] == "",
+        "hosted source selection invalid"
+    );
+    let job: ato_ipc::formation::FormationJobV1 = serde_json::from_value(json!({
+        "protocol":"ato.formation-job.v1","job_id":"fjob_hosted_preparation","request_idempotency_key":"hosted-preparation-source",
+        "source":{"kind":"uploaded_archive","archive_ref":format!("formation-source-archive:{job_id}"),"expected_archive_digest":digest,
+            "expected_source_tree_digest":tree,"subdirectory":""},
+        "requested_outputs":["process_workspace"],"target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},
+        "policy":{"policy_version":"formation-v1","network":"denied","publish_enabled":false}
+    }))?;
+    let contract = serde_json::from_value(
+        json!({"schema":"ato.contract/1","requirements":[{"id":"root","verifier":"ato.contract.http@1",
+        "port":"app.http","method":"GET","path":intent.path,"status":intent.status}]}),
+    )?;
+    let (config, plan) = provider_profile();
+    let exploration = serde_json::from_value(
+        json!({"ceiling":{},"formation":{"max_rounds":1,"max_retries":0},
+        "max_provider_calls":1,"max_inspections":0,"max_provider_cost_usd_micros":plan.ceiling_usd_micros,
+        "max_provider_input_tokens":plan.input_token_cap,"max_provider_output_tokens":plan.output_token_cap,
+        "provider_configuration_ref":config.configuration_ref(&plan)?,"provider_budget_binding_ref":hosted_budget_binding(&claim.owner,&claim.search_id)?}),
+    )?;
+    let policy = SatisfyPolicy {
+        network: "denied".into(),
+        allow_managed: true,
+        decision: None,
+        generation: None,
+        proposal: None,
+        exploration: Some(exploration),
+    };
+    let budget = SatisfyBudget {
+        mode: "first_pass".into(),
+        max_attempts: 1,
+        deadline_seconds: 600,
+        max_transfer_bytes: 16 * 1024 * 1024,
+        max_expanded_bytes: 128 * 1024 * 1024,
+        max_stored_bytes: 128 * 1024 * 1024,
+    };
+    let submission = prepare_source_exploration(
+        fetcher,
+        &job,
+        contract,
+        work_root,
+        RuntimeConstraintWire::Any,
+        policy,
+        budget,
+        &claim.search_id,
+        BTreeMap::from([("python".into(), "3.12.7".into())]),
+    )?;
+    ensure!(
+        submission.request.source.closure_ref == closure
+            && submission.request.source.archive_digest == digest
+            && submission.request.authorized_derivations.is_empty(),
+        "hosted prepared source mismatch"
+    );
+    Ok(submission)
+}
 impl SourceFetcher for HostedPreparationSource<'_> {
     fn fetch(&self, _job_id: &str, _source: &Value) -> Result<Vec<u8>> {
         bail!("hosted preparation requires bounded file intake")

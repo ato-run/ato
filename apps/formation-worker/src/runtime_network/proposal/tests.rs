@@ -992,6 +992,64 @@ fn source_exploration_intake_requires_measured_tree_and_network_denial() {
 }
 
 #[test]
+fn hosted_claim_prepares_fixed_contract_and_bounded_profile_from_the_measured_archive() {
+    use crate::job::{
+        hosted_preparation::{PreparationClaim, prepare_claim},
+        source_intake::ArchiveFileFetcher,
+    };
+    let (root, _template) = prepared(|_| {});
+    let (file, bytes, digest, tree, closure) = raw_github_source(root.path());
+    let mut claim = PreparationClaim {
+        id: "hprep_aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".into(),
+        owner: "owner_a".into(),
+        search_id: "search_123".into(),
+        holder: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".into(),
+        generation: 1,
+        expires_at: "2026-10-31T00:00:00Z".into(),
+        intent: json!({"path":"/health","status":200}),
+        source_origin: json!({"result":{"job_id":"fjob_source","archive_descriptor":{
+            "source_archive_digest":digest,"source_tree_digest":tree,"source_closure_ref":closure,"subdirectory":"","size_bytes":bytes.len()}}}),
+    };
+    let sub = prepare_claim(
+        &ArchiveFileFetcher(file.clone()),
+        &claim,
+        &root.path().join("hosted"),
+    )
+    .unwrap();
+    println!(
+        "hosted_prepared_request={}",
+        serde_json::to_string(&sub.request).unwrap()
+    );
+    assert_eq!(sub.request.search_id, claim.search_id);
+    assert_eq!(
+        serde_json::to_value(&sub.request.base_contract).unwrap()["requirements"][0]["path"],
+        "/health"
+    );
+    assert_eq!(sub.request.source.archive_digest, digest);
+    assert_eq!(sub.request.source.closure_ref, closure);
+    assert!(sub.request.authorized_derivations.is_empty());
+    assert_eq!(sub.request.budget.max_attempts, 1);
+    assert_eq!(
+        sub.request
+            .policy
+            .exploration
+            .as_ref()
+            .unwrap()
+            .max_provider_calls,
+        1
+    );
+    claim.intent = json!({"path":"https://evil.example","status":200});
+    assert!(
+        prepare_claim(
+            &ArchiveFileFetcher(file),
+            &claim,
+            &root.path().join("bad-hosted")
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn explicit_zero_derivation_archive_never_enables_source_manifest_or_known_preset_fallback() {
     let (root, mut template) =
         prepared(|p| std::fs::write(p.join("capsule.toml"), "not valid TOML !!!").unwrap());
