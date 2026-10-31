@@ -4,6 +4,7 @@ use super::FormArgs;
 use anyhow::{Context, Result, bail, ensure};
 use ato_formation::{
     authoring::BoundContract, exploration::ExplorationPolicy, proposal::ProposalAuthorization,
+    provider_budget::validate_combined,
 };
 use ato_formation_worker::runtime_network::{
     Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement,
@@ -99,51 +100,10 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         "agent Session needs --session-bridge and no direct inference API decision provider"
     );
     config.exploration.validate()?;
-    let reserve = config.provider_budget.validate()?;
-    let cp_calls = u64::from(config.provider_budget.max_calls);
-    let mut total_cost = reserve.checked_mul(cp_calls).context("spend overflow")?;
-    let mut total_input = config
-        .provider_budget
-        .input_token_cap
-        .checked_mul(cp_calls)
-        .context("token overflow")?;
-    let mut total_output = config
-        .provider_budget
-        .output_token_cap
-        .checked_mul(cp_calls)
-        .context("token overflow")?;
-    let mut total_calls = cp_calls;
+    let mut plans = vec![config.provider_budget.clone()];
     if let Some(decision) = &config.decision {
         decision.validate()?;
-        let calls = u64::from(decision.budget.max_calls);
-        total_cost = total_cost
-            .checked_add(
-                decision
-                    .budget
-                    .validate()?
-                    .checked_mul(calls)
-                    .context("spend overflow")?,
-            )
-            .context("spend overflow")?;
-        total_input = total_input
-            .checked_add(
-                decision
-                    .budget
-                    .input_token_cap
-                    .checked_mul(calls)
-                    .context("token overflow")?,
-            )
-            .context("token overflow")?;
-        total_output = total_output
-            .checked_add(
-                decision
-                    .budget
-                    .output_token_cap
-                    .checked_mul(calls)
-                    .context("token overflow")?,
-            )
-            .context("token overflow")?;
-        total_calls += calls;
+        plans.push(decision.budget.clone());
         let ref_ = decision.configuration_ref()?;
         ensure!(
             config
@@ -163,13 +123,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             "frozen decision configuration missing"
         );
     }
-    ensure!(
-        total_calls <= u64::from(config.exploration.max_provider_calls)
-            && total_cost <= config.exploration.max_provider_cost_usd_micros
-            && total_input <= config.exploration.max_provider_input_tokens
-            && total_output <= config.exploration.max_provider_output_tokens,
-        "combined provider spend plan exceeds frozen exploration budget"
-    );
+    validate_combined(&plans, &config.exploration)?;
     let provider_ref = config.provider.configuration_ref(&config.provider_budget)?;
     ensure!(
         config
