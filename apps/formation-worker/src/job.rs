@@ -47,6 +47,7 @@ use crate::api::{FailureReport, FormationApi, PublishOutcome};
 use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
+pub mod hosted_preparation;
 pub(crate) mod source_evidence;
 pub(crate) mod source_fetch;
 pub mod source_intake;
