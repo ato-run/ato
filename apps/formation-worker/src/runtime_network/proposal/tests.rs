@@ -882,6 +882,76 @@ fn original_github_wrapper_archive_reaches_search_without_retar_or_semantic_rela
 }
 
 #[test]
+fn verified_github_archive_prepares_unstarted_zero_d_search_with_fixed_contract() {
+    let (root, template) = prepared(|_| {});
+    let (file, bytes, digest, _tree, closure) = raw_github_source(root.path());
+    let verify = || {
+        FileVerifiedArchive::verify(
+            File::open(&file).unwrap(),
+            &digest,
+            bytes.len() as u64,
+            SourceLimits::default(),
+        )
+        .unwrap()
+    };
+    let mut policy = template.request.policy.clone();
+    policy.exploration=Some(serde_json::from_value(json!({"ceiling":{},"max_provider_calls":1,"max_inspections":1,
+        "max_provider_cost_usd_micros":1,"max_provider_input_tokens":1,"max_provider_output_tokens":1})).unwrap());
+    let mut too_small = template.request.budget.clone();
+    too_small.max_transfer_bytes = 1;
+    assert!(
+        prepare_verified_exploration_submission(
+            verify(),
+            template.request.base_contract.clone(),
+            &root.path().join("small"),
+            RuntimeConstraintWire::Any,
+            policy.clone(),
+            too_small,
+            "proposal_test",
+            BTreeMap::new()
+        )
+        .is_err()
+    );
+    let sub = prepare_verified_exploration_submission(
+        verify(),
+        template.request.base_contract.clone(),
+        &root.path().join("verified"),
+        RuntimeConstraintWire::Any,
+        policy,
+        template.request.budget.clone(),
+        "proposal_test",
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(sub.request.base_contract, template.request.base_contract);
+    assert_eq!(
+        sub.request.base_contract_ref,
+        template.request.base_contract_ref
+    );
+    assert_eq!(sub.request.source.archive_digest, digest);
+    assert_eq!(sub.request.source.closure_ref, closure);
+    assert!(sub.request.authorized_derivations.is_empty());
+    assert!(
+        sub.request
+            .policy
+            .proposal
+            .as_ref()
+            .unwrap()
+            .execution_plan
+            .as_ref()
+            .unwrap()
+            .files
+            .values()
+            .any(|f| f.path == "app.py")
+    );
+    let mut copied = Vec::new();
+    sub.source_file().unwrap().read_to_end(&mut copied).unwrap();
+    assert_eq!(copied, bytes);
+    let proposal = sub.proposal_request_v2(&status(&sub)).unwrap();
+    assert_eq!(proposal.frozen_contract, template.request.base_contract);
+}
+
+#[test]
 fn explicit_zero_derivation_archive_never_enables_source_manifest_or_known_preset_fallback() {
     let (root, mut template) =
         prepared(|p| std::fs::write(p.join("capsule.toml"), "not valid TOML !!!").unwrap());
