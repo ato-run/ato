@@ -1,0 +1,128 @@
+{
+  "kind": "browser-evidence",
+  "rust_contract_receipt": false,
+  "grammar_corrected": true,
+  "save_reload": true,
+  "download_bytes_match": true,
+  "offline_grammar": true,
+  "external_text_requests": 0,
+  "page_errors": [],
+  "requests": [
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/style.css",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/app.js",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/harper.wasm",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "[browser-owned blob]",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "[browser-owned blob]",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "[browser-owned blob]",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/style.css",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/app.js",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "/harper.wasm",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "[browser-owned blob]",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "[browser-owned blob]",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    },
+    {
+      "origin": "http://127.0.0.1:8767",
+      "path": "[browser-owned blob]",
+      "method": "GET",
+      "text_present": false,
+      "finished": true,
+      "failure": null
+    }
+  ],
+  "sockets": [],
+  "checked_at": "2026-10-23T13:12:36.719Z",
+  "fresh_browser_does_not_inherit_text": true,
+  "browser_version": "155.0.8059.86"
+}

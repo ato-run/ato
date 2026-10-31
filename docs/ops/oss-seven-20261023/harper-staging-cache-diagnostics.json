@@ -1,0 +1,121 @@
+{
+  "kind": "diagnostic-evidence",
+  "acceptance_passed": false,
+  "wasm_full_http_fetch": {
+    "bytes": 20252229,
+    "sha256": "e2d2998448e29acbf80cc2da768198a4ead4bf0dd838feb16f09373b5fca1e16"
+  },
+  "runs": {
+    "default": {
+      "body": "Harper\nEnglish text\nCheck grammarSaveDownload text\n\nLoading grammar checker\u2026\n\nHarper \u00b7 Apache-2.0 \u00b7 Text is checked on this device and saved in this browser.",
+      "errors": [
+        "Loading the script 'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092' violates the following Content Security Policy directive: \"script-src 'self' 'wasm-unsafe-eval'\". Note that 'script-src-elem' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.",
+        {
+          "path": "/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092",
+          "error": "csp",
+          "ms": 6369
+        },
+        {
+          "path": "/__ato/app-view/refresh",
+          "error": "net::ERR_ABORTED",
+          "ms": 7696
+        },
+        "Applying inline style violates the following Content Security Policy directive 'style-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-3HJb6DGTUQCvIGAk9k1ZYbxXEhrglhxIINL1kiTJL1s='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked.",
+        {
+          "path": "/harper.wasm",
+          "error": "net::ERR_CACHE_WRITE_FAILURE",
+          "ms": 10445
+        },
+        "WebAssembly compilation aborted: Network error: Response body loading was aborted",
+        "WebAssembly compilation aborted: Network error: Response body loading was aborted",
+        "WebAssembly compilation aborted: Network error: Response body loading was aborted",
+        "locator.waitFor: Timeout 150000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('status').getByText('Ready', { exact: true }) to be visible\u001b[22m\n"
+      ],
+      "wasm_responses": [
+        {
+          "path": "/harper.wasm",
+          "status": 200,
+          "type": "application/wasm",
+          "csp": "frame-ancestors 'self' https://ato.run https://stg-app.ato.run"
+        },
+        {
+          "path": "/harper.wasm",
+          "status": 200,
+          "type": "application/wasm",
+          "csp": "frame-ancestors 'self' https://ato.run https://stg-app.ato.run"
+        }
+      ]
+    },
+    "page_cache_disabled": {
+      "body": "Harper\nEnglish text\nCheck grammarSaveDownload text\n\nLoading grammar checker\u2026\n\nHarper \u00b7 Apache-2.0 \u00b7 Text is checked on this device and saved in this browser.",
+      "errors": [
+        "Loading the script 'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092' violates the following Content Security Policy directive: \"script-src 'self' 'wasm-unsafe-eval'\". Note that 'script-src-elem' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.",
+        {
+          "path": "/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092",
+          "error": "csp",
+          "ms": 9658
+        },
+        {
+          "path": "/__ato/app-view/refresh",
+          "error": "net::ERR_ABORTED",
+          "ms": 10866
+        },
+        "Applying inline style violates the following Content Security Policy directive 'style-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-3HJb6DGTUQCvIGAk9k1ZYbxXEhrglhxIINL1kiTJL1s='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked.",
+        {
+          "path": "/harper.wasm",
+          "error": "net::ERR_CACHE_WRITE_FAILURE",
+          "ms": 17433
+        },
+        "WebAssembly compilation aborted: Network error: Response body loading was aborted",
+        "WebAssembly compilation aborted: Network error: Response body loading was aborted",
+        "WebAssembly compilation aborted: Network error: Response body loading was aborted",
+        "locator.waitFor: Timeout 45000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('status').getByText('Ready', { exact: true }) to be visible\u001b[22m\n"
+      ],
+      "wasm_responses": [
+        {
+          "path": "/harper.wasm",
+          "status": 200,
+          "type": "application/wasm",
+          "csp": "frame-ancestors 'self' https://ato.run https://stg-app.ato.run"
+        },
+        {
+          "path": "/harper.wasm",
+          "status": 200,
+          "type": "application/wasm",
+          "csp": "frame-ancestors 'self' https://ato.run https://stg-app.ato.run"
+        }
+      ]
+    },
+    "all_context_routing": {
+      "body": "Harper\nEnglish text\nCheck grammarSaveDownload text\n\nReady\n\nHarper \u00b7 Apache-2.0 \u00b7 Text is checked on this device and saved in this browser.",
+      "errors": [
+        "Loading the script 'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092' violates the following Content Security Policy directive: \"script-src 'self' 'wasm-unsafe-eval'\". Note that 'script-src-elem' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.",
+        {
+          "path": "/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092",
+          "error": "csp",
+          "ms": 11351
+        },
+        {
+          "path": "/__ato/app-view/refresh",
+          "error": "net::ERR_ABORTED",
+          "ms": 12467
+        },
+        "Applying inline style violates the following Content Security Policy directive 'style-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-3HJb6DGTUQCvIGAk9k1ZYbxXEhrglhxIINL1kiTJL1s='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked."
+      ],
+      "wasm_responses": [
+        {
+          "path": "/harper.wasm",
+          "status": 200,
+          "type": "application/wasm",
+          "csp": "frame-ancestors 'self' https://ato.run https://stg-app.ato.run"
+        },
+        {
+          "path": "/harper.wasm",
+          "status": 200,
+          "type": "application/wasm",
+          "csp": "frame-ancestors 'self' https://ato.run https://stg-app.ato.run"
+        }
+      ]
+    }
+  }
+}

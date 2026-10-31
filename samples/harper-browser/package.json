@@ -1,0 +1,13 @@
+{
+  "name": "ato-harper-browser-derivation",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "node build.mjs",
+    "verify": "node verify.mjs"
+  },
+  "dependencies": { "harper.js": "2.13.0" },
+  "devDependencies": { "esbuild": "0.25.11", "playwright": "1.55.0" }
+}
