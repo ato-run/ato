@@ -8,6 +8,8 @@ use super::{
         TransmittedContextEvidence,
     },
     deepseek::{GeneralFailure, GeneralOutput, PROMPT_V3, PROMPT_VERSION_V3},
+    hosted_budget::HostedProviderBudget,
+    hosted_budget_http::{HostedJournalHttp, HostedJournalScope},
     provenance::{ErrorClass, ProviderIdentity},
 };
 use anyhow::{Result, ensure};
@@ -17,7 +19,10 @@ use ato_formation::proposal::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +258,108 @@ impl GeneralCandidateProducer for HostedAnthropicCandidateProducer {
     }
 }
 
+/// The Coordinator creates the round fence as part of claim. Consequently a
+/// hosted provider cannot be constructed with its final journal capability
+/// before the claim response. This factory binds exactly once, after that
+/// response is checked, and is discarded before another round.
+pub struct ClaimBoundAnthropicProducer {
+    config: HostedAnthropicConfig,
+    plan: BudgetPlan,
+    api: String,
+    token: String,
+    owner: String,
+    search: String,
+    holder: String,
+    claimant: String,
+    generation: u64,
+    bound: Mutex<Option<Arc<HostedAnthropicCandidateProducer>>>,
+}
+pub struct ClaimBoundScope<'a> {
+    pub api: &'a str,
+    pub token: &'a str,
+    pub owner: &'a str,
+    pub search: &'a str,
+    pub holder: &'a str,
+    pub claimant: &'a str,
+    pub generation: u64,
+}
+impl ClaimBoundAnthropicProducer {
+    pub fn new(
+        config: HostedAnthropicConfig,
+        plan: BudgetPlan,
+        scope: ClaimBoundScope<'_>,
+    ) -> Result<Self> {
+        config.validate(&plan)?;
+        Ok(Self {
+            config,
+            plan,
+            api: scope.api.into(),
+            token: scope.token.into(),
+            owner: scope.owner.into(),
+            search: scope.search.into(),
+            holder: scope.holder.into(),
+            claimant: scope.claimant.into(),
+            generation: scope.generation,
+            bound: Mutex::new(None),
+        })
+    }
+}
+impl GeneralCandidateProducer for ClaimBoundAnthropicProducer {
+    fn configuration_ref(&self) -> Result<String> {
+        self.config.configuration_ref(&self.plan)
+    }
+    fn identity(&self) -> ProviderIdentity {
+        self.config.identity()
+    }
+    fn bind_claim(&self, round: u64, fence: &str) -> Result<()> {
+        let mut bound = self
+            .bound
+            .lock()
+            .map_err(|_| anyhow::anyhow!("hosted producer lock unavailable"))?;
+        ensure!(bound.is_none(), "hosted producer already bound");
+        let transport = Arc::new(HostedJournalHttp::new(
+            &self.api,
+            &self.token,
+            HostedJournalScope {
+                owner: &self.owner,
+                search: &self.search,
+                holder: &self.holder,
+                claimant: &self.claimant,
+                generation: self.generation,
+                round,
+                round_fence: fence,
+            },
+        )?);
+        let budget = Arc::new(HostedProviderBudget::new(
+            self.plan.clone(),
+            transport.clone(),
+        )?);
+        *bound = Some(Arc::new(HostedAnthropicCandidateProducer::new(
+            self.config.clone(),
+            budget,
+            transport,
+        )?));
+        Ok(())
+    }
+}
+impl CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure>
+    for ClaimBoundAnthropicProducer
+{
+    fn propose(
+        &self,
+        request: &ProposalRequestV2,
+    ) -> std::result::Result<GeneralOutput, GeneralFailure> {
+        let bound = self.bound.lock().ok().and_then(|guard| guard.clone());
+        match bound {
+            Some(producer) => producer.propose(request),
+            None => Err(GeneralFailure {
+                class: ErrorClass::ProviderRefused,
+                provenance: self.config.identity().unknown_usage(),
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +486,34 @@ mod tests {
         let mut c = config();
         c.endpoint = "https://example.com".into();
         assert!(c.configuration_ref(&plan()).is_err());
+    }
+    #[test]
+    fn managed_producer_is_bound_only_after_one_valid_claim() {
+        let producer = ClaimBoundAnthropicProducer::new(
+            config(),
+            plan(),
+            ClaimBoundScope {
+                api: "https://example.com",
+                token: "worker-token",
+                owner: "owner_a",
+                search: "source-search",
+                holder: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+                claimant: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+                generation: 1,
+            },
+        )
+        .unwrap();
+        assert!(producer.propose(&request()).is_err());
+        assert!(producer.bind_claim(0, "bad").is_err());
+        assert!(
+            producer
+                .bind_claim(1, "cccccccc-cccc-4ccc-cccc-cccccccccccc")
+                .is_ok()
+        );
+        assert!(
+            producer
+                .bind_claim(1, "cccccccc-cccc-4ccc-cccc-cccccccccccc")
+                .is_err()
+        );
     }
 }
