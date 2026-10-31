@@ -280,6 +280,13 @@ enum SearchRequest {
         plans: Vec<ato_formation::provider_budget::BudgetPlan>,
         exploration: ato_formation::exploration::ExplorationPolicy,
     },
+    ValidateProviderJournal {
+        plans: Vec<ato_formation::provider_budget::BudgetPlan>,
+        exploration: ato_formation::exploration::ExplorationPolicy,
+        plan_index: usize,
+        history: Vec<ato_formation::provider_budget::JournalEvent>,
+        next: Option<ato_formation::provider_budget::JournalEvent>,
+    },
     ValidateFunctionalObservations {
         acceptance: ato_formation::functional_acceptance::FunctionalAcceptanceV1,
         observations: Vec<ato_formation::port_operations::PortOperationObservation>,
@@ -363,6 +370,23 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                 ato_formation::provider_budget::validate_combined(&plans, &exploration)
                     .map_err(|_| "provider_budget_invalid".to_owned())?;
                 Ok(serde_json::json!({"status":"provider_budgets_validated"}))
+            }
+            SearchRequest::ValidateProviderJournal {
+                plans,
+                exploration,
+                plan_index,
+                history,
+                next,
+            } => {
+                ato_formation::provider_budget::validate_combined(&plans, &exploration)
+                    .map_err(|_| "provider_budget_invalid".to_owned())?;
+                let plan = plans
+                    .get(plan_index)
+                    .ok_or_else(|| "provider_budget_invalid".to_owned())?;
+                let snapshot =
+                    ato_formation::provider_budget::replay_hosted_budget(plan, &history, next)
+                        .map_err(|_| "provider_journal_invalid".to_owned())?;
+                Ok(serde_json::json!({"status":"provider_journal_validated", "snapshot":snapshot}))
             }
             SearchRequest::ValidateFunctionalObservations {
                 acceptance,
@@ -699,6 +723,38 @@ mod provider_budget_tests {
             "provider_budgets_validated"
         );
         request["exploration"]["max_provider_calls"] = json!(3);
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+    }
+
+    #[test]
+    fn wasm_authority_replays_reservations_and_rejects_uncertain_retry() {
+        let request_event = |cell: &str| {
+            json!({"request":{"cell":cell,
+            "proposal_request_sha256":format!("sha256:{}", "a".repeat(64)),
+            "provider_body_sha256":format!("sha256:{}", "b".repeat(64)),
+            "timeout_ms":1000,"proposal_request_bytes":1,"provider_body_bytes":1}})
+        };
+        let mut request = json!({"operation":"validate_provider_journal",
+            "plans":[{"max_calls":2,"input_token_cap":100,"output_token_cap":20,
+                "input_price":1,"output_price":1,"ceiling_usd_micros":4}],
+            "exploration":{"ceiling":{},"max_provider_calls":2,"max_inspections":0,
+                "max_provider_cost_usd_micros":4,"max_provider_input_tokens":200,
+                "max_provider_output_tokens":40},
+            "plan_index":0,"history":[],"next":request_event("first")});
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "provider_journal_validated"
+        );
+        request["history"] = json!([request_event("first")]);
+        request["next"] = request_event("second");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+        request["history"] = json!([request_event("first"), {"charged_unknown":"first"}]);
         assert_eq!(
             evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
             "rejected"
