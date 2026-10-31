@@ -1,0 +1,91 @@
+{
+  "protocol": "ato.runtime-network/0",
+  "search_id": "search_123",
+  "contract_ref": "sha256:4616a05545d066eb6d91bff8978ab742d720a2b61817afce8e8d46e87a2dd0b0",
+  "base_contract_ref": "sha256:4616a05545d066eb6d91bff8978ab742d720a2b61817afce8e8d46e87a2dd0b0",
+  "base_contract": {
+    "schema": "ato.contract/1",
+    "requirements": [
+      {
+        "id": "root",
+        "verifier": "ato.contract.http@1",
+        "port": "app.http",
+        "method": "GET",
+        "path": "/health",
+        "status": 200
+      }
+    ]
+  },
+  "source": {
+    "content_ref": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53",
+    "archive_bytes": 232,
+    "archive_digest": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53",
+    "closure_ref": "sha256:7b373bd83a9efeee6f588bd5b2fdc939175aebed67815e4488ca9c3b9598f5a1"
+  },
+  "initial_source": {
+    "closure_ref": "sha256:7b373bd83a9efeee6f588bd5b2fdc939175aebed67815e4488ca9c3b9598f5a1",
+    "archive_digest": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53"
+  },
+  "authorized_derivations": [],
+  "runtime_constraint": {
+    "kind": "any"
+  },
+  "bindings": {},
+  "policy": {
+    "network": "denied",
+    "allow_managed": true,
+    "proposal": {
+      "modifiable_derivation_refs": [],
+      "source_domain": {
+        "entrypoints": {},
+        "modules": {}
+      },
+      "python_http_process": null,
+      "execution_plan": {
+        "runtime_port_operations": true,
+        "files": {
+          "f_568470d013cd12e4f3882065": {
+            "path": "app.py",
+            "digest": "sha256:76b7f508530d50aec5482a8ab7272cf8aa9eb051f47484c18844ae6892571f32"
+          },
+          "f_b335630551682c19a781afeb": {
+            "path": "README.md",
+            "digest": "sha256:2191413ebd75893a4db915d48cb7d3ce6d043eb0f40f5dcd8cff98e3b4c71da2"
+          }
+        },
+        "toolchains": {
+          "python": "3.12.7"
+        }
+      },
+      "policy": {
+        "max_proposal_rounds": 1,
+        "max_proposals": 1,
+        "timeout_ms": 30000,
+        "allow_source_text": true,
+        "max_source_bytes": 16384
+      }
+    },
+    "exploration": {
+      "formation": {
+        "max_rounds": 1,
+        "max_retries": 0
+      },
+      "ceiling": {},
+      "max_provider_calls": 1,
+      "max_inspections": 0,
+      "max_provider_cost_usd_micros": 113664,
+      "max_provider_input_tokens": 32768,
+      "max_provider_output_tokens": 1024,
+      "provider_configuration_ref": "sha256:6ecfc6f9deb7b97ad48d6f49a2959c9ce238c2917b349427ad9b480184162022",
+      "provider_budget_binding_ref": "sha256:d6a2c6132e48bfef2b55ee28bec93d06d536498015a5033c778d25ffaa58b299"
+    }
+  },
+  "budget": {
+    "max_attempts": 1,
+    "mode": "first_pass",
+    "deadline_seconds": 600,
+    "max_transfer_bytes": 16777216,
+    "max_expanded_bytes": 134217728,
+    "max_stored_bytes": 134217728
+  }
+}
