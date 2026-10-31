@@ -952,6 +952,46 @@ fn verified_github_archive_prepares_unstarted_zero_d_search_with_fixed_contract(
 }
 
 #[test]
+fn source_exploration_intake_requires_measured_tree_and_network_denial() {
+    use crate::job::source_intake::{ArchiveFileFetcher, prepare_source_exploration};
+    let (root, template) = prepared(|_| {});
+    let (file, bytes, digest, tree, closure) = raw_github_source(root.path());
+    let mut job:ato_ipc::formation::FormationJobV1=serde_json::from_value(json!({
+        "protocol":"ato.formation-job.v1","job_id":"fjob_wrapper_search","request_idempotency_key":"wrapper-search-explicit",
+        "source":{"kind":"uploaded_archive","archive_ref":"formation-source-archive:fjob_source","expected_archive_digest":digest,"expected_source_tree_digest":tree,"subdirectory":""},
+        "requested_outputs":["process_workspace"],"target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},"policy":{"policy_version":"formation-v1","network":"denied","publish_enabled":false}
+    })).unwrap();
+    let mut policy = template.request.policy.clone();
+    policy.exploration=Some(serde_json::from_value(json!({"ceiling":{},"max_provider_calls":1,"max_inspections":1,
+        "max_provider_cost_usd_micros":1,"max_provider_input_tokens":1,"max_provider_output_tokens":1})).unwrap());
+    let prepare = |job: &ato_ipc::formation::FormationJobV1, p: SatisfyPolicy| {
+        prepare_source_exploration(
+            &ArchiveFileFetcher(file.clone()),
+            job,
+            template.request.base_contract.clone(),
+            &root.path().join("intake"),
+            RuntimeConstraintWire::Any,
+            p,
+            template.request.budget.clone(),
+            "proposal_test",
+            BTreeMap::new(),
+        )
+    };
+    let sub = prepare(&job, policy.clone()).unwrap();
+    assert_eq!(sub.request.source.archive_digest, digest);
+    assert_eq!(sub.request.source.archive_bytes, Some(bytes.len() as u64));
+    assert_eq!(sub.request.source.closure_ref, closure);
+    assert!(sub.request.authorized_derivations.is_empty());
+    let mut network = policy.clone();
+    network.network = "allowed".into();
+    assert!(prepare(&job, network).is_err());
+    if let ato_ipc::formation::FormationSourceV1::UploadedArchive(s) = &mut job.source {
+        s.expected_source_tree_digest = Some(format!("sha256:{}", "0".repeat(64)));
+    }
+    assert!(prepare(&job, policy).is_err());
+}
+
+#[test]
 fn explicit_zero_derivation_archive_never_enables_source_manifest_or_known_preset_fallback() {
     let (root, mut template) =
         prepared(|p| std::fs::write(p.join("capsule.toml"), "not valid TOML !!!").unwrap());
