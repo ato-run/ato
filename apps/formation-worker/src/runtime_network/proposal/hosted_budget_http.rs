@@ -44,6 +44,18 @@ struct SnapshotResponse {
     snapshot: BudgetSnapshot,
 }
 
+/// Server-issued scope; none of these values comes from the repository or model.
+#[derive(Clone, Copy)]
+pub struct HostedJournalScope<'a> {
+    pub owner: &'a str,
+    pub search: &'a str,
+    pub holder: &'a str,
+    pub claimant: &'a str,
+    pub generation: u64,
+    pub round: u64,
+    pub round_fence: &'a str,
+}
+
 pub struct HostedJournalHttp {
     client: Client,
     endpoint: Url,
@@ -71,20 +83,11 @@ fn uuid(s: &str) -> bool {
 impl HostedJournalHttp {
     /// `api` and token come from the trusted managed worker configuration;
     /// never use a repository, model or owner-provided endpoint here.
-    pub fn new(
-        api: &str,
-        token: &str,
-        owner: &str,
-        search: &str,
-        holder: &str,
-        claimant: &str,
-        generation: u64,
-        round: u64,
-        round_fence: &str,
-    ) -> Result<Self> {
-        Self::build(
-            api,
-            token,
+    pub fn new(api: &str, token: &str, scope: HostedJournalScope<'_>) -> Result<Self> {
+        Self::build(api, token, scope, false)
+    }
+    fn build(api: &str, token: &str, scope: HostedJournalScope<'_>, mock: bool) -> Result<Self> {
+        let HostedJournalScope {
             owner,
             search,
             holder,
@@ -92,22 +95,7 @@ impl HostedJournalHttp {
             generation,
             round,
             round_fence,
-            false,
-        )
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn build(
-        api: &str,
-        token: &str,
-        owner: &str,
-        search: &str,
-        holder: &str,
-        claimant: &str,
-        generation: u64,
-        round: u64,
-        round_fence: &str,
-        mock: bool,
-    ) -> Result<Self> {
+        } = scope;
         let mut endpoint = Url::parse(api)?;
         let loopback = endpoint.scheme() == "http"
             && matches!(endpoint.host_str(), Some("127.0.0.1" | "[::1]"));
@@ -295,19 +283,7 @@ mod tests {
             }
             received
         });
-        let transport = HostedJournalHttp::build(
-            &origin,
-            "test-token",
-            "owner_a",
-            "search_123",
-            HOLDER,
-            CLAIMANT,
-            2,
-            1,
-            FENCE,
-            true,
-        )
-        .unwrap();
+        let transport = HostedJournalHttp::build(&origin, "test-token", scope(2), true).unwrap();
         let event = JournalEvent::Halt { halt: true };
         assert_eq!(transport.append(&event).unwrap(), AppendOutcome::Appended);
         assert_eq!(
@@ -325,7 +301,21 @@ mod tests {
         assert_eq!(seen[0].1, seen[1].1);
         assert_eq!(seen[0].1["lease"]["generation"], 2);
         assert_eq!(seen[0].1["round_fence"], FENCE);
-        assert_eq!(seen[0].1["id"], "31d1836715e2396171683042b0c50cf8a103f92f42ba052c89e4549fad999593");
+        assert_eq!(
+            seen[0].1["id"],
+            "31d1836715e2396171683042b0c50cf8a103f92f42ba052c89e4549fad999593"
+        );
+    }
+    fn scope(generation: u64) -> HostedJournalScope<'static> {
+        HostedJournalScope {
+            owner: "owner_a",
+            search: "search_123",
+            holder: HOLDER,
+            claimant: CLAIMANT,
+            generation,
+            round: 1,
+            round_fence: FENCE,
+        }
     }
     #[test]
     fn rejects_untrusted_origins_and_malformed_scope_before_network_use() {
@@ -336,48 +326,11 @@ mod tests {
             "https://example.com/path",
             "https://example.com/?query=1",
         ] {
-            assert!(
-                HostedJournalHttp::new(
-                    origin,
-                    "token",
-                    "owner_a",
-                    "search_123",
-                    HOLDER,
-                    CLAIMANT,
-                    1,
-                    1,
-                    FENCE
-                )
-                .is_err()
-            );
+            assert!(HostedJournalHttp::new(origin, "token", scope(1)).is_err());
         }
-        assert!(
-            HostedJournalHttp::new(
-                "https://example.com",
-                "token",
-                "../owner",
-                "search_123",
-                HOLDER,
-                CLAIMANT,
-                1,
-                1,
-                FENCE
-            )
-            .is_err()
-        );
-        assert!(
-            HostedJournalHttp::new(
-                "https://example.com",
-                "token",
-                "owner_a",
-                "search_123",
-                HOLDER,
-                CLAIMANT,
-                0,
-                1,
-                FENCE
-            )
-            .is_err()
-        );
+        let mut invalid = scope(1);
+        invalid.owner = "../owner";
+        assert!(HostedJournalHttp::new("https://example.com", "token", invalid).is_err());
+        assert!(HostedJournalHttp::new("https://example.com", "token", scope(0)).is_err());
     }
 }
