@@ -228,11 +228,32 @@ pub fn provider_profile() -> (
     use crate::runtime_network::proposal::{
         budget::BudgetPlan, deepseek::PROMPT_VERSION_V3, hosted_anthropic::HostedAnthropicConfig,
     };
+    let use_router = match std::env::var("ATO_HOSTED_PROPOSAL_PROVIDER") {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "anthropic" => false,
+        Ok(value) if value == "openrouter" => true,
+        _ => panic!("invalid hosted proposal provider"),
+    };
     (
         HostedAnthropicConfig {
-            provider: "anthropic".into(),
-            model: "claude-sonnet-4-6".into(),
-            endpoint: "https://api.anthropic.com".into(),
+            provider: if use_router {
+                "openrouter"
+            } else {
+                "anthropic"
+            }
+            .into(),
+            model: if use_router {
+                "anthropic/claude-sonnet-4.6"
+            } else {
+                "claude-sonnet-4-6"
+            }
+            .into(),
+            endpoint: if use_router {
+                "https://openrouter.ai"
+            } else {
+                "https://api.anthropic.com"
+            }
+            .into(),
             prompt_version: PROMPT_VERSION_V3.into(),
             max_output_tokens: 1024,
             timeout_ms: 30_000,
@@ -241,9 +262,10 @@ pub fn provider_profile() -> (
             max_calls: 1,
             input_token_cap: 32768,
             output_token_cap: 1024,
-            input_price: 3_000_000,
-            output_price: 15_000_000,
-            ceiling_usd_micros: 113_664,
+            // Include OpenRouter's possible BYOK surcharge in the bound.
+            input_price: if use_router { 3_150_000 } else { 3_000_000 },
+            output_price: if use_router { 15_750_000 } else { 15_000_000 },
+            ceiling_usd_micros: if use_router { 119_348 } else { 113_664 },
         },
     )
 }
