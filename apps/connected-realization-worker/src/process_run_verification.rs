@@ -96,7 +96,11 @@ fn check_assignment<'a>(
                 .is_some_and(|last| last.id == serve.id)
             && derivation.ports[0].from == serve.id
             && serve.argv == process.argv
-            && serve.cwd == spec.workspace.cwd_relative
+            // The Formation authoring format spells the workspace root as
+            // ".", while RuntimeLaunchSpecV1 uses "" for the same root.
+            // Preserve the frozen D and reject every other mismatch.
+            && (serve.cwd == spec.workspace.cwd_relative
+                || (serve.cwd == "." && spec.workspace.cwd_relative.is_empty()))
             && serve.env.iter().all(|(name, value)| spec
                 .public_env
                 .iter()
@@ -325,6 +329,21 @@ mod tests {
             "readiness":{"kind":"http","endpoint_name":"http","path":"/","timeout_ms":10000},
             "lifecycle":{"graceful_shutdown_ms":1000,"force_kill_after_ms":2000}}).to_string()).unwrap();
         (assignment, spec)
+    }
+
+    #[test]
+    fn workspace_root_spelling_maps_only_the_same_directory() {
+        let (mut assignment, mut launch) = example();
+        assignment.frozen_input.derivation.steps[0].cwd = ".".into();
+        let d = assignment.frozen_input.derivation.derivation_ref().unwrap();
+        assignment.derivation_ref = d.clone();
+        assignment.frozen_input.derivation_ref = d;
+        assert!(check_assignment(&assignment, "run1", "lease1", &launch, "http").is_ok());
+        let RuntimeLaunchSpec::V1(spec) = &mut launch else {
+            panic!("expected V1")
+        };
+        spec.workspace.cwd_relative = "other".into();
+        assert!(check_assignment(&assignment, "run1", "lease1", &launch, "http").is_err());
     }
 
     #[test]
