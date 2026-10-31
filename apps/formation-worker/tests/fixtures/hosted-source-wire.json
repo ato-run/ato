@@ -1,0 +1,102 @@
+{
+  "archive_base64": "H4sIAHsAAAAA/+3UPY7CMBAFYNd7iunYLZbF+V3okEiJhLiBSQawILY1cRC5PQYhCkBQgFIQf41HU/rpDaHRlbSamt8BD8IoTtL/oVjkBS7/2JsMnDSO7+7PLjNPQzdzJ2Exa0FdWUEArKPoQf7CmL5p2MuOuSZRdHd/kqTX+QfHtxVdz1/ICmFeKytLzIg0ffdK9yegcIcEuMe8tghFTVKtQCorNtj7+WLeZ3jU/3k2nkyzflmw1zztfxTc9D/knLWi4/2fNXatFbhTv5W5sFKrEZjLzp1/X3XP87yPdAAquq4bAA4AAA==",
+  "archive_digest": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53",
+  "canonical_frozen_json": "{\"base_contract\":{\"requirements\":[{\"id\":\"health\",\"method\":\"GET\",\"path\":\"/health\",\"port\":\"app.http\",\"status\":200,\"verifier\":\"ato.contract.http@1\"}],\"schema\":\"ato.contract/1\"},\"base_contract_ref\":\"sha256:76de509572729699ee58f5732ab7a873a8e14153effce876082fa100811ab9f8\",\"browser_contract\":null,\"candidates\":[],\"contract_ref\":\"sha256:76de509572729699ee58f5732ab7a873a8e14153effce876082fa100811ab9f8\",\"initial_source\":{\"archive_digest\":\"sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53\",\"closure_ref\":\"sha256:7b373bd83a9efeee6f588bd5b2fdc939175aebed67815e4488ca9c3b9598f5a1\"},\"policy\":{\"allow_managed\":false,\"bindings\":{},\"budget\":{\"deadline_seconds\":604800,\"max_attempts\":4,\"max_expanded_bytes\":10737418240,\"max_stored_bytes\":10737418240,\"max_transfer_bytes\":10737418240},\"mode\":\"first_pass\",\"network\":\"denied\",\"proposal\":{\"modifiable_derivation_refs\":[],\"policy\":{\"allow_source_text\":true,\"max_proposal_rounds\":1,\"max_proposals\":4,\"max_source_bytes\":4096,\"timeout_ms\":30000},\"python_http_process\":{\"guest_port\":8000,\"http_port\":\"app.http\",\"python_version\":\"3.12.7\"},\"source_domain\":{\"entrypoints\":{\"entry\":\"app.py\"},\"modules\":{}}},\"runtime_constraint\":{\"kind\":\"any\"}}}",
+  "job": {
+    "job_id": "fjob_wrapper_search",
+    "policy": {
+      "network": "denied",
+      "policy_version": "formation-v1",
+      "publish_enabled": false
+    },
+    "protocol": "ato.formation-job.v1",
+    "request_idempotency_key": "wrapper-search-explicit",
+    "requested_outputs": [
+      "process_workspace"
+    ],
+    "source": {
+      "archive_ref": "formation-source-archive:fjob_source",
+      "expected_archive_digest": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53",
+      "expected_source_tree_digest": "sha256:7d67edf215408291bec868c879d1bffe8347680bfe98bed0e6fdbc50d72c9a14",
+      "kind": "uploaded_archive",
+      "subdirectory": ""
+    },
+    "target": {
+      "triple": "x86_64-linux-gnu",
+      "workspace_guest_root": "/app"
+    }
+  },
+  "observed_file_count": 2,
+  "observed_uncompressed_bytes": 89,
+  "request": {
+    "authorized_derivations": [],
+    "base_contract": {
+      "requirements": [
+        {
+          "id": "health",
+          "method": "GET",
+          "path": "/health",
+          "port": "app.http",
+          "status": 200,
+          "verifier": "ato.contract.http@1"
+        }
+      ],
+      "schema": "ato.contract/1"
+    },
+    "base_contract_ref": "sha256:76de509572729699ee58f5732ab7a873a8e14153effce876082fa100811ab9f8",
+    "bindings": {},
+    "budget": {
+      "deadline_seconds": 604800,
+      "max_attempts": 4,
+      "max_expanded_bytes": 10737418240,
+      "max_stored_bytes": 10737418240,
+      "max_transfer_bytes": 10737418240,
+      "mode": "first_pass"
+    },
+    "contract_ref": "sha256:76de509572729699ee58f5732ab7a873a8e14153effce876082fa100811ab9f8",
+    "initial_source": {
+      "archive_digest": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53",
+      "closure_ref": "sha256:7b373bd83a9efeee6f588bd5b2fdc939175aebed67815e4488ca9c3b9598f5a1"
+    },
+    "policy": {
+      "allow_managed": false,
+      "network": "denied",
+      "proposal": {
+        "modifiable_derivation_refs": [],
+        "policy": {
+          "allow_source_text": true,
+          "max_proposal_rounds": 1,
+          "max_proposals": 4,
+          "max_source_bytes": 4096,
+          "timeout_ms": 30000
+        },
+        "python_http_process": {
+          "guest_port": 8000,
+          "http_port": "app.http",
+          "python_version": "3.12.7"
+        },
+        "source_domain": {
+          "entrypoints": {
+            "entry": "app.py"
+          },
+          "modules": {}
+        }
+      }
+    },
+    "protocol": "ato.runtime-network/0",
+    "runtime_constraint": {
+      "kind": "any"
+    },
+    "search_id": "proposal_test",
+    "source": {
+      "archive_bytes": 232,
+      "archive_digest": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53",
+      "closure_ref": "sha256:7b373bd83a9efeee6f588bd5b2fdc939175aebed67815e4488ca9c3b9598f5a1",
+      "content_ref": "sha256:ae9747eee7321058334239479e6b03e9eaec253e1e024b4800656de06b072f53"
+    }
+  },
+  "resolver_contract_version": "ato.source-resolver.v1",
+  "size_bytes": 232,
+  "source_closure_ref": "sha256:7b373bd83a9efeee6f588bd5b2fdc939175aebed67815e4488ca9c3b9598f5a1",
+  "source_tree_digest": "sha256:7d67edf215408291bec868c879d1bffe8347680bfe98bed0e6fdbc50d72c9a14"
+}
