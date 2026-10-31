@@ -96,6 +96,58 @@ pub fn prepare_source_proposal(
     )
 }
 
+/// Prepare a reviewable zero-D exploration request from one immutable source
+/// job. The caller must independently authorize the job and owner, and obtain
+/// confirmation of the resulting frozen Search before starting any action.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_source_exploration(
+    fetcher: &dyn SourceFetcher,
+    job: &ato_ipc::formation::FormationJobV1,
+    contract: ato_formation::authoring::BoundContract,
+    work_root: &Path,
+    constraint: crate::runtime_network::RuntimeConstraintWire,
+    policy: crate::runtime_network::SatisfyPolicy,
+    budget: crate::runtime_network::SatisfyBudget,
+    search_id: &str,
+    toolchains: std::collections::BTreeMap<String, String>,
+) -> Result<crate::runtime_network::Submission> {
+    job.validate()?;
+    let ato_ipc::formation::FormationSourceV1::UploadedArchive(source) = &job.source else {
+        bail!("approved_search_requires_immutable_archive");
+    };
+    anyhow::ensure!(
+        source.expected_source_tree_digest.is_some(),
+        "approved_search_requires_verified_tree"
+    );
+    anyhow::ensure!(
+        source.subdirectory.is_empty(),
+        "approved_search_subdirectory_unsupported"
+    );
+    anyhow::ensure!(
+        job.policy.network == ato_ipc::formation::FormationNetworkPolicyV1::Denied
+            && policy.network == "denied",
+        "approved_search_network_policy_mismatch"
+    );
+    budget.validate()?;
+    let mut limits = SourceLimits::default();
+    limits.max_total_bytes = limits.max_total_bytes.min(budget.max_expanded_bytes);
+    let deadline = Instant::now()
+        + Duration::from_secs(budget.deadline_seconds)
+            .min(crate::runtime_network::SOURCE_TRANSFER_TIMEOUT);
+    let verified = verify_source(
+        fetcher,
+        &job.job_id,
+        &serde_json::to_value(&job.source)?,
+        work_root,
+        limits,
+        budget.max_transfer_bytes,
+        deadline,
+    )?;
+    crate::runtime_network::proposal::prepare_verified_exploration_submission(
+        verified, contract, work_root, constraint, policy, budget, search_id, toolchains,
+    )
+}
+
 /// Explicit requester-local file import, using the same private bounded copy
 /// as network intake. It never modifies or builds the caller's directory.
 pub struct ArchiveFileFetcher(pub PathBuf);
