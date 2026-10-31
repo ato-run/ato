@@ -2,6 +2,7 @@
 //! neither its saved candidates nor its compiler verdict grant receipt authority.
 pub mod budget;
 pub mod deepseek;
+pub mod hosted_budget;
 pub mod provenance;
 pub mod reasoning;
 

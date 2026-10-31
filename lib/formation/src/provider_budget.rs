@@ -255,6 +255,18 @@ mod tests {
             replay_hosted_budget(&plan, &[], Some(JournalEvent::Cell("legacy".into()))).is_err()
         );
     }
+
+    #[test]
+    fn hosted_snapshot_decoding_rejects_unknown_fields() {
+        let snapshot = BudgetSnapshot::default();
+        let value = serde_json::to_value(&snapshot).unwrap();
+        let decoded: BudgetSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(decoded.cells.is_empty());
+        assert!(!decoded.stopped);
+        let mut invalid = value;
+        invalid["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<BudgetSnapshot>(invalid).is_err());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,12 +407,14 @@ pub struct RequestInspection {
     pub request: RequestEvidence,
     pub response_resolved: bool,
 }
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetSnapshot {
     pub cells: BTreeMap<String, CallEvidence>,
     pub stopped: bool,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CallEvidence {
     pub transport: Option<TransportEvidence>,
     pub not_sent: bool,
