@@ -93,6 +93,10 @@ fn uuid(s: &str) -> bool {
         })
 }
 impl HostedJournalHttp {
+    #[cfg(test)]
+    pub(crate) fn for_test(api: &str, token: &str, scope: HostedJournalScope<'_>) -> Result<Self> {
+        Self::build(api, token, scope, true)
+    }
     /// `api` and token come from the trusted managed worker configuration;
     /// never use a repository, model or owner-provided endpoint here.
     pub fn new(api: &str, token: &str, scope: HostedJournalScope<'_>) -> Result<Self> {

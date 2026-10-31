@@ -292,19 +292,23 @@ impl HostedExplorationApi {
             }
             let monotonic = fixed_deadline.expect("set above").1;
             let (config, plan) = super::hosted_preparation::provider_profile();
-            let producer = Arc::new(ClaimBoundAnthropicProducer::new(
-                config,
-                plan,
-                ClaimBoundScope {
-                    api: self.origin(),
-                    token: self.token(),
-                    owner: &work.owner,
-                    search: &work.search,
-                    holder: &work.holder,
-                    claimant: &work.claimant,
-                    generation: work.generation,
-                },
-            )?);
+            let scope = || ClaimBoundScope {
+                api: self.origin(),
+                token: self.token(),
+                owner: &work.owner,
+                search: &work.search,
+                holder: &work.holder,
+                claimant: &work.claimant,
+                generation: work.generation,
+            };
+            #[cfg(test)]
+            let producer = Arc::new(if self.mock {
+                ClaimBoundAnthropicProducer::for_test(config, plan, scope())?
+            } else {
+                ClaimBoundAnthropicProducer::new(config, plan, scope())?
+            });
+            #[cfg(not(test))]
+            let producer = Arc::new(ClaimBoundAnthropicProducer::new(config, plan, scope())?);
             let step = drive_step(
                 &status,
                 || {
@@ -669,5 +673,141 @@ mod tests {
         assert!(paths[4].contains("/provider-journal/initialize "));
         assert!(paths[6].contains("/proposal/status "));
         assert!(!paths.iter().any(|p| p.contains("provider-inference")));
+    }
+    #[test]
+    fn drives_one_fenced_mock_provider_call() {
+        use crate::runtime_network::{SatisfyRequest, proposal::frozen_request};
+        use ato_formation::{
+            proposal::ProposalRoundRecord,
+            search::{BudgetCounters, SEARCH_SCHEMA, SearchStateV1},
+        };
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let wire: Value =
+                serde_json::from_str(include_str!("../../tests/fixtures/hosted-source-wire.json"))
+                    .unwrap();
+            let archive = BASE64
+                .decode(wire["archive_base64"].as_str().unwrap())
+                .unwrap();
+            let request: Value = serde_json::from_str(include_str!(
+                "../../tests/fixtures/hosted-prepared-request.json"
+            ))
+            .unwrap();
+            let typed: SatisfyRequest = serde_json::from_value(request.clone()).unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let state = SearchStateV1 {
+                schema: SEARCH_SCHEMA.into(),
+                search_id: typed.search_id.clone(),
+                owner_scope: "owner_a".into(),
+                revision: 1,
+                frozen: frozen_request(&typed).unwrap(),
+                deadline_ms: now + 60_000,
+                budget: BudgetCounters::default(),
+                source_archive_bytes: typed.source.archive_bytes,
+                attempts: vec![],
+                owner_stopped: false,
+                decisions: vec![],
+                evidence: vec![],
+                generation: None,
+                proposal_history: vec![],
+                exploration_submission: None,
+                proposal_round: Some(ProposalRoundRecord {
+                    opened_at_ms: now,
+                    expires_at_ms: now + 30_000,
+                    outcome: None,
+                    candidates: vec![],
+                    derivations: vec![],
+                    diagnostics: vec![],
+                    inspection_requests: vec![],
+                }),
+            };
+            let mut seen = Vec::new();
+            for turn in 0..14 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut buf = [0u8; 4096];
+                let start = loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8(data[..start].to_vec()).unwrap();
+                let len: usize = headers
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|v| v.parse().ok())
+                    })
+                    .unwrap();
+                while data.len() < start + len {
+                    let n = stream.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&buf[..n]);
+                }
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer worker-token")
+                );
+                let body: Value = serde_json::from_slice(&data[start..start + len]).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&data[start..start + len]).contains("worker-token")
+                );
+                let path = headers.lines().next().unwrap().to_owned();
+                seen.push((path.clone(), body));
+                let response:Vec<u8>=match turn {
+                    0=>json!({"work":{"owner":"owner_a","search":"search_123","satisfy_id":"sat_1","holder":HOLDER,"claimant":CLAIMANT,"generation":1,"expires_at":"later"}}).to_string().into_bytes(),
+                    1=>json!({"request":request,"source_origin":{"result":{"job_id":"fjob_source","archive_descriptor":{
+                        "source_archive_digest":wire["archive_digest"],"source_tree_digest":wire["source_tree_digest"],"source_closure_ref":wire["source_closure_ref"],"size_bytes":wire["size_bytes"],"subdirectory":""}}}}).to_string().into_bytes(),
+                    2=>archive.clone(),
+                    3|5|12=>json!({"claimant_id":CLAIMANT,"lease_holder":HOLDER,"lease_generation":1,"lease_expires_at":"later"}).to_string().into_bytes(),
+                    4=>json!({"created":true,"revision":0}).to_string().into_bytes(),
+                    6=>json!({"search_id":"search_123","satisfy_id":"sat_1","status":"running","search_state":state,"proposal_point":{"round_seq":1,"revision":1,"claimed":false},"proposal_round":{"round_seq":1,"status":"open"}}).to_string().into_bytes(),
+                    7=>json!({"revision":2,"round_seq":1,"fence":"cccccccc-cccc-4ccc-cccc-cccccccccccc"}).to_string().into_bytes(),
+                    8=>json!({"appended":true,"revision":1}).to_string().into_bytes(),
+                    9=>json!({"model":"claude-sonnet-4-6","stop_reason":"end_turn","content":[{"type":"text","text":"{\"schema\":\"ato.formation-proposal/1\",\"proposals\":[]}"}],"usage":{"input_tokens":20,"output_tokens":10}}).to_string().into_bytes(),
+                    10=>json!({"appended":true,"revision":2}).to_string().into_bytes(),
+                    11=>json!({"outcome":"completed","revision":3}).to_string().into_bytes(),
+                    _=>json!({"search_id":"search_123","satisfy_id":"sat_1","status":"unsatisfied","search_state":{"deadline_ms":now+60_000}}).to_string().into_bytes(),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .unwrap();
+                stream.write_all(&response).unwrap();
+            }
+            seen
+        });
+        let api = HostedExplorationApi::build(&origin, "worker-token", true).unwrap();
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let root = tempfile::tempdir_in(scratch).unwrap();
+        assert!(api.drive_one(HOLDER, root.path(), || false).unwrap());
+        let seen = server.join().unwrap();
+        assert!(seen[7].0.contains("/proposal/claim "));
+        assert!(seen[8].0.contains("/provider-journal/append "));
+        assert!(seen[9].0.contains("/provider-inference/anthropic "));
+        assert!(seen[10].0.contains("/provider-journal/append "));
+        assert!(seen[11].0.contains("/proposal/complete "));
+        assert_eq!(
+            seen.iter()
+                .filter(|(p, _)| p.contains("provider-inference"))
+                .count(),
+            1
+        );
     }
 }
