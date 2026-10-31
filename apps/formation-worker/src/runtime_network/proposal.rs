@@ -1294,11 +1294,43 @@ impl Client {
     }
 }
 
+/// The proposal driver uses a scoped Coordinator capability, not an owner
+/// session. The existing CLI client and the future managed transport share the
+/// same claim, compilation and completion logic through this interface.
+pub trait ProposalCoordinator: Send + Sync {
+    fn bounded(&self, deadline_ms: u64) -> Box<dyn ProposalCoordinator>;
+    fn claim_proposal(&self, id: &str, revision: u64, claimant_id: &str) -> Result<Value>;
+    fn complete_proposal(&self, id: &str, bytes: &[u8]) -> Result<Value>;
+    fn report_completion(&self, id: &str, bytes: &[u8]) -> Result<Value>;
+    fn variable_metadata(&self, application: &str, search: &str) -> Result<Vec<Value>>;
+    fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>>;
+}
+impl ProposalCoordinator for Client {
+    fn bounded(&self, deadline_ms: u64) -> Box<dyn ProposalCoordinator> {
+        Box::new(self.with_deadline(deadline_ms))
+    }
+    fn claim_proposal(&self, id: &str, revision: u64, claimant_id: &str) -> Result<Value> {
+        Client::claim_proposal(self, id, revision, claimant_id)
+    }
+    fn complete_proposal(&self, id: &str, bytes: &[u8]) -> Result<Value> {
+        Client::complete_proposal(self, id, bytes)
+    }
+    fn report_completion(&self, id: &str, bytes: &[u8]) -> Result<Value> {
+        self.for_reporting().complete_proposal(id, bytes)
+    }
+    fn variable_metadata(&self, application: &str, search: &str) -> Result<Vec<Value>> {
+        Client::variable_metadata(self, application, search)
+    }
+    fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>> {
+        Client::runtime_capabilities(self, constraint)
+    }
+}
+
 /// One possible invocation per successful durable claim, even with stale GETs.
 /// Transport/lost claim errors consume this local opportunity without calling.
 /// A restarted requester observes claimed/terminal state and never recovers a fence.
 pub fn serve_proposal(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
@@ -1317,7 +1349,7 @@ pub fn serve_proposal(
 
 /// Same durable claim/completion engine; no separate generated-D executor.
 pub fn serve_general_proposal(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
@@ -1344,7 +1376,7 @@ pub fn serve_general_proposal(
 /// Shared session/API driver. Exact inputs and responses are durable before a
 /// proposal reaches the same independent receiver compiler and Runtime.
 pub fn serve_reasoning_proposal(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
@@ -1380,7 +1412,7 @@ enum Invocation {
     Reasoning(Arc<reasoning::ReasoningProducer>),
 }
 fn serve_proposal_inner(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
@@ -1444,7 +1476,8 @@ fn serve_proposal_inner(
         .exploration
         .as_ref()
         .map_or(0, |p| p.formation.max_retries);
-    let client = &client.with_deadline(expires);
+    let bounded_client = client.bounded(expires);
+    let client = bounded_client.as_ref();
     let claim_revision = if point["claimed"] == true {
         state.revision.saturating_sub(1)
     } else {
@@ -1673,7 +1706,7 @@ fn serve_proposal_inner(
     // re-enter the producer or synthesize a new batch to repair that transport.
     if let Some(p) = durable_producer {
         let reported = p.coordinator_operation(seq, "complete", &bytes, retries, expires, || {
-            client.for_reporting().complete_proposal(id, &bytes)
+            client.report_completion(id, &bytes)
         });
         if let Err(error) = reported
             && SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() < u128::from(expires)
