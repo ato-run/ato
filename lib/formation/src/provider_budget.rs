@@ -3,9 +3,31 @@
 use crate::exploration::ExplorationPolicy;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub const AUTHORIZED_USD_MICROS: u64 = 5_000_000;
+
+/// Content-address the public candidate-provider configuration and spend plan.
+/// The caller validates the configuration and prompt; this does not grant a
+/// call or accept an untrusted prompt as a known version.
+pub fn candidate_configuration_ref<T: Serialize>(
+    config: &T,
+    plan: &BudgetPlan,
+    prompt_digest: &str,
+) -> Result<String> {
+    ensure!(
+        crate::generation::is_sha256(prompt_digest),
+        "invalid prompt digest"
+    );
+    plan.validate()?;
+    let canonical = serde_jcs::to_vec(&(config, plan, prompt_digest))?;
+    ensure!(
+        canonical.len() <= 16 * 1024,
+        "provider configuration bounds"
+    );
+    Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +146,28 @@ mod tests {
         plan.ceiling_usd_micros = 5_000_000;
         plan.max_calls = 65;
         assert!(plan.validate().is_err());
+    }
+
+    #[test]
+    fn configuration_binding_preserves_the_existing_canonical_wire() {
+        let plan = BudgetPlan {
+            max_calls: 1,
+            input_token_cap: 100,
+            output_token_cap: 20,
+            input_price: 1,
+            output_price: 1,
+            ceiling_usd_micros: 2,
+        };
+        let config = serde_json::json!({"provider":"deepseek","model":"pinned"});
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let prior = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_jcs::to_vec(&(&config, &plan, digest.clone())).unwrap())
+        );
+        assert_eq!(
+            candidate_configuration_ref(&config, &plan, &digest).unwrap(),
+            prior
+        );
     }
 
     #[test]
