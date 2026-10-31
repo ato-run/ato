@@ -134,7 +134,13 @@ impl HostedPreparationApi {
         let Some(claim) = self.claim(holder)? else {
             return Ok(false);
         };
-        let submission = prepare_claim(&self.source_fetcher(&claim), &claim, work_root)?;
+        let submission = match prepare_claim(&self.source_fetcher(&claim), &claim, work_root) {
+            Ok(submission) => submission,
+            Err(error) => {
+                let _ = self.fail(&claim);
+                return Err(error);
+            }
+        };
         self.complete(&claim, &submission.request)?;
         Ok(true)
     }
@@ -177,6 +183,33 @@ impl HostedPreparationApi {
             bytes.len() <= 4096
                 && serde_json::from_slice::<Value>(&bytes)? == json!({"prepared":true}),
             "hosted preparation completion response invalid; outcome unknown"
+        );
+        Ok(())
+    }
+    fn fail(&self, claim: &PreparationClaim) -> Result<()> {
+        ensure!(
+            claim.id.strip_prefix("hprep_").is_some_and(uuid)
+                && uuid(&claim.holder)
+                && claim.generation > 0,
+            "hosted preparation claim invalid"
+        );
+        let response = self
+            .client
+            .post(self.endpoint.join("fail")?)
+            .bearer_auth(&self.token)
+            .json(&json!({"id":claim.id,"holder":claim.holder,"generation":claim.generation}))
+            .send()
+            .map_err(|_| anyhow::anyhow!("hosted preparation failure report outcome unknown"))?;
+        ensure!(
+            response.status().is_success(),
+            "hosted preparation failure report refused"
+        );
+        let mut bytes = Vec::new();
+        response.take(4097).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= 4096
+                && serde_json::from_slice::<Value>(&bytes)? == json!({"failed":true}),
+            "hosted preparation failure report response invalid"
         );
         Ok(())
     }
@@ -496,5 +529,73 @@ mod tests {
         ] {
             assert!(HostedPreparationApi::new(origin, "token").is_err());
         }
+    }
+    #[test]
+    fn preparation_failure_reports_no_source_diagnostics() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut reported = Value::Null;
+            for turn in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let start = loop {
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8(data[..start].to_vec()).unwrap();
+                let size: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|v| v.parse().ok())
+                    })
+                    .unwrap();
+                while data.len() < start + size {
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&chunk[..n]);
+                }
+                if turn == 1 {
+                    assert!(
+                        headers
+                            .lines()
+                            .next()
+                            .unwrap()
+                            .contains("/exploration-preparations/fail ")
+                    );
+                    reported = serde_json::from_slice(&data[start..start + size]).unwrap();
+                }
+                let response = if turn == 0 {
+                    serde_json::to_string(&json!({"work":{"id":format!("hprep_{HOLDER}"),"owner":"owner_a","search_id":"search_123",
+                    "holder":HOLDER,"generation":1,"expires_at":"2026-10-31T00:00:00Z","intent":{"path":"https://untrusted.invalid","status":200},"source_origin":{}}})).unwrap()
+                } else {
+                    r#"{"failed":true}"#.to_owned()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .unwrap();
+            }
+            reported
+        });
+        let api = HostedPreparationApi::build(&origin, "worker-token", true).unwrap();
+        assert!(api.prepare_one(HOLDER, Path::new(".")).is_err());
+        assert_eq!(
+            server.join().unwrap(),
+            json!({"id":format!("hprep_{HOLDER}"),"holder":HOLDER,"generation":1})
+        );
     }
 }
