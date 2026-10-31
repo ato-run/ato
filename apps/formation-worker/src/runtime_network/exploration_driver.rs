@@ -24,6 +24,9 @@ pub fn hosted_budget_binding(owner: &str, search: &str) -> Result<String> {
     anyhow::ensure!(
         !owner.is_empty()
             && owner.len() <= 256
+            && owner
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
             && (8..=128).contains(&search.len())
             && search
                 .bytes()
@@ -167,6 +170,10 @@ mod tests {
     #[test]
     fn hosted_binding_is_stable_and_separates_owners_searches_and_legacy() {
         let binding = hosted_budget_binding("owner-a", "search_123").unwrap();
+        assert_eq!(
+            binding,
+            "sha256:61a5e8cf287cb90c56d74762f7874ef731b4f81aad30a3c7f15e75da46b273ac"
+        );
         assert_eq!(
             binding,
             hosted_budget_binding("owner-a", "search_123").unwrap()
