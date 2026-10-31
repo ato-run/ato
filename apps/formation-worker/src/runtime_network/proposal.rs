@@ -3,6 +3,7 @@
 pub mod budget;
 pub mod deepseek;
 pub mod hosted_budget;
+pub mod hosted_budget_http;
 pub mod provenance;
 pub mod reasoning;
 
