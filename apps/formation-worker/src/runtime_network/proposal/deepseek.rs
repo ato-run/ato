@@ -108,12 +108,11 @@ impl DeepSeekConfig {
         self.validate()?;
         budget.validate()?;
         let prompt = prompt_for(&self.prompt_version).context("unknown prompt version")?;
-        let canonical = serde_jcs::to_vec(&(
+        ato_formation::provider_budget::candidate_configuration_ref(
             self,
             budget,
-            format!("sha256:{:x}", Sha256::digest(prompt.as_bytes())),
-        ))?;
-        Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+            &format!("sha256:{:x}", Sha256::digest(prompt.as_bytes())),
+        )
     }
     pub fn identity(&self) -> ProviderIdentity {
         ProviderIdentity {
