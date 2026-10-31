@@ -6,7 +6,9 @@ use ato_formation::{
     authoring::BoundContract, exploration::ExplorationPolicy, proposal::ProposalAuthorization,
 };
 use ato_formation_worker::runtime_network::{
-    Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement, new_search_id,
+    Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement,
+    exploration_driver::{DriverStep, drive_step},
+    new_search_id,
     proposal::{
         budget::{BudgetPlan, CallBudget},
         deepseek::DeepSeekCandidateProducer,
@@ -467,13 +469,50 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         } else {
             reporting_client.satisfy_status(&id)?
         };
-        let settled = Settlement::of(&status)? != Settlement::Running;
+        Settlement::of(&status)?;
         if let Some(bridge) = &bridge {
             bridge.update(&status)?;
         }
-        let expired = Instant::now() >= deadline
-            || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() >= u128::from(expires);
-        if !settled && !expired && status["pause_reason"] == "needs_input" {
+        let step = drive_step(
+            &status,
+            || {
+                Ok(Instant::now() >= deadline
+                    || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
+                        >= u128::from(expires))
+            },
+            || {
+                if let Some(decision) = &decision {
+                    serve_decision(&client, &id, &status, decision, &mut answered);
+                }
+                Ok(())
+            },
+            || {
+                if let Some(producer) = &reasoning {
+                    serve_reasoning_proposal(
+                        &client,
+                        &id,
+                        &status,
+                        &mut submission,
+                        &claimant_id,
+                        producer.clone(),
+                    )?;
+                } else {
+                    serve_general_proposal(
+                        &client,
+                        &id,
+                        &status,
+                        &mut submission,
+                        &claimant_id,
+                        api_producer
+                            .as_ref()
+                            .context("API producer missing")?
+                            .clone(),
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+        if step == DriverStep::NeedsInput {
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -482,36 +521,9 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             );
             return Ok(());
         }
-        if !settled && !expired {
-            if let Some(decision) = &decision {
-                serve_decision(&client, &id, &status, decision, &mut answered);
-            }
-            if let Some(producer) = &reasoning {
-                serve_reasoning_proposal(
-                    &client,
-                    &id,
-                    &status,
-                    &mut submission,
-                    &claimant_id,
-                    producer.clone(),
-                )?;
-            } else {
-                serve_general_proposal(
-                    &client,
-                    &id,
-                    &status,
-                    &mut submission,
-                    &claimant_id,
-                    api_producer
-                        .as_ref()
-                        .context("API producer missing")?
-                        .clone(),
-                )?;
-            }
-        }
-        if settled || expired {
+        if matches!(step, DriverStep::Settled(_) | DriverStep::Deadline) {
             let mut result = submission.exploration_result(&status)?;
-            if expired && !settled {
+            if step == DriverStep::Deadline {
                 // This is the requester's wait ending, not an invented durable
                 // settlement or evidence that an uncertain attempt had no effect.
                 result["requester_stop"] = serde_json::json!({

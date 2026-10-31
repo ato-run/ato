@@ -56,6 +56,7 @@ use std::io::{Read, Seek, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod delivery;
+pub mod exploration_driver;
 pub mod proposal;
 mod publication;
 pub mod source_handoff;
