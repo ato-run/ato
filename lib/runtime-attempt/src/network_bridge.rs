@@ -164,6 +164,15 @@ mod ingress_tests {
     use std::os::{fd::AsRawFd, unix::net::UnixListener};
 
     #[test]
+    fn ingress_mapping_accepts_only_nonzero_numeric_ports() {
+        assert_eq!(ingress_ports("28641:8080").unwrap(), (28641, 8080));
+        assert_eq!(ingress_ports("8080").unwrap(), (8080, 8080));
+        for value in ["0:8080", "1:0", "1:2:3", "../1:80", "1:localhost"] {
+            assert!(ingress_ports(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn ingress_handshake_reaches_a_deep_private_socket_without_chdir() {
         let root =
             tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap_or_else(|| ".".into())).unwrap();
@@ -186,6 +195,17 @@ mod ingress_tests {
     }
 }
 
+/// The owner socket is keyed by the allocated host port. Its peer connects
+/// only to the declared port inside this isolated network namespace.
+#[cfg(unix)]
+fn ingress_ports(value: &str) -> Result<(u16, u16)> {
+    let (host, guest) = value.split_once(':').unwrap_or((value, value));
+    let host: u16 = host.parse()?;
+    let guest: u16 = guest.parse()?;
+    ensure!(host > 0 && guest > 0, "invalid ingress port");
+    Ok((host, guest))
+}
+
 #[cfg(unix)]
 pub fn namespace_ingress(args: &[String]) -> Result<()> {
     use std::io::Write;
@@ -196,9 +216,8 @@ pub fn namespace_ingress(args: &[String]) -> Result<()> {
     );
     let mut tasks = Vec::new();
     for value in args {
-        let port: u16 = value.parse()?;
-        ensure!(port > 0, "invalid ingress port");
-        let socket = format!("{INGRESS_ROOT}/{port}.sock");
+        let (host_port, guest_port) = ingress_ports(value)?;
+        let socket = format!("{INGRESS_ROOT}/{host_port}.sock");
         let listener = UnixListener::bind(&socket)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         tasks.push(std::thread::spawn(move || {
@@ -212,7 +231,7 @@ pub fn namespace_ingress(args: &[String]) -> Result<()> {
                     continue;
                 }
                 let Ok(tcp) = std::net::TcpStream::connect_timeout(
-                    &std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+                    &std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, guest_port)),
                     std::time::Duration::from_millis(100),
                 ) else {
                     continue;
