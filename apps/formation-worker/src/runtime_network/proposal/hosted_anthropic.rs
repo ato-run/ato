@@ -273,6 +273,8 @@ pub struct ClaimBoundAnthropicProducer {
     claimant: String,
     generation: u64,
     bound: Mutex<Option<Arc<HostedAnthropicCandidateProducer>>>,
+    #[cfg(test)]
+    mock: bool,
 }
 pub struct ClaimBoundScope<'a> {
     pub api: &'a str,
@@ -301,7 +303,19 @@ impl ClaimBoundAnthropicProducer {
             claimant: scope.claimant.into(),
             generation: scope.generation,
             bound: Mutex::new(None),
+            #[cfg(test)]
+            mock: false,
         })
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        config: HostedAnthropicConfig,
+        plan: BudgetPlan,
+        scope: ClaimBoundScope<'_>,
+    ) -> Result<Self> {
+        let mut producer = Self::new(config, plan, scope)?;
+        producer.mock = true;
+        Ok(producer)
     }
 }
 impl GeneralCandidateProducer for ClaimBoundAnthropicProducer {
@@ -317,19 +331,23 @@ impl GeneralCandidateProducer for ClaimBoundAnthropicProducer {
             .lock()
             .map_err(|_| anyhow::anyhow!("hosted producer lock unavailable"))?;
         ensure!(bound.is_none(), "hosted producer already bound");
-        let transport = Arc::new(HostedJournalHttp::new(
-            &self.api,
-            &self.token,
-            HostedJournalScope {
-                owner: &self.owner,
-                search: &self.search,
-                holder: &self.holder,
-                claimant: &self.claimant,
-                generation: self.generation,
-                round,
-                round_fence: fence,
-            },
-        )?);
+        let scope = || HostedJournalScope {
+            owner: &self.owner,
+            search: &self.search,
+            holder: &self.holder,
+            claimant: &self.claimant,
+            generation: self.generation,
+            round,
+            round_fence: fence,
+        };
+        #[cfg(test)]
+        let transport = Arc::new(if self.mock {
+            HostedJournalHttp::for_test(&self.api, &self.token, scope())?
+        } else {
+            HostedJournalHttp::new(&self.api, &self.token, scope())?
+        });
+        #[cfg(not(test))]
+        let transport = Arc::new(HostedJournalHttp::new(&self.api, &self.token, scope())?);
         let budget = Arc::new(HostedProviderBudget::new(
             self.plan.clone(),
             transport.clone(),
