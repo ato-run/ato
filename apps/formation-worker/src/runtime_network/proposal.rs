@@ -36,6 +36,11 @@ pub trait GeneralCandidateProducer:
 {
     fn configuration_ref(&self) -> Result<String>;
     fn identity(&self) -> ProviderIdentity;
+    /// Called only after the Coordinator has returned a valid private claim.
+    /// Hosted transports bind their journal and inference capability here.
+    fn bind_claim(&self, _round: u64, _fence: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl GeneralCandidateProducer for DeepSeekCandidateProducer {
@@ -1550,6 +1555,9 @@ fn serve_proposal_inner(
             )?;
         }
         return Ok(false);
+    }
+    if let Invocation::General(producer) = &producer {
+        producer.bind_claim(seq, fence)?;
     }
     let mut completion = json!({"revision":revision,"fence":fence});
     let durable_producer = if let Invocation::Reasoning(p) = &producer {
