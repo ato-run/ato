@@ -38,9 +38,14 @@ impl HostedAnthropicConfig {
     fn validate(&self, plan: &BudgetPlan) -> Result<()> {
         plan.validate()?;
         ensure!(
-            self.provider == "anthropic"
+            ((self.provider == "anthropic"
                 && self.model == "claude-sonnet-4-6"
-                && self.endpoint == "https://api.anthropic.com"
+                && self.endpoint == "https://api.anthropic.com")
+                || (self.provider == "openrouter"
+                    && self.model == "anthropic/claude-sonnet-4.6"
+                    && self.endpoint == "https://openrouter.ai"
+                    && plan.input_price >= 3_150_000
+                    && plan.output_price >= 15_750_000))
                 && self.prompt_version == PROMPT_VERSION_V3
                 && (1..=2048).contains(&self.max_output_tokens)
                 && self.max_output_tokens <= plan.output_token_cap
@@ -112,11 +117,13 @@ impl HostedAnthropicCandidateProducer {
         if (PROMPT_V3.len() + proposal.len() + 1024) as u64 > self.budget.plan().input_token_cap {
             return Err(ErrorClass::MalformedResponse);
         }
-        let body = serde_json::to_vec(
-            &json!({"model":self.config.model,"max_tokens":self.config.max_output_tokens,
-            "system":PROMPT_V3,"messages":[{"role":"user","content":proposal}],"stream":false}),
-        )
-        .map_err(|_| ErrorClass::MalformedResponse)?;
+        let mut provider_body = json!({"model":self.config.model,"max_tokens":self.config.max_output_tokens,
+            "system":PROMPT_V3,"messages":[{"role":"user","content":proposal}],"stream":false});
+        if self.config.provider == "openrouter" {
+            provider_body["provider"] = json!({"only":["anthropic"],"allow_fallbacks":false,
+                "max_price":{"prompt":3,"completion":15}});
+        }
+        let body = serde_json::to_vec(&provider_body).map_err(|_| ErrorClass::MalformedResponse)?;
         if body.len() > 65536 {
             return Err(ErrorClass::MalformedResponse);
         }
@@ -463,6 +470,37 @@ mod tests {
         assert!(snapshot.cells["source-search_r1"].response.is_some());
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
         assert!(producer.propose(&request()).is_err());
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn router_request_pins_price_upstream_and_accounts_for_surcharge() {
+        let mut p = plan();
+        p.input_price = 3_150_000;
+        p.output_price = 15_750_000;
+        p.ceiling_usd_micros = 107_252;
+        let mut c = config();
+        c.provider = "openrouter".into();
+        c.model = "anthropic/claude-sonnet-4.6".into();
+        c.endpoint = "https://openrouter.ai".into();
+        assert!(c.configuration_ref(&plan()).is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let budget = Arc::new(CallBudget::create(&temp.path().join("budget.jsonl"), p).unwrap());
+        let mut reply: Value = serde_json::from_slice(&response()).unwrap();
+        reply["model"] = json!("anthropic/claude-sonnet-4.6");
+        let transport = Arc::new(Transport {
+            calls: AtomicUsize::new(0),
+            body: Mutex::new(vec![]),
+            response: Some(serde_json::to_vec(&reply).unwrap()),
+        });
+        let producer = HostedAnthropicCandidateProducer::new(c, budget, transport.clone()).unwrap();
+        let output = producer.propose(&request()).unwrap();
+        assert_eq!(output.provenance.provider, "openrouter");
+        let payload: Value = serde_json::from_slice(&transport.body.lock().unwrap()).unwrap();
+        assert_eq!(
+            payload["provider"],
+            json!({"only":["anthropic"],"allow_fallbacks":false,
+            "max_price":{"prompt":3,"completion":15}})
+        );
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
     }
     #[test]
