@@ -130,6 +130,56 @@ impl HostedPreparationApi {
     ) -> HostedPreparationSource<'a> {
         HostedPreparationSource { api: self, claim }
     }
+    pub fn prepare_one(&self, holder: &str, work_root: &Path) -> Result<bool> {
+        let Some(claim) = self.claim(holder)? else {
+            return Ok(false);
+        };
+        let submission = prepare_claim(&self.source_fetcher(&claim), &claim, work_root)?;
+        self.complete(&claim, &submission.request)?;
+        Ok(true)
+    }
+
+    /// A lost response is ambiguous. Do not produce or send a replacement;
+    /// the owner reads the durable preparation status from the service.
+    pub fn complete(
+        &self,
+        claim: &PreparationClaim,
+        request: &crate::runtime_network::SatisfyRequest,
+    ) -> Result<()> {
+        self.complete_value(claim, serde_json::to_value(request)?)
+    }
+    fn complete_value(&self, claim: &PreparationClaim, request: Value) -> Result<()> {
+        ensure!(
+            claim.id.strip_prefix("hprep_").is_some_and(uuid)
+                && uuid(&claim.holder)
+                && claim.generation > 0,
+            "hosted preparation claim invalid"
+        );
+        let body = json!({"id":claim.id,"holder":claim.holder,"generation":claim.generation,"request":request});
+        ensure!(
+            serde_json::to_vec(&body)?.len() <= 256 * 1024,
+            "hosted preparation result too large"
+        );
+        let response = self
+            .client
+            .post(self.endpoint.join("complete")?)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .map_err(|_| anyhow::anyhow!("hosted preparation completion outcome unknown"))?;
+        ensure!(
+            response.status().is_success(),
+            "hosted preparation completion refused"
+        );
+        let mut bytes = Vec::new();
+        response.take(4097).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= 4096
+                && serde_json::from_slice::<Value>(&bytes)? == json!({"prepared":true}),
+            "hosted preparation completion response invalid; outcome unknown"
+        );
+        Ok(())
+    }
 }
 pub struct HostedPreparationSource<'a> {
     api: &'a HostedPreparationApi,
@@ -334,7 +384,7 @@ mod tests {
         let expected_tree = tree.clone();
         let server = thread::spawn(move || {
             let mut seen = Vec::new();
-            for turn in 0..2 {
+            for turn in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -379,8 +429,10 @@ mod tests {
                     serde_json::to_string(&json!({"work":{"id":format!("hprep_{HOLDER}"),"owner":"owner_a","search_id":"search_123",
                     "holder":HOLDER,"generation":1,"expires_at":"2026-10-31T00:00:00Z","intent":{"path":"/","status":200},
                     "source_origin":{"result":{"job_id":"fjob_source","archive_descriptor":{"source_archive_digest":digest,"source_tree_digest":tree,"size_bytes":3}}}}})).unwrap()
-                } else {
+                } else if turn == 1 {
                     "abc".into()
+                } else {
+                    r#"{"prepared":true}"#.into()
                 };
                 write!(
                     stream,
@@ -425,10 +477,14 @@ mod tests {
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"abc");
         assert_eq!(observed, expected);
+        api.complete_value(&claim, json!({"fixture":"request"}))
+            .unwrap();
         let seen = server.join().unwrap();
         assert!(seen[0].0.contains("/exploration-preparations/claim "));
         assert!(seen[1].0.contains("/exploration-preparations/source "));
         assert_eq!(seen[1].1["generation"], 1);
+        assert!(seen[2].0.contains("/exploration-preparations/complete "));
+        assert_eq!(seen[2].1["request"]["fixture"], "request");
     }
     #[test]
     fn rejects_untrusted_origins() {
