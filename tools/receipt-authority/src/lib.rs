@@ -276,6 +276,10 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
+    ValidateProviderBudgets {
+        plans: Vec<ato_formation::provider_budget::BudgetPlan>,
+        exploration: ato_formation::exploration::ExplorationPolicy,
+    },
     ValidateFunctionalObservations {
         acceptance: ato_formation::functional_acceptance::FunctionalAcceptanceV1,
         observations: Vec<ato_formation::port_operations::PortOperationObservation>,
@@ -355,6 +359,11 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         let request: SearchRequest =
             serde_json::from_slice(bytes).map_err(|_| "search_input_invalid".to_owned())?;
         match request {
+            SearchRequest::ValidateProviderBudgets { plans, exploration } => {
+                ato_formation::provider_budget::validate_combined(&plans, &exploration)
+                    .map_err(|_| "provider_budget_invalid".to_owned())?;
+                Ok(serde_json::json!({"status":"provider_budgets_validated"}))
+            }
             SearchRequest::ValidateFunctionalObservations {
                 acceptance,
                 observations,
@@ -670,6 +679,31 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         }
     };
     evaluate().unwrap_or_else(|detail|serde_json::json!({"status":"rejected","code":"search_state_invalid","detail":detail}))
+}
+
+#[cfg(test)]
+mod provider_budget_tests {
+    use super::evaluate_search;
+    use serde_json::json;
+
+    #[test]
+    fn wasm_authority_checks_all_plans_against_the_frozen_budget() {
+        let plan = json!({"max_calls":2,"input_token_cap":100,"output_token_cap":20,
+            "input_price":1,"output_price":1,"ceiling_usd_micros":4});
+        let mut request = json!({"operation":"validate_provider_budgets","plans":[plan.clone(),plan],
+            "exploration":{"ceiling":{},"max_provider_calls":4,"max_inspections":0,
+            "max_provider_cost_usd_micros":8,"max_provider_input_tokens":400,
+            "max_provider_output_tokens":80}});
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "provider_budgets_validated"
+        );
+        request["exploration"]["max_provider_calls"] = json!(3);
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+    }
 }
 
 #[cfg(test)]

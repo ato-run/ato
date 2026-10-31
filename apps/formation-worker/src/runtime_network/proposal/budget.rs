@@ -2,6 +2,7 @@
 //! A reservation is consumed before credentials are read. Never refunded on
 //! timeout/unknown usage. Incomplete writes fail closed; no implicit reset.
 use anyhow::{Result, ensure};
+pub use ato_formation::provider_budget::{AUTHORIZED_USD_MICROS, BudgetPlan};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,48 +12,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const AUTHORIZED_USD_MICROS: u64 = 5_000_000;
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BudgetPlan {
-    pub max_calls: u32,
-    pub input_token_cap: u64,
-    pub output_token_cap: u64,
-    /// Explicit peak/cache-miss price snapshot, micros per million tokens.
-    pub input_price: u64,
-    pub output_price: u64,
-    pub ceiling_usd_micros: u64,
-}
-impl BudgetPlan {
-    pub fn cost(&self, input: u64, output: u64) -> Result<u64> {
-        let input = (u128::from(input) * u128::from(self.input_price)).div_ceil(1_000_000);
-        let output = (u128::from(output) * u128::from(self.output_price)).div_ceil(1_000_000);
-        Ok(u64::try_from(
-            input
-                .checked_add(output)
-                .ok_or_else(|| anyhow::anyhow!("cost overflow"))?,
-        )?)
-    }
-    pub fn validate(&self) -> Result<u64> {
-        ensure!(
-            (1..=64).contains(&self.max_calls)
-                && self.input_token_cap > 0
-                && (1..=if self.output_price == 0 { 65536 } else { 2048 })
-                    .contains(&self.output_token_cap)
-                && self.input_price > 0
-                && self.ceiling_usd_micros <= AUTHORIZED_USD_MICROS,
-            "invalid spend plan"
-        );
-        let per_call = self.cost(self.input_token_cap, self.output_token_cap)?;
-        ensure!(
-            per_call
-                .checked_mul(u64::from(self.max_calls))
-                .is_some_and(|n| n <= self.ceiling_usd_micros),
-            "spend ceiling exceeded"
-        );
-        Ok(per_call)
-    }
-}
 pub struct CallBudget {
     path: PathBuf,
     plan: BudgetPlan,

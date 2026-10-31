@@ -49,6 +49,7 @@ pub mod port_operations;
 #[cfg(feature = "planning")]
 pub mod preset;
 pub mod process_binding;
+pub mod provider_budget;
 #[cfg(feature = "planning")]
 pub mod projection;
 pub mod receipt;
