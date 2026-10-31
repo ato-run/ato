@@ -13,7 +13,7 @@
 //! | `--api-base` | control plane base URL (required) |
 //! | `--work-root` | worker-owned directory; holds `worker-update.json` |
 //! | `--worker-id` | identity this process claims as |
-//! | `--queue` | `all` (default) or `source-only`; requires a dedicated runner identity |
+//! | `--queue` | `all` (default), `source-only`, or `hosted-preparation`; dedicated queues require a pinned runner identity |
 //! | `--poll-ms` | idle poll interval (default 2000) |
 //! | `--heartbeat-ms` | lifecycle/identity report interval (default 15000) |
 //! | `--expect-version` | refuse to serve unless the binary reports this version |
@@ -44,6 +44,7 @@ use ato_formation_worker::api::{
     WorkerIdentityReport, WorkerStateReport, bounded_reason, classify_failure as classify,
 };
 use ato_formation_worker::build::BuildAttempt;
+use ato_formation_worker::job::hosted_preparation::HostedPreparationApi;
 use ato_formation_worker::job::{JobContext, PinnedSourceFetcher, TreePacker, run_claimed_job};
 use ato_formation_worker::lifecycle::{
     BinaryIdentity, EXIT_DRAINED, EXIT_ROLLBACK_REQUIRED, LoadOutcome, Recovery,
@@ -535,7 +536,8 @@ fn serve(args: &[String]) -> Result<()> {
     );
     let expect_version = flag(args, "--expect-version");
     let expect_digest = flag(args, "--expect-digest");
-    let source_only = source_only_queue(args)?;
+    let queue = queue_mode(args)?;
+    let source_only = queue == QueueMode::SourceOnly;
     let token = std::env::var("ATO_FORMATION_TOKEN")
         .map_err(|_| anyhow!("ATO_FORMATION_TOKEN is required"))?;
 
@@ -560,6 +562,11 @@ fn serve(args: &[String]) -> Result<()> {
         .timeout(Duration::from_secs(900))
         .build()?;
     let api = FormationApi::new(client, api_base.clone(), token.clone());
+    let hosted_preparation_api = if queue == QueueMode::HostedPreparation {
+        Some(HostedPreparationApi::new(&api_base, &token)?)
+    } else {
+        None
+    };
     let source_api = match SourceArchiveApi::new(api_base.clone(), token.clone()) {
         Ok(api) => Some(api),
         Err(error) if source_only => {
@@ -726,6 +733,20 @@ fn serve(args: &[String]) -> Result<()> {
         // worker must never take another attempt fence.
         if STOP_REQUESTED.load(Ordering::SeqCst) || state.drain_requested.load(Ordering::SeqCst) {
             break;
+        }
+
+        if let Some(preparation) = &hosted_preparation_api {
+            match new_preparation_holder()
+                .and_then(|holder| preparation.prepare_one(&holder, &work_root))
+            {
+                Ok(true) => println!("[formation] hosted source preparation completed"),
+                Ok(false) => pause(&state, idle),
+                Err(_) => {
+                    eprintln!("[formation] hosted source preparation unavailable or failed");
+                    pause(&state, idle);
+                }
+            }
+            continue;
         }
 
         // Alternate source and ordinary work so a continuously busy queue
@@ -1095,7 +1116,13 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-fn source_only_queue(args: &[String]) -> Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueMode {
+    All,
+    SourceOnly,
+    HostedPreparation,
+}
+fn queue_mode(args: &[String]) -> Result<QueueMode> {
     let mut mode = None;
     for (index, arg) in args.iter().enumerate() {
         let value = if arg == "--queue" {
@@ -1114,24 +1141,66 @@ fn source_only_queue(args: &[String]) -> Result<bool> {
         }
     }
     match mode {
-        None => Ok(false),
-        Some("all") => Ok(false),
-        Some("source-only") => Ok(true),
-        _ => Err(anyhow!("--queue must be all or source-only")),
+        None | Some("all") => Ok(QueueMode::All),
+        Some("source-only") => Ok(QueueMode::SourceOnly),
+        Some("hosted-preparation") => Ok(QueueMode::HostedPreparation),
+        _ => Err(anyhow!(
+            "--queue must be all, source-only, or hosted-preparation"
+        )),
     }
+}
+
+fn new_preparation_holder() -> Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    ))
 }
 
 #[cfg(test)]
 mod queue_tests {
-    use super::source_only_queue;
+    use super::{QueueMode, new_preparation_holder, queue_mode};
 
     #[test]
     fn queue_mode_is_explicit_and_malformed_modes_fail_closed() {
         let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
-        assert!(!source_only_queue(&args(&[])).unwrap());
-        assert!(!source_only_queue(&args(&["--queue", "all"])).unwrap());
-        assert!(source_only_queue(&args(&["--queue", "source-only"])).unwrap());
-        assert!(source_only_queue(&args(&["--queue=source-only"])).unwrap());
+        assert_eq!(queue_mode(&args(&[])).unwrap(), QueueMode::All);
+        assert_eq!(
+            queue_mode(&args(&["--queue", "all"])).unwrap(),
+            QueueMode::All
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue", "source-only"])).unwrap(),
+            QueueMode::SourceOnly
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue=source-only"])).unwrap(),
+            QueueMode::SourceOnly
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue=hosted-preparation"])).unwrap(),
+            QueueMode::HostedPreparation
+        );
         for bad in [
             vec!["--queue"],
             vec!["--queue", "--worker-id"],
@@ -1141,8 +1210,17 @@ mod queue_tests {
             vec!["--queue", "source-only", "--queue", "all"],
             vec!["--queue=source-only", "--queue=all"],
         ] {
-            assert!(source_only_queue(&args(&bad)).is_err(), "{bad:?}");
+            assert!(queue_mode(&args(&bad)).is_err(), "{bad:?}");
         }
+    }
+    #[test]
+    fn hosted_holders_are_distinct_v4_uuids() {
+        let a = new_preparation_holder().unwrap();
+        let b = new_preparation_holder().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        assert_eq!(&a[14..15], "4");
+        assert!(["8", "9", "a", "b"].contains(&&a[19..20]));
     }
 }
 
