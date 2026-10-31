@@ -49,6 +49,10 @@ fn uuid(value: &str) -> bool {
 }
 
 impl HostedProposalHttp {
+    #[cfg(test)]
+    pub(crate) fn for_test(api: &str, token: &str, scope: HostedProposalScope<'_>) -> Result<Self> {
+        Self::build(api, token, scope, true)
+    }
     pub fn new(api: &str, token: &str, scope: HostedProposalScope<'_>) -> Result<Self> {
         Self::build(api, token, scope, false)
     }
