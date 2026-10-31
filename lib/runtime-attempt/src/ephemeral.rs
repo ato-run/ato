@@ -546,10 +546,12 @@ impl TemporaryRealization {
                 // The port explanation first: the output tail is long, and
                 // a bounded report must not lose the actionable part.
                 let mut detail = String::new();
-                if let Some(moved) = realization
-                    .endpoints
-                    .iter()
-                    .find(|endpoint| endpoint.host_port != endpoint.guest_port)
+                if runtime_gate.is_none()
+                    && !require_private_isolation
+                    && let Some(moved) = realization
+                        .endpoints
+                        .iter()
+                        .find(|endpoint| endpoint.host_port != endpoint.guest_port)
                 {
                     detail.push_str(&format!(
                         "guest port {} was unavailable on this Runtime, so {} carries {} — a \
