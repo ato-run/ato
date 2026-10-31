@@ -57,6 +57,52 @@ pub struct CallBudget {
     path: PathBuf,
     plan: BudgetPlan,
 }
+
+/// Transport-independent provider ledger. Implementations must reserve before
+/// credentials or network use, persist UNKNOWN without refund, and retain the
+/// same frozen plan across restarts. A hosted implementation additionally
+/// requires its Coordinator and driver fences at every committing operation.
+pub trait ProviderBudget: Send + Sync {
+    fn plan(&self) -> &BudgetPlan;
+    fn reserve_request(&self, request: RequestEvidence) -> Result<()>;
+    fn record_response(&self, response: ResponseEvidence) -> Result<()>;
+    fn record_transport(&self, transport: TransportEvidence) -> Result<()>;
+    fn charge_unknown(&self, cell: &str) -> Result<()>;
+    fn settle_retry(&self, cell: &str, not_sent: bool) -> Result<()>;
+    fn halt(&self) -> Result<()>;
+    fn snapshot(&self) -> Result<BudgetSnapshot>;
+    fn accounting(&self) -> Result<serde_json::Value>;
+}
+
+impl ProviderBudget for CallBudget {
+    fn plan(&self) -> &BudgetPlan {
+        CallBudget::plan(self)
+    }
+    fn reserve_request(&self, request: RequestEvidence) -> Result<()> {
+        CallBudget::reserve_request(self, request)
+    }
+    fn record_response(&self, response: ResponseEvidence) -> Result<()> {
+        CallBudget::record_response(self, response)
+    }
+    fn record_transport(&self, transport: TransportEvidence) -> Result<()> {
+        CallBudget::record_transport(self, transport)
+    }
+    fn charge_unknown(&self, cell: &str) -> Result<()> {
+        CallBudget::charge_unknown(self, cell)
+    }
+    fn settle_retry(&self, cell: &str, not_sent: bool) -> Result<()> {
+        CallBudget::settle_retry(self, cell, not_sent)
+    }
+    fn halt(&self) -> Result<()> {
+        CallBudget::halt(self)
+    }
+    fn snapshot(&self) -> Result<BudgetSnapshot> {
+        CallBudget::snapshot(self)
+    }
+    fn accounting(&self) -> Result<serde_json::Value> {
+        CallBudget::accounting(self)
+    }
+}
 impl CallBudget {
     /// Explicit initialization only. Existing journals are never overwritten.
     pub fn create(path: &Path, plan: BudgetPlan) -> Result<Self> {
