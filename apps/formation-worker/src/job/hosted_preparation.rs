@@ -221,6 +221,10 @@ pub struct HostedPreparationSource<'a> {
 
 /// Fixed first hosted profile; the Coordinator and provider proxy independently
 /// enforce the same ceilings and runtime admission remains authoritative.
+fn hosted_port_ceiling() -> serde_json::Value {
+    json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"bind"}]})
+}
+
 pub fn provider_profile() -> (
     crate::runtime_network::proposal::hosted_anthropic::HostedAnthropicConfig,
     crate::runtime_network::proposal::budget::BudgetPlan,
@@ -334,7 +338,9 @@ pub fn prepare_claim(
     )?;
     let (config, plan) = provider_profile();
     let exploration = serde_json::from_value(
-        json!({"ceiling":{},"formation":{"max_rounds":1,"max_retries":0},
+        // The fixed logical Port is an inbound adapter capability, not
+        // outbound network authority. No other resource or phase is granted.
+        json!({"ceiling":hosted_port_ceiling(),"formation":{"max_rounds":1,"max_retries":0},
         "max_provider_calls":1,"max_inspections":0,"max_provider_cost_usd_micros":plan.ceiling_usd_micros,
         "max_provider_input_tokens":plan.input_token_cap,"max_provider_output_tokens":plan.output_token_cap,
         "provider_configuration_ref":config.configuration_ref(&plan)?,"provider_budget_binding_ref":hosted_budget_binding(&claim.owner,&claim.search_id)?}),
@@ -429,6 +435,23 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{io::Write, net::TcpListener, thread};
     const HOLDER: &str = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    #[test]
+    fn hosted_ceiling_allows_only_the_fixed_inbound_port() {
+        use ato_formation::requirements::ExecutionRequirements;
+        let ceiling: ExecutionRequirements = serde_json::from_value(hosted_port_ceiling()).unwrap();
+        let inbound: ExecutionRequirements =
+            serde_json::from_value(json!({"authority":[{"phase":"runtime",
+            "protocol":"ato.http@1","resource":"app.http","operation":"bind"}]}))
+            .unwrap();
+        assert!(inbound.within(&ceiling).is_ok());
+        for changed in [
+            json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"other.http","operation":"bind"}]}),
+            json!({"network":[{"phase":"runtime","host":"example.com","port":443}]}),
+        ] {
+            let request: ExecutionRequirements = serde_json::from_value(changed).unwrap();
+            assert!(request.within(&ceiling).is_err());
+        }
+    }
     #[test]
     fn streams_only_the_claimed_source_and_rechecks_actual_digest() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
