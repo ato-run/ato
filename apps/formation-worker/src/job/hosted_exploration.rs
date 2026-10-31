@@ -47,6 +47,8 @@ pub struct HostedExplorationApi {
     origin: String,
     endpoint: Url,
     token: String,
+    #[cfg(test)]
+    mock: bool,
 }
 fn id(value: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&value.len())
@@ -106,6 +108,8 @@ impl HostedExplorationApi {
             origin,
             endpoint,
             token: token.into(),
+            #[cfg(test)]
+            mock,
         })
     }
     fn call<T: serde::de::DeserializeOwned>(
@@ -209,6 +213,166 @@ impl HostedExplorationApi {
     }
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// One Search at a time. All decisions, claims and verification stay on
+    /// the common Coordinator/Rust paths. A local stop only ends this driver;
+    /// it does not invent a durable cancellation or a successful receipt.
+    pub fn drive_one(
+        &self,
+        holder: &str,
+        work_root: &Path,
+        should_stop: impl Fn() -> bool,
+    ) -> Result<bool> {
+        use crate::runtime_network::{
+            exploration_driver::{DriverStep, drive_step},
+            proposal::{
+                hosted_anthropic::{ClaimBoundAnthropicProducer, ClaimBoundScope},
+                hosted_proposal_http::{HostedProposalHttp, HostedProposalScope},
+                serve_general_proposal,
+            },
+        };
+        use std::{
+            sync::Arc,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        if should_stop() {
+            return Ok(false);
+        }
+        let Some(work) = self.claim(holder)? else {
+            return Ok(false);
+        };
+        if should_stop() {
+            return Ok(true);
+        }
+        let context = self.context(&work)?;
+        let mut submission = self.prepare_submission(&work, &context, work_root)?;
+        self.renew(&work)?;
+        self.initialize(&work)?;
+        let scope = || HostedProposalScope {
+            owner: &work.owner,
+            search: &work.search,
+            satisfy: &work.satisfy_id,
+            holder: &work.holder,
+            claimant: &work.claimant,
+            generation: work.generation,
+        };
+        #[cfg(test)]
+        let coordinator = if self.mock {
+            HostedProposalHttp::for_test(self.origin(), self.token(), scope())?
+        } else {
+            HostedProposalHttp::new(self.origin(), self.token(), scope())?
+        };
+        #[cfg(not(test))]
+        let coordinator = HostedProposalHttp::new(self.origin(), self.token(), scope())?;
+        let mut fixed_deadline: Option<(u64, Instant)> = None;
+        loop {
+            if should_stop() {
+                return Ok(true);
+            }
+            self.renew(&work)?;
+            let status = coordinator.status()?;
+            ensure!(
+                status["search_id"] == work.search && status["satisfy_id"] == work.satisfy_id,
+                "hosted exploration status mismatch"
+            );
+            let deadline = status["search_state"]["deadline_ms"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("hosted exploration deadline missing"))?;
+            let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+            if let Some((original, _)) = fixed_deadline {
+                ensure!(deadline == original, "hosted exploration deadline changed");
+            } else {
+                let remaining =
+                    u64::try_from(u128::from(deadline).saturating_sub(now_ms)).unwrap_or(u64::MAX);
+                fixed_deadline = Some((
+                    deadline,
+                    Instant::now() + Duration::from_millis(remaining.min(7 * 24 * 60 * 60 * 1000)),
+                ));
+            }
+            let monotonic = fixed_deadline.expect("set above").1;
+            let (config, plan) = super::hosted_preparation::provider_profile();
+            let producer = Arc::new(ClaimBoundAnthropicProducer::new(
+                config,
+                plan,
+                ClaimBoundScope {
+                    api: self.origin(),
+                    token: self.token(),
+                    owner: &work.owner,
+                    search: &work.search,
+                    holder: &work.holder,
+                    claimant: &work.claimant,
+                    generation: work.generation,
+                },
+            )?);
+            let step = drive_step(
+                &status,
+                || {
+                    Ok(should_stop()
+                        || Instant::now() >= monotonic
+                        || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
+                            >= u128::from(deadline))
+                },
+                || Ok(()),
+                || {
+                    serve_general_proposal(
+                        &coordinator,
+                        &work.satisfy_id,
+                        &status,
+                        &mut submission,
+                        &work.claimant,
+                        producer,
+                    )?;
+                    Ok(())
+                },
+            )?;
+            if !matches!(step, DriverStep::Pending) {
+                return Ok(true);
+            }
+            for _ in 0..8 {
+                if should_stop() {
+                    return Ok(true);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+
+    fn prepare_submission(
+        &self,
+        work: &ExplorationWork,
+        context: &ExplorationContext,
+        root: &Path,
+    ) -> Result<crate::runtime_network::Submission> {
+        use super::source_intake::prepare_source_proposal;
+        let result = &context.source_origin["result"];
+        let d = &result["archive_descriptor"];
+        let job_id = result["job_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("hosted source job missing"))?;
+        let digest = d["source_archive_digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("hosted source digest missing"))?;
+        let tree = d["source_tree_digest"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("hosted source tree missing"))?;
+        ensure!(
+            id(job_id, 6, 128) && job_id.starts_with("fjob_") && d["subdirectory"] == "",
+            "hosted source selection invalid"
+        );
+        let job: ato_ipc::formation::FormationJobV1 = serde_json::from_value(json!({
+            "protocol":"ato.formation-job.v1","job_id":"fjob_hosted_exploration","request_idempotency_key":"hosted-exploration-source",
+            "source":{"kind":"uploaded_archive","archive_ref":format!("formation-source-archive:{job_id}"),"expected_archive_digest":digest,
+                "expected_source_tree_digest":tree,"subdirectory":""},
+            "requested_outputs":["process_workspace"],"target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},
+            "policy":{"policy_version":"formation-v1","network":"denied","publish_enabled":false}
+        }))?;
+        prepare_source_proposal(
+            &self.source_fetcher(work, context),
+            &job,
+            context.request.clone(),
+            root,
+        )
     }
 }
 impl ExplorationWork {
@@ -413,5 +577,97 @@ mod tests {
         ] {
             assert!(HostedExplorationApi::new(origin, "token").is_err());
         }
+    }
+    #[test]
+    fn stop_before_claim_never_contacts_the_service() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let api = HostedExplorationApi::build(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "worker-token",
+            true,
+        )
+        .unwrap();
+        assert!(!api.drive_one(HOLDER, Path::new("."), || true).unwrap());
+        assert!(listener.accept().is_err());
+    }
+    #[test]
+    fn rebuilds_the_frozen_search_and_stops_on_a_terminal_observation() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let wire: Value =
+                serde_json::from_str(include_str!("../../tests/fixtures/hosted-source-wire.json"))
+                    .unwrap();
+            let archive = BASE64
+                .decode(wire["archive_base64"].as_str().unwrap())
+                .unwrap();
+            let request: Value = serde_json::from_str(include_str!(
+                "../../tests/fixtures/hosted-prepared-request.json"
+            ))
+            .unwrap();
+            let mut paths = Vec::new();
+            for turn in 0..7 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let start = loop {
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8(data[..start].to_vec()).unwrap();
+                let size: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|v| v.parse().ok())
+                    })
+                    .unwrap();
+                while data.len() < start + size {
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&chunk[..n]);
+                }
+                paths.push(headers.lines().next().unwrap().to_owned());
+                let response:Vec<u8>=match turn {
+                    0=>json!({"work":{"owner":"owner_a","search":"search_123","satisfy_id":"sat_1","holder":HOLDER,"claimant":CLAIMANT,"generation":1,"expires_at":"later"}}).to_string().into_bytes(),
+                    1=>json!({"request":request,"source_origin":{"result":{"job_id":"fjob_source","archive_descriptor":{
+                        "source_archive_digest":wire["archive_digest"],"source_tree_digest":wire["source_tree_digest"],"source_closure_ref":wire["source_closure_ref"],
+                        "size_bytes":wire["size_bytes"],"subdirectory":""}}}}).to_string().into_bytes(),
+                    2=>archive.clone(),
+                    3|5=>json!({"claimant_id":CLAIMANT,"lease_holder":HOLDER,"lease_generation":1,"lease_expires_at":"later"}).to_string().into_bytes(),
+                    4=>json!({"created":true,"revision":0}).to_string().into_bytes(),
+                    _=>{let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        json!({"search_id":"search_123","satisfy_id":"sat_1","status":"satisfied","search_state":{"deadline_ms":now+60000}}).to_string().into_bytes()},
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .unwrap();
+                stream.write_all(&response).unwrap();
+            }
+            paths
+        });
+        let api = HostedExplorationApi::build(&origin, "worker-token", true).unwrap();
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let root = tempfile::tempdir_in(scratch).unwrap();
+        assert!(api.drive_one(HOLDER, root.path(), || false).unwrap());
+        let paths = server.join().unwrap();
+        assert!(paths[2].contains("/source "));
+        assert!(paths[4].contains("/provider-journal/initialize "));
+        assert!(paths[6].contains("/proposal/status "));
+        assert!(!paths.iter().any(|p| p.contains("provider-inference")));
     }
 }
