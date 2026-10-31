@@ -8,12 +8,20 @@ on:
     branches: [dev, stg]
     paths: ["docs/**", "README*.md", "CONTRIBUTING.md", "scripts/docs-*", ".github/workflows/docs-ci.yml"]
 
+# Public-repository CI: fork PRs run attacker-controlled code here (docs audit
+# scripts), so the workflow stays read-only and secret-free.
 permissions:
   contents: read
 
+# One in-flight run per ref; only PR runs are cancelled by a newer push.
+concurrency:
+  group: docs-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   documentation:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ato-ci]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

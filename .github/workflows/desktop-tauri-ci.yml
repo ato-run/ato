@@ -13,6 +13,10 @@
 # The real-macOS smoke evidence in PR #1287's Definition of Done is a manual
 # checklist, not a CI job; the `tauri` job below is the automated compile/test
 # gate that must pass before that smoke run.
+#
+# Runner: both jobs stay on GitHub-hosted macOS because the self-hosted
+# ato-ci pool is Linux-only (see docs/ops/ci-selfhosted-runners.md). This
+# workflow therefore still consumes GitHub-hosted macOS minutes.
 
 name: desktop-tauri-ci
 

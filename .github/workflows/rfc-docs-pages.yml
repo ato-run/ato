@@ -1,5 +1,11 @@
 name: Docs Pages
 
+# Deployment path, not CI: publishing stays on GitHub-hosted runners because the
+# github-pages environment, its OIDC identity and `actions/deploy-pages` are
+# tied to GitHub-hosted publishing. It is never routed to the self-hosted ato-ci
+# pool (docs/ops/ci-selfhosted-runners.md). Only main pushes can trigger it, so
+# fork PRs cannot reach it.
+
 on:
   push:
     branches:

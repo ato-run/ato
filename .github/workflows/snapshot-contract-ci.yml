@@ -7,12 +7,20 @@ on:
     paths: ["extensions/materializers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
   workflow_dispatch:
 
+# Public-repository CI: fork PRs run attacker-controlled code here, so the
+# workflow stays read-only and secret-free.
 permissions:
   contents: read
 
+# One in-flight run per ref; only PR runs are cancelled by a newer push.
+concurrency:
+  group: snapshot-contract-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   snapshot:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ato-ci]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
