@@ -1291,7 +1291,15 @@ impl HttpValidatorApi {
             request = self.claimed(request, &job.claim_id);
         }
         let response = request.send()?;
-        if !response.status().is_success() {
+        // A create-only upload may already have completed when its response was
+        // lost. The following ack still queues validation of the expected digest.
+        let create_only_retry = response.status() == reqwest::StatusCode::PRECONDITION_FAILED
+            && prepared.upload_direct
+            && prepared
+                .upload_headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match") && value == "*");
+        if !response.status().is_success() && !create_only_retry {
             bail!(
                 "portable export output upload returned {}: {}",
                 response.status(),
@@ -1826,6 +1834,68 @@ mod tests {
     use crate::portability_export::repack_portable_dependencies;
     use crate::{PortableRealizationKind, build_multi_derivation_bundle, build_static_bundle};
     use ato_objects::PortableDependencyProfile;
+
+    #[test]
+    fn export_upload_recovers_only_a_signed_create_only_precondition() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        for (direct, conditional, accepted) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let size = socket.read(&mut chunk).unwrap();
+                    assert!(size > 0);
+                    request.extend_from_slice(&chunk[..size]);
+                }
+                socket.write_all(b"HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                String::from_utf8(request).unwrap().to_ascii_lowercase()
+            });
+            let api = HttpValidatorApi::new(
+                "http://localhost",
+                "fixture-token".into(),
+                "fixture-agent".into(),
+            )
+            .unwrap();
+            let job = ExportJob {
+                job_id: "export-fixture".into(),
+                claim_id: "claim-fixture".into(),
+                claim_expires_at: "later".into(),
+                source_bundle_sha256: "digest".into(),
+                source_size_bytes: 0,
+                source_download_url: "/fixture".into(),
+                include_saved_data: false,
+                portability: PortableDependencyProfile::Cached,
+                capture: None,
+                capture_downloads: BTreeMap::new(),
+            };
+            let mut headers = BTreeMap::new();
+            if conditional {
+                headers.insert("If-None-Match".into(), "*".into());
+            }
+            let prepared = ExportOutputPreparation {
+                bundle_id: "fixture".into(),
+                upload_url: format!("http://127.0.0.1:{port}/fixture"),
+                upload_direct: direct,
+                upload_headers: headers,
+            };
+            let result = api.upload_export_output(&job, &prepared, b"fixture".to_vec());
+            let observed = server.join().unwrap();
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(observed.contains("if-none-match: *"), conditional);
+            if direct {
+                assert!(!observed.contains("authorization:"));
+            }
+        }
+    }
 
     #[test]
     fn route_report_carries_validated_filesystem_state_without_host_paths() {
