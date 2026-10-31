@@ -286,54 +286,127 @@ pub fn prepare_exploration_submission_auto(
     )?;
     let authorization = match authorization {
         Some(a) => a,
-        None => {
-            let mut paths: Vec<_> = source_file_inventory(&submission.frozen_source.root)?
-                .into_iter()
-                .filter(|p| ato_formation::proposal::source_file_allowed(p))
-                .collect();
-            paths.sort_by_key(|p| {
-                (
-                    ato_formation::proposal::source_inspection_priority(p),
-                    p.clone(),
-                )
-            });
-            let files = paths
-                .into_iter()
-                .take(2048)
-                .map(|path| -> Result<_> {
-                    let id = format!("f_{:x}", Sha256::digest(path.as_bytes()))[..26].to_owned();
-                    let digest =
-                        file_digest(&mut File::open(submission.frozen_source.root.join(&path))?)?;
-                    Ok((
-                        id,
-                        ato_formation::proposal::VerifiedSourceFile { path, digest },
-                    ))
-                })
-                .collect::<Result<_>>()?;
-            ProposalAuthorization {
-                execution_plan: Some(ato_formation::proposal::PlanAuthorization {
-                    runtime_port_operations: true,
-                    files,
-                    toolchains,
-                    source_oci: None,
-                }),
-                modifiable_derivation_refs: vec![],
-                source_domain: ato_formation::proposal::SourceDomain {
-                    entrypoints: BTreeMap::new(),
-                    modules: BTreeMap::new(),
-                },
-                python_http_process: None,
-                node_static_workspace: None,
-                policy: ato_formation::proposal::CandidateProducerPolicy {
-                    max_proposal_rounds: 1,
-                    max_proposals: 1,
-                    timeout_ms: 30_000,
-                    allow_source_text: true,
-                    max_source_bytes: 16 * 1024,
-                },
-            }
-        }
+        None => automatic_source_authorization(&submission, toolchains)?,
     };
+    submission.enable_candidate_producer(authorization)?;
+    Ok(submission)
+}
+
+fn automatic_source_authorization(
+    submission: &Submission,
+    toolchains: BTreeMap<String, String>,
+) -> Result<ProposalAuthorization> {
+    let mut paths: Vec<_> = source_file_inventory(&submission.frozen_source.root)?
+        .into_iter()
+        .filter(|p| ato_formation::proposal::source_file_allowed(p))
+        .collect();
+    paths.sort_by_key(|p| {
+        (
+            ato_formation::proposal::source_inspection_priority(p),
+            p.clone(),
+        )
+    });
+    let files = paths
+        .into_iter()
+        .take(2048)
+        .map(|path| -> Result<_> {
+            let id = format!("f_{:x}", Sha256::digest(path.as_bytes()))[..26].to_owned();
+            let digest = file_digest(&mut File::open(submission.frozen_source.root.join(&path))?)?;
+            Ok((
+                id,
+                ato_formation::proposal::VerifiedSourceFile { path, digest },
+            ))
+        })
+        .collect::<Result<_>>()?;
+    Ok(ProposalAuthorization {
+        execution_plan: Some(ato_formation::proposal::PlanAuthorization {
+            runtime_port_operations: true,
+            files,
+            toolchains,
+            source_oci: None,
+        }),
+        modifiable_derivation_refs: vec![],
+        source_domain: ato_formation::proposal::SourceDomain {
+            entrypoints: BTreeMap::new(),
+            modules: BTreeMap::new(),
+        },
+        python_http_process: None,
+        node_static_workspace: None,
+        policy: ato_formation::proposal::CandidateProducerPolicy {
+            max_proposal_rounds: 1,
+            max_proposals: 1,
+            timeout_ms: 30_000,
+            allow_source_text: true,
+            max_source_bytes: 16 * 1024,
+        },
+    })
+}
+
+/// Prepare an unstarted Search from the already measured archive itself. The
+/// caller still obtains owner confirmation and creates the Search; this does
+/// not authorize source upload, provider dispatch, execution or publication.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_verified_exploration_submission(
+    verified: FileVerifiedArchive,
+    contract: BoundContract,
+    work_root: &Path,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    toolchains: BTreeMap<String, String>,
+) -> Result<Submission> {
+    budget.validate()?;
+    anyhow::ensure!(
+        policy.exploration.is_some() && policy.proposal.is_none(),
+        "explicit exploration policy required"
+    );
+    anyhow::ensure!(
+        verified.archive_bytes() <= budget.max_transfer_bytes
+            && verified.expanded_bytes() <= budget.max_expanded_bytes,
+        "approved_search_source_budget_exhausted"
+    );
+    let digest = verified.archive_digest().to_owned();
+    let bytes = verified.archive_bytes();
+    let closure = verified.closure_ref("")?;
+    std::fs::create_dir_all(work_root)?;
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(budget.deadline_seconds).min(SOURCE_TRANSFER_TIMEOUT);
+    let mut archive = crate::job::source_fetch::temporary_file(work_root, bytes, deadline)?;
+    let copied = crate::job::source_fetch::copy_bounded(
+        verified.archive_reader()?,
+        &mut archive,
+        bytes,
+        deadline,
+    )?;
+    anyhow::ensure!(
+        copied == digest && archive.metadata()?.len() == bytes,
+        "approved_search_source_copy_mismatch"
+    );
+    let (archive, _) = crate::job::source_fetch::rewind(archive, copied)?;
+    let inventory = local::freeze_verified_file_with_guard(
+        verified,
+        &std::path::absolute(work_root)?,
+        SourceLimits::default(),
+        &|| std::time::Instant::now() < deadline,
+    )?;
+    anyhow::ensure!(
+        inventory.closure_ref.as_str() == closure.as_str(),
+        "approved_search_source_mismatch"
+    );
+    let mut submission = prepare_frozen_submission(
+        archive,
+        inventory,
+        &[],
+        None,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        Some(contract),
+        false,
+    )?;
+    let authorization = automatic_source_authorization(&submission, toolchains)?;
     submission.enable_candidate_producer(authorization)?;
     Ok(submission)
 }
