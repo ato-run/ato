@@ -49,6 +49,7 @@ fn state() -> SearchStateV1 {
     });
     s.frozen.policy.proposal = Some(ProposalAuthorization {
         execution_plan: Some(PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: false,
             source_oci: None,
             files: BTreeMap::from([(
@@ -126,6 +127,36 @@ fn structural_candidate_scope_rejects_unbound_native_facts_and_metadata_changes(
     let mut forged = c.candidate().clone();
     forged.effects = "privileged".into();
     assert!(validate_candidate_scope(&s.frozen, &[forged]).is_err());
+}
+
+#[test]
+fn hosted_build_free_opt_in_is_frozen_and_preserves_legacy_plans() {
+    let mut s = state();
+    let legacy = compile(&s, plan());
+    let ProposalOutcome::Admitted(old) = &legacy[0] else {
+        panic!("{legacy:?}")
+    };
+    assert_eq!(old.compiled().derivation.steps[0].id, "check-toolchain");
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .private_process_no_build = true;
+    let result = compile(&s, plan());
+    let ProposalOutcome::Admitted(new) = &result[0] else {
+        panic!("{result:?}")
+    };
+    assert_eq!(
+        new.compiled().base_contract_ref,
+        old.compiled().base_contract_ref
+    );
+    assert_eq!(new.compiled().derivation.steps.len(), 1);
+    assert_eq!(new.compiled().derivation.steps[0].id, "app");
+    assert_ne!(new.compiled().derivation_ref, old.compiled().derivation_ref);
 }
 
 #[test]

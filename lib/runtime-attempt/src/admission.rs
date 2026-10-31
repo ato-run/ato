@@ -11,7 +11,9 @@
 
 use ato_formation::authoring::EffectClass;
 use ato_formation::request::AttemptFailure;
-use ato_formation::requirements::ExecutionRequirements;
+use ato_formation::requirements::{
+    AuthorityRequirement, ExecutionPhase, ExecutionRequirements, ResourceOperation,
+};
 
 use crate::browser_verify::BrowserVerification;
 use crate::spec::{AttemptSpec, CandidateShape};
@@ -48,6 +50,9 @@ pub enum EffectAuthorization<'a> {
     /// Nobody is present: a Formation attempt, a Runtime Network ticket, a
     /// hosted job. Only disposable effect classes run.
     Unattended,
+    /// Platform-admitted private Formation: isolated, bounded, no egress.
+    /// This grants only the fixed logical HTTP bind, never ordinary Run rights.
+    PrivateIsolatedFormation,
     /// A person started a Run of exactly this Derivation in the foreground
     /// (`ato run <capsule>`). It authorizes running that D; it is not a
     /// confirmation of effects the D declares beyond the disposable ones,
@@ -72,10 +77,25 @@ impl EffectAuthorization<'_> {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Unattended => "unattended",
+            Self::PrivateIsolatedFormation => "private_isolated_formation",
             Self::UserInvoked { .. } => "user_invoked",
             Self::Exploration { .. } => "exploration",
             Self::FunctionalVerification { .. } => "functional_verification",
         }
+    }
+}
+
+/// Fixed platform ceiling for the private, stateless, isolated HTTP profile.
+/// It is not inferred from an authored manifest and carries no egress rights.
+pub fn private_http_bind_ceiling() -> ExecutionRequirements {
+    ExecutionRequirements {
+        authority: vec![AuthorityRequirement {
+            phase: ExecutionPhase::Runtime,
+            protocol: "ato.http@1".into(),
+            resource: "app.http".into(),
+            operation: ResourceOperation::Bind,
+        }],
+        ..Default::default()
     }
 }
 
@@ -131,6 +151,19 @@ pub(crate) fn admit_with_model_delivery(
         );
     }
     match authorization {
+        EffectAuthorization::PrivateIsolatedFormation => {
+            if spec
+                .derivation
+                .requirements
+                .within(&private_http_bind_ceiling())
+                .is_err()
+            {
+                return refused(
+                    "execution_authority_required",
+                    "private Formation permits only its isolated HTTP bind",
+                );
+            }
+        }
         EffectAuthorization::Exploration {
             derivation_ref,
             grant,
@@ -323,6 +356,57 @@ mod tests {
             runtimes: [("node".to_owned(), version.to_owned())].into(),
             state: Vec::new(),
             bindings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn private_formation_grants_only_the_isolated_http_bind() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".into(),
+            requirements: vec![],
+        };
+        for (requirements, expected) in [
+            (
+                serde_json::json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"bind"}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"execute"}]}),
+                Some("execution_authority_required"),
+            ),
+            (
+                serde_json::json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"other","operation":"bind"}]}),
+                Some("execution_authority_required"),
+            ),
+            (
+                serde_json::json!({"network":[{"phase":"runtime","host":"example.com","port":443}]}),
+                Some("execution_authority_required"),
+            ),
+        ] {
+            let mut d = derivation(EffectClass::Pure);
+            d.requirements = serde_json::from_value(requirements).unwrap();
+            let spec = AttemptSpec {
+                contract: &contract,
+                contract_ref: "sha256:k",
+                derivation: &d,
+                derivation_ref: "sha256:d",
+                shape: CandidateShape::Process,
+                input_refs: Default::default(),
+                instance_snapshot_ref: None,
+                scenarios: vec![],
+            };
+            assert_eq!(
+                admit(&spec, EffectAuthorization::PrivateIsolatedFormation, None)
+                    .map(|f| f.code)
+                    .as_deref(),
+                expected
+            );
+            assert_eq!(
+                admit(&spec, EffectAuthorization::Unattended, None)
+                    .map(|f| f.code)
+                    .as_deref(),
+                Some("execution_authority_required")
+            );
         }
     }
 
