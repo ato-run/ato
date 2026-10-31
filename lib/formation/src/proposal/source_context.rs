@@ -324,3 +324,53 @@ impl ProposalRequestV2 {
         ))
     }
 }
+
+/// Validate the provider-visible request against the previously frozen Search.
+/// This verifies the typed projection and its authority bounds; a trusted
+/// requester must separately establish source-text membership in the immutable
+/// archive before supplying those bytes. It grants no execution or LLM call.
+pub fn validate_frozen_provider_request(
+    request: &ProposalRequestV2,
+    frozen: &crate::search::FrozenSearchV1,
+    search_id: &str,
+    round: u32,
+    timeout_ms: u64,
+) -> Result<(), ProposalError> {
+    frozen
+        .canonical_bytes()
+        .map_err(|_| ProposalError("provider_frozen_search_invalid"))?;
+    let auth = frozen
+        .policy
+        .proposal
+        .as_ref()
+        .ok_or(ProposalError("provider_proposal_policy_missing"))?;
+    let exploration = frozen
+        .policy
+        .exploration
+        .as_ref()
+        .ok_or(ProposalError("provider_exploration_policy_missing"))?;
+    let context = request
+        .exploration_context
+        .as_ref()
+        .ok_or(ProposalError("provider_exploration_context_missing"))?;
+    request.validate(auth)?;
+    let original_refs: Vec<_> = frozen
+        .candidates
+        .iter()
+        .map(|candidate| candidate.derivation_ref.clone())
+        .collect();
+    if search_id.is_empty()
+        || request.search_id != search_id
+        || request.round_seq != Some(round)
+        || request.remaining_budget.timeout_ms != timeout_ms
+        || request.frozen_contract != frozen.base_contract
+        || request.runtime_constraint != frozen.policy.runtime_constraint
+        || request.known_derivations != original_refs
+        || request.remaining_budget.attempts_remaining > frozen.policy.budget.max_attempts
+        || context.effective_max_rounds != exploration.formation.max_rounds.get()
+        || context.ceiling != exploration.ceiling
+    {
+        return Err(ProposalError("provider_search_scope_mismatch"));
+    }
+    Ok(())
+}

@@ -276,6 +276,13 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
+    ValidateProviderRequest {
+        request: Box<ato_formation::proposal::ProposalRequestV2>,
+        frozen: Box<ato_formation::search::FrozenSearchV1>,
+        search_id: String,
+        round: u32,
+        timeout_ms: u64,
+    },
     CanonicalProviderEvent {
         event: ato_formation::provider_budget::JournalEvent,
     },
@@ -371,6 +378,19 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         let request: SearchRequest =
             serde_json::from_slice(bytes).map_err(|_| "search_input_invalid".to_owned())?;
         match request {
+            SearchRequest::ValidateProviderRequest {
+                request,
+                frozen,
+                search_id,
+                round,
+                timeout_ms,
+            } => {
+                ato_formation::proposal::validate_frozen_provider_request(
+                    &request, &frozen, &search_id, round, timeout_ms,
+                )
+                .map_err(|_| "provider_request_invalid".to_owned())?;
+                Ok(serde_json::json!({"status":"provider_request_validated"}))
+            }
             SearchRequest::CanonicalProviderEvent { event } => {
                 let canonical = serde_jcs::to_string(&event)
                     .map_err(|_| "provider_journal_invalid".to_owned())?;
@@ -738,6 +758,29 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
 mod provider_budget_tests {
     use super::evaluate_search;
     use serde_json::json;
+
+    #[test]
+    fn provider_request_authority_refuses_cross_search_or_changed_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/hosted-provider-request.json")).unwrap();
+        let mut input = json!({"operation":"validate_provider_request","search_id":"source-search","round":1,"timeout_ms":5000,
+            "frozen":fixture["frozen"],"request":fixture["request"]});
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&input).unwrap())["status"],
+            "provider_request_validated"
+        );
+        input["search_id"] = json!("other-search");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&input).unwrap())["status"],
+            "rejected"
+        );
+        input["search_id"] = json!("source-search");
+        input["request"]["frozen_contract"]["requirements"][0]["status"] = json!(201);
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&input).unwrap())["status"],
+            "rejected"
+        );
+    }
 
     #[test]
     fn wasm_authority_checks_all_plans_against_the_frozen_budget() {
