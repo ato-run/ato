@@ -13,7 +13,7 @@
 //! | `--api-base` | control plane base URL (required) |
 //! | `--work-root` | worker-owned directory; holds `worker-update.json` |
 //! | `--worker-id` | identity this process claims as |
-//! | `--queue` | `all` (default), `source-only`, or `hosted-preparation`; dedicated queues require a pinned runner identity |
+//! | `--queue` | `all` (default), `source-only`, `hosted-preparation`, or `hosted-exploration`; dedicated queues require a pinned runner identity |
 //! | `--poll-ms` | idle poll interval (default 2000) |
 //! | `--heartbeat-ms` | lifecycle/identity report interval (default 15000) |
 //! | `--expect-version` | refuse to serve unless the binary reports this version |
@@ -44,6 +44,7 @@ use ato_formation_worker::api::{
     WorkerIdentityReport, WorkerStateReport, bounded_reason, classify_failure as classify,
 };
 use ato_formation_worker::build::BuildAttempt;
+use ato_formation_worker::job::hosted_exploration::HostedExplorationApi;
 use ato_formation_worker::job::hosted_preparation::HostedPreparationApi;
 use ato_formation_worker::job::{JobContext, PinnedSourceFetcher, TreePacker, run_claimed_job};
 use ato_formation_worker::lifecycle::{
@@ -562,8 +563,16 @@ fn serve(args: &[String]) -> Result<()> {
         .timeout(Duration::from_secs(900))
         .build()?;
     let api = FormationApi::new(client, api_base.clone(), token.clone());
-    let hosted_preparation_api = if queue == QueueMode::HostedPreparation {
+    let hosted_preparation_api = if matches!(
+        queue,
+        QueueMode::HostedPreparation | QueueMode::HostedExploration
+    ) {
         Some(HostedPreparationApi::new(&api_base, &token)?)
+    } else {
+        None
+    };
+    let hosted_exploration_api = if queue == QueueMode::HostedExploration {
+        Some(HostedExplorationApi::new(&api_base, &token)?)
     } else {
         None
     };
@@ -728,6 +737,7 @@ fn serve(args: &[String]) -> Result<()> {
     // than a signal. It carries the target binary from the refusal.
     let mut refusal: Option<ClaimRefusal> = None;
     let mut poll_source = true;
+    let mut prefer_exploration = true;
     loop {
         // Checked before every claim: after a stop or a drain directive the
         // worker must never take another attempt fence.
@@ -736,16 +746,60 @@ fn serve(args: &[String]) -> Result<()> {
         }
 
         if let Some(preparation) = &hosted_preparation_api {
+            let preferred = prefer_exploration;
+            prefer_exploration = !prefer_exploration;
+            let drive = || -> Result<bool> {
+                let Some(exploration) = &hosted_exploration_api else {
+                    return Ok(false);
+                };
+                let holder = new_preparation_holder()?;
+                exploration.drive_one(&holder, &work_root, || {
+                    STOP_REQUESTED.load(Ordering::SeqCst)
+                        || state.drain_requested.load(Ordering::SeqCst)
+                })
+            };
+            if preferred {
+                match drive() {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => {
+                        eprintln!("[formation] hosted exploration unavailable or stopped");
+                        pause(&state, idle);
+                        continue;
+                    }
+                }
+            }
+            if STOP_REQUESTED.load(Ordering::SeqCst) || state.drain_requested.load(Ordering::SeqCst)
+            {
+                break;
+            }
             match new_preparation_holder()
                 .and_then(|holder| preparation.prepare_one(&holder, &work_root))
             {
-                Ok(true) => println!("[formation] hosted source preparation completed"),
-                Ok(false) => pause(&state, idle),
+                Ok(true) => {
+                    println!("[formation] hosted source preparation completed");
+                    continue;
+                }
+                Ok(false) => {}
                 Err(_) => {
                     eprintln!("[formation] hosted source preparation unavailable or failed");
                     pause(&state, idle);
+                    continue;
                 }
             }
+            if !preferred {
+                if STOP_REQUESTED.load(Ordering::SeqCst)
+                    || state.drain_requested.load(Ordering::SeqCst)
+                {
+                    break;
+                }
+                match drive() {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => eprintln!("[formation] hosted exploration unavailable or stopped"),
+                }
+            }
+            pause(&state, idle);
             continue;
         }
 
@@ -1121,6 +1175,7 @@ enum QueueMode {
     All,
     SourceOnly,
     HostedPreparation,
+    HostedExploration,
 }
 fn queue_mode(args: &[String]) -> Result<QueueMode> {
     let mut mode = None;
@@ -1144,8 +1199,9 @@ fn queue_mode(args: &[String]) -> Result<QueueMode> {
         None | Some("all") => Ok(QueueMode::All),
         Some("source-only") => Ok(QueueMode::SourceOnly),
         Some("hosted-preparation") => Ok(QueueMode::HostedPreparation),
+        Some("hosted-exploration") => Ok(QueueMode::HostedExploration),
         _ => Err(anyhow!(
-            "--queue must be all, source-only, or hosted-preparation"
+            "--queue must be all, source-only, hosted-preparation, or hosted-exploration"
         )),
     }
 }
@@ -1200,6 +1256,10 @@ mod queue_tests {
         assert_eq!(
             queue_mode(&args(&["--queue=hosted-preparation"])).unwrap(),
             QueueMode::HostedPreparation
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue=hosted-exploration"])).unwrap(),
+            QueueMode::HostedExploration
         );
         for bad in [
             vec!["--queue"],
