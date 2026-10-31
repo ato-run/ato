@@ -101,7 +101,14 @@ impl CandidateRealizer for FormationRealizer<'_> {
         }
         if planned.derivation.source_oci.is_some()
             || planned.derivation.runtimes.contains_key("oci.image")
-            || !planned.derivation.requirements.is_empty()
+            || (!planned.derivation.requirements.is_empty()
+                && (!self.require_private_isolation
+                    || planned.derivation.requirements.startup.is_some()
+                    || planned
+                        .derivation
+                        .requirements
+                        .within(&crate::admission::private_http_bind_ceiling())
+                        .is_err()))
             || !planned.derivation.variable_bindings.is_empty()
             || !planned.derivation.runtime_port_operations.is_empty()
             || planned.derivation.steps.iter().any(|s| {

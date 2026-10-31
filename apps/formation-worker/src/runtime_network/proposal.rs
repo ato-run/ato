@@ -320,6 +320,7 @@ fn automatic_source_authorization(
         .collect::<Result<_>>()?;
     Ok(ProposalAuthorization {
         execution_plan: Some(ato_formation::proposal::PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: true,
             files,
             toolchains,
@@ -406,7 +407,14 @@ pub fn prepare_verified_exploration_submission(
         Some(contract),
         false,
     )?;
-    let authorization = automatic_source_authorization(&submission, toolchains)?;
+    let mut authorization = automatic_source_authorization(&submission, toolchains)?;
+    // This is the independently isolated hosted source intake. The opt-in is
+    // frozen before Search and cannot be chosen by the model.
+    authorization
+        .execution_plan
+        .as_mut()
+        .expect("automatic execution plan")
+        .private_process_no_build = true;
     submission.enable_candidate_producer(authorization)?;
     Ok(submission)
 }

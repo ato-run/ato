@@ -47,8 +47,8 @@ use crate::api::{FailureReport, FormationApi, PublishOutcome};
 use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
-pub mod hosted_preparation;
 pub mod hosted_exploration;
+pub mod hosted_preparation;
 pub(crate) mod source_evidence;
 pub(crate) mod source_fetch;
 pub mod source_intake;
@@ -487,7 +487,11 @@ pub fn run_claimed_job_with_ledger(
             contract_ref: &planned.contract_ref,
             runtime_id: context.worker_id,
             profile: &profile,
-            authorization: EffectAuthorization::Unattended,
+            authorization: if private_isolated {
+                EffectAuthorization::PrivateIsolatedFormation
+            } else {
+                EffectAuthorization::Unattended
+            },
             network,
             browser: None,
             attempt_root: &attempt_root,
