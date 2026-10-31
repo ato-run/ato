@@ -262,10 +262,10 @@ pub fn provider_profile() -> (
             max_calls: 1,
             input_token_cap: 32768,
             output_token_cap: 1024,
-            // Include OpenRouter's possible BYOK surcharge in the bound.
-            input_price: if use_router { 3_150_000 } else { 3_000_000 },
+            // Include one-hour cache writes and a possible BYOK surcharge.
+            input_price: if use_router { 6_300_000 } else { 3_000_000 },
             output_price: if use_router { 15_750_000 } else { 15_000_000 },
-            ceiling_usd_micros: if use_router { 119_348 } else { 113_664 },
+            ceiling_usd_micros: if use_router { 222_567 } else { 113_664 },
         },
     )
 }

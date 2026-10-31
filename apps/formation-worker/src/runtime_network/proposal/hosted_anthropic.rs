@@ -44,7 +44,7 @@ impl HostedAnthropicConfig {
                 || (self.provider == "openrouter"
                     && self.model == "anthropic/claude-sonnet-4.6"
                     && self.endpoint == "https://openrouter.ai"
-                    && plan.input_price >= 3_150_000
+                    && plan.input_price >= 6_300_000
                     && plan.output_price >= 15_750_000))
                 && self.prompt_version == PROMPT_VERSION_V3
                 && (1..=2048).contains(&self.max_output_tokens)
@@ -475,9 +475,9 @@ mod tests {
     #[test]
     fn router_request_pins_price_upstream_and_accounts_for_surcharge() {
         let mut p = plan();
-        p.input_price = 3_150_000;
+        p.input_price = 6_300_000;
         p.output_price = 15_750_000;
-        p.ceiling_usd_micros = 107_252;
+        p.ceiling_usd_micros = 210_471;
         let mut c = config();
         c.provider = "openrouter".into();
         c.model = "anthropic/claude-sonnet-4.6".into();
