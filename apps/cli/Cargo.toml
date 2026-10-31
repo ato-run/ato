@@ -5,7 +5,7 @@ edition = "2024"
 description = "Ato command line interface for addressable computations"
 authors = ["ato-run"]
 homepage = "https://ato.run"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 build = "build.rs"
 

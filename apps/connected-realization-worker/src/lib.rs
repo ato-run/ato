@@ -14,6 +14,7 @@ pub mod host_resources;
 #[cfg(all(test, target_os = "linux"))]
 mod managed_hosted_tests;
 mod native_pixel_config;
+mod process_run_verification;
 pub mod runtime_launch;
 mod slot_state;
 
@@ -165,6 +166,7 @@ fn advertised_capabilities(
     mut capabilities: Vec<&'static str>,
     host_boundary: bool,
     has_accelerator: bool,
+    private_resource_bounded: bool,
 ) -> Vec<&'static str> {
     if host_boundary {
         capabilities.retain(|capability| *capability != NAMESPACE_ISOLATION_CAPABILITY);
@@ -179,6 +181,9 @@ fn advertised_capabilities(
     }
     if has_accelerator {
         capabilities.push(GPU_CAPABILITY);
+    }
+    if !host_boundary && private_resource_bounded {
+        capabilities.push(runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE);
     }
     capabilities
 }
@@ -2931,9 +2936,20 @@ impl ConnectedWorker {
 
         // ACTIVE. The control plane decides when this ends.
         let last_heartbeat = std::cell::Cell::new(Instant::now());
+        // Retrying observation is separate from readiness. A transient API
+        // failure must not turn a usable Run into a false success or failure.
+        let mut verification_retry = Some(Instant::now());
         let mut stop = || -> Result<bool> {
             #[cfg(unix)]
-            if native.is_some_and(|native| native.is_finished()) {
+            if let Some(native) = native
+                && native.is_finished()
+            {
+                // A Terminal program that exits by itself has finished its
+                // session: stop, save outputs and report stopped as usual.
+                // Its exit code is kept in the stop evidence.
+                if native.ended_by_workload_exit() {
+                    return Ok(true);
+                }
                 bail!("Native workload lifecycle ended while ACTIVE");
             }
             // A group is one Application: a service that exits while ACTIVE
@@ -2949,7 +2965,7 @@ impl ConnectedWorker {
                 self.heartbeat_best_effort(1);
                 last_heartbeat.set(Instant::now());
             }
-            poll_runtime_launch_control(
+            if poll_runtime_launch_control(
                 || self.control_stop_requested_runtime(&lease.id, native_lane),
                 || {
                     self.refresh_runtime_authorization(
@@ -2958,7 +2974,28 @@ impl ConnectedWorker {
                         native_lane,
                     )
                 },
-            )
+            )? {
+                return Ok(true);
+            }
+            if verification_retry.is_some_and(|at| Instant::now() >= at) {
+                match process_run_verification::report(
+                    &self.api,
+                    lease,
+                    spec,
+                    active,
+                    endpoint_name,
+                ) {
+                    Ok(()) => verification_retry = None,
+                    Err(_) => {
+                        eprintln!(
+                            "[run-verification] run={} observation unavailable; retrying",
+                            lease.run_id
+                        );
+                        verification_retry = Some(Instant::now() + Duration::from_secs(15));
+                    }
+                }
+            }
+            Ok(false)
         };
         runtime_launch::lease::wait_for_stop(&mut stop, Duration::from_millis(500), hard_deadline)?;
         Ok(execution_id)
@@ -5062,6 +5099,7 @@ impl HttpRunnerApi {
                 ),
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
+                config.max_slots == 1 && ato_runtime_attempt::resource_boundary::verify_current().is_ok(),
             ), config.require_explicit_runtime_placement),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
@@ -7418,22 +7456,28 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(base.contains(&"isolation=untrusted-v1"));
         assert!(base.contains(&"isolation:runtime_launch=untrusted-v1"));
 
-        let host_boundary = advertised_capabilities(base.clone(), true, false);
+        let host_boundary = advertised_capabilities(base.clone(), true, false, true);
         assert!(host_boundary.contains(&"isolation=host-boundary-v1"));
         assert!(!host_boundary.contains(&"isolation=untrusted-v1"));
         assert!(!host_boundary.contains(&"isolation:runtime_launch=untrusted-v1"));
         assert!(host_boundary.contains(&"isolation:runtime_launch=host-boundary-v1"));
         assert!(!host_boundary.contains(&"gpu"));
 
-        // The default mode is unchanged, byte for byte.
-        assert_eq!(advertised_capabilities(base.clone(), false, false), base);
+        assert!(!host_boundary.contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE));
+        let namespace = advertised_capabilities(base.clone(), false, false, true);
+        assert!(namespace.contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE));
+        assert!(base.iter().all(|capability| namespace.contains(capability)));
+        assert!(
+            !advertised_capabilities(base.clone(), false, false, false)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE)
+        );
     }
 
     #[test]
     fn gpu_is_advertised_only_when_a_device_answered() {
         let base = runner_capabilities(false, false, false, false, false);
-        assert!(advertised_capabilities(base.clone(), false, true).contains(&"gpu"));
-        assert!(!advertised_capabilities(base, false, false).contains(&"gpu"));
+        assert!(advertised_capabilities(base.clone(), false, true, true).contains(&"gpu"));
+        assert!(!advertised_capabilities(base, false, false, true).contains(&"gpu"));
     }
 
     #[test]
@@ -7444,6 +7488,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                     runner_capabilities(false, oci, false, false, false),
                     host,
                     false,
+                    true,
                 );
                 assert_eq!(
                     capabilities.contains(&"runtime_feature=oci_data_plane_v1"),

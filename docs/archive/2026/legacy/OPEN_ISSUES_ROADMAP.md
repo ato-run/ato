@@ -1,5 +1,17 @@
 # Ato Development Roadmap — Remaining Work
 
+> Status: historical evidence / superseded roadmap. Language: ja+en.
+> 状態: 履歴資料 / 置き換え済みのロードマップ。言語: ja+en。
+> Last content verification 2026-09-01 (body rewritten in `d686c367e`, 2026-09-23).
+> Issue state is owned by GitHub, not by this file: roadmap and work tracking have
+> moved to <https://github.com/ato-run/ato/issues>. Do not create new issues or
+> update issue state from this document.
+> 個別issueの状態・優先度はGitHubが正であり、本書から新しいissueを作成しない。
+> This file is not updated and its counts are stale. It is retained because it is
+> the only consolidated record of the dependency-ordered P0/P1/P2 tasks and
+> Gates A–D. Separate technical progress reference:
+> [Formation roadmap](../../../rfcs/draft/FORMATION_ROADMAP.md).
+
 - **最終確認日:** 2026-09-01
 - **調査対象:** accepted RFC、`nightly` (`d1acd3dd`)、GitHub open issues 121件
 

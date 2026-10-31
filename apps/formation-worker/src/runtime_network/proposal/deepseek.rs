@@ -1,7 +1,7 @@
 //! Requester-only, one HTTP send. No repair, fallback, SDK parsing authority,
 //! reasoning persistence or external credentials in a ProposalRequest.
 use super::{
-    budget::{CallBudget, FinishReason, RequestEvidence, ResponseEvidence},
+    budget::{FinishReason, ProviderBudget, RequestEvidence, ResponseEvidence},
     provenance::*,
 };
 use anyhow::{Context, Result, ensure};
@@ -108,12 +108,11 @@ impl DeepSeekConfig {
         self.validate()?;
         budget.validate()?;
         let prompt = prompt_for(&self.prompt_version).context("unknown prompt version")?;
-        let canonical = serde_jcs::to_vec(&(
+        ato_formation::provider_budget::candidate_configuration_ref(
             self,
             budget,
-            format!("sha256:{:x}", Sha256::digest(prompt.as_bytes())),
-        ))?;
-        Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+            &format!("sha256:{:x}", Sha256::digest(prompt.as_bytes())),
+        )
     }
     pub fn identity(&self) -> ProviderIdentity {
         ProviderIdentity {
@@ -141,7 +140,7 @@ enum Credentials {
 pub struct DeepSeekCandidateProducer {
     config: DeepSeekConfig,
     credentials: Credentials,
-    budget: Arc<CallBudget>,
+    budget: Arc<dyn ProviderBudget>,
     http: reqwest::blocking::Client,
     #[cfg(test)]
     pub(super) credential_reads: std::sync::atomic::AtomicUsize,
@@ -162,7 +161,7 @@ impl DeepSeekCandidateProducer {
     pub fn new(
         config: DeepSeekConfig,
         key_environment: &str,
-        budget: Arc<CallBudget>,
+        budget: Arc<dyn ProviderBudget>,
     ) -> Result<Self> {
         ensure!(
             config.endpoint == "https://api.deepseek.com",
@@ -182,7 +181,7 @@ impl DeepSeekCandidateProducer {
         )
     }
     /// Local synthetic transport only; never reads an environment credential.
-    pub fn new_mock(config: DeepSeekConfig, budget: Arc<CallBudget>) -> Result<Self> {
+    pub fn new_mock(config: DeepSeekConfig, budget: Arc<dyn ProviderBudget>) -> Result<Self> {
         let url = reqwest::Url::parse(&config.endpoint)?;
         ensure!(
             url.scheme() == "http"
@@ -199,7 +198,7 @@ impl DeepSeekCandidateProducer {
     fn build(
         config: DeepSeekConfig,
         credentials: Credentials,
-        budget: Arc<CallBudget>,
+        budget: Arc<dyn ProviderBudget>,
     ) -> Result<Self> {
         config.validate()?;
         budget.plan().validate()?;

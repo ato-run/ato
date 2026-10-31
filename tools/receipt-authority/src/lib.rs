@@ -276,6 +276,29 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
+    ValidateProviderRequest {
+        request: Box<ato_formation::proposal::ProposalRequestV2>,
+        frozen: Box<ato_formation::search::FrozenSearchV1>,
+        search_id: String,
+        round: u32,
+        timeout_ms: u64,
+    },
+    CanonicalProviderEvent {
+        event: ato_formation::provider_budget::JournalEvent,
+    },
+    ValidateProviderBudgets {
+        plans: Vec<ato_formation::provider_budget::BudgetPlan>,
+        exploration: ato_formation::exploration::ExplorationPolicy,
+    },
+    ValidateProviderJournal {
+        plans: Vec<ato_formation::provider_budget::BudgetPlan>,
+        exploration: ato_formation::exploration::ExplorationPolicy,
+        plan_index: usize,
+        provider_config: Value,
+        prompt_digest: String,
+        history: Vec<ato_formation::provider_budget::JournalEvent>,
+        next: Option<ato_formation::provider_budget::JournalEvent>,
+    },
     ValidateFunctionalObservations {
         acceptance: ato_formation::functional_acceptance::FunctionalAcceptanceV1,
         observations: Vec<ato_formation::port_operations::PortOperationObservation>,
@@ -355,6 +378,65 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         let request: SearchRequest =
             serde_json::from_slice(bytes).map_err(|_| "search_input_invalid".to_owned())?;
         match request {
+            SearchRequest::ValidateProviderRequest {
+                request,
+                frozen,
+                search_id,
+                round,
+                timeout_ms,
+            } => {
+                ato_formation::proposal::validate_frozen_provider_request(
+                    &request, &frozen, &search_id, round, timeout_ms,
+                )
+                .map_err(|_| "provider_request_invalid".to_owned())?;
+                Ok(serde_json::json!({"status":"provider_request_validated"}))
+            }
+            SearchRequest::CanonicalProviderEvent { event } => {
+                let canonical = serde_jcs::to_string(&event)
+                    .map_err(|_| "provider_journal_invalid".to_owned())?;
+                if canonical.len() > 16 * 1024 {
+                    return Err("provider_journal_invalid".into());
+                }
+                Ok(
+                    serde_json::json!({"status":"provider_event_canonical", "canonical_event":canonical}),
+                )
+            }
+            SearchRequest::ValidateProviderBudgets { plans, exploration } => {
+                ato_formation::provider_budget::validate_combined(&plans, &exploration)
+                    .map_err(|_| "provider_budget_invalid".to_owned())?;
+                Ok(serde_json::json!({"status":"provider_budgets_validated"}))
+            }
+            SearchRequest::ValidateProviderJournal {
+                plans,
+                exploration,
+                plan_index,
+                provider_config,
+                prompt_digest,
+                history,
+                next,
+            } => {
+                ato_formation::provider_budget::validate_combined(&plans, &exploration)
+                    .map_err(|_| "provider_budget_invalid".to_owned())?;
+                let plan = plans
+                    .get(plan_index)
+                    .ok_or_else(|| "provider_budget_invalid".to_owned())?;
+                if plan_index != 0 || plans.len() != 1 {
+                    return Err("provider_budget_invalid".into());
+                }
+                let actual = ato_formation::provider_budget::candidate_configuration_ref(
+                    &provider_config,
+                    plan,
+                    &prompt_digest,
+                )
+                .map_err(|_| "provider_configuration_invalid".to_owned())?;
+                if exploration.provider_configuration_ref.as_deref() != Some(actual.as_str()) {
+                    return Err("provider_configuration_mismatch".into());
+                }
+                let snapshot =
+                    ato_formation::provider_budget::replay_hosted_budget(plan, &history, next)
+                        .map_err(|_| "provider_journal_invalid".to_owned())?;
+                Ok(serde_json::json!({"status":"provider_journal_validated", "snapshot":snapshot}))
+            }
             SearchRequest::ValidateFunctionalObservations {
                 acceptance,
                 observations,
@@ -670,6 +752,118 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         }
     };
     evaluate().unwrap_or_else(|detail|serde_json::json!({"status":"rejected","code":"search_state_invalid","detail":detail}))
+}
+
+#[cfg(test)]
+mod provider_budget_tests {
+    use super::evaluate_search;
+    use serde_json::json;
+
+    #[test]
+    fn provider_request_authority_refuses_cross_search_or_changed_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/hosted-provider-request.json")).unwrap();
+        let mut input = json!({"operation":"validate_provider_request","search_id":"source-search","round":1,"timeout_ms":5000,
+            "frozen":fixture["frozen"],"request":fixture["request"]});
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&input).unwrap())["status"],
+            "provider_request_validated"
+        );
+        input["search_id"] = json!("other-search");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&input).unwrap())["status"],
+            "rejected"
+        );
+        input["search_id"] = json!("source-search");
+        input["request"]["frozen_contract"]["requirements"][0]["status"] = json!(201);
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&input).unwrap())["status"],
+            "rejected"
+        );
+    }
+
+    #[test]
+    fn wasm_authority_checks_all_plans_against_the_frozen_budget() {
+        let plan = json!({"max_calls":2,"input_token_cap":100,"output_token_cap":20,
+            "input_price":1,"output_price":1,"ceiling_usd_micros":4});
+        let mut request = json!({"operation":"validate_provider_budgets","plans":[plan.clone(),plan],
+            "exploration":{"ceiling":{},"max_provider_calls":4,"max_inspections":0,
+            "max_provider_cost_usd_micros":8,"max_provider_input_tokens":400,
+            "max_provider_output_tokens":80}});
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "provider_budgets_validated"
+        );
+        request["exploration"]["max_provider_calls"] = json!(3);
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+    }
+
+    #[test]
+    fn wasm_authority_replays_reservations_and_rejects_uncertain_retry() {
+        let request_event = |cell: &str| {
+            json!({"request":{"cell":cell,
+            "proposal_request_sha256":format!("sha256:{}", "a".repeat(64)),
+            "provider_body_sha256":format!("sha256:{}", "b".repeat(64)),
+            "timeout_ms":1000,"proposal_request_bytes":1,"provider_body_bytes":1}})
+        };
+        let mut request = json!({"operation":"validate_provider_journal",
+            "plans":[{"max_calls":2,"input_token_cap":100,"output_token_cap":20,
+                "input_price":1,"output_price":1,"ceiling_usd_micros":4}],
+            "exploration":{"ceiling":{},"max_provider_calls":2,"max_inspections":0,
+                "max_provider_cost_usd_micros":4,"max_provider_input_tokens":200,
+                "max_provider_output_tokens":40},
+            "plan_index":0,"history":[],"next":request_event("first")});
+        let config = json!({"provider":"deepseek","model":"pinned"});
+        let prompt_digest = format!("sha256:{}", "c".repeat(64));
+        let plan = serde_json::from_value(request["plans"][0].clone()).unwrap();
+        let config_ref = ato_formation::provider_budget::candidate_configuration_ref(
+            &config,
+            &plan,
+            &prompt_digest,
+        )
+        .unwrap();
+        request["provider_config"] = config;
+        request["prompt_digest"] = json!(prompt_digest);
+        request["exploration"]["provider_configuration_ref"] = json!(config_ref);
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "provider_journal_validated"
+        );
+        request["history"] = json!([request_event("first")]);
+        request["next"] = request_event("second");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+        request["history"] = json!([]);
+        request["provider_config"]["model"] = json!("changed");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+        request["provider_config"]["model"] = json!("pinned");
+        request["history"] = json!([request_event("first"), {"charged_unknown":"first"}]);
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
+        let canonical = evaluate_search(
+            &serde_json::to_vec(&json!({
+                "operation":"canonical_provider_event", "event":request_event("first")
+            }))
+            .unwrap(),
+        );
+        assert_eq!(canonical["status"], "provider_event_canonical");
+        assert!(
+            canonical["canonical_event"]
+                .as_str()
+                .unwrap()
+                .contains("provider_body_sha256")
+        );
+    }
 }
 
 #[cfg(test)]

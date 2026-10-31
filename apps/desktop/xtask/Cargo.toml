@@ -1,6 +1,7 @@
 [workspace]
 
 [package]
+license = "MPL-2.0"
 name = "ato-desktop-xtask"
 # Must track ato-desktop's version because xtask reads
 # env!("CARGO_PKG_VERSION") to embed into MSI/DMG/AppImage filenames.

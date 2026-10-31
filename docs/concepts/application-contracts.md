@@ -1,5 +1,7 @@
 # Capsule, Contract K, Derivation D and Source
 
+Status: Current technical reference.
+
 Ato preserves a point from which work can continue. The
 [Computation model](computation.md) explains that point independently of the
 process, filesystem, container or VM used to realize it. The portable

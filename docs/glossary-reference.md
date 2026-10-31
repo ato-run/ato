@@ -1,5 +1,7 @@
 # Glossary
 
+Status: Current technical reference.
+
 Canonical terminology for current explanatory documentation. Accepted RFCs own
 normative contracts; the [specification index](specifications/README.md) labels
 implementation-track drafts. Definitions below do not amend those RFCs.

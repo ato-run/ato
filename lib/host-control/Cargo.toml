@@ -2,7 +2,7 @@
 name = "ato-host-control"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "MPL-2.0"
 description = "Host-agnostic process supervision — starts, watches, and tears down the ato CLI process tree. The desktop shell is one host."
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"

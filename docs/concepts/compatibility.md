@@ -1,5 +1,7 @@
 # Compatibility and Derivation transformation
 
+Status: Current technical reference.
+
 Compatibility means preserving Contract K and producing a verified new
 realization. It does not require keeping the old implementation forever.
 K states the observable obligations being preserved; the strength of the

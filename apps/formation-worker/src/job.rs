@@ -36,6 +36,7 @@ use ato_runtime_attempt::{
     executor::{AttemptExecution, AttemptExecutor, ExecutedCandidate, LocalAttemptExecutor},
     formation_realizer::FormationRealizer,
     journal::{AttemptJournal, AttemptLedger, AttemptRecordState},
+    verification::{FROZEN_VERIFICATION_SCHEMA, FrozenVerificationInput},
 };
 
 pub use ato_runtime_attempt::plan::{
@@ -46,6 +47,8 @@ use crate::api::{FailureReport, FormationApi, PublishOutcome};
 use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
+pub mod hosted_exploration;
+pub mod hosted_preparation;
 pub(crate) mod source_evidence;
 pub(crate) mod source_fetch;
 pub mod source_intake;
@@ -211,12 +214,20 @@ pub fn run_job(
     )
 }
 
-/// Run a job whose attempt is already claimed.
-///
-/// Split out from `run_job` because a queue-polling worker learns which job it
-/// has BY claiming — there is no name to pass in beforehand. The attempt fence
-/// still comes from the control plane either way; nothing here decides which
-/// attempt is current.
+fn private_isolation_policy(job: &serde_json::Value) -> Result<bool> {
+    let enabled = match job["policy"].get("private_isolated") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => anyhow::bail!("private Formation isolation flag invalid"),
+    };
+    if enabled && job["policy"]["network"].as_str() != Some("denied") {
+        anyhow::bail!("private Formation build network must be denied");
+    }
+    Ok(enabled)
+}
+
+/// Run a job whose attempt was already claimed. The control plane supplies the
+/// attempt fence; this function does not decide which attempt is current.
 pub fn run_claimed_job(
     context: &JobContext<'_>,
     attempt: &BuildAttempt,
@@ -339,6 +350,13 @@ pub fn run_claimed_job_with_ledger(
         Some(text) => Some(text.to_owned()),
         None => read_capsule_toml(&source_root).map_err(FormationFailure::from)?,
     };
+    // Check the admission mode before either frontend can start work. A
+    // private source must never fall through to another realization profile.
+    let private_isolated = private_isolation_policy(job)?;
+    if private_isolated {
+        ato_runtime_attempt::resource_boundary::verify_current()
+            .context("private Formation requires bounded worker resources")?;
+    }
     // ── schema routing ──────────────────────────────────────────────────────
     // `ato.capsule/2` has a frontend of its own: it declares a portable
     // application instead of intent to plan. Reading only the discriminator
@@ -348,6 +366,11 @@ pub fn run_claimed_job_with_ledger(
     if let Some(text) = authored_toml.as_deref()
         && crate::v2_frontend::owns(text).map_err(anyhow::Error::new)?
     {
+        if private_isolated {
+            return Err(anyhow::anyhow!(
+                "private Formation portable frontend unsupported"
+            ));
+        }
         return crate::v2_frontend::run(crate::v2_frontend::V2Request {
             api: context.api,
             attempt: &attempt,
@@ -464,7 +487,11 @@ pub fn run_claimed_job_with_ledger(
             contract_ref: &planned.contract_ref,
             runtime_id: context.worker_id,
             profile: &profile,
-            authorization: EffectAuthorization::Unattended,
+            authorization: if private_isolated {
+                EffectAuthorization::PrivateIsolatedFormation
+            } else {
+                EffectAuthorization::Unattended
+            },
             network,
             browser: None,
             attempt_root: &attempt_root,
@@ -479,6 +506,7 @@ pub fn run_claimed_job_with_ledger(
             builder: &builder,
             shim: context.shim,
             network,
+            require_private_isolation: private_isolated,
         },
         Ok(permit),
     );
@@ -789,18 +817,9 @@ fn compose_result(
     let plan = &planned.plan;
     let serve = plan.serving(&planned.derivation);
     let public_env = plan.process_environment(&planned.derivation);
-    let readiness_path = planned
-        .contract
-        .requirements
-        .iter()
-        .find(|r| r.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER)
-        .and_then(|r| r.path.as_ref());
-    // What the result actually exports is decided here, once, and the readiness
-    // contract is derived from it. A Static Web candidate runs in the browser
-    // and exports nothing, so naming the Contract's HTTP port there is a claim
-    // about a port that does not exist — the control plane refuses it with
-    // `readiness names port "http", which is not exported`. The HTTP Contract
-    // observation itself is unaffected: it is still verified for every lane.
+    // Preserve the Derivation's logical Port identity all the way to the
+    // Runner. Formation and ordinary Runs derive their injected port variable
+    // from this same name; replacing it with "http" changes the process ABI.
     let exported_ports = planned
         .derivation
         .ports
@@ -808,24 +827,26 @@ fn compose_result(
         .filter(|port| plan.lane.is_process() && port.from == serve.id)
         .map(|port| {
             serde_json::json!({
-                "name": "http", "protocol": "http", "guest_port": port.guest_port,
+                "name": port.id, "protocol": "http", "guest_port": port.guest_port,
             })
         })
         .collect::<Vec<_>>();
-    let readiness_contracts = if exported_ports
+    let readiness_contracts = planned
+        .contract
+        .requirements
         .iter()
-        .any(|port| port.get("name").and_then(serde_json::Value::as_str) == Some("http"))
-    {
-        readiness_path
-            .map(|path| {
-                vec![serde_json::json!({
-                    "kind": "http", "port_name": "http", "path": path,
-                })]
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+        .filter(|requirement| {
+            requirement.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER
+        })
+        .find_map(|requirement| {
+            let name = requirement.port.as_deref()?;
+            let path = requirement.path.as_ref()?;
+            exported_ports
+                .iter()
+                .any(|port| port.get("name").and_then(serde_json::Value::as_str) == Some(name))
+                .then(|| vec![serde_json::json!({"kind": "http", "port_name": name, "path": path})])
+        })
+        .unwrap_or_default();
     let (kind, candidate) = match plan.lane {
         Lane::PythonProcess | Lane::Process => (
             "process_workspace",
@@ -856,7 +877,7 @@ fn compose_result(
     }))?);
     let formation_key = format!("v2:{inputs_digest}");
 
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "protocol": "ato.formation-result.v2",
         "job_id": attempt.job_id,
         "attempt_id": attempt.attempt_id,
@@ -940,7 +961,21 @@ fn compose_result(
         "deterministic_inputs_digest": inputs_digest,
         "verification_receipt": receipt,
         "outcomes": outcomes,
-    }))
+    });
+    if plan.lane.is_process() && planned.derivation.state.is_empty() {
+        // Preserve exactly what Formation verified. This is not a Run receipt:
+        // the later Run must observe its own workload using the same K and D.
+        let frozen = FrozenVerificationInput {
+            schema: FROZEN_VERIFICATION_SCHEMA.to_owned(),
+            contract_ref: contract_ref.to_owned(),
+            derivation_ref: derivation_ref.to_owned(),
+            contract: planned.contract.clone(),
+            derivation: planned.derivation.clone(),
+        };
+        frozen.validate_assignment(contract_ref, derivation_ref)?;
+        result["frozen_verification_input"] = serde_json::to_value(frozen)?;
+    }
+    Ok(result)
 }
 
 /// Where a job's scratch lives, so a caller can clean it up.
@@ -1099,6 +1134,25 @@ status = 200
     }
 
     #[test]
+    fn process_result_retains_the_exact_bound_verification_input() {
+        let planned = process_plan();
+        let result = compose(&planned);
+        let input: FrozenVerificationInput =
+            serde_json::from_value(result["frozen_verification_input"].clone()).unwrap();
+        assert_eq!(input.contract, planned.contract);
+        assert_eq!(input.derivation, planned.derivation);
+        assert_eq!(
+            input.validate_assignment(&planned.contract_ref, &planned.derivation_ref),
+            Ok(())
+        );
+        assert!(
+            compose(&static_plan())
+                .get("frozen_verification_input")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_static_result_exports_no_port_and_claims_no_readiness() {
         let planned = static_plan();
         assert_eq!(planned.plan.lane, Lane::StaticWeb);
@@ -1135,6 +1189,7 @@ status = 200
             .as_array()
             .expect("exported_ports is a list");
         assert!(!exported.is_empty(), "a serving process exports its port");
+        assert_eq!(exported[0]["name"], json!("app.http"));
 
         let readiness = result["readiness_contracts"]
             .as_array()
@@ -1164,6 +1219,24 @@ mod contract_identity_tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn private_isolation_requires_an_explicit_denied_network_policy() {
+        assert!(!private_isolation_policy(&json!({})).unwrap());
+        assert!(
+            private_isolation_policy(
+                &json!({"policy":{"private_isolated":true,"network":"denied"}})
+            )
+            .unwrap()
+        );
+        for policy in [
+            json!({"private_isolated":true}),
+            json!({"private_isolated":true,"network":"scoped"}),
+            json!({"private_isolated":"true","network":"denied"}),
+        ] {
+            assert!(private_isolation_policy(&json!({"policy":policy})).is_err());
+        }
+    }
 
     #[test]
     fn a_job_without_an_identity_request_is_unchanged() {

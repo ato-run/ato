@@ -2,7 +2,7 @@
 name = "ato-contracts"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 description = "Extension-defined Contract verifiers for Ato Realizations"
 
 [package.metadata.dist]

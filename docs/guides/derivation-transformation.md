@@ -1,5 +1,7 @@
 # Verify a Derivation transformation
 
+Status: Current technical reference.
+
 `ato reform` builds and verifies a local candidate under an existing portable
 bundle's frozen K. Review the candidate source before executing it. Start with
 an existing bundle whose Contract permits the intended source change.

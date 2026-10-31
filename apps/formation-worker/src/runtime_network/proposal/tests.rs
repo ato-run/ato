@@ -364,6 +364,7 @@ fn auto_plan_inventory_comes_from_verified_source_and_excludes_credentials() {
     // tries to supply it in a hand-written authorization.
     let mut auth = authorization();
     auth.execution_plan = Some(ato_formation::proposal::PlanAuthorization {
+        private_process_no_build: false,
         runtime_port_operations: false,
         source_oci: None,
         toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
@@ -516,6 +517,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
     })
     .collect();
     let domain = ato_formation::proposal::PlanAuthorization {
+        private_process_no_build: false,
         runtime_port_operations: false,
         files,
         toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
@@ -879,6 +881,174 @@ fn original_github_wrapper_archive_reaches_search_without_retar_or_semantic_rela
             "{corruption}"
         );
     }
+}
+
+#[test]
+fn verified_github_archive_prepares_unstarted_zero_d_search_with_fixed_contract() {
+    let (root, template) = prepared(|_| {});
+    let (file, bytes, digest, _tree, closure) = raw_github_source(root.path());
+    let verify = || {
+        FileVerifiedArchive::verify(
+            File::open(&file).unwrap(),
+            &digest,
+            bytes.len() as u64,
+            SourceLimits::default(),
+        )
+        .unwrap()
+    };
+    let mut policy = template.request.policy.clone();
+    policy.exploration=Some(serde_json::from_value(json!({"ceiling":{},"max_provider_calls":1,"max_inspections":1,
+        "max_provider_cost_usd_micros":1,"max_provider_input_tokens":1,"max_provider_output_tokens":1})).unwrap());
+    let mut too_small = template.request.budget.clone();
+    too_small.max_transfer_bytes = 1;
+    assert!(
+        prepare_verified_exploration_submission(
+            verify(),
+            template.request.base_contract.clone(),
+            &root.path().join("small"),
+            RuntimeConstraintWire::Any,
+            policy.clone(),
+            too_small,
+            "proposal_test",
+            BTreeMap::new()
+        )
+        .is_err()
+    );
+    let sub = prepare_verified_exploration_submission(
+        verify(),
+        template.request.base_contract.clone(),
+        &root.path().join("verified"),
+        RuntimeConstraintWire::Any,
+        policy,
+        template.request.budget.clone(),
+        "proposal_test",
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(sub.request.base_contract, template.request.base_contract);
+    assert_eq!(
+        sub.request.base_contract_ref,
+        template.request.base_contract_ref
+    );
+    assert_eq!(sub.request.source.archive_digest, digest);
+    assert_eq!(sub.request.source.closure_ref, closure);
+    assert!(sub.request.authorized_derivations.is_empty());
+    assert!(
+        sub.request
+            .policy
+            .proposal
+            .as_ref()
+            .unwrap()
+            .execution_plan
+            .as_ref()
+            .unwrap()
+            .files
+            .values()
+            .any(|f| f.path == "app.py")
+    );
+    let mut copied = Vec::new();
+    sub.source_file().unwrap().read_to_end(&mut copied).unwrap();
+    assert_eq!(copied, bytes);
+    let proposal = sub.proposal_request_v2(&status(&sub)).unwrap();
+    assert_eq!(proposal.frozen_contract, template.request.base_contract);
+}
+
+#[test]
+fn source_exploration_intake_requires_measured_tree_and_network_denial() {
+    use crate::job::source_intake::{ArchiveFileFetcher, prepare_source_exploration};
+    let (root, template) = prepared(|_| {});
+    let (file, bytes, digest, tree, closure) = raw_github_source(root.path());
+    let mut job:ato_ipc::formation::FormationJobV1=serde_json::from_value(json!({
+        "protocol":"ato.formation-job.v1","job_id":"fjob_wrapper_search","request_idempotency_key":"wrapper-search-explicit",
+        "source":{"kind":"uploaded_archive","archive_ref":"formation-source-archive:fjob_source","expected_archive_digest":digest,"expected_source_tree_digest":tree,"subdirectory":""},
+        "requested_outputs":["process_workspace"],"target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},"policy":{"policy_version":"formation-v1","network":"denied","publish_enabled":false}
+    })).unwrap();
+    let mut policy = template.request.policy.clone();
+    policy.exploration=Some(serde_json::from_value(json!({"ceiling":{},"max_provider_calls":1,"max_inspections":1,
+        "max_provider_cost_usd_micros":1,"max_provider_input_tokens":1,"max_provider_output_tokens":1})).unwrap());
+    let prepare = |job: &ato_ipc::formation::FormationJobV1, p: SatisfyPolicy| {
+        prepare_source_exploration(
+            &ArchiveFileFetcher(file.clone()),
+            job,
+            template.request.base_contract.clone(),
+            &root.path().join("intake"),
+            RuntimeConstraintWire::Any,
+            p,
+            template.request.budget.clone(),
+            "proposal_test",
+            BTreeMap::new(),
+        )
+    };
+    let sub = prepare(&job, policy.clone()).unwrap();
+    assert_eq!(sub.request.source.archive_digest, digest);
+    assert_eq!(sub.request.source.archive_bytes, Some(bytes.len() as u64));
+    assert_eq!(sub.request.source.closure_ref, closure);
+    assert!(sub.request.authorized_derivations.is_empty());
+    let mut network = policy.clone();
+    network.network = "allowed".into();
+    assert!(prepare(&job, network).is_err());
+    if let ato_ipc::formation::FormationSourceV1::UploadedArchive(s) = &mut job.source {
+        s.expected_source_tree_digest = Some(format!("sha256:{}", "0".repeat(64)));
+    }
+    assert!(prepare(&job, policy).is_err());
+}
+
+#[test]
+fn hosted_claim_prepares_fixed_contract_and_bounded_profile_from_the_measured_archive() {
+    use crate::job::{
+        hosted_preparation::{PreparationClaim, prepare_claim},
+        source_intake::ArchiveFileFetcher,
+    };
+    let (root, _template) = prepared(|_| {});
+    let (file, bytes, digest, tree, closure) = raw_github_source(root.path());
+    let mut claim = PreparationClaim {
+        id: "hprep_aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".into(),
+        owner: "owner_a".into(),
+        search_id: "search_123".into(),
+        holder: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".into(),
+        generation: 1,
+        expires_at: "2026-10-31T00:00:00Z".into(),
+        intent: json!({"path":"/health","status":200}),
+        source_origin: json!({"result":{"job_id":"fjob_source","archive_descriptor":{
+            "source_archive_digest":digest,"source_tree_digest":tree,"source_closure_ref":closure,"subdirectory":"","size_bytes":bytes.len()}}}),
+    };
+    let sub = prepare_claim(
+        &ArchiveFileFetcher(file.clone()),
+        &claim,
+        &root.path().join("hosted"),
+    )
+    .unwrap();
+    println!(
+        "hosted_prepared_request={}",
+        serde_json::to_string(&sub.request).unwrap()
+    );
+    assert_eq!(sub.request.search_id, claim.search_id);
+    assert_eq!(
+        serde_json::to_value(&sub.request.base_contract).unwrap()["requirements"][0]["path"],
+        "/health"
+    );
+    assert_eq!(sub.request.source.archive_digest, digest);
+    assert_eq!(sub.request.source.closure_ref, closure);
+    assert!(sub.request.authorized_derivations.is_empty());
+    assert_eq!(sub.request.budget.max_attempts, 1);
+    assert_eq!(
+        sub.request
+            .policy
+            .exploration
+            .as_ref()
+            .unwrap()
+            .max_provider_calls,
+        1
+    );
+    claim.intent = json!({"path":"https://evil.example","status":200});
+    assert!(
+        prepare_claim(
+            &ArchiveFileFetcher(file),
+            &claim,
+            &root.path().join("bad-hosted")
+        )
+        .is_err()
+    );
 }
 
 #[test]

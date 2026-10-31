@@ -1,5 +1,7 @@
 # Native helper controls (draft)
 
+Status: Draft.
+
 The helper is physical Runner tooling. Controls never enter K, D, a Capsule
 reference, or the exact D-derived session descriptor. The accepted Materialization
 and Protocol Adapter RFCs require physical realization and secret binding to

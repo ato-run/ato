@@ -1,5 +1,7 @@
 # Connect a user-owned Runner
 
+Status: Current technical reference.
+
 Implementation branch guide, 2026-10-08 (TODO #137/#145). These changes require
 the matching API/PWA release. No new binary distribution has been published.
 This guide uses the current Connected Realization Worker, not retired

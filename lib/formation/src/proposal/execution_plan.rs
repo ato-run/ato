@@ -126,6 +126,9 @@ pub struct VerifiedSourceFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAuthorization {
+    /// Frozen opt-in for private hosted plans that need no authored build.
+    #[serde(default, skip_serializing_if = "crate::port_operations::is_false")]
+    pub private_process_no_build: bool,
     #[serde(default, skip_serializing_if = "crate::port_operations::is_false")]
     pub runtime_port_operations: bool,
     pub files: BTreeMap<String, VerifiedSourceFile>,
@@ -616,10 +619,21 @@ impl ExecutionPlanProposal {
                 "node"
             }
         );
-        let mut steps = vec![
-            json!({"id":"check-toolchain","use":"ato.process@1","op":"exec",
-            "argv":[executable,"--version"],"cwd":self.cwd,"network":"scoped-dependencies"}),
-        ];
+        // The private hosted profile already validates the provisioned runtime
+        // in its isolated executor. Avoid an extra authored scoped-network step
+        // only for an explicitly frozen, build-free plan. Old searches retain
+        // their exact compiler behavior and Derivation identities.
+        let mut steps = Vec::new();
+        if !authorization.private_process_no_build
+            || !self.dependencies.is_empty()
+            || !self.build_scripts.is_empty()
+            || !self.setup_scripts.is_empty()
+        {
+            steps.push(
+                json!({"id":"check-toolchain","use":"ato.process@1","op":"exec",
+                "argv":[executable,"--version"],"cwd":self.cwd,"network":"scoped-dependencies"}),
+            );
+        }
         let runtimes = vec![json!({"name":self.runtime.name,"version":self.runtime.version})];
         for dependency in &self.dependencies {
             if let DependencyOperation::NpmCi {

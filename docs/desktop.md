@@ -1,5 +1,7 @@
 # Desktop
 
+Status: Current technical reference.
+
 Desktop is a separate optional build/release boundary under `apps/desktop`,
 excluded from the root Cargo workspace. The current product entry is the Web
 service ato.run. Desktop does not define a different Capsule identity.
