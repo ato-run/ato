@@ -5,6 +5,7 @@ pub mod deepseek;
 pub mod hosted_anthropic;
 pub mod hosted_budget;
 pub mod hosted_budget_http;
+pub mod hosted_proposal_http;
 pub mod provenance;
 pub mod reasoning;
 
