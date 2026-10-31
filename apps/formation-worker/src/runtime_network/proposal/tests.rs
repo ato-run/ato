@@ -364,6 +364,7 @@ fn auto_plan_inventory_comes_from_verified_source_and_excludes_credentials() {
     // tries to supply it in a hand-written authorization.
     let mut auth = authorization();
     auth.execution_plan = Some(ato_formation::proposal::PlanAuthorization {
+        private_process_no_build: false,
         runtime_port_operations: false,
         source_oci: None,
         toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
@@ -516,6 +517,7 @@ fn session_inspection_is_inside_one_round_and_restart_reuses_the_final_answer() 
     })
     .collect();
     let domain = ato_formation::proposal::PlanAuthorization {
+        private_process_no_build: false,
         runtime_port_operations: false,
         files,
         toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
