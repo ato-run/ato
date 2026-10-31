@@ -1721,3 +1721,87 @@ fn adaptive_proposal_fences_are_the_deterministic_fences() {
         );
     }
 }
+
+#[test]
+fn hosted_provider_input_is_bound_to_the_frozen_search_and_round() {
+    let mut state = empty_frontier();
+    let mut auth = source_auth(16384);
+    auth.policy.max_proposals = 1;
+    state.frozen.policy.proposal = Some(auth.clone());
+    state.frozen.policy.exploration = Some(
+        serde_json::from_value(json!({
+            "ceiling":{},"max_provider_calls":2,"max_inspections":0,
+            "max_provider_cost_usd_micros":10,"max_provider_input_tokens":100,
+            "max_provider_output_tokens":100
+        }))
+        .unwrap(),
+    );
+    let mut base = source_request(&auth);
+    base.remaining_budget.max_proposals = 1;
+    let mut request = ProposalRequestV2::new(base, &auth, &[]).unwrap();
+    request.round_seq = Some(1);
+    request.exploration_context = Some(
+        serde_json::from_value(json!({
+            "effective_max_rounds":3,"ceiling":{},"previous_derivations":[],
+            "failures":[],"successful_derivation_ref":null,"proposal_diagnostics":[]
+        }))
+        .unwrap(),
+    );
+    validate_frozen_provider_request(&request, &state.frozen, "source-search", 1, 5000).unwrap();
+    assert!(
+        validate_frozen_provider_request(&request, &state.frozen, "different-search", 1, 5000)
+            .is_err()
+    );
+    assert!(
+        validate_frozen_provider_request(&request, &state.frozen, "source-search", 2, 5000)
+            .is_err()
+    );
+    assert!(
+        validate_frozen_provider_request(&request, &state.frozen, "source-search", 1, 4999)
+            .is_err()
+    );
+    let mut changed = request.clone();
+    changed.frozen_contract.requirements[0].status = Some(201);
+    assert!(
+        validate_frozen_provider_request(&changed, &state.frozen, "source-search", 1, 5000)
+            .is_err()
+    );
+    let mut changed = request.clone();
+    changed.remaining_budget.attempts_remaining = state.frozen.policy.budget.max_attempts + 1;
+    assert!(
+        validate_frozen_provider_request(&changed, &state.frozen, "source-search", 1, 5000)
+            .is_err()
+    );
+    let mut changed = request.clone();
+    changed
+        .exploration_context
+        .as_mut()
+        .unwrap()
+        .effective_max_rounds = 4;
+    assert!(
+        validate_frozen_provider_request(&changed, &state.frozen, "source-search", 1, 5000)
+            .is_err()
+    );
+    let mut changed = request.clone();
+    changed.operation_catalog.operations.clear();
+    assert!(
+        validate_frozen_provider_request(&changed, &state.frozen, "source-search", 1, 5000)
+            .is_err()
+    );
+    let mut changed = request.clone();
+    changed.source_context = build_source_context(
+        &auth,
+        &[AuthorizedSourceText {
+            kind: SourceContextKind::Entrypoint,
+            logical_id: "entry_a",
+            bytes: b"print('ok')",
+        }],
+    )
+    .unwrap();
+    validate_frozen_provider_request(&changed, &state.frozen, "source-search", 1, 5000).unwrap();
+    changed.source_context[0].text.push('!');
+    assert!(
+        validate_frozen_provider_request(&changed, &state.frozen, "source-search", 1, 5000)
+            .is_err()
+    );
+}
