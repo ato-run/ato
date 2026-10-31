@@ -3,8 +3,10 @@
 //! pinned binary and combine owner consent, worker, lease and round fences in
 //! the same write. This client never turns its managed token into an owner token.
 use super::budget::{BudgetSnapshot, JournalEvent};
+use super::hosted_anthropic::HostedInferenceTransport;
 use super::hosted_budget::{AppendOutcome, HostedJournalTransport};
 use anyhow::{Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use reqwest::{Url, blocking::Client};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,6 +32,16 @@ struct EventRequest<'a> {
 struct SnapshotRequest<'a> {
     owner: &'a str,
     lease: &'a Lease,
+}
+#[derive(Serialize)]
+struct InferenceRequest<'a> {
+    owner: &'a str,
+    lease: &'a Lease,
+    cell: &'a str,
+    round: u64,
+    round_fence: &'a str,
+    timeout_ms: u64,
+    body_base64: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,15 +165,26 @@ impl HostedJournalHttp {
         operation: &str,
         body: &impl Serialize,
     ) -> Result<T> {
+        let bytes = self.call_raw(operation, body, MAX_RESPONSE_BYTES, None)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("hosted ledger response invalid; outcome unknown"))
+    }
+    fn call_raw(
+        &self,
+        operation: &str,
+        body: &impl Serialize,
+        cap: u64,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>> {
         let url = self
             .endpoint
             .join(operation)
             .map_err(|_| anyhow::anyhow!("hosted ledger endpoint invalid"))?;
-        let mut response = self
-            .client
-            .post(url)
-            .bearer_auth(&self.token)
-            .json(body)
+        let mut request = self.client.post(url).bearer_auth(&self.token).json(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let mut response = request
             .send()
             .map_err(|_| anyhow::anyhow!("hosted ledger transport failed; outcome unknown"))?;
         if !response.status().is_success() {
@@ -170,15 +193,40 @@ impl HostedJournalHttp {
         let mut bytes = Vec::new();
         response
             .by_ref()
-            .take(MAX_RESPONSE_BYTES + 1)
+            .take(cap + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| anyhow::anyhow!("hosted ledger response unreadable; outcome unknown"))?;
         ensure!(
-            bytes.len() as u64 <= MAX_RESPONSE_BYTES,
+            bytes.len() as u64 <= cap,
             "hosted ledger response too large"
         );
-        serde_json::from_slice(&bytes)
-            .map_err(|_| anyhow::anyhow!("hosted ledger response invalid; outcome unknown"))
+        Ok(bytes)
+    }
+}
+impl HostedInferenceTransport for HostedJournalHttp {
+    fn send(&self, cell: &str, round: u32, timeout_ms: u64, body: &[u8]) -> Result<Vec<u8>> {
+        ensure!(
+            safe_id(cell, 1, 128)
+                && u64::from(round) == self.round
+                && (1..=30_000).contains(&timeout_ms)
+                && !body.is_empty()
+                && body.len() <= 65_536,
+            "invalid hosted inference scope"
+        );
+        self.call_raw(
+            "../provider-inference/anthropic",
+            &InferenceRequest {
+                owner: &self.owner,
+                lease: &self.lease,
+                cell,
+                round: self.round,
+                round_fence: &self.round_fence,
+                timeout_ms,
+                body_base64: BASE64.encode(body),
+            },
+            128 * 1024,
+            Some(Duration::from_millis(timeout_ms)),
+        )
     }
 }
 impl HostedJournalTransport for HostedJournalHttp {
@@ -236,7 +284,7 @@ mod tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = thread::spawn(move || {
             let mut received = vec![];
-            for n in 0..3 {
+            for n in 0..4 {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -277,7 +325,8 @@ mod tests {
                 let response = match n {
                     0 => r#"{"appended":true,"revision":1}"#,
                     1 => r#"{"appended":false,"revision":1}"#,
-                    _ => r#"{"revision":1,"snapshot":{"cells":{},"stopped":false}}"#,
+                    2 => r#"{"revision":1,"snapshot":{"cells":{},"stopped":false}}"#,
+                    _ => r#"{"content":[]}"#,
                 };
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
             }
@@ -291,6 +340,11 @@ mod tests {
             AppendOutcome::AlreadyPresent
         );
         assert!(!transport.snapshot().unwrap().stopped);
+        assert_eq!(
+            transport.send("call_1", 1, 1000, b"model bytes").unwrap(),
+            b"{\"content\":[]}"
+        );
+        assert!(transport.send("call_1", 2, 1000, b"model bytes").is_err());
         let seen = server.join().unwrap();
         assert!(seen[0].0.starts_with(
             "POST /v1/internal/formation/explorations/search_123/provider-journal/append "
@@ -298,6 +352,15 @@ mod tests {
         assert!(seen[2].0.starts_with(
             "POST /v1/internal/formation/explorations/search_123/provider-journal/snapshot "
         ));
+        assert!(seen[3].0.starts_with(
+            "POST /v1/internal/formation/explorations/search_123/provider-inference/anthropic "
+        ));
+        assert_eq!(
+            BASE64
+                .decode(seen[3].1["body_base64"].as_str().unwrap())
+                .unwrap(),
+            b"model bytes"
+        );
         assert_eq!(seen[0].1, seen[1].1);
         assert_eq!(seen[0].1["lease"]["generation"], 2);
         assert_eq!(seen[0].1["round_fence"], FENCE);
