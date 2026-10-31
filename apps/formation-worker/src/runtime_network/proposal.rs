@@ -26,6 +26,25 @@ use provenance::{CallStatus, ErrorClass, ProviderCall, ProviderIdentity};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Provider-specific transport is not the proposal compiler or the authority
+/// on K. Every implementation is bound to one frozen configuration and passes
+/// its raw output through the same Coordinator/Rust validation path.
+pub trait GeneralCandidateProducer:
+    CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure> + Send + Sync
+{
+    fn configuration_ref(&self) -> Result<String>;
+    fn identity(&self) -> ProviderIdentity;
+}
+
+impl GeneralCandidateProducer for DeepSeekCandidateProducer {
+    fn configuration_ref(&self) -> Result<String> {
+        DeepSeekCandidateProducer::configuration_ref(self)
+    }
+    fn identity(&self) -> ProviderIdentity {
+        DeepSeekCandidateProducer::identity(self)
+    }
+}
+
 pub(super) struct RequesterProposal {
     frozen: FrozenSearchV1,
     bases: BTreeMap<String, String>,
@@ -1302,7 +1321,7 @@ pub fn serve_general_proposal(
     status: &Value,
     submission: &mut Submission,
     claimant_id: &str,
-    producer: Arc<DeepSeekCandidateProducer>,
+    producer: Arc<dyn GeneralCandidateProducer>,
 ) -> Result<bool> {
     if let Some(exploration) = &submission.request.policy.exploration {
         anyhow::ensure!(
@@ -1356,7 +1375,7 @@ pub fn serve_reasoning_proposal(
 
 enum Invocation {
     Fixed(Arc<dyn CandidateProducer + Send + Sync>),
-    General(Arc<DeepSeekCandidateProducer>),
+    General(Arc<dyn GeneralCandidateProducer>),
     Reasoning(Arc<reasoning::ReasoningProducer>),
 }
 fn serve_proposal_inner(
