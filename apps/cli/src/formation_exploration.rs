@@ -4,9 +4,12 @@ use super::FormArgs;
 use anyhow::{Context, Result, bail, ensure};
 use ato_formation::{
     authoring::BoundContract, exploration::ExplorationPolicy, proposal::ProposalAuthorization,
+    provider_budget::validate_combined,
 };
 use ato_formation_worker::runtime_network::{
-    Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement, new_search_id,
+    Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement,
+    exploration_driver::{DriverStep, drive_step},
+    new_search_id,
     proposal::{
         budget::{BudgetPlan, CallBudget},
         deepseek::DeepSeekCandidateProducer,
@@ -97,51 +100,10 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         "agent Session needs --session-bridge and no direct inference API decision provider"
     );
     config.exploration.validate()?;
-    let reserve = config.provider_budget.validate()?;
-    let cp_calls = u64::from(config.provider_budget.max_calls);
-    let mut total_cost = reserve.checked_mul(cp_calls).context("spend overflow")?;
-    let mut total_input = config
-        .provider_budget
-        .input_token_cap
-        .checked_mul(cp_calls)
-        .context("token overflow")?;
-    let mut total_output = config
-        .provider_budget
-        .output_token_cap
-        .checked_mul(cp_calls)
-        .context("token overflow")?;
-    let mut total_calls = cp_calls;
+    let mut plans = vec![config.provider_budget.clone()];
     if let Some(decision) = &config.decision {
         decision.validate()?;
-        let calls = u64::from(decision.budget.max_calls);
-        total_cost = total_cost
-            .checked_add(
-                decision
-                    .budget
-                    .validate()?
-                    .checked_mul(calls)
-                    .context("spend overflow")?,
-            )
-            .context("spend overflow")?;
-        total_input = total_input
-            .checked_add(
-                decision
-                    .budget
-                    .input_token_cap
-                    .checked_mul(calls)
-                    .context("token overflow")?,
-            )
-            .context("token overflow")?;
-        total_output = total_output
-            .checked_add(
-                decision
-                    .budget
-                    .output_token_cap
-                    .checked_mul(calls)
-                    .context("token overflow")?,
-            )
-            .context("token overflow")?;
-        total_calls += calls;
+        plans.push(decision.budget.clone());
         let ref_ = decision.configuration_ref()?;
         ensure!(
             config
@@ -161,13 +123,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             "frozen decision configuration missing"
         );
     }
-    ensure!(
-        total_calls <= u64::from(config.exploration.max_provider_calls)
-            && total_cost <= config.exploration.max_provider_cost_usd_micros
-            && total_input <= config.exploration.max_provider_input_tokens
-            && total_output <= config.exploration.max_provider_output_tokens,
-        "combined provider spend plan exceeds frozen exploration budget"
-    );
+    validate_combined(&plans, &config.exploration)?;
     let provider_ref = config.provider.configuration_ref(&config.provider_budget)?;
     ensure!(
         config
@@ -467,13 +423,50 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         } else {
             reporting_client.satisfy_status(&id)?
         };
-        let settled = Settlement::of(&status)? != Settlement::Running;
+        Settlement::of(&status)?;
         if let Some(bridge) = &bridge {
             bridge.update(&status)?;
         }
-        let expired = Instant::now() >= deadline
-            || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() >= u128::from(expires);
-        if !settled && !expired && status["pause_reason"] == "needs_input" {
+        let step = drive_step(
+            &status,
+            || {
+                Ok(Instant::now() >= deadline
+                    || SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
+                        >= u128::from(expires))
+            },
+            || {
+                if let Some(decision) = &decision {
+                    serve_decision(&client, &id, &status, decision, &mut answered);
+                }
+                Ok(())
+            },
+            || {
+                if let Some(producer) = &reasoning {
+                    serve_reasoning_proposal(
+                        &client,
+                        &id,
+                        &status,
+                        &mut submission,
+                        &claimant_id,
+                        producer.clone(),
+                    )?;
+                } else {
+                    serve_general_proposal(
+                        &client,
+                        &id,
+                        &status,
+                        &mut submission,
+                        &claimant_id,
+                        api_producer
+                            .as_ref()
+                            .context("API producer missing")?
+                            .clone(),
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+        if step == DriverStep::NeedsInput {
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -482,36 +475,9 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             );
             return Ok(());
         }
-        if !settled && !expired {
-            if let Some(decision) = &decision {
-                serve_decision(&client, &id, &status, decision, &mut answered);
-            }
-            if let Some(producer) = &reasoning {
-                serve_reasoning_proposal(
-                    &client,
-                    &id,
-                    &status,
-                    &mut submission,
-                    &claimant_id,
-                    producer.clone(),
-                )?;
-            } else {
-                serve_general_proposal(
-                    &client,
-                    &id,
-                    &status,
-                    &mut submission,
-                    &claimant_id,
-                    api_producer
-                        .as_ref()
-                        .context("API producer missing")?
-                        .clone(),
-                )?;
-            }
-        }
-        if settled || expired {
+        if matches!(step, DriverStep::Settled(_) | DriverStep::Deadline) {
             let mut result = submission.exploration_result(&status)?;
-            if expired && !settled {
+            if step == DriverStep::Deadline {
                 // This is the requester's wait ending, not an invented durable
                 // settlement or evidence that an uncertain attempt had no effect.
                 result["requester_stop"] = serde_json::json!({
