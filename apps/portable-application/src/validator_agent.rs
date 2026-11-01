@@ -352,6 +352,39 @@ impl ValidatorAgent {
                 run_id: job.run_id.as_deref(),
             },
         );
+        // The receipt leaves this process only if it is internally consistent
+        // with the frozen K and the attempt it names: certificate evidence must
+        // belong to THIS requirement, a satisfied TLS verdict must be a public,
+        // unexpired, completed observation, and the observation set must be
+        // exactly K's. This is the same Rust authority the receiver uses.
+        let assignment = ato_formation::receipt::ReceiptAssignment {
+            contract: spec.contract,
+            contract_ref: spec.contract_ref,
+            derivation_ref: spec.derivation_ref,
+            attempt_id: job
+                .attempt_id
+                .as_deref()
+                .context("runtime job omitted attempt_id")?,
+            request_id: None,
+        };
+        if let Err(rejection) = ato_formation::receipt::accept_receipt(&assignment, &point.receipt)
+        {
+            let code = "receipt_inconsistent";
+            if let Err(report_error) = self.api.report_runtime_failure(
+                &job,
+                code,
+                &format!("{}: {}", rejection.code, rejection.detail),
+            ) {
+                eprintln!(
+                    "[validator] could not report {code} for {}: {report_error:#}",
+                    job.job_id
+                );
+            }
+            return Ok(ValidatorRunOutcome::HostedAbandoned {
+                bundle_id: job.bundle_id.clone(),
+                failure_code: code.to_owned(),
+            });
+        }
         self.api.ack_runtime(&job, &point.receipt)?;
         Ok(ValidatorRunOutcome::HostedVerified {
             bundle_id: job.bundle_id,

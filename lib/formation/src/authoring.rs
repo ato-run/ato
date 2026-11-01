@@ -1602,4 +1602,17 @@ mod tests {
         assert!(validate_tls_server_name("mail.example").is_ok());
         assert!(validate_tls_server_name("mail..example").is_err());
     }
+
+    #[test]
+    fn a_pre_tls_contract_keeps_its_exact_canonical_bytes() {
+        // The new fields are absent, not null and not reordered: this is the
+        // frozen canonical form of a Contract that predates them, so every
+        // ContractRef minted before TLS stays the same value.
+        let (contract, _) = bind(&minimal(AuthoringProvenance::Authored), &ctx()).expect("binds");
+        let canonical = serde_jcs::to_vec(&contract).expect("canonicalizes");
+        assert_eq!(
+            String::from_utf8(canonical).expect("utf8"),
+            r#"{"requirements":[{"id":"root","method":"GET","path":"/","port":"app.http","status":200,"verifier":"ato.contract.http@1"}],"schema":"ato.contract/1"}"#
+        );
+    }
 }
