@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use ato_formation::authoring::{
-    BoundDerivation, BoundRequirement, ClientAddressTransport, HTTP_CONTRACT_VERIFIER,
+    BoundDerivation, BoundRequirement, ClientAddressTransport, EffectClass, HTTP_CONTRACT_VERIFIER,
     HTTP_PROTOCOL, STATE_FILESYSTEM_PROTOCOL, StateAccess, TCP_EGRESS_PROTOCOL,
     TLS_CONTRACT_VERIFIER, TlsStart,
 };
@@ -38,6 +38,27 @@ fn mail_sample_route() -> ValidatedPortableApplication {
     let mut routes = validate_all_derivations(&bundle).expect("every derivation validates");
     assert_eq!(routes.len(), 1, "D1 is one service group");
     routes.remove(0)
+}
+
+#[test]
+fn the_bundle_pins_its_effect_policy_and_its_whole_observation_set() {
+    let route = mail_sample_route();
+    // The validator requires this effect class for a service group with
+    // operator-managed TCP egress; losing it would change admission, not just
+    // documentation.
+    assert_eq!(route.derivation.effects, EffectClass::RequiresConfirmation);
+    // Seven observations decide this bundle's K: four TLS + three HTTP.
+    assert_eq!(route.contract.requirements.len(), 7);
+    let verifiers = route
+        .contract
+        .requirements
+        .iter()
+        .map(|requirement| requirement.verifier.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        verifiers,
+        BTreeSet::from([TLS_CONTRACT_VERIFIER, HTTP_CONTRACT_VERIFIER])
+    );
 }
 
 fn requirement<'a>(contract: &'a [BoundRequirement], id: &str) -> &'a BoundRequirement {
