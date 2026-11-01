@@ -51,6 +51,24 @@ repository root after creating the directories:
       -addext "keyUsage=critical,digitalSignature" \
       -addext "extendedKeyUsage=serverAuth"
 
+## high-serial/ (serial 0x8f1234abcd, valid 2026-01-01 to 2046-01-01)
+
+A certificate whose serial has the high bit set, so its DER INTEGER content
+carries the mandatory 0x00 sign padding (`00 8F 12 34 AB CD`) while
+`openssl x509 -serial` prints `8F1234ABCD`. The probe must report the number,
+not the padding, because ops compares it with the export meta and openssl.
+
+    cd lib/tls-observe/tests/fixtures/high-serial
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout key.pem -out cert.pem -sha256 \
+      -subj "/CN=mail.ato.test" \
+      -set_serial 0x8f1234abcd \
+      -not_before 20260101000000Z -not_after 20460101000000Z \
+      -addext "subjectAltName=DNS:mail.ato.test" \
+      -addext "basicConstraints=critical,CA:FALSE" \
+      -addext "keyUsage=critical,digitalSignature" \
+      -addext "extendedKeyUsage=serverAuth"
+
 ## Why these facts
 
 - valid/cert.pem is the end-entity the tests serve; TestOnly(valid/cert.pem)
@@ -60,8 +78,9 @@ repository root after creating the directories:
 - expired/ is outside its validity window at any plausible test time, so
   within_validity is false and days_remaining is negative.
 - serial 0x00c0ffee has its top bit set, so its DER INTEGER content is
-  00 c0 ff ee; the probe reports the raw contents as lowercase hex
-  (00c0ffee), which is what makes the serial expectation meaningful.
+  00 c0 ff ee; the probe strips the DER sign-padding byte and reports
+  `c0ffee`, exactly as `openssl x509 -serial` displays it. The
+  high-serial/ fixture pins the same rule for the probe's own test.
 
 The private keys are committed only so the loopback test servers can complete
 a handshake; they protect nothing.

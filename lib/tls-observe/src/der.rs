@@ -135,7 +135,7 @@ pub(crate) fn parse_certificate(der: &[u8]) -> Result<LeafFacts, String> {
     }
 
     let serial = tbs.expect(TAG_INTEGER)?;
-    let serial_hex = hex_lower(serial);
+    let serial_hex = hex_lower(serial_bytes(serial));
 
     // signature AlgorithmIdentifier
     tbs.expect(TAG_SEQUENCE)?;
@@ -305,6 +305,21 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+/// The serial as the certificate's own `-serial` display states it.
+///
+/// DER INTEGER carries one leading `0x00` byte only to keep a positive value
+/// from looking negative when its first byte has the high bit set. That padding
+/// is not part of the number, and ops compares this value with the export meta
+/// and with `openssl x509 -serial`, which both omit it. A serial of zero stays
+/// `00`.
+fn serial_bytes(der_integer: &[u8]) -> &[u8] {
+    if der_integer.len() > 1 && der_integer[0] == 0 {
+        &der_integer[1..]
+    } else {
+        der_integer
+    }
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -436,5 +451,59 @@ mod tests {
 
         let well_formed = Reader::new(&[0x02, 0x01, 0x01]).read_tlv();
         assert!(well_formed.is_ok());
+    }
+
+    #[test]
+    fn a_der_sign_padding_byte_is_not_part_of_the_serial() {
+        assert_eq!(hex_lower(serial_bytes(&[0x8f, 0x12])), "8f12");
+        assert_eq!(hex_lower(serial_bytes(&[0x00, 0x8f, 0x12])), "8f12");
+        assert_eq!(hex_lower(serial_bytes(&[0x00, 0x00, 0x01])), "0001");
+        assert_eq!(hex_lower(serial_bytes(&[0x00])), "00");
+    }
+
+    #[test]
+    fn a_high_bit_fixture_serial_matches_the_openssl_serial_display() {
+        let path = format!(
+            "{}/tests/fixtures/high-serial/cert.pem",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let pem = std::fs::read_to_string(&path).expect("read high-serial fixture");
+        let der = pem_certificate_der(&pem);
+        let facts = parse_certificate(&der).expect("parse the fixture");
+        // openssl x509 -serial prints 8F1234ABCD; the DER content is
+        // 00 8F 12 34 AB CD because the first byte has the high bit set.
+        assert_eq!(facts.serial_hex, "8f1234abcd");
+    }
+
+    /// The test fixtures are base64 PEM; decode only the certificate body.
+    fn pem_certificate_der(pem: &str) -> Vec<u8> {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut lookup = [u8::MAX; 256];
+        for (index, byte) in ALPHABET.iter().enumerate() {
+            lookup[usize::from(*byte)] = index as u8;
+        }
+        let begin = "-----BEGIN CERTIFICATE-----";
+        let end = "-----END CERTIFICATE-----";
+        let body = &pem[pem.find(begin).unwrap() + begin.len()..pem.find(end).unwrap()];
+        let encoded: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut decoded = Vec::new();
+        let mut accumulator = 0u32;
+        let mut bits = 0u32;
+        for byte in encoded.bytes() {
+            if byte == b'=' {
+                break;
+            }
+            let value = lookup[usize::from(byte)];
+            assert_ne!(value, u8::MAX);
+            accumulator = (accumulator << 6) | u32::from(value);
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                decoded.push((accumulator >> bits) as u8);
+                accumulator &= (1u32 << bits) - 1;
+            }
+        }
+        decoded
     }
 }
