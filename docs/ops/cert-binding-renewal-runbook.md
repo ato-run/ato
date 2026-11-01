@@ -22,7 +22,7 @@ Do not start this procedure until all of the following are true:
 3. S1 (`ato.contract.tls@1`, receipt `/3`) is merged, so the reflection proof
    exists.
 4. The Instance is imported, running, and its Stalwart configuration references
-   `ATO_BINDING_MAIL_TLS_CERT` / `ATO_BINDING_MAIL_TLS_KEY`.
+   `ATO_BINDING_MAIL_CERT_PEM` / `ATO_BINDING_MAIL_KEY_PEM`.
 
 If (1) is not true, the honest interim is the current host-side copy into
 Stalwart with a manual restart, and this runbook does not apply.
@@ -35,7 +35,7 @@ One root-owned file, `0600`, root-owned. The tool refuses to run otherwise.
 # /etc/ato/cert-export/allowlist.conf
 allowlist = "ato.cert-export.allowlist/1"
 # instance_id        domain            certificate                    private key                    cert-binding     key-binding
-i_01J8ZQ0K9R3T6V      mail.ato.run      /srv/caddy-data/mail.ato.run.crt  /srv/caddy-data/mail.ato.run.key  mail_tls_cert  mail_tls_key
+i_01J8ZQ0K9R3T6V      mail.ato.run      /srv/caddy-data/mail.ato.run.crt  /srv/caddy-data/mail.ato.run.key  mail_cert_pem  mail_key_pem
 ```
 
 Rules: one line per (Instance, domain); absolute paths; binding ids exactly as
@@ -264,7 +264,7 @@ back".
 
    ```text
    allowlist = "ato.cert-export.allowlist/1"
-   i_01J8ZQ0K9R3T6V  mail.ato.run  /var/lib/ato/cert-export/<instance>/cert.pem.prev  /var/lib/ato/cert-export/<instance>/key.pem.prev  mail_tls_cert  mail_tls_key
+   i_01J8ZQ0K9R3T6V  mail.ato.run  /var/lib/ato/cert-export/<instance>/cert.pem.prev  /var/lib/ato/cert-export/<instance>/key.pem.prev  mail_cert_pem  mail_key_pem
    ```
 
    `chmod 0600`, root-owned.

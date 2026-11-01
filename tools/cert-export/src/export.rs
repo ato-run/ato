@@ -444,8 +444,8 @@ mod tests {
             domain: "mail.example.test".to_owned(),
             certificate: root.join("source.crt"),
             private_key: root.join("source.key"),
-            certificate_binding: "mail_tls_cert".to_owned(),
-            private_key_binding: "mail_tls_key".to_owned(),
+            certificate_binding: "mail_cert_pem".to_owned(),
+            private_key_binding: "mail_key_pem".to_owned(),
         }
     }
 
