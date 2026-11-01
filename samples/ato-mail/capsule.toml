@@ -1,0 +1,159 @@
+schema = "ato.capsule/2"
+
+# D1 of the self-hosted mail plan (docs/ops/self-hosted-mail-ato-app-plan-20261102.md).
+# One Capsule, one K, one Derivation that composes two components.
+#
+# This file is authoring input only. K ([[contract.observation]]) states what
+# must hold of the service; it names logical Ports, never an address, a Runner,
+# a host or a product.
+[application]
+title = "ato-mail: Stalwart service group behind fixed TCP"
+# D1 has no HTML UI. The only HTTP Port is Stalwart's JMAP/admin listener, so
+# the Surface entry is that listener's liveness route.
+surface_path = "/healthz/live"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+# --- Bindings --------------------------------------------------------------
+# Secrets and the outbound grant. Values are supplied per Run by the owner /
+# operator and are never authored here.
+
+# SMTP AUTH secret for the Stage 1 relay. Read by Stalwart through an
+# EnvironmentVariable reference in the MtaRoute (see configure_stalwart.py).
+[[binding]]
+id = "relay_auth"
+protocol = "ato.secret@1"
+required = true
+
+# Certificate pair for the public mail listeners, delivered as secrets and read
+# by Stalwart through EnvironmentVariable references on its Certificate object
+# (plan G2 / S2). The certificate is public data; it travels on the secret path
+# because that is the path that delivers durable per-Instance values.
+[[binding]]
+id = "mail_cert_pem"
+protocol = "ato.secret@1"
+required = true
+
+[[binding]]
+id = "mail_key_pem"
+protocol = "ato.secret@1"
+required = true
+
+# Stage 1 outbound: one exact relay address and port, consumed by the transport
+# Adapter (plan G1). Operator-managed; no owner-supplied value.
+[[binding]]
+id = "smtp_egress"
+protocol = "ato.tcp-egress@1"
+required = true
+
+# --- Persistent state ------------------------------------------------------
+# Stalwart's RocksDB store lives under this mount (stalwart-config.json).
+[[state]]
+id = "mail_data"
+use = "ato.state.filesystem@1"
+mount = "/var/lib/stalwart"
+access = "read-write"
+
+# --- K ---------------------------------------------------------------------
+[contract]
+mode = "all"
+
+# K5 for 25: plaintext SMTP greeting, then STARTTLS, then the certificate.
+[[contract.observation]]
+id = "smtp-certificate"
+use = "ato.contract.tls@1"
+port = "stalwart.smtp"
+server_name = "mx-test.atousercontent.com"
+start = "smtp-starttls"
+
+# K2/K5 for 465: implicit TLS (submission).
+[[contract.observation]]
+id = "submission-certificate"
+use = "ato.contract.tls@1"
+port = "stalwart.submissions"
+server_name = "mx-test.atousercontent.com"
+start = "implicit"
+
+# K2/K5 for 587: STARTTLS submission. The Port name and the plan's K5 table
+# both say STARTTLS; observing this Port as implicit would contradict the
+# listener this sample configures.
+[[contract.observation]]
+id = "submission-starttls-certificate"
+use = "ato.contract.tls@1"
+port = "stalwart.submissions-starttls"
+server_name = "mx-test.atousercontent.com"
+start = "smtp-starttls"
+
+# K2/K5 for 993: implicit TLS (IMAPS).
+[[contract.observation]]
+id = "imaps-certificate"
+use = "ato.contract.tls@1"
+port = "stalwart.imaps"
+server_name = "mx-test.atousercontent.com"
+start = "implicit"
+
+# K3: the JMAP/admin listener answers. See README "HTTP observations" for why
+# these three routes and exactly what each one does and does not prove.
+[[contract.observation]]
+id = "http-live"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/healthz/live"
+status = 200
+
+# /healthz/ready answers 200 only when the data storage backend is configured
+# (503 otherwise) on the pinned Stalwart build.
+[[contract.observation]]
+id = "http-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/healthz/ready"
+status = 200
+
+# JMAP session discovery. 307 with Location: /jmap/session, before any
+# authentication is attempted.
+[[contract.observation]]
+id = "http-jmap-discovery"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/.well-known/jmap"
+status = 307
+
+# --- D1 --------------------------------------------------------------------
+[[derivation]]
+id = "oci-service-group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+# Stalwart. Listener, certificate and relay configuration live in its dynamic
+# registry, not in stalwart-config.json; configure_stalwart.py applies it.
+[[derivation.service]]
+id = "stalwart"
+runtimes = { "oci.image" = "ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7ab2749baa5bcd15a56b51f90ba99aea0c3256ce04d4f7e5e3076e8e0", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "1073741824", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+argv = ["--config", "/app/stalwart-config.json"]
+ports = [
+  { id = "stalwart.smtp", guest_port = 25, client_address_transport = "proxy_protocol_v2" },
+  { id = "stalwart.submissions", guest_port = 465, client_address_transport = "proxy_protocol_v2" },
+  { id = "stalwart.submissions-starttls", guest_port = 587, client_address_transport = "proxy_protocol_v2" },
+  { id = "stalwart.imaps", guest_port = 993, client_address_transport = "proxy_protocol_v2" },
+  { id = "app.http", guest_port = 8080 },
+]
+state = ["mail_data"]
+bindings = ["relay_auth", "mail_cert_pem", "mail_key_pem"]
+
+# Stage 1 outbound transport Adapter: one compiled destination, verified TLS,
+# consumed through the tcp-egress grant. It has no SMTP parser and no dynamic
+# destination. The target, SNI and CA below are placeholders; see README.
+[[derivation.service]]
+id = "relay"
+runtimes = { "oci.image" = "ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:868ae56c18a004e7e4cc0e8d0707364b9d28242b914ec25f18f3fe1ca3a6aabf", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "134217728", "oci.cpu_limit_millis" = "250", "oci.pids_limit" = "64" }
+argv = ["serve"]
+env = { SMTP_RELAY_TARGET = "203.0.113.10:2525", SMTP_RELAY_TLS_SERVER_NAME = "smtp-relay.placeholder.invalid", SMTP_RELAY_CA_PEM = "/etc/ssl/certs/ca-certificates.crt", ADAPTER_MAX_CONNECTIONS = "16", ADAPTER_CONNECT_TIMEOUT_SECS = "10", ADAPTER_IDLE_TIMEOUT_SECS = "60" }
+ports = [{ id = "relay.smtp", guest_port = 2525 }]
+bindings = ["smtp_egress"]
+
+[effects]
+default = "requires-confirmation"
