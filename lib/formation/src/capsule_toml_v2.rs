@@ -636,6 +636,12 @@ fn parse_capsule_toml_v2_impl(
                                 "an HTTP observation does not take `scenario`",
                             ));
                         }
+                        if observation.server_name.is_some() || observation.start.is_some() {
+                            return Err(invalid(
+                                "contract.observation",
+                                "only a TLS observation names `server_name` or `start`",
+                            ));
+                        }
                         let method = observation.method.unwrap_or_else(|| "GET".to_owned());
                         if method != "GET" {
                             return Err(invalid(
@@ -683,6 +689,8 @@ fn parse_capsule_toml_v2_impl(
                             || observation.path.is_some()
                             || observation.status.is_some()
                             || observation.body_digest.is_some()
+                            || observation.server_name.is_some()
+                            || observation.start.is_some()
                         {
                             return Err(invalid(
                                 "contract.observation",

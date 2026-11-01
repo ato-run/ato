@@ -51,6 +51,9 @@ pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2: &str = "ato.contract-verifica
 /// /3 adds structured TLS evidence to an observation: the certificate the run
 /// actually received, not just the fact that a handshake succeeded.
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3: &str = "ato.contract-verification-receipt/3";
+/// The trust anchor label a certificate observation must carry to satisfy K:
+/// the public root set, never a private or test anchor.
+pub const TLS_TRUST_ANCHOR_PUBLIC_ROOTS: &str = "public-roots";
 
 /// What the executed Derivation actually produced, in the terms `K` observes.
 ///
@@ -215,6 +218,11 @@ pub struct RuntimeTlsObservation {
     /// validity) at observation time. Name and validity are also reported on
     /// their own so a failure can say which check failed.
     pub trusted: bool,
+    /// The TLS handshake finished. A certificate can be presented and validate
+    /// while the rest of the handshake fails (a broken server key, a proxy that
+    /// resets after the certificate flight). Such a session is not an
+    /// observation that K holds: nothing completed on that connection.
+    pub handshake_completed: bool,
     /// The leaf's SAN covers `server_name`.
     pub server_name_matches: bool,
     /// Observation time was inside the certificate's validity.
@@ -295,6 +303,7 @@ pub struct TlsEvidence {
     pub days_remaining: i64,
     pub chain_length: usize,
     pub trust_anchor: String,
+    pub handshake_completed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,6 +520,7 @@ impl ContractVerificationReceipt {
                                     days_remaining: observation.days_remaining,
                                     chain_length: observation.chain_length,
                                     trust_anchor: observation.trust_anchor.clone(),
+                                    handshake_completed: observation.handshake_completed,
                                 }),
                             }),
                         _ => None,
@@ -954,6 +964,14 @@ pub fn verify_runtime(
                                 observation.trust_anchor
                             ),
                         },
+                        Some(observation) if !observation.handshake_completed => {
+                            ObservationOutcome::Failed {
+                                code: "tls_handshake_incomplete",
+                                detail: format!(
+                                    "a certificate valid for {server_name} was presented on                                      {port}, but the TLS handshake did not complete"
+                                ),
+                            }
+                        }
                         Some(_) => ObservationOutcome::Satisfied,
                     }
                 }

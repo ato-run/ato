@@ -83,6 +83,21 @@ pub fn accept_receipt(
     {
         return Err(reject("receipt_schema_unknown", receipt.schema.clone()));
     }
+    // Certificate evidence is exactly what /3 exists for. A /1 or /2 receipt
+    // carrying it is malformed rather than merely newer.
+    if receipt.schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3
+        && receipt.observations.iter().any(|observation| {
+            observation
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.tls.is_some())
+        })
+    {
+        return Err(reject(
+            "receipt_tls_evidence_schema",
+            "certificate evidence requires ato.contract-verification-receipt/3",
+        ));
+    }
     if receipt.contract_ref != assignment.contract_ref {
         return Err(reject(
             "receipt_contract_mismatch",
@@ -264,6 +279,18 @@ fn check_observation(
             }
             if !is_serial_hex(&tls.presented_serial) {
                 return inconsistent("the presented serial is not a lowercase hex integer");
+            }
+            // A satisfied TLS verdict states that a public port serves a
+            // currently valid, publicly rooted certificate over a completed
+            // handshake. Anything else cannot have satisfied K.
+            if tls.trust_anchor != crate::verify::TLS_TRUST_ANCHOR_PUBLIC_ROOTS {
+                return inconsistent("a satisfied TLS verdict is not anchored in public roots");
+            }
+            if tls.days_remaining < 0 {
+                return inconsistent("a satisfied TLS verdict is already expired");
+            }
+            if !tls.handshake_completed {
+                return inconsistent("a satisfied TLS verdict has no completed handshake");
             }
         }
         SCENARIO_CONTRACT_VERIFIER => {
