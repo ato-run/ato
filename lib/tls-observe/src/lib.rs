@@ -7,9 +7,17 @@
 //!
 //! Facts are reported even when certificate validation rejects the
 //! certificate: a port that serves the wrong certificate is still an
-//! observation, and callers decide the verdict from the facts. Only the
+//! observation, and callers decide the verdict from the facts. A session that
+//! dies after the certificate verified is reported the same way, with
+//! handshake_completed == false; it is not a completed observation, and a
+//! caller must not decide a Contract condition satisfied from it. Only the
 //! absence of a certificate (no connection, timeout, SMTP refusal, no
 //! certificate message) is an error.
+//!
+//! timeout is the whole observation budget, not a per-I/O bound. The probe
+//! takes a deadline on entry and re-arms the socket timeouts with what is left
+//! before each SMTP line read and each handshake step, so a peer that
+//! trickles bytes just under the timeout cannot extend the call.
 //!
 //! Trust anchors are public roots in production (webpki-roots, the Mozilla
 //! set); TestOnly injects a private anchor for tests. The observation does not
@@ -24,7 +32,7 @@ mod smtp;
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -32,7 +40,6 @@ use rustls::crypto::ring;
 use rustls::pki_types::{ServerName, UnixTime};
 use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme,
-    StreamOwned,
 };
 use rustls_pki_types::CertificateDer;
 
@@ -100,6 +107,12 @@ pub struct TlsFacts {
     pub server_name_matches: bool,
     /// Whether the observation time was inside the validity period.
     pub within_validity: bool,
+    /// Whether the TLS handshake finished. A certificate can be presented and
+    /// validate while the rest of the handshake fails; such a session is not a
+    /// completed observation even though the certificate facts are real.
+    pub handshake_completed: bool,
+    /// Why the handshake did not finish, when it did not.
+    pub handshake_error: Option<String>,
 }
 
 /// Why no certificate could be observed.
@@ -202,9 +215,11 @@ impl ServerCertVerifier for RecordingVerifier {
 /// 64 lines per reply.
 ///
 /// Returns Ok with facts whenever a certificate was presented, even if it is
-/// untrusted, expired, or for another name. Returns Err when no certificate
-/// could be obtained, or when a presented certificate cannot be read as an
-/// X.509 certificate at all.
+/// untrusted, expired, or for another name, and even if the session died
+/// afterwards: then handshake_completed is false and the caller must treat the
+/// observation as unfinished. Returns Err when no certificate could be
+/// obtained, when the whole budget is spent, or when a presented certificate
+/// cannot be read as an X.509 certificate at all.
 pub fn observe_tls(
     address: SocketAddr,
     server_name: &str,
@@ -218,6 +233,10 @@ pub fn observe_tls(
         ));
     }
 
+    // timeout is the budget for the whole observation, so every network
+    // operation below is bounded by what is left of it, not by a fresh
+    // timeout.
+    let deadline = Instant::now() + timeout;
     let now_epoch = unix_now();
     let server_name_owned = ServerName::try_from(server_name.to_owned()).map_err(|err| {
         TlsProbeError::new(format!(
@@ -227,21 +246,16 @@ pub fn observe_tls(
 
     let mut tcp = TcpStream::connect_timeout(&address, timeout)
         .map_err(|err| TlsProbeError::new(format!("could not connect to {address}: {err}")))?;
-    tcp.set_read_timeout(Some(timeout))
-        .map_err(|err| TlsProbeError::new(format!("could not bound the read timeout: {err}")))?;
-    tcp.set_write_timeout(Some(timeout))
-        .map_err(|err| TlsProbeError::new(format!("could not bound the write timeout: {err}")))?;
 
     if start == TlsStart::SmtpStarttls {
-        smtp::start_tls(&mut tcp, server_name)?;
+        smtp::start_tls(&mut tcp, server_name, deadline)?;
     }
 
     let (config, presented) = client_config(&anchors)?;
-    let connection = ClientConnection::new(Arc::new(config), server_name_owned)
+    let mut connection = ClientConnection::new(Arc::new(config), server_name_owned)
         .map_err(|err| TlsProbeError::new(format!("could not start the TLS handshake: {err}")))?;
 
-    let mut stream = StreamOwned::new(connection, tcp);
-    let handshake_error = drive_handshake(&mut stream)
+    let handshake_error = drive_handshake(&mut connection, &mut tcp, deadline)
         .err()
         .map(|err| err.to_string());
 
@@ -254,11 +268,98 @@ pub fn observe_tls(
         return Err(TlsProbeError::new(reason));
     };
 
-    build_facts(certificate, server_name, start, anchors.label(), now_epoch)
+    build_facts(
+        certificate,
+        server_name,
+        start,
+        anchors.label(),
+        now_epoch,
+        handshake_error,
+    )
 }
 
-fn drive_handshake(stream: &mut StreamOwned<ClientConnection, TcpStream>) -> io::Result<()> {
-    stream.conn.complete_io(&mut stream.sock).map(|_| ())
+/// Drive the handshake one socket step at a time.
+///
+/// Each step re-arms the socket timeouts with what is left of the budget, so
+/// the call cannot outlive the deadline even if the peer keeps trickling bytes
+/// just under the timeout. Certificate verification happens while the
+/// Certificate message is processed, which is why a failure after this point
+/// can still leave a recorded certificate.
+fn drive_handshake(
+    connection: &mut ClientConnection,
+    tcp: &mut TcpStream,
+    deadline: Instant,
+) -> io::Result<()> {
+    while connection.is_handshaking() {
+        let remaining = remaining_budget(deadline)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, TIMEOUT_REASON))?;
+        tcp.set_read_timeout(Some(remaining))?;
+        tcp.set_write_timeout(Some(remaining))?;
+
+        if connection.wants_write() {
+            connection.write_tls(tcp).map_err(deadline_io_error)?;
+        }
+        if !connection.is_handshaking() {
+            break;
+        }
+        if !connection.wants_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the TLS handshake stalled without wanting to read or write",
+            ));
+        }
+        if connection.read_tls(tcp).map_err(deadline_io_error)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the peer closed the connection before the TLS handshake completed",
+            ));
+        }
+        connection
+            .process_new_packets()
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    }
+    Ok(())
+}
+
+const TIMEOUT_REASON: &str = "the observation exceeded its timeout";
+
+/// What is left of the observation budget, or None once it is spent.
+pub(crate) fn remaining_budget(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    // Never arm a zero-duration socket timeout: on some platforms that means
+    // "no timeout" rather than "already expired".
+    (!remaining.is_zero()).then(|| remaining.max(Duration::from_millis(1)))
+}
+
+pub(crate) fn timeout_error() -> TlsProbeError {
+    TlsProbeError::new(TIMEOUT_REASON)
+}
+
+fn is_timeout(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// A failed socket operation, reported as the budget expiring when it did.
+///
+/// The socket timeouts are always armed with what is left of the budget, so a
+/// timeout here is the budget being spent, not a per-I/O limit of its own.
+pub(crate) fn io_budget_error(context: &str, error: io::Error) -> TlsProbeError {
+    if is_timeout(&error) {
+        timeout_error()
+    } else {
+        TlsProbeError::new(format!("{context}: {error}"))
+    }
+}
+
+fn deadline_io_error(error: io::Error) -> io::Error {
+    if is_timeout(&error) {
+        io::Error::new(io::ErrorKind::TimedOut, TIMEOUT_REASON)
+    } else {
+        error
+    }
 }
 
 fn build_facts(
@@ -267,6 +368,7 @@ fn build_facts(
     start: TlsStart,
     trust_anchor: &'static str,
     now_epoch: i64,
+    handshake_error: Option<String>,
 ) -> Result<TlsFacts, TlsProbeError> {
     let leaf = der::parse_certificate(presented.end_entity.as_ref()).map_err(|reason| {
         TlsProbeError::new(format!(
@@ -290,6 +392,8 @@ fn build_facts(
         trusted: presented.chain_verified,
         server_name_matches,
         within_validity: now_epoch >= leaf.not_before_epoch && now_epoch <= leaf.not_after_epoch,
+        handshake_completed: handshake_error.is_none(),
+        handshake_error,
     })
 }
 
