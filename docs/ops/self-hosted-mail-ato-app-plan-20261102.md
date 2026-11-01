@@ -190,25 +190,25 @@ deployed.
   TLS requirement on a hosted Run is unobserved and fails closed — it is never
   assumed satisfied.
 
-### Detected gap before S3: K3's 443 is served by the host
+### K3's 443 is served by the host — decided
 
 K3 (HTTPS admin / JMAP) and K5 for 443 are served by the host Caddy today, and
 D1 deliberately keeps Caddy outside the app as the certificate source. A
 Contract observation resolves a **logical Port of the candidate**, so an
-endpoint owned by the host Caddy is not something the Run can observe with
-`ato.contract.tls@1` or `ato.contract.http@1` as designed. S3 has to choose:
+endpoint owned by the host Caddy is not something the Run could observe with
+`ato.contract.tls@1` as originally designed.
 
-1. move 443 into the app (Stalwart's own HTTPS listener on a fixed TCP Port)
-   and leave Caddy only the ACME role — this conflicts with the host Caddy
-   binding 443 during D1;
-2. add an explicitly external endpoint to the observation model (a Binding
-   address rather than a candidate Port) — a general Contract capability, not
-   a mail-specific exception;
-3. keep 443 out of K for D1 and verify it by ops procedure, accepting that
-   K3/K5 for 443 is not a Receipt-backed condition.
+Decided 2026-11-02: **option 2** — a general, product-agnostic external endpoint
+Binding. The Derivation declares an operator-managed Binding and a
+binding-backed logical Port; the control plane resolves the authorized endpoint;
+the runtime reuses `ato.contract.tls@1` unchanged. K never names an IP, a
+Runner, Caddy or a binding id. Unresolvable = unobserved = not
+`fully_satisfied`, so 443 gates the mail Capsule. No Kernel or Capsule-format
+feature is added.
 
-This is recorded as a gap, not decided. The mail-port observations (25/465/
-587/993) are unaffected: those Ports belong to the app.
+Design and its independent review: draft RFC, PR ato-run/ato#1667. It depends on
+S1 being merged. The mail-port observations (25/465/587/993) are unaffected:
+those Ports belong to the app.
 
 ### Implementation slices
 
