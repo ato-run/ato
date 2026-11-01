@@ -97,6 +97,11 @@ listener. The shapes come from the pinned source, commit `474dd02`:
 
 Weaknesses, stated rather than hidden:
 
+- The three routes are answered before any authentication, but they are not
+  exempt from Stalwart's anonymous-request rate limiter
+  (`is_http_anonymous_request_allowed`), which a hostile or broken client can
+  trip. From the verifier's own address, with the shipped defaults, each is a
+  stable answer; it is not a promise that every source sees it.
 - No body digest is pinned. The `/healthz/*` bodies are `serde_json`-generated
   problem documents; pinning their bytes without observing the pinned image once
   would make K fragile for no gain. If staging shows the exact body, pinning it
@@ -317,8 +322,9 @@ cargo test -p ato-portable-application --test ato_mail_sample --offline
 cargo fmt --all -- --check
 cargo clippy -p ato-portable-application --all-targets --offline -- -D warnings
 
-# optional: build the portable bundle itself
-cargo run -p ato-cli --bin ato -- pack samples/ato-mail --output .tmp/ato-mail.capsule
+# optional: build the portable bundle itself (verified offline, 2026-11-02;
+# it does not pull or start an image)
+cargo run -p ato-cli --bin ato --offline -- pack samples/ato-mail --output .tmp/ato-mail.capsule
 ```
 
 The test asserts: the four certificate requirements with their Ports and start
