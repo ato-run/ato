@@ -68,7 +68,7 @@ checks alone are not sufficient.
 | Component | Placement | Treatment in Ato |
 |---|---|---|
 | Stalwart | Dedicated Runner | The Capsule's execution component |
-| Caddy | Existing host | External Ingress / certificate Binding (G2) |
+| Caddy | Existing host | External Ingress / certificate source; delivered as a secret Binding (G2) |
 | SMTP relay | Independent service on the host | External-communication Binding (G1, `ato.tcp-egress@1`) |
 | Persistent data | Runner Volume | Save / restore target |
 | DNS / PTR | Cloudflare / Hetzner | Environment-dependent external Binding |
@@ -135,8 +135,7 @@ Stalwart v0.16.22 source.
    `EnvironmentVariable` as well as `Text` and `File`. Delivering the pair as
    `ato.secret@1` Bindings (env) reuses the existing secret path; durable
    Binding values are replaced by an owner re-run with new values, which
-   starts a new Run. The G2 read-only host directory needs new Runner code
-   (an allowlisted host-path Binding). Choice recorded as an open decision.
+   starts a new Run. Decided 2026-11-02: use this path (see G2).
 3. **Fixed TCP PROXY v2 exists** (`client_address_transport`,
    `ecb0f6a4d`), so G4 needs configuration, not code.
 4. **Contract observations today:** `ato.contract.http@1`,
@@ -152,7 +151,7 @@ Stalwart v0.16.22 source.
 | # | Slice | Repo | Environment |
 |---|---|---|---|
 | S1 | `ato.contract.tls@1` observation: `start = "implicit" \| "smtp-starttls"`, server name, chain/SAN/validity, presented serial in evidence; CLI and hosted verifiers from the same Rust authority | ato | local + CI |
-| S2 | Certificate delivery (per the open decision) and exporter with allowlist, atomic write, validation | ato / host scripts | local, then staging |
+| S2 | Certificate as `ato.secret@1` Bindings; exporter with allowlist, validation and owner re-run | ato / host scripts | local, then staging |
 | S3 | D1 sample `samples/ato-mail`: Stalwart + Adapter, fixed TCP 25/465/587/993 with PROXY v2, state slot, egress grant to the independent relay, K1–K6 | ato | staging dedicated Runner |
 | S4 | Independent outbound relay service (separate from the rollback container) and its Stage 1 grant | host config | staging, then production after approval |
 | S5 | Cutover / rollback scripts implementing the required steps, with queue and mailbox consistency records | ato `docs/ops` + scripts | staging rehearsal |
@@ -240,55 +239,56 @@ implemented and accepted:
 
 Until Stage 2 is accepted, the app keeps using the Stage 1 relay.
 
-## G2 — host-managed certificate, read-only to the dedicated Runner (option b)
+## G2 — host-managed certificate, delivered as a secret Binding (decided 2026-11-02)
+
+Decision: the certificate and key reach Stalwart as `ato.secret@1`
+Bindings, read by Stalwart through `EnvironmentVariable` references. No new
+Runner mount is added. The earlier read-only host directory design (option
+b) is withdrawn.
 
 ### Ownership and data flow
 
 ```
-Caddy (user caddy) ── obtains/renews ──▶ /var/lib/caddy/.../certificates/.../mail.ato.run/
-                                                   │ (never shared or mounted)
-        ato-cert-export (root, oneshot) ── copies only the target domain's cert+key
-                                                   ▼
-        /var/lib/ato-certs/<runner-id>/<domain>/{cert.pem,key.pem,meta.json}
-            root:<runner-group> 0750 directory, 0640 files
-                                                   │ read-only bind mount
-        dedicated Runner ── certificate Binding ──▶ app (read-only path)
+Caddy (user caddy) ── obtains/renews ──▶ Caddy storage (never shared or mounted)
+        ato-cert-export (root, oneshot) ── reads only the allowlisted domain's cert+key
+              │ validates (key matches, SAN, validity), records meta.json
+              ▼ owner re-run of the Instance with new Binding values
+        API (durable Binding config, encrypted, Instance/Contract-bound)
+              ▼ one-time secret grant per Run
+        dedicated Runner ── env ──▶ Stalwart Certificate {EnvironmentVariable}
 ```
 
 - Caddy remains the only ACME client. Its data directory is never shared,
   mounted or made group-readable.
-- `ato-cert-export` copies **only** an allowlisted `(runner-id, domain)` pair.
-  The allowlist lives in a root-owned file, so the Runner cannot request
-  another domain's key.
-- Files are written to a temporary file in the same directory, `fsync`ed and
-  renamed atomically, together with `meta.json` (serial, notAfter, SHA-256 of
-  the certificate chain and of the key). Readers never see a partial pair.
-- The dedicated Runner's user can read this directory and nothing in
-  Caddy's storage.
+- `ato-cert-export` handles only an allowlisted `(instance, domain)` pair from
+  a root-owned file.
+- The values are stored only as the API's encrypted durable Binding config
+  and delivered per Run through the existing one-time secret grant; they are
+  not written into the Capsule, the state slot or logs.
+- The exporter needs an owner credential that can re-run this Instance. Its
+  scope, storage (root-only file) and rotation are an open item for S2;
+  if no suitably narrow credential exists, renewal is an operator-run
+  command until one does.
 
 ### Renewal and reflection
 
 1. Caddy renews in place (about 30 days before expiry).
 2. `ato-cert-export` runs from a systemd timer (hourly) and on demand. It
-   exports only when the source SHA-256 changes, and verifies first that
-   the key matches the certificate and that the chain covers the domain.
-3. The Runner watches `meta.json`. On a new serial it signals the
-   certificate Binding consumer: either the app's declared reload operation,
-   or a graceful Run restart under the always-on policy. Stalwart loads
-   certificates only at start, so the initial integration restarts the
-   Run; the fixed TCP generation fences the hand-over.
-4. Evidence: the export record and the served certificate's serial on each
-   public port, probed after reflection.
+   acts only when the source SHA-256 changes, and validates first.
+3. It re-runs the Instance with the new Binding values. The new Run starts
+   with the new certificate; the fixed TCP generation fences the hand-over.
+4. Evidence: the export record and the K5 observation of the presented
+   serial on every port after the new Run is ready.
 
 ### Failure handling and recovery
 
 | Failure | Behaviour | Recovery |
 |---|---|---|
-| Caddy renewal fails | The last good pair keeps being served; the exporter alerts when notAfter is under 14 days. | Fix Caddy (DNS, port 80/443, rate limits); export reruns on the next change. |
-| Export validation fails (mismatched key, wrong SAN, parse error) | Nothing is replaced; the alert is raised. | Investigate the source; rerun the export manually. |
-| Reflection fails (Run does not restart, or the port still serves the old serial) | The Run keeps the old certificate; an alert fires on the serial mismatch. | Restart the Run manually; if it cannot become ready, roll back to the previous pair (kept as `*.prev`). |
-| Expired certificate served | Treated as an incident. | Restore the latest valid pair from the export directory or Caddy, then restart. |
-| Caddyfile regenerated by `ato runner setup` (import line lost) | Renewal for the mail domain stops. | Interim: the exporter checks that the mail site is configured and alerts. Long term: register the mail site through the host's own Caddy configuration mechanism instead of the generated file. |
+| Caddy renewal fails | The running Run keeps its certificate; the exporter alerts when notAfter is under 14 days. | Fix Caddy (DNS, port 80/443, rate limits); export reruns on the next change. |
+| Export validation fails | No re-run; alert. | Investigate the source; rerun manually. |
+| Re-run fails or the new Run is not ready | The API keeps the previous Run's outcome visible; alert on serial mismatch. | Re-run with the previous values (kept by the exporter as `*.prev`, root-only). |
+| Expired certificate served | Incident. | Re-run with the latest valid pair from Caddy. |
+| Caddyfile regenerated by `ato runner setup` (import line lost) | Renewal for the mail domain stops. | Interim: the exporter checks that the mail site is configured and alerts. Long term: register the mail site through the host's own Caddy configuration mechanism. |
 
 ## G3–G5 (unchanged)
 
