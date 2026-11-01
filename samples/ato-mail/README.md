@@ -124,9 +124,12 @@ binding-backed logical Port plus authorized endpoint resolution), which is not
 implemented. Consequences, recorded here so nobody has to rediscover them:
 
 - this sample declares **no** 443 requirement and no binding-backed Port;
-- a run of this sample can never be `fully_satisfied` for the mail Capsule as a
-  whole, because K3/K5 for 443 stay unobserved, and unobserved means not
-  satisfied (fail closed);
+- the **bundle's own K** (four TLS + three HTTP observations) can reach
+  `fully_satisfied` once a Run serves them — and that is all it means. It does
+  **not** mean the mail service works: K1/K2/K4/K6 are not in this K yet, and
+  the plan's mail Capsule stays unsatisfied until 443 and the functional
+  observations exist too. A green receipt here must never be reported as "mail
+  is working";
 - when ADR-043 lands, D1 adds one Port (`edge.https` with an `edge_https`
   binding) and one TLS requirement. The mail-Port observations do not change.
 
@@ -335,9 +338,10 @@ protocols, and that each is visible to exactly the one service that needs it.
 
 ## Known limits
 
-- **Not deployed.** Build and validation only. K1, K2, K4, K6 and the 443 half of
-  K3/K5 are unobserved (see above), so a staging run of this sample is expected
-  to be **not** `fully_satisfied`.
+- **Not deployed.** Build and validation only. The bundle's own seven
+  observations are the only ones it can decide; K1, K2, K4, K6 and the 443 half
+  of K3/K5 are not in this K (see above), so a green receipt for this bundle is
+  **not** evidence that mail works.
 - **443 needs ADR-043** (external endpoint Binding). Not implemented.
 - **The relay is S4.** This sample only names its address as environment data;
   queue-drain and delivery evidence is design only.
