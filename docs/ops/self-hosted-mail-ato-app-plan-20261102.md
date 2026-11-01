@@ -36,14 +36,32 @@ terms; each Derivation D composes the components that realize it.
 | K2 | Authenticated submission (465) and mailbox access (993) work over TLS. |
 | K3 | The HTTPS admin / JMAP endpoint answers. |
 | K4 | Mailboxes and the outbound queue survive a Run restart. |
-| K5 | Every public port serves a valid certificate for the declared host name. |
+| K5 | Every public port presents a valid certificate for the declared host name, verified per protocol (below). |
 | K6 | Outbound delivery succeeds under the declared conditions (Stage 1: through the granted relay). |
 
 K names no product (Stalwart, Caddy) and no placement. Today's Contract
 verifiers cover HTTP (`ato.contract.http@1`), workspace and scenario
-observations. K1, K2 and K5 need a generic TCP/TLS observation; that belongs
-to the Protocol/Adapter side as a product-agnostic observation, not a
-mail-specific Kernel feature, and is an open item for Phase 1.
+observations. K1, K2 and K5 need a TCP/TLS observation; that belongs to the
+Protocol/Adapter side as a product-agnostic observation, not a mail-specific
+Kernel feature.
+
+### K5 — certificate verification per protocol
+
+The certificate is checked as **presented on the public port**, from outside
+the host, not by reading the exported files. Each observation records the
+leaf serial, SAN, notBefore/notAfter and chain validation result, and
+compares the serial with the current export `meta.json`.
+
+| Port | How TLS starts | Observation |
+|---|---|---|
+| 25, 587 | Plain SMTP, then `STARTTLS` | Connect, read the 220 greeting, `EHLO`, require `STARTTLS` in the EHLO reply, issue `STARTTLS`, complete the handshake, verify the certificate. A port that does not offer `STARTTLS` fails K5. |
+| 465, 993 | Implicit TLS | TLS handshake immediately on connect, verify the certificate, then read the protocol greeting (SMTP 220 / IMAP `* OK`) inside TLS. |
+| 443 | HTTPS | Ordinary HTTPS request to the declared host name, verify the certificate and the response. |
+
+Verification means: chain to a public trust root, SAN covers the declared
+host name, current time within validity, notAfter more than 14 days ahead
+(warning below), and serial equal to the exported certificate. Expiry or SAN
+checks alone are not sufficient.
 
 ### D1 — first Derivation (Stage 1)
 
@@ -68,6 +86,10 @@ dedicated IP, or L4 routing. It does not by itself solve certificates for
 SMTP STARTTLS / IMAPS, which still need a certificate shared with the mail
 component. D2 is added as a new D under the same K; D1 is not rewritten.
 
+D2 preconditions (not D1's): the Runner runs **multiple components of one
+Capsule together** (service-group composition) with fixed TCP and
+persistent state, and the port design above is chosen.
+
 ### Receipts
 
 Each of these is verified with a Receipt tied to the Run attempt, not by
@@ -81,10 +103,14 @@ existing fixed TCP, `ato.tcp-egress@1`, Runner Volume and Binding paths.
 
 ### Capability to confirm
 
-Whether the current dedicated Runner handles **multiple components, fixed
-TCP and persistent state at the same time** is not established by design
-review. It must be confirmed by implementation and real-host tests
-(Phase 2 staging, Phase 4 production test domain) before cutover.
+In D1, Ato runs exactly **one** component (Stalwart). Multi-component
+composition is a D2 precondition and is not required for D1.
+
+For D1, confirm by implementation and real-host tests (Phase 2 staging,
+Phase 4 production test domain) that the dedicated Runner runs one
+always-on component with fixed TCP on the mail ports, a persistent Runner
+Volume, the read-only certificate Binding and the `ato.tcp-egress@1` relay
+grant at the same time.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
@@ -252,20 +278,61 @@ existing domains.
 3. **Optional:** if IPv6 is not acceptable, an additional IPv4 address for
    the server (paid) allows the same test on IPv4 with its own PTR.
 
+### Rollback procedure (required steps)
+
+Restarting the old container is **not** a rollback: mail received and queue
+entries created by the app after cutover exist only in the app's state and
+would be lost. Rollback therefore moves the app's state back to the old
+environment.
+
+Precondition for the whole rollback window: the app runs the **same
+Stalwart image digest** as the container, so the data store is readable by
+both without migration. A Stalwart upgrade under the app is allowed only
+after the rollback window closes.
+
+1. **Stop new acceptance and sending.** Close the app's public listeners
+   (25/465/587/993/443) by stopping the fixed TCP allocation; remote MTAs
+   queue and retry on temporary failure. Stop the app's outbound queue
+   processing, then stop the Run so the store is quiescent. Record the
+   time.
+2. **Check queue and store consistency.** From the quiescent state, record
+   the outbound queue (message IDs, recipients, next-attempt, per-recipient
+   delivered/pending status) and per-mailbox message counts and highest
+   IDs. Confirm no delivery was in flight at stop (relay log for the window
+   shows no open transaction). Take a checksum-verified snapshot of the
+   Runner Volume.
+3. **Transfer state from the new environment to the old one.** Move the
+   current `/srv/ato-mail/data` aside (kept, not deleted), restore the
+   snapshot into `/srv/ato-mail/data` with the container's ownership, keep
+   the container's `/srv/ato-mail/etc`, and start the container with the
+   pinned digest. Release the fixed TCP ports before the container binds
+   them.
+4. **Verify no loss and no double send.** Mailbox counts and highest IDs
+   equal the step-2 record; every queue entry from step 2 is present with
+   the same per-recipient status, so already-delivered recipients are not
+   retried; messages sent to test addresses during the window arrive
+   exactly once (Message-ID check on the receiving side); inbound mail
+   deferred during steps 1–3 arrives after restart. Re-run K1–K6 against
+   the container.
+
+Cutover is the same procedure in the other direction (stop the container,
+check, seed the Instance volume from `/srv/ato-mail/data`, start the app).
+
 ### Rollback rehearsal
 
-1. Write the runbook with exact commands for cutover and rollback. Cutover:
-   back up `/srv/ato-mail`, stop the container, seed the Instance state,
-   start the app. Rollback: stop the app, take a final snapshot of the app's
-   state, restore it into `/srv/ato-mail/data`, start the container.
-2. Rehearse it on staging with real mailboxes. Measure the time.
+1. Write the runbook with exact commands for cutover and the rollback
+   procedure above.
+2. Rehearse it on staging with real mailboxes, including mail received and
+   a non-empty outbound queue (unreachable test destination) at the moment
+   of rollback. Measure the time.
 3. Rehearse it on production with the test domain from step 2 above. Move
-   the test domain onto the app, deliver mail, roll back to a container
-   started from the same state, and confirm messages received in between
-   are present after rollback. Measure the downtime.
-4. Pass criteria: no lost messages across both directions, total downtime
-   within the agreed window, and the served certificate, PTR and DKIM
-   unchanged after rollback.
+   the test domain onto the app, deliver mail, run the rollback procedure,
+   and confirm messages received in between are present after rollback.
+   Measure the downtime.
+4. Pass criteria: no lost messages and no duplicate delivery in either
+   direction, queue state carried over, total downtime within the agreed
+   window, and the served certificate, PTR and DKIM unchanged after
+   rollback.
 
 Senders queue and retry during a short port-25 outage, so a bounded cutover
 window does not lose inbound mail. The rehearsal must confirm the bound.
@@ -277,9 +344,9 @@ window does not lose inbound mail. The rehearsal must confirm the bound.
    exporter and certificate Binding design (this document); independent
    relay design; runbook draft.
 2. **Staging.** Pre-cutover verification step 1, plus the staging rollback
-   rehearsal. Confirms the Runner capability (multiple components, fixed
-   TCP, persistent state together) and issues the K4/K5/K6 and restart
-   Receipts.
+   rehearsal. Confirms the D1 Runner capability (one component, fixed TCP,
+   persistent Volume and Bindings together) and issues the K4/K5/K6 and
+   restart Receipts.
 3. **Production dedicated Runner install.** Build the reviewed worker from
    `main`; install as a new systemd unit and user; enroll as the owner's
    dedicated Runner; allowlist only the test IPv6 address first.
@@ -287,9 +354,10 @@ window does not lose inbound mail. The rehearsal must confirm the bound.
    production rollback rehearsal on the test domain.
 5. **Cutover window.** Move `mail.ato.run` and `atousercontent.com` onto the
    app. The container is stopped, not modified: its image digest,
-   `/srv/ato-mail/etc` and a final copy of `/srv/ato-mail/data` are kept so
-   rollback is a container start. The Stage 1 relay is the separate service
-   from G1.
+   `/srv/ato-mail/etc` and a final copy of `/srv/ato-mail/data` are kept.
+   Rollback follows the rollback procedure (state moves back from the app);
+   it is never a plain container restart. The Stage 1 relay is the separate
+   service from G1.
 6. **Clean-up after a stable week.** Remove the Caddy import line once G2
    uses the host mechanism. Retiring the stopped container is a separate,
    explicitly approved step.
