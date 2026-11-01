@@ -103,14 +103,61 @@ existing fixed TCP, `ato.tcp-egress@1`, Runner Volume and Binding paths.
 
 ### Capability to confirm
 
-In D1, Ato runs exactly **one** component (Stalwart). Multi-component
-composition is a D2 precondition and is not required for D1.
+D1's mail component is Stalwart. Because Stalwart cannot consume
+`ato.tcp-egress@1` itself, D1 also carries the existing generic transport
+Adapter (see Implementation findings); that two-service group already passed
+staging on 2026-09-20 and is not a new requirement. Composing Caddy is a D2
+precondition and is not required for D1.
 
-For D1, confirm by implementation and real-host tests (Phase 2 staging,
-Phase 4 production test domain) that the dedicated Runner runs one
-always-on component with fixed TCP on the mail ports, a persistent Runner
-Volume, the read-only certificate Binding and the `ato.tcp-egress@1` relay
-grant at the same time.
+For D1, confirm by real-host tests (Phase 2 staging, Phase 4 production
+test domain) that the dedicated Runner runs it always-on with fixed TCP on
+the standard mail ports, PROXY v2, a persistent state slot, the certificate
+Binding and the relay grant at the same time.
+
+## Implementation findings (2026-11-02)
+
+Checked against `origin/stg` (`e2e6c3386`), the 2026-09-20 staging
+acceptance (`samples/stalwart-missive-mail`, archived records) and the pinned
+Stalwart v0.16.22 source.
+
+1. **Outbound needs the generic transport Adapter as a second component.**
+   Stalwart opens SMTP connections itself and does not use the SOCKS endpoint
+   that `ato.tcp-egress@1` provides (archived connectivity decision,
+   2026-09-20). The existing byte-oriented Adapter
+   (`ato-fixed-socks5-tls-adapter`, one compiled destination, verified TLS)
+   is what consumes the grant. D1 is therefore Stalwart + that Adapter. This
+   is not a new requirement: the same Stalwart + Adapter (+ Missive) service
+   group already passed staging on 2026-09-20 with fixed TCP, a persistent
+   state slot, stop/restart and checkpoint/restore. Composing Caddy (D2)
+   remains separate.
+2. **The certificate can reach Stalwart without a new Runner mount.**
+   Stalwart's `Certificate.certificate` / `privateKey` accept
+   `EnvironmentVariable` as well as `Text` and `File`. Delivering the pair as
+   `ato.secret@1` Bindings (env) reuses the existing secret path; durable
+   Binding values are replaced by an owner re-run with new values, which
+   starts a new Run. The G2 read-only host directory needs new Runner code
+   (an allowlisted host-path Binding). Choice recorded as an open decision.
+3. **Fixed TCP PROXY v2 exists** (`client_address_transport`,
+   `ecb0f6a4d`), so G4 needs configuration, not code.
+4. **Contract observations today:** `ato.contract.http@1`,
+   `ato.contract.scenario@1/2`, workspace and instance-snapshot. K1/K2/K5
+   need a new TLS observation; it touches the Contract grammar, the bound
+   Contract, the Rust verifier and receipt evidence, so it is its own slice.
+5. **Known staging limitations still open:** no id-mapped OCI state mount
+   (thin uid-1000 Stalwart image), images preloaded rather than pullable
+   (GHCR `write:packages` missing), checkpoints over 64 MiB out of scope.
+
+### Implementation slices
+
+| # | Slice | Repo | Environment |
+|---|---|---|---|
+| S1 | `ato.contract.tls@1` observation: `start = "implicit" \| "smtp-starttls"`, server name, chain/SAN/validity, presented serial in evidence; CLI and hosted verifiers from the same Rust authority | ato | local + CI |
+| S2 | Certificate delivery (per the open decision) and exporter with allowlist, atomic write, validation | ato / host scripts | local, then staging |
+| S3 | D1 sample `samples/ato-mail`: Stalwart + Adapter, fixed TCP 25/465/587/993 with PROXY v2, state slot, egress grant to the independent relay, K1–K6 | ato | staging dedicated Runner |
+| S4 | Independent outbound relay service (separate from the rollback container) and its Stage 1 grant | host config | staging, then production after approval |
+| S5 | Cutover / rollback scripts implementing the required steps, with queue and mailbox consistency records | ato `docs/ops` + scripts | staging rehearsal |
+
+Production steps (Phase 3 onward) stay gated on separate approval.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
