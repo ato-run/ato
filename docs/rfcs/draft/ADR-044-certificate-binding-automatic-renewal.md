@@ -103,9 +103,10 @@ Why this is not the "new Runner feature" the plan excludes: no mount is added,
 no new Binding protocol, no new Capability, no Capsule-format change, and the
 contract that already accepts the value is unchanged. It is the existing
 environment channel being made able to carry what the existing declaration
-already permits. Exposure is the same class as today's 0600 environment file:
+already permits. Exposure is the same class as the environment file it replaces:
 the value is in the docker client process's environment for the launch window
-and never in argv.
+and never in argv; the staged single-line file is now created 0600 atomically
+(previously it was written at the process umask).
 
 **Alternative considered and rejected:** base64-encoding the PEM and decoding it
 inside Stalwart. Stalwart's `Certificate.certificate`/`privateKey` accept
@@ -235,9 +236,10 @@ Request body (strict, unknown fields refused):
 
 1. **Auth check.** `Authorization: Bearer <token>`; compare
    `SHA-256(token)` with `token_sha256` in constant time (the same
-   `tokenMatches` helper the refresh route already uses). Refuse when the row is
-   missing, revoked, expired (`410`), or when `config_generation` no longer
-   matches the durable config generation (the grant must be re-issued).
+   `tokenMatches` helper the refresh route already uses). Status codes are one
+   table: `401` missing/malformed token, `403` revoked grant, `410`
+   expired/rotated/consumed grant, `409` `config_generation` no longer
+   matching the durable config (re-issue the grant).
 2. **Instance and binding allowlist.** Resolve the Instance from the grant, not
    from the body. Load the bundle's `validator_report`
    (`required_bindings`) and require that the body's value keys are exactly
@@ -270,19 +272,32 @@ Request body (strict, unknown fields refused):
    `/start` use (`stopInstanceRuntime`, then `ensureReadyRoute` with the
    Instance's owner as actor). The wake path already opens
    `binding_config_encrypted` before launching, so the new Run starts with the
-   new pair. Fixed-TCP generation fencing hands the public ports over; the old
-   Run is stopped first because two processes must not serve the same mail ports.
-   The response is `{applied_generation, serial, not_after, run_id}`.
+   new pair. Fixed TCP cannot be served by two Runs, so the old Run is stopped
+   before the new one starts. **That ordering is the one externally visible
+   failure**; it is not "the running Run always keeps serving":
+   - stop fails -> the old Run is still serving the old, valid pair (safe);
+   - stop succeeds, start fails -> **the mail ports are down** until a start
+     succeeds; the response says `run_id: null, stopped: true` and the timer
+     alerts immediately. Recovery is retry-start first, then the rollback
+     procedure.
+
+   The response is `{applied_generation, serial, not_after, run_id, stopped}`.
 7. **Token rotation.** On success, replace `token_sha256` with a fresh random
    token and return it once (`next_token`), exactly as the refresh route
    rotates. The host overwrites its 0400 token file. A leaked old token is dead
    after the next renewal or at `expires_at`.
-8. **Failure response.** If the CAS or the checks fail, nothing is written and
-   the running Run keeps its pair. If the CAS succeeded but the Run replace
-   failed, respond `502` with `applied_generation` and `run_id: null`: the
-   durable config is ahead of the running Run, which is safe (the running
-   certificate is still the previous, still-valid one) and the next wake uses the
-   new pair. The timer alerts on a non-2xx and retries.
+8. **Failure response.** Three distinct outcomes, never merged:
+   - checks or CAS fail **before** the stop -> nothing is written, no Run is
+     touched; `4xx`, the old Run keeps serving.
+   - CAS committed, **stop** failed -> `502` with `stopped: false`,
+     `run_id: null`; the durable config is ahead of the running Run, the old
+     Run still serves the old valid pair, and the next wake uses the new pair.
+     Safe, but alert because the durable and running state disagree.
+   - CAS committed, stop succeeded, **start** failed -> `502` with
+     `stopped: true`, `run_id: null`; **mail is down** on the public ports.
+     Critical alert; retry the start, then roll back with `*.prev` if the new
+     Run cannot become ready. Do not report this as "the running certificate is
+     still the previous one".
 
 ### What it must refuse
 
@@ -369,7 +384,7 @@ durable Binding config ciphertext; the audit record's integrity.
 | T1 | Key leaks through a log, Receipt or stdout | The exporter prints key material only for `--print-binding-update`/`print-binding-update`, warns on stderr, and everything else is a journal-safe plan line. `ResolvedSecret` has no `Serialize` and a redacting `Debug`; the Runner's only exposure point is `expose_for_spawn`. Receipts never contain Binding values (K holds facts about the run, not secrets). | A shell redirection by the operator can still persist it; the runbook forbids it and the command says so. |
 | T2 | Key leaks by being passed as an argument | `openssl` receives paths, never bytes; the empty passphrase `pass:` carries no secret; the docker CLI gets `--env NAME` without a value, so the PEM is not in argv. | `ps` shows file paths only. |
 | T3 | Key read by another Instance | The value is sealed with AAD `[instanceId, parentRoot]`, so a ciphertext cannot be opened for another Instance; the per-Run grant is one-time (`DELETE … RETURNING`) with AAD `[runId, leaseId, parentRoot]`; the renewal grant names exactly one Instance and two binding ids. | A compromised control plane is out of scope (it can already re-seal). |
-| T4 | Key read by the Runner host | The environment file is 0600 inside a Runner-owned runtime directory and removed as soon as `docker run` returns; with the required change the value is also in the docker client's environment for the launch window. `/proc/<pid>/environ` is readable by root and by the same UID. | Root on the host can always read it; the tool's privilege checks only keep *accidents* from happening. |
+| T4 | Key read by the Runner host | The environment file is created 0600 (before the first byte is written) inside a Runner-owned runtime directory, removed as soon as `docker run` returns and on every early-return path (RAII guard); a multi-line value is also in the docker client's environment for the launch window. `/proc/<pid>/environ` is readable by root and by the same UID. | Root on the host can always read it. The docker client environment is inherited by any child it spawns (credential helpers, hooks) for that window; the review must keep those children bounded, and the window ends with the client process. |
 | T5 | Key read by other workloads | Only the Stalwart container receives the two variables. Every other service in the group gets its own environment; the Runner writes one environment file per container. | Any process inside the Stalwart container can read them, and Stalwart persists the pair in its own registry (the field is marked `secret`, so its API does not return it). This is the Instance-compromise boundary, not a key-loss boundary. |
 | T6 | Cross-Instance or cross-binding write through the renewal credential | The API resolves the Instance from the grant, requires the two binding ids to be declared `ato.secret@1`, and refuses everything else. | A stolen token can still roll the allowlisted pair for its own Instance; the audit record and the serial mismatch alert are the detection. |
 | T7 | An old certificate is silently kept or served | The K5 reflection proof (below) compares the presented serial with the export record after every renewal; a mismatch is an alert, and `notAfter < 14 d` is an alert even when nothing changed. | A hand-run renewal can skip the comparison; the runbook makes it a gate. |
@@ -398,7 +413,10 @@ After the new Run is ready:
 
 1. The K5 observation on each public port records the presented leaf serial,
    SAN, `notBefore`/`notAfter`, chain length and trust-anchor label in the
-   receipt `/3` evidence.
+   receipt `/3` evidence. The serial is the number as `openssl x509 -serial`
+   displays it: the DER INTEGER's leading sign-padding `0x00` is stripped
+   (fixed in S1, with a high-bit fixture), so both sides use the same spelling
+   for a serial whose top bit is set.
 2. Ops compares, for every port:
 
    ```text
@@ -505,3 +523,8 @@ Not implemented, deliberately:
    `ato-api` implementation.
 2. Exact `ato-api` route names/shape are a proposal for that repo's review; the
    invariants (allowlist, CAS, payload-free audit, no secret in logs) are fixed.
+3. **Admission entry for the replace.** The internal stop/start path must be
+   named explicitly: the replacement is an owner-actor operation, not an
+   Unattended admission, and the sample's `effects = requires-confirmation` must
+   not silently turn the unattended renewal into a denied admission. Record the
+   entry and the effect policy it consults before writing the API code.

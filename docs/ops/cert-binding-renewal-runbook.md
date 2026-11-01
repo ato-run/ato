@@ -135,23 +135,34 @@ token_file=/etc/ato/cert-export/operator.token
 export_dir=/var/lib/ato/cert-export/"$instance"
 
 token=$(cat "$token_file")
+run_dir=/var/lib/ato/cert-export/"$instance"
 state=$(curl -fsS -H "Authorization: Bearer $token" \
   "$api/v1/operator/certificate-bindings/$grant")
 generation=$(printf '%s' "$state" | jq -r '.generation')
 
-# Plan and warnings go to the journal; the payload goes only into curl.
+# Plan and warnings go to the journal; the payload goes to a private file so
+# the action can be checked before anything is sent. Never run this
+# unconditionally: an unchanged pair must NOT restart the mail Run.
 /usr/local/bin/ato-cert-export \
   --allowlist /etc/ato/cert-export/allowlist.conf \
   --instance "$instance" \
   --openssl /usr/bin/openssl \
   export --print-binding-update \
   --grant-id "$grant" --expected-generation "$generation" \
-| curl -fsS -X POST \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    --data-binary @- \
-    "$api/v1/operator/certificate-bindings/$grant/apply" \
-    > /var/lib/ato/cert-export/"$instance"/last-apply.json
+  > "$run_dir/.payload" 2> "$run_dir/.plan"
+if grep -q '"action":"unchanged"' "$run_dir/.plan"; then
+  cat "$run_dir/.plan"
+  rm -f "$run_dir/.payload" "$run_dir/.plan"
+  exit 0
+fi
+cat "$run_dir/.plan"
+curl -fsS -X POST \
+  -H "Authorization: Bearer $token" \
+  -H "Content-Type: application/json" \
+  --data-binary @"$run_dir/.payload" \
+  "$api/v1/operator/certificate-bindings/$grant/apply" \
+  > "$run_dir/last-apply.json"
+rm -f "$run_dir/.payload" "$run_dir/.plan"
 
 # The response carries the rotated token; store it, never print it.
 jq -r '.next_token' /var/lib/ato/cert-export/"$instance"/last-apply.json \
@@ -162,11 +173,12 @@ rm -f /var/lib/ato/cert-export/"$instance"/last-apply.json
 Notes on the script:
 
 - `export` with `--print-binding-update` sends the plan JSON to **stderr** and
-  the payload to stdout, so the pipe carries exactly one document.
-- If the pair is unchanged the tool is a no-op on disk, and it still prints the
-  payload; applying an unchanged pair is harmless but unnecessary — check the
-  plan's `action` in the journal and skip the call if you prefer
-  (`|grep '"action":"unchanged"' && exit 0`, before the pipe).
+  the payload to stdout. The script sends them to two private files first, so it
+  can read `action` and skip the call.
+- If the pair is unchanged the tool is a no-op on disk, **and the apply call is
+  skipped**. Applying an unchanged pair is not harmless: it starts a new Run and
+  briefly drops the mail ports, so the `unchanged` branch is a hard requirement,
+  not a preference.
 - `last-apply.json` is the only file that ever holds the rotated token; it is
   removed in the same run. If a run dies between the response and the `mv`, the
   old token is still valid until the next successful rotation and the next
@@ -183,8 +195,11 @@ Notes on the script:
 3. The API verifies the grant, the two binding ids, the domain, the value shape
    and `expected_generation`, seals the new values, writes one audit row, and
    replaces the Run.
-4. The new Run starts with the new pair; the old Run is stopped first (two
-   processes cannot hold the same mail ports).
+4. The old Run is stopped first (fixed TCP cannot be served by two Runs), then
+   the new Run starts with the new pair. Consequence: a stop failure leaves the
+   old valid certificate serving, but **a stop success followed by a start
+   failure leaves the mail ports down** until the start succeeds. That is the
+   only externally visible failure of a renewal and it is alerted as critical.
 5. The K5 observation records the presented serial in receipt `/3`.
 6. Ops compares (§7).
 
@@ -197,8 +212,9 @@ Notes on the script:
 | Allowlist/usage problem (exit `3`) | `usage: …` | Fix the file or the arguments; no secret was touched. |
 | Not root (exit `4`) | `privilege: …` | Run through the unit; `--allow-unprivileged` is for tests only. |
 | openssl or export directory failure (exit `5`) | `tool:`/`io:` | Check `/usr/bin/openssl` ownership and the export directory; the running Run is unaffected. |
-| Apply rejected (`401/403/409/410/413`) | curl exit `22`, the body in the journal | `409` is a generation race: next tick wins. `410/403`: rotate or re-issue the grant (§8). Never disable the check. |
-| Apply `502` with `applied_generation` and `run_id: null` | The durable config is ahead; the old Run still serves | Retry the replace (owner `start`) or wait for the always-on policy; alert. |
+| Apply rejected | curl exit `22`, the body in the journal | `401` missing/malformed token: check the token file. `403` revoked grant. `410` expired/rotated/consumed grant: re-issue (§8). `409` generation conflict: the next tick wins. `413/422` value shape or size: fix and retry. Never disable the check. |
+| Apply `502`, `stopped: false`, `run_id: null` | The CAS committed but the stop failed; the old Run still serves the old valid pair | Alert. Retry the replace; the next wake uses the new pair. |
+| Apply `502`, `stopped: true`, `run_id: null` | **Mail is down**: the old Run was stopped, the new one did not start | Critical alert. Retry the start; if it cannot become ready, roll back (§9). Do not wait for the next tick. |
 | `notAfter < 14 days` warning | `warning: the certificate expires in N days` | Caddy is not renewing: fix DNS/ACME, then run the unit by hand. |
 | Serial mismatch after a renewal | K5 receipt serial ≠ `meta.json` serial | Incident: the new Run did not pick up the values, or something else answers on the port. Roll back (§9) and investigate. |
 
@@ -252,9 +268,10 @@ openssl s_client -starttls smtp -connect mail.ato.run:587 -servername mail.ato.r
 
 ## 9. Rollback
 
-The running Run is never modified by a renewal, so "rollback" is either "do not
-start the new Run" (already true if anything failed) or "put the previous pair
-back".
+A renewal can end in three states: nothing changed (checks/CAS failed before any
+stop), the durable config is ahead but the old Run still serves (stop failed), or
+the old Run is stopped and the new one is not running (start failed). Rollback
+covers the last two: put the previous pair back, then start the Run.
 
 1. Take the pair from the export's `*.prev` (root-only, next to the current
    pair). Do not copy it anywhere else — the private key stays under
@@ -282,7 +299,16 @@ back".
    expired previous pair is refused — which is the correct answer: roll back to
    a certificate that is about to lapse is not a rollback.
 5. Re-run §7. The serials must now show the previous certificate, on every port.
-6. Delete the rollback allowlist file when done (it points at a specific pair and
+6. **Make the rollback the current state before the next tick.** The timer still
+   reads the main export directory, which holds the *new* pair; leaving it alone
+   would re-apply the pair you just rolled back. Either point the main allowlist
+   back at the sources (Caddy still serves the new pair, so this only helps after
+   Caddy is fixed) or, as the supported path, move the rollback export directory
+   over the current one while the timer is stopped:
+   `systemctl stop ato-cert-renew.timer`, `mv <instance> <instance>-failed`,
+   `mv <instance>-rollback <instance>`, then re-enable the timer. Keep
+   `<instance>-failed` (root-only) for the investigation.
+7. Delete the rollback allowlist file when done (it points at a specific pair and
    is not meant to persist).
 
 If the rollback pair is no longer usable, re-issue from Caddy by forcing a

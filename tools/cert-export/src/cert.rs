@@ -252,8 +252,9 @@ pub fn verify_program(program: &Path, privileged: bool) -> Result<()> {
 
 fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or("").trim();
-    if line.len() > 300 {
-        format!("{}...", &line[..300])
+    if line.chars().count() > 300 {
+        let truncated: String = line.chars().take(300).collect();
+        format!("{truncated}...")
     } else {
         line.to_owned()
     }
