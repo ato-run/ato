@@ -971,8 +971,16 @@ fn read_contract(
                 require,
                 "contract.require",
                 &[
-                    "id", "use", "port", "method", "path", "input", "expect", "scenario",
-                    "server_name", "start",
+                    "id",
+                    "use",
+                    "port",
+                    "method",
+                    "path",
+                    "input",
+                    "expect",
+                    "scenario",
+                    "server_name",
+                    "start",
                 ],
             )?;
             let id = required_str(require, "id", "contract.require")?;
@@ -991,6 +999,12 @@ fn read_contract(
                         return Err(malformed(
                             what.clone(),
                             "an HTTP requirement does not take `scenario`",
+                        ));
+                    }
+                    if require.contains_key("server_name") || require.contains_key("start") {
+                        return Err(malformed(
+                            what.clone(),
+                            "only a TLS requirement names `server_name` or `start`",
                         ));
                     }
                     only(
@@ -1054,6 +1068,8 @@ fn read_contract(
                     if require.contains_key("method")
                         || require.contains_key("path")
                         || require.contains_key("input")
+                        || require.contains_key("server_name")
+                        || require.contains_key("start")
                     {
                         return Err(malformed(
                             what.clone(),
@@ -1100,7 +1116,8 @@ fn read_contract(
                             return Err(malformed(
                                 format!("{what}.start"),
                                 format!(
-                                    "{other:?} is not a TLS start mode; use implicit or                                      smtp-starttls"
+                                    "{other:?} is not a TLS start mode; use implicit or \
+                                     smtp-starttls"
                                 ),
                             ));
                         }
@@ -1116,6 +1133,12 @@ fn read_contract(
                         return Err(malformed(
                             what.clone(),
                             "a workspace requirement does not take `scenario`",
+                        ));
+                    }
+                    if require.contains_key("server_name") || require.contains_key("start") {
+                        return Err(malformed(
+                            what.clone(),
+                            "only a TLS requirement names `server_name` or `start`",
                         ));
                     }
                     only(expect, &format!("{what}.expect"), &["digest"])?;
@@ -1363,5 +1386,30 @@ start = "smtp-starttls"
         assert!(rendered.contains("server_name = \"mail.example\""));
         let reparsed = parse_capsule_toml(&rendered).unwrap();
         assert_eq!(reparsed.contract, draft.contract);
+
+        // A TLS requirement states only its own three keys, and no other
+        // requirement may borrow them.
+        for (what, text) in [
+            (
+                "unknown start",
+                doc.replace("start = \"smtp-starttls\"", "start = \"opportunistic\""),
+            ),
+            (
+                "expectation",
+                doc.replace(
+                    "start = \"smtp-starttls\"",
+                    "start = \"smtp-starttls\"\n[contract.require.expect]\nstatus = 200",
+                ),
+            ),
+            (
+                "tls keys on an http requirement",
+                doc.replace(
+                    "use = \"ato.contract.tls@1\"\nport = \"app.http\"",
+                    "use = \"ato.contract.http@1\"\nport = \"app.http\"",
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml(&text).is_err(), "{what}");
+        }
     }
 }

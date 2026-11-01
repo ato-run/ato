@@ -345,7 +345,8 @@ impl ValidatorAgent {
             &ReceiptContext {
                 target: VerificationTargetKind::AtoRunHosted,
                 bundle_sha256: Some(&transport),
-                // The Hosted receipt is schema /1: it names no dependency
+                // The Hosted receipt is schema /1 — or /3 when it carries
+                // certificate evidence — and never names a dependency
                 // profile, whatever the transport declares.
                 portability_profile: None,
                 run_id: job.run_id.as_deref(),
