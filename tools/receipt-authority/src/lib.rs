@@ -1211,6 +1211,8 @@ mod exploration_submission_tests {
             )],
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
+
+            tls: Vec::new(),
         };
         let mut receipt = ContractVerificationReceipt::from_attempt(
             &state.frozen.contract_ref,
