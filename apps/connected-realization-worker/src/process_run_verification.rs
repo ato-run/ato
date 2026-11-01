@@ -252,6 +252,7 @@ pub(super) fn report(
         &spec,
         observations,
         Vec::new(),
+        Vec::new(),
         execution,
         &ReceiptContext {
             target: VerificationTargetKind::AtoRunHosted,
@@ -390,6 +391,7 @@ mod tests {
                 &spec,
                 observed,
                 Vec::new(),
+                Vec::new(),
                 execution,
                 &ReceiptContext {
                     target: VerificationTargetKind::AtoRunHosted,
@@ -500,6 +502,7 @@ mod tests {
         let result = verify_observed_candidate(
             &spec,
             vec![observation],
+            Vec::new(),
             Vec::new(),
             execution,
             &ReceiptContext {

@@ -40,7 +40,8 @@ use crate::authoring::{
     InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
     PortDraft, RequirementDraft, RuntimeDraft, SCENARIO_CONTRACT_VERIFIER,
     STATE_FILESYSTEM_PROTOCOL, ScenarioRequirement, StateAccess, StateDraft, StepDraft,
-    StepNetwork, WORKSPACE_PROTOCOL, malformed,
+    StepNetwork, TLS_CONTRACT_VERIFIER, TlsRequirement, TlsStart, WORKSPACE_PROTOCOL, malformed,
+    validate_tls_server_name,
 };
 use crate::native_surface::{
     NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, TERMINAL_PORT_PROTOCOL,
@@ -61,6 +62,7 @@ pub const LEGACY_STORE_SCHEMA_KEY: &str = "schema_version";
 const USE_HTTP_CONTRACT: &str = "ato.contract.http@1";
 const USE_WORKSPACE_CONTRACT: &str = "ato.contract.workspace@1";
 const USE_SCENARIO_CONTRACT: &str = SCENARIO_CONTRACT_VERIFIER;
+const USE_TLS_CONTRACT: &str = TLS_CONTRACT_VERIFIER;
 
 /// The only address a workload may bind for anything outside to reach it.
 const REQUIRED_BIND: &str = "0.0.0.0";
@@ -288,7 +290,8 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
     let requirements: Vec<_>=draft.contract.requirements.iter().map(|r|match &r.requirement {
         RequirementDraft::Http(h)=>json!({"id":r.id,"use":USE_HTTP_CONTRACT,"port":h.port,"method":h.method,"path":h.path,"expect":{"status":h.status,"body_digest":h.body_digest.as_ref().map(&observed)}}),
         RequirementDraft::InputIdentity(i)=>json!({"id":r.id,"use":USE_WORKSPACE_CONTRACT,"input":i.input,"expect":{"digest":observed(&i.digest)}}),
-        RequirementDraft::Scenario(s)=>json!({"id":r.id,"use":USE_SCENARIO_CONTRACT,"port":s.port,"scenario":observed(&s.scenario)})
+        RequirementDraft::Scenario(s)=>json!({"id":r.id,"use":USE_SCENARIO_CONTRACT,"port":s.port,"scenario":observed(&s.scenario)}),
+        RequirementDraft::Tls(t)=>json!({"id":r.id,"use":USE_TLS_CONTRACT,"port":t.port,"server_name":t.server_name,"start":t.start.as_str()})
     }).collect();
     let mut contract_doc = json!({"require":requirements});
     // Only an explicit identity is written. A document that never stated one
@@ -969,6 +972,7 @@ fn read_contract(
                 "contract.require",
                 &[
                     "id", "use", "port", "method", "path", "input", "expect", "scenario",
+                    "server_name", "start",
                 ],
             )?;
             let id = required_str(require, "id", "contract.require")?;
@@ -1070,6 +1074,43 @@ fn read_contract(
                         scenario: Observed::Stated(raw),
                     })
                 }
+                USE_TLS_CONTRACT => {
+                    // A certificate requirement observes a port, the name the
+                    // certificate must cover, and how TLS starts there. It
+                    // states no expected value: the serial changes on every
+                    // renewal and is evidence, never identity.
+                    if require.contains_key("method")
+                        || require.contains_key("path")
+                        || require.contains_key("input")
+                        || require.contains_key("scenario")
+                    {
+                        return Err(malformed(
+                            what.clone(),
+                            "a TLS requirement states only `port`, `server_name` and `start`",
+                        ));
+                    }
+                    only(expect, &format!("{what}.expect"), &[])?;
+                    let server_name = required_str(require, "server_name", &what)?;
+                    validate_tls_server_name(&server_name)
+                        .map_err(|detail| malformed(format!("{what}.server_name"), detail))?;
+                    let start = match optional_str(require, "start", &what)? {
+                        None | Some("implicit") => TlsStart::Implicit,
+                        Some("smtp-starttls") => TlsStart::SmtpStarttls,
+                        Some(other) => {
+                            return Err(malformed(
+                                format!("{what}.start"),
+                                format!(
+                                    "{other:?} is not a TLS start mode; use implicit or                                      smtp-starttls"
+                                ),
+                            ));
+                        }
+                    };
+                    RequirementDraft::Tls(TlsRequirement {
+                        port: required_str(require, "port", &what)?,
+                        server_name,
+                        start,
+                    })
+                }
                 USE_WORKSPACE_CONTRACT => {
                     if require.contains_key("scenario") {
                         return Err(malformed(
@@ -1099,8 +1140,8 @@ fn read_contract(
                         format!("{what}.use"),
                         format!(
                             "{other:?} is not a verifier this build can decide; \
-                             use {USE_HTTP_CONTRACT}, {USE_WORKSPACE_CONTRACT} or \
-                             {USE_SCENARIO_CONTRACT}"
+                             use {USE_HTTP_CONTRACT}, {USE_WORKSPACE_CONTRACT}, \
+                             {USE_SCENARIO_CONTRACT} or {USE_TLS_CONTRACT}"
                         ),
                     ));
                 }
@@ -1272,5 +1313,55 @@ mod tests {
     fn a_source_tree_without_a_capsule_toml_reads_as_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(read_capsule_toml(dir.path()), Ok(None));
+    }
+
+    #[test]
+    fn a_tls_requirement_parses_and_renders_without_losing_its_fields() {
+        let doc = r#"schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+entry = "index.html"
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+
+[[contract.require]]
+id = "imaps"
+use = "ato.contract.tls@1"
+port = "app.http"
+server_name = "mail.example"
+start = "smtp-starttls"
+"#;
+        let draft = parse_capsule_toml(doc).unwrap();
+        let requirement = draft
+            .contract
+            .requirements
+            .iter()
+            .find(|requirement| requirement.id == "imaps")
+            .expect("the tls requirement is parsed");
+        match &requirement.requirement {
+            RequirementDraft::Tls(tls) => {
+                assert_eq!(tls.port, "app.http");
+                assert_eq!(tls.server_name, "mail.example");
+                assert_eq!(tls.start, TlsStart::SmtpStarttls);
+            }
+            other => panic!("expected a TLS requirement, got {other:?}"),
+        }
+        let rendered = render_capsule_toml(&draft).unwrap();
+        assert!(rendered.contains("ato.contract.tls@1"));
+        assert!(rendered.contains("server_name = \"mail.example\""));
+        let reparsed = parse_capsule_toml(&rendered).unwrap();
+        assert_eq!(reparsed.contract, draft.contract);
     }
 }
