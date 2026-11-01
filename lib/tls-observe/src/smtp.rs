@@ -1,11 +1,14 @@
 //! The SMTP STARTTLS preamble: 220 greeting, EHLO, STARTTLS command, 220.
 //!
-//! The conversation is bounded: at most 64 reply lines and 512 bytes per line.
-//! Lines are read one byte at a time so that no plaintext byte is buffered and
-//! lost when the same stream becomes a TLS transport afterwards.
+//! The conversation is bounded: at most 64 reply lines and 512 bytes per line,
+//! and every read and write is bounded by what is left of the observation
+//! budget rather than by a fresh timeout. Lines are read one byte at a time so
+//! that no plaintext byte is buffered and lost when the same stream becomes a
+//! TLS transport afterwards.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 use crate::TlsProbeError;
 
@@ -39,24 +42,38 @@ impl Reply {
 struct Conversation<'a> {
     stream: &'a mut TcpStream,
     lines_left: usize,
+    deadline: Instant,
 }
 
 impl<'a> Conversation<'a> {
-    fn new(stream: &'a mut TcpStream) -> Self {
+    fn new(stream: &'a mut TcpStream, deadline: Instant) -> Self {
         Self {
             stream,
             lines_left: MAX_REPLY_LINES,
+            deadline,
         }
     }
 
+    /// What is left of the whole observation budget.
+    fn remaining(&self) -> Result<Duration, TlsProbeError> {
+        crate::remaining_budget(self.deadline).ok_or_else(crate::timeout_error)
+    }
+
     fn write_command(&mut self, command: &str) -> Result<(), TlsProbeError> {
+        let remaining = self.remaining()?;
+        self.stream
+            .set_write_timeout(Some(remaining))
+            .map_err(|err| {
+                TlsProbeError::new(format!("could not bound the write timeout: {err}"))
+            })?;
         self.stream
             .write_all(command.as_bytes())
             .and_then(|()| self.stream.flush())
             .map_err(|err| {
-                TlsProbeError::new(format!(
-                    "could not write the SMTP command {command:?}: {err}"
-                ))
+                crate::io_budget_error(
+                    &format!("could not write the SMTP command {command:?}"),
+                    err,
+                )
             })
     }
 
@@ -96,6 +113,12 @@ impl<'a> Conversation<'a> {
         let mut bytes = Vec::new();
         let mut byte = [0u8; 1];
         loop {
+            let remaining = self.remaining()?;
+            self.stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|err| {
+                    TlsProbeError::new(format!("could not bound the read timeout: {err}"))
+                })?;
             match self.stream.read(&mut byte) {
                 Ok(0) => {
                     return Err(TlsProbeError::new(format!(
@@ -114,9 +137,10 @@ impl<'a> Conversation<'a> {
                     }
                 }
                 Err(err) => {
-                    return Err(TlsProbeError::new(format!(
-                        "{step}: could not read the SMTP reply: {err}"
-                    )));
+                    return Err(crate::io_budget_error(
+                        &format!("{step}: could not read the SMTP reply"),
+                        err,
+                    ));
                 }
             }
         }
@@ -131,8 +155,12 @@ impl<'a> Conversation<'a> {
 /// Run the SMTP STARTTLS preamble on a freshly connected stream.
 ///
 /// On success the same stream is ready for the TLS handshake.
-pub(crate) fn start_tls(stream: &mut TcpStream, server_name: &str) -> Result<(), TlsProbeError> {
-    let mut conversation = Conversation::new(stream);
+pub(crate) fn start_tls(
+    stream: &mut TcpStream,
+    server_name: &str,
+    deadline: Instant,
+) -> Result<(), TlsProbeError> {
+    let mut conversation = Conversation::new(stream, deadline);
 
     let greeting = conversation.read_reply("greeting")?;
     greeting.require(220, "greeting")?;
