@@ -15,11 +15,76 @@ A Stalwart v0.16.22 container (`ato-mail-stalwart`, pinned upstream digest
 - Let's Encrypt certificate obtained by the host Caddy (an import line appended
   to the generated Caddyfile) and copied into Stalwart by a daily timer.
 
-This container is the **rollback target** for every phase below and stays
-intact until clean-up.
+This container is the **rollback target** for every phase below. Its
+configuration, data, listeners and certificate sync stay intact and
+restartable until clean-up; no phase repurposes it.
 
 The goal is to run the same service **as an Ato app**: always-on, fixed
 public TCP ports, persistent state, Ato-managed lifecycle.
+
+## Capsule model: one K for the mail service, components composed in D
+
+The mail service is **one Capsule**, but one Capsule is not one container.
+The Contract K states what must be true of the service, in product-agnostic
+terms; each Derivation D composes the components that realize it.
+
+### K — service conditions (product-agnostic)
+
+| # | Condition |
+|---|---|
+| K1 | SMTP on public TCP 25 accepts mail for the declared domains. |
+| K2 | Authenticated submission (465) and mailbox access (993) work over TLS. |
+| K3 | The HTTPS admin / JMAP endpoint answers. |
+| K4 | Mailboxes and the outbound queue survive a Run restart. |
+| K5 | Every public port serves a valid certificate for the declared host name. |
+| K6 | Outbound delivery succeeds under the declared conditions (Stage 1: through the granted relay). |
+
+K names no product (Stalwart, Caddy) and no placement. Today's Contract
+verifiers cover HTTP (`ato.contract.http@1`), workspace and scenario
+observations. K1, K2 and K5 need a generic TCP/TLS observation; that belongs
+to the Protocol/Adapter side as a product-agnostic observation, not a
+mail-specific Kernel feature, and is an open item for Phase 1.
+
+### D1 — first Derivation (Stage 1)
+
+| Component | Placement | Treatment in Ato |
+|---|---|---|
+| Stalwart | Dedicated Runner | The Capsule's execution component |
+| Caddy | Existing host | External Ingress / certificate Binding (G2) |
+| SMTP relay | Independent service on the host | External-communication Binding (G1, `ato.tcp-egress@1`) |
+| Persistent data | Runner Volume | Save / restore target |
+| DNS / PTR | Cloudflare / Hetzner | Environment-dependent external Binding |
+
+**D1 is not a self-contained bundle.** It depends on host-provided Bindings
+(Caddy certificate, SMTP relay) and on external DNS/PTR. It is reproducible
+only where equivalent Bindings are rebound; that is intended, per "rebind
+external state".
+
+### D2 — later: Caddy as an internal component
+
+A later D may move Caddy into the Capsule as a component of a service group.
+That needs its own port design: forward from the existing host Caddy, a
+dedicated IP, or L4 routing. It does not by itself solve certificates for
+SMTP STARTTLS / IMAPS, which still need a certificate shared with the mail
+component. D2 is added as a new D under the same K; D1 is not rewritten.
+
+### Receipts
+
+Each of these is verified with a Receipt tied to the Run attempt, not by
+log inspection: state retention (K4), restart, outbound delivery (K6) and
+certificate renewal reflected on every port (K5).
+
+### Not added
+
+No new Capsule format and no mail-specific Kernel feature. D1 uses the
+existing fixed TCP, `ato.tcp-egress@1`, Runner Volume and Binding paths.
+
+### Capability to confirm
+
+Whether the current dedicated Runner handles **multiple components, fixed
+TCP and persistent state at the same time** is not established by design
+review. It must be confirmed by implementation and real-host tests
+(Phase 2 staging, Phase 4 production test domain) before cutover.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
@@ -64,15 +129,20 @@ fixed-target transport Adapter with an `ato.tcp-egress@1` grant for **one
 exact `/32` and port**, and Stalwart's `MtaRoute` relay with SMTP AUTH and
 certificate verification. No arbitrary-destination egress is enabled.
 
-The relay target is a host-side SMTP relay outside the app, owned by the
-operator:
+The relay target is a **new, independent** host-side SMTP relay outside the
+app, owned by the operator. It is **not** the existing Stalwart container:
+that container is the rollback target and must stay restorable as a full
+mail server.
 
-- the existing Stalwart container, reduced to an **outbound-only relay**: no
-  public listeners, submission on one non-public port reachable only from the
-  dedicated Runner's egress path, AUTH required, sender domains restricted to
-  the app's domains, per-sender rate limits;
-- it keeps doing direct MX delivery from `65.109.37.38` with the existing PTR,
-  SPF and DKIM, so deliverability does not change during the move.
+- separate service (own unit/container, config and queue directory); no
+  public listeners; submission on one non-public address and port reachable
+  only from the dedicated Runner's egress path; AUTH required; sender
+  domains restricted to the app's domains; per-sender rate limits;
+- it delivers directly to MX from `65.109.37.38` with the existing PTR and
+  SPF. DKIM signing stays in the app, so deliverability does not change
+  during the move;
+- it is brought up and tested while the container still serves the domains,
+  and it does not bind ports the container uses.
 
 The app's grant names exactly this relay's address and port. Revoking the
 grant (or stopping the relay) stops all outbound mail from the app.
@@ -202,20 +272,27 @@ window does not lose inbound mail. The rehearsal must confirm the bound.
 
 ## Phases
 
-1. **Design (no deploy).** G1 Stage 2 RFC draft; G2 exporter and
-   certificate Binding design (this document); runbook draft.
+1. **Design (no deploy).** K and D1 written as a Capsule (no new format);
+   the generic TCP/TLS observation for K1/K2/K5; G1 Stage 2 RFC draft; G2
+   exporter and certificate Binding design (this document); independent
+   relay design; runbook draft.
 2. **Staging.** Pre-cutover verification step 1, plus the staging rollback
-   rehearsal.
+   rehearsal. Confirms the Runner capability (multiple components, fixed
+   TCP, persistent state together) and issues the K4/K5/K6 and restart
+   Receipts.
 3. **Production dedicated Runner install.** Build the reviewed worker from
    `main`; install as a new systemd unit and user; enroll as the owner's
    dedicated Runner; allowlist only the test IPv6 address first.
 4. **Production parallel test.** Pre-cutover verification step 2 and the
    production rollback rehearsal on the test domain.
 5. **Cutover window.** Move `mail.ato.run` and `atousercontent.com` onto the
-   app; the container becomes the Stage 1 outbound relay (no public
-   listeners).
+   app. The container is stopped, not modified: its image digest,
+   `/srv/ato-mail/etc` and a final copy of `/srv/ato-mail/data` are kept so
+   rollback is a container start. The Stage 1 relay is the separate service
+   from G1.
 6. **Clean-up after a stable week.** Remove the Caddy import line once G2
-   uses the host mechanism.
+   uses the host mechanism. Retiring the stopped container is a separate,
+   explicitly approved step.
 
 ## Risks
 
