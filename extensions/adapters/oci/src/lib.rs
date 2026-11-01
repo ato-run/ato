@@ -652,18 +652,16 @@ impl DockerOciAdapter {
         let container_name = format!("ato-{stem}-{}-{suffix}", std::process::id());
 
         let env_file = runtime_root.join("environment.list");
-        let environment = self
-            .spec
-            .environment
-            .iter()
-            .map(|(name, value)| format!("{name}={value}\n"))
-            .collect::<String>();
-        fs::write(&env_file, environment).context("write OCI environment file")?;
+        let (inline_environment, multiline_environment) = split_environment(&self.spec.environment);
+        write_environment_file(&env_file, &inline_environment)?;
 
         let mut argv = docker_run_arguments(
             &self.spec,
             workspace,
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &multiline_environment,
+            },
             &container_name,
             network.name(),
             alias,
@@ -688,7 +686,17 @@ impl DockerOciAdapter {
             }))?,
         )
         .context("record OCI launch identity")?;
-        let launched = self.docker.command().args(&argv).output();
+        // A value containing a newline cannot be a NAME=VALUE line in the
+        // environment file. Docker reads `--env NAME` from the client's
+        // environment, so the value stays out of the argv (visible in ps) and
+        // is cleared with the rest of the client environment afterwards.
+        let mut docker = self.docker.command();
+        for name in &multiline_environment {
+            if let Some(value) = self.spec.environment.get(name) {
+                docker.env(name, value);
+            }
+        }
+        let launched = docker.args(&argv).output();
         // Docker has consumed the file once `docker run` returns. It may hold
         // runtime Binding values, so it must not become part of a durable Run
         // directory or survive a failed launch.
@@ -1654,7 +1662,7 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
     }
     for (name, value) in &spec.environment {
         ensure!(
-            !name.is_empty() && !name.contains('=') && !value.contains(['\0', '\n', '\r']),
+            !name.is_empty() && !name.contains('=') && !value.contains(['\0', '\r']),
             "OCI environment is invalid"
         );
     }
@@ -1743,10 +1751,60 @@ fn valid_guest_path(target: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+/// Split declared environment values by how they can reach the container.
+///
+/// A value without a newline is a valid `NAME=VALUE` line in the environment
+/// file. A value containing a newline (a PEM certificate or key is the reason
+/// this exists) cannot be one, so its name travels as `--env NAME` and the
+/// value is handed to docker through the client's own environment.
+fn split_environment(
+    environment: &BTreeMap<String, String>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let mut inline = Vec::new();
+    let mut multiline = Vec::new();
+    for (name, value) in environment {
+        if value.contains('\n') {
+            multiline.push(name.clone());
+        } else {
+            inline.push((name.clone(), value.clone()));
+        }
+    }
+    (inline, multiline)
+}
+
+/// Write the single-line environment file and keep it unreadable to other
+/// users. It may hold runtime Binding values and lives under the Run
+/// directory until docker has consumed it.
+fn write_environment_file(path: &Path, inline: &[(String, String)]) -> Result<()> {
+    let mut contents = String::new();
+    for (name, value) in inline {
+        contents.push_str(name);
+        contents.push('=');
+        contents.push_str(value);
+        contents.push('\n');
+    }
+    fs::write(path, contents).context("write OCI environment file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .context("restrict OCI environment file permissions")?;
+    }
+    Ok(())
+}
+
+/// How the declared environment reaches the container: the single-line file
+/// (mounted as `--env-file`) and the names whose values travel through the
+/// docker client's own environment as `--env NAME`.
+struct EnvironmentDelivery<'a> {
+    env_file: &'a Path,
+    multiline: &'a [String],
+}
+
 fn docker_run_arguments(
     spec: &OciSpec,
     workspace: &Path,
-    env_file: &Path,
+    environment: &EnvironmentDelivery<'_>,
     container_name: &str,
     network_name: &str,
     alias: Option<&str>,
@@ -1755,7 +1813,8 @@ fn docker_run_arguments(
     let workspace = workspace
         .canonicalize()
         .context("canonicalize OCI workspace")?;
-    let env_file = env_file
+    let env_file = environment
+        .env_file
         .canonicalize()
         .context("canonicalize OCI environment file")?;
     let selected_user = execution_user(spec)?;
@@ -1795,6 +1854,9 @@ fn docker_run_arguments(
         "--label".to_owned(),
         format!("run.ato.dev/id={}", spec.id),
     ];
+    for name in environment.multiline {
+        argv.extend(["--env".to_owned(), name.clone()]);
+    }
     for (key, value) in &spec.labels {
         argv.extend(["--label".to_owned(), format!("{key}={value}")]);
     }
@@ -2216,7 +2278,10 @@ mod tests {
         let args = docker_run_arguments(
             &value,
             workspace.path(),
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &[],
+            },
             "test",
             "network",
             None,
@@ -2281,7 +2346,10 @@ mod tests {
         let args = docker_run_arguments(
             &spec(),
             workspace.path(),
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &[],
+            },
             "ato-test",
             "ato-test-net",
             None,
@@ -2319,7 +2387,10 @@ mod tests {
         let alone = docker_run_arguments(
             &spec(),
             workspace.path(),
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &[],
+            },
             "ato-test",
             "ato-group-net",
             None,
@@ -2329,7 +2400,10 @@ mod tests {
         let aliased = docker_run_arguments(
             &spec(),
             workspace.path(),
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &[],
+            },
             "ato-test",
             "ato-group-net",
             Some("backend"),
@@ -2357,7 +2431,10 @@ mod tests {
         let args = docker_run_arguments(
             &declared,
             workspace.path(),
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &[],
+            },
             "ato-test",
             "ato-test-net",
             None,
@@ -2380,7 +2457,10 @@ mod tests {
         let args = docker_run_arguments(
             &declared,
             workspace.path(),
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &[],
+            },
             "ato-test",
             "ato-test-net",
             None,
@@ -2422,7 +2502,10 @@ mod tests {
         let result = docker_run_arguments(
             &value,
             workspace.path(),
-            &env_file,
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &[],
+            },
             "ato-test",
             "ato-test-net",
             None,
@@ -2669,5 +2752,68 @@ esac
         );
         let error = failed_launch(&docker, "c1", anyhow::anyhow!("inspect failed"));
         assert!(error.downcast_ref::<SpawnCleanupUnconfirmed>().is_some());
+    }
+
+    #[test]
+    fn multi_line_environment_values_are_accepted_and_never_become_argv_or_env_file_lines() {
+        let mut declared = spec();
+        declared.environment.insert(
+            "MAIL_CERT".to_owned(),
+            "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----".to_owned(),
+        );
+        declared
+            .environment
+            .insert("PORT".to_owned(), "8080".to_owned());
+        assert!(validate_spec(&declared).is_ok());
+
+        // NUL and CR stay refused: neither can be carried safely.
+        for value in ["a\0b", "a\rb"] {
+            declared
+                .environment
+                .insert("BAD".to_owned(), value.to_owned());
+            assert!(validate_spec(&declared).is_err(), "accepted {value:?}");
+            declared.environment.remove("BAD");
+        }
+
+        let (inline, multiline) = split_environment(&declared.environment);
+        assert_eq!(multiline, vec!["MAIL_CERT".to_owned()]);
+        assert!(inline.iter().all(|(name, _)| name != "MAIL_CERT"));
+        assert!(
+            inline
+                .iter()
+                .any(|(name, value)| name == "PORT" && value == "8080")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let env_file = dir.path().join("environment.list");
+        write_environment_file(&env_file, &inline).unwrap();
+        let written = std::fs::read_to_string(&env_file).unwrap();
+        assert!(written.contains("PORT=8080\n"));
+        assert!(!written.contains("MAIL_CERT"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&env_file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let args = docker_run_arguments(
+            &declared,
+            workspace.path(),
+            &EnvironmentDelivery {
+                env_file: &env_file,
+                multiline: &multiline,
+            },
+            "ato-test",
+            "ato-test-net",
+            None,
+            "sha256:verified-local-id",
+        )
+        .unwrap();
+        let env_flag = args.iter().position(|arg| arg == "--env").unwrap();
+        assert_eq!(args[env_flag + 1], "MAIL_CERT");
+        // The value is never in the docker CLI's argv.
+        assert!(!args.join(" ").contains("BEGIN CERTIFICATE"));
     }
 }
