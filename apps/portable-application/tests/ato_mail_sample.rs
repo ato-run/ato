@@ -122,8 +122,9 @@ fn k5_asks_for_a_certificate_on_every_mail_port_in_the_right_start_mode() {
 fn k3_observes_definitions_the_pinned_http_listener_answers_without_a_session() {
     let route = mail_sample_route();
     let expected = BTreeMap::from([
-        // Proves the HTTP listener and its routing table are alive. Always 200
-        // on the pinned build, before any authentication or storage access.
+        // Proves the HTTP listener and its routing table are alive. 200 on the
+        // pinned build before any authentication or storage access, subject
+        // only to Stalwart's anonymous-request rate limiter.
         ("http-live", ("/healthz/live", 200u16)),
         // 200 only when a data storage backend is configured (503 otherwise),
         // so it also covers "the state mount is wired to a store".
