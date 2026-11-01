@@ -58,10 +58,10 @@ contains the refreshable-Binding path):
 | Operator surface | `/v1/operator` group (`requireAdmin()` + `ato_session`) and `/v1/internal` (`MANAGED_RUNNER_ADMIN_TOKEN`) | Existing; interactive admin session or one static service token. Neither is a per-Instance credential. |
 | K5 observation | `ato.contract.tls@1` and receipt `/3` evidence (serial, SAN, validity, chain, anchor) | S1, unmerged (`feat/mail-tls-contract-observation`, ato#1666). **This design depends on it.** |
 
-## Detected blocker: the OCI environment channel cannot carry a multi-line value
+## Detected blocker: the OCI environment channel could not carry a multi-line value
 
-This is the one thing that does not work today, and it is a gap between two
-existing rules rather than a missing capability.
+Fixed in this PR (the adapter change below is implemented and tested here). It
+was a gap between two existing rules rather than a missing capability.
 
 - The authoring and API layers **allow** a Binding value with newlines:
   `resolve_application_bindings` rejects only empty values, `> 64 KiB` and NUL
@@ -72,25 +72,32 @@ existing rules rather than a missing capability.
   (`extensions/adapters/oci/src/lib.rs`). A PEM certificate or key always has
   line breaks, so a service group fed two PEM Bindings fails at admission.
 
-Because it fails closed, this is safe today; it is also why "certificate as an
-`ato.secret@1` Binding" cannot reach D1 without one change. Docker's
-`--env-file` has no escaping or quoting, so the value cannot be encoded into
-that file.
+Because it failed closed, the old behaviour was safe; it was also why
+"certificate as an `ato.secret@1` Binding" could not reach D1 without one
+change. Docker's `--env-file` has no escaping or quoting, so the value cannot
+be encoded into that file.
 
-**Required ato change (small, no new capability).** Deliver environment values
-that cannot be represented in `--env-file` through the docker client's own
-environment instead:
+**Adopted ato change (small, no new capability; implemented here).** Deliver
+environment values that cannot be represented in `--env-file` through the
+docker client's own environment instead:
 
 1. Validation keeps rejecting NUL and `\r`, and stops rejecting `\n`.
-2. The staged environment file carries only names whose value has no line break.
+2. The staged environment file carries only names whose value has no line break,
+   and it is written `0600` (it may hold an `ato.secret@1` value).
 3. For each remaining name the argv gains `--env NAME` **without a value**
    (the docker CLI then propagates `NAME` from its own environment), and the
    spawned docker client gets that variable set explicitly — `DockerClient::command`
    calls `env_clear()` when a docker owner socket is configured, so the
    variable must be set on the child, not inherited.
-4. Tests: argv carries `--env NAME` and no value; the child environment carries
-   the value; a value with NUL or `\r` is still refused; a single-line value
-   still goes through the file.
+4. Tests: argv carries `--env NAME` and no value; the value never appears in
+   argv; the environment file is `0600` and omits the multi-line name; a value
+   with NUL or `\r` is still refused; a single-line value still goes through
+   the file.
+
+Implemented in `extensions/adapters/oci/src/lib.rs`: the validation rule, a
+`split_environment` / `write_environment_file` pair, and the
+`EnvironmentDelivery` passed to the run-argument builder. `cargo test -p
+ato-adapter-oci` is green (40 tests) and clippy is clean.
 
 Why this is not the "new Runner feature" the plan excludes: no mount is added,
 no new Binding protocol, no new Capability, no Capsule-format change, and the
@@ -115,23 +122,23 @@ environment through its configuration registry:
 
 ```toml
 [[binding]]
-id = "mail_tls_cert"
+id = "mail_cert_pem"
 protocol = "ato.secret@1"
 required = true
 
 [[binding]]
-id = "mail_tls_key"
+id = "mail_key_pem"
 protocol = "ato.secret@1"
 required = true
 ```
 
-The injected names are `ATO_BINDING_MAIL_TLS_CERT` and
-`ATO_BINDING_MAIL_TLS_KEY` (derived, not authored), and the Stalwart
+The injected names are `ATO_BINDING_MAIL_CERT_PEM` and
+`ATO_BINDING_MAIL_KEY_PEM` (derived, not authored), and the Stalwart
 configuration references them:
 
 ```json
-{ "certificate": { "@type": "EnvironmentVariable", "variable": "ATO_BINDING_MAIL_TLS_CERT" },
-  "privateKey":  { "@type": "EnvironmentVariable", "variable": "ATO_BINDING_MAIL_TLS_KEY" } }
+{ "certificate": { "@type": "EnvironmentVariable", "variable": "ATO_BINDING_MAIL_CERT_PEM" },
+  "privateKey":  { "@type": "EnvironmentVariable", "variable": "ATO_BINDING_MAIL_KEY_PEM" } }
 ```
 
 `Certificate.certificate` / `privateKey` accepting `EnvironmentVariable` is the
@@ -216,7 +223,7 @@ Request body (strict, unknown fields refused):
   "schema": "ato.certificate-binding-update/1",
   "domain": "mail.ato.run",
   "expected_generation": 7,
-  "values": { "mail_tls_cert": "<PEM>", "mail_tls_key": "<PEM>" },
+  "values": { "mail_cert_pem": "<PEM>", "mail_key_pem": "<PEM>" },
   "evidence": {
     "serial": "0a1b…", "not_before": "…", "not_after": "…",
     "certificate_sha256": "…", "exported_at": "…"
@@ -433,6 +440,11 @@ Implemented and verified locally in this worktree:
   directory, change detection, `*.prev` retention, and the
   `ato.certificate-binding-update/1` payload printer. 46 tests, `clippy -D
   warnings`, `fmt --check`. No network I/O.
+- The OCI environment channel (the detected blocker above): multi-line values
+  travel as `--env NAME` with the value in the docker client environment, the
+  single-line file is `0600`, NUL/CR stay refused. 40 adapter tests, clippy
+  clean. This is what makes a PEM `ato.secret@1` Binding able to reach D1 at
+  all.
 - This document and `docs/ops/cert-binding-renewal-runbook.md`.
 
 Not implemented, deliberately:
@@ -441,10 +453,10 @@ Not implemented, deliberately:
   specified here but not written; they are a separate `ato-api` change that
   depends on S1 (receipt `/3`) being merged and on the `ato` OCI environment
   fix.
-- The `ato` OCI environment change (Detected blocker). Until it lands, D1
-  cannot run with PEM Bindings at all.
-- The S3 sample (`samples/ato-mail`): declaring the two bindings and pointing
-  Stalwart's registry at the two environment variables.
+- The S3 sample (`samples/ato-mail`): declaring the two bindings
+  (`mail_cert_pem` / `mail_key_pem`) and pointing Stalwart's registry at
+  `ATO_BINDING_MAIL_CERT_PEM` / `ATO_BINDING_MAIL_KEY_PEM`. The sample exists
+  on its own stacked branch; wiring the exporter to it is staging work.
 - Anything on the host: no systemd unit, no timer, no token, no export
   directory is installed. No Caddy instance was read.
 
@@ -458,8 +470,8 @@ Not implemented, deliberately:
   cannot change `ContractRef` and cannot make a satisfied Capsule unsatisfied.
 - Good: the running Run is never mutated, so "keep the current certificate" is
   the default outcome of every failure.
-- Bad: one small `ato` change is required first (the OCI environment channel),
-  which means S2 spans two repositories.
+- Bad: S2 still spans two repositories — this PR's adapter change plus the
+  `ato-api` grant/replace change described here (not written yet).
 - Bad: a renewal restarts the mail workload, so public ports are briefly down
   and remote MTAs must queue and retry; that is the accepted cutover behaviour
   and it is why the Run replace is the last step, after everything else passed.
@@ -469,26 +481,27 @@ Not implemented, deliberately:
 - Bad: the operator endpoint is new control-plane surface that must itself be
   reviewed (constant-time comparison, strict body, CAS, payload-free audit).
 
-## Open decisions for review
+## Decisions taken (2026-11-02)
 
-1. **The OCI environment change.** Accept the small adapter change above
-   (recommended) or choose another delivery. Without one, requirement 1 cannot
-   be met for D1.
-2. **Grant scope**: one grant per (Instance, domain) as designed, or per
-   environment with several Instances. The design deliberately keeps it to one
-   pair; a per-environment grant would widen the blast radius of a stolen token.
-3. **Audit storage**: a new `certificate_binding_audit_events` table (proposed)
-   or an extension of `capsule_access_audit_events`, which is post-scoped and
-   would need a nullable post id.
-4. **Status endpoint**: include `GET /v1/operator/certificate-bindings/:grantId`
-   (proposed; lets the timer pass `expected_generation` instead of parsing a 409
-   conflict).
-5. **Rollback mechanism**: a second root-only allowlist file (proposed, uses
-   only existing code) or a `--from-prev` flag in the tool.
-6. **Always-on interaction**: whether the replace should temporarily set
+1. **The OCI environment change**: accepted and implemented in this PR (see the
+   blocker section).
+2. **Grant scope**: one grant per (Instance, domain), as designed. A
+   per-environment grant would widen the blast radius of a stolen token.
+3. **Audit storage**: a new dedicated `certificate_binding_audit_events` table.
+   `capsule_access_audit_events` is post-scoped and would need a nullable post
+   id, which muddies both records.
+4. **Status endpoint**: include
+   `GET /v1/operator/certificate-bindings/:grantId` so the timer can pass
+   `expected_generation` instead of parsing a 409 conflict.
+5. **Rollback mechanism**: a second root-only allowlist file, pointing at the
+   retained `*.prev` pair. It uses only existing tool code.
+6. **Grant TTL and rotation**: 30 days, rotated on every successful apply.
+
+## Open questions
+
+1. **Always-on interaction**: whether the replace should temporarily set
    `desired_state = stopped` (as the owner's stop route does) or rely on the
-   single-flight wake alone. Needs an S3 look at how a service-group Run with
-   fixed TCP is started and stopped in practice.
-7. **Grant TTL and rotation policy**: 30 days rotating on every apply
-   (proposed) versus a longer TTL with a scheduled rotation that does not depend
-   on a renewal happening.
+   single-flight wake alone. Needs the S3/Instance-lifecycle check before the
+   `ato-api` implementation.
+2. Exact `ato-api` route names/shape are a proposal for that repo's review; the
+   invariants (allowlist, CAS, payload-free audit, no secret in logs) are fixed.

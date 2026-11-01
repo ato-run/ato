@@ -78,8 +78,8 @@ fn entry(certificate: PathBuf, private_key: PathBuf, domain: &str) -> Entry {
         domain: domain.to_owned(),
         certificate,
         private_key,
-        certificate_binding: "mail_tls_cert".to_owned(),
-        private_key_binding: "mail_tls_key".to_owned(),
+        certificate_binding: "mail_cert_pem".to_owned(),
+        private_key_binding: "mail_key_pem".to_owned(),
     }
 }
 
@@ -400,13 +400,13 @@ fn the_cli_prints_the_binding_update_payload_it_was_asked_for() {
         "/v1/operator/certificate-bindings/opcg_01/apply"
     );
     assert!(
-        payload["values"]["mail_tls_cert"]
+        payload["values"]["mail_cert_pem"]
             .as_str()
             .unwrap()
             .contains("BEGIN CERTIFICATE")
     );
     assert!(
-        payload["values"]["mail_tls_key"]
+        payload["values"]["mail_key_pem"]
             .as_str()
             .unwrap()
             .contains("BEGIN PRIVATE KEY")

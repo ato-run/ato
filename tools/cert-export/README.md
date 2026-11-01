@@ -50,7 +50,7 @@ comment. The header line is mandatory.
 ```text
 allowlist = "ato.cert-export.allowlist/1"
 # instance_id   domain        certificate                   private key                   cert-binding    key-binding
-i_01J8ZQ0K      mail.ato.run  /srv/certs/mail.ato.run.crt   /srv/certs/mail.ato.run.key   mail_tls_cert   mail_tls_key
+i_01J8ZQ0K      mail.ato.run  /srv/certs/mail.ato.run.crt   /srv/certs/mail.ato.run.key   mail_cert_pem   mail_key_pem
 ```
 
 Rules: instance ids `[A-Za-z0-9_-]{1,64}`, domains lowercase DNS with at least
