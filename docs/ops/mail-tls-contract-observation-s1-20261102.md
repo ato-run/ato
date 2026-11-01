@@ -89,12 +89,38 @@ Local worktree `.tmp/wt/mail-plan`, branch `feat/mail-tls-contract-observation`
 
 No staging or production host was touched.
 
+## Integration status (2026-11-02)
+
+Phase 1 integration of S1, verified locally and recorded here honestly:
+
+- **Control plane** ato-run/ato-api#1079 (draft, base main) supplies the Run's
+  fixed-TCP endpoints in the runtime-verification claim and accepts receipt
+  /3. Its endpoints are fenced to the Run **and its current lease and
+  generation and an allocated allocation**; a job without a lease names none.
+  The claim test also seeds a superseded lease of the same Run and a revoked
+  allocation and proves neither is named.
+- **Receipt correspondence**: the hosted validator validates every receipt
+  with the Rust authority (`accept_receipt`) before reporting it — the
+  observation set must equal the frozen K and TLS evidence must belong to its
+  own requirement (server_name/start, serial form, public roots, unexpired,
+  completed handshake). A receipt that fails this is never sent; the attempt
+  is abandoned as `receipt_inconsistent`.
+- **Regressions**: a pre-TLS Contract's canonical bytes are frozen in a test;
+  receipt /1 and /2 handling is unchanged and still refuses TLS evidence.
+- **Read model follow-up**: ato-run/ato-api#1080 (`runtime_image_index`
+  projects only /1; accepted /3 receipts are deliberately not projected yet).
+- **CI**: the ato PR's checks pass. The ato-api PR's Activity CI is still
+  queued because the self-hosted `ato-ci` runner is busy/unavailable; local
+  `pnpm typecheck` and 47 relevant vitest tests pass. CI success is not
+  claimed for that PR.
+- **Merge order**: ato-api#1079 first, then ato#1666. No staging or production
+  host has been touched by either.
+
 ## Not in this slice (open)
 
-1. **Hosted transport (ato-api).** The validator job now accepts an optional
-   list of public fixed-TCP endpoints per logical Port, but the API does not
-   supply it yet and accepts only receipt /1. Until that follow-up lands, a
-   TLS requirement on a hosted Run is unobserved and fails closed.
+1. **Hosted transport (ato-api).** Implemented by ato-run/ato-api#1079
+   (draft). Until it merges, a TLS requirement on a hosted Run is unobserved
+   and fails closed.
 2. **K5 serial comparison with the export.** The observation records the
    presented serial; comparing it with `ato-cert-export`'s `meta.json` belongs
    to S2/S5 ops.
