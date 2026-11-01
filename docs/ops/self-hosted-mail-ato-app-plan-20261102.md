@@ -48,20 +48,24 @@ Kernel feature.
 ### K5 — certificate verification per protocol
 
 The certificate is checked as **presented on the public port**, from outside
-the host, not by reading the exported files. Each observation records the
-leaf serial, SAN, notBefore/notAfter and chain validation result, and
-compares the serial with the current export `meta.json`.
+the host, not by reading the exported files.
 
 | Port | How TLS starts | Observation |
 |---|---|---|
 | 25, 587 | Plain SMTP, then `STARTTLS` | Connect, read the 220 greeting, `EHLO`, require `STARTTLS` in the EHLO reply, issue `STARTTLS`, complete the handshake, verify the certificate. A port that does not offer `STARTTLS` fails K5. |
-| 465, 993 | Implicit TLS | TLS handshake immediately on connect, verify the certificate, then read the protocol greeting (SMTP 220 / IMAP `* OK`) inside TLS. |
-| 443 | HTTPS | Ordinary HTTPS request to the declared host name, verify the certificate and the response. |
+| 465, 993 | Implicit TLS | TLS handshake immediately on connect, verify the certificate. The protocol greeting (SMTP 220 / IMAP `* OK`) belongs to K1/K2 readiness, not to this certificate observation. |
+| 443 | HTTPS | TLS handshake on 443 and verify the certificate; the HTTP response itself belongs to K3. |
 
-Verification means: chain to a public trust root, SAN covers the declared
-host name, current time within validity, notAfter more than 14 days ahead
-(warning below), and serial equal to the exported certificate. Expiry or SAN
-checks alone are not sufficient.
+**What K decides:** the chain validates to a public trust root, the SAN covers
+the declared host name, and the observation time is inside the validity
+period. A handshake that does not complete is not a satisfied observation.
+Expiry or SAN checks alone are not sufficient.
+
+**What is evidence, not K:** the observation records the presented leaf
+serial, SAN, notBefore/notAfter, chain length and trust-anchor label. Ops
+compares the serial with the current `ato-cert-export` record and warns when
+notAfter is under 14 days; neither is a Contract condition, because K must not
+change on every renewal.
 
 ### D1 — first Derivation (Stage 1)
 
@@ -185,6 +189,26 @@ deployed.
   it and accepting receipt /3 is a follow-up `ato-api` change. Until then a
   TLS requirement on a hosted Run is unobserved and fails closed — it is never
   assumed satisfied.
+
+### Detected gap before S3: K3's 443 is served by the host
+
+K3 (HTTPS admin / JMAP) and K5 for 443 are served by the host Caddy today, and
+D1 deliberately keeps Caddy outside the app as the certificate source. A
+Contract observation resolves a **logical Port of the candidate**, so an
+endpoint owned by the host Caddy is not something the Run can observe with
+`ato.contract.tls@1` or `ato.contract.http@1` as designed. S3 has to choose:
+
+1. move 443 into the app (Stalwart's own HTTPS listener on a fixed TCP Port)
+   and leave Caddy only the ACME role — this conflicts with the host Caddy
+   binding 443 during D1;
+2. add an explicitly external endpoint to the observation model (a Binding
+   address rather than a candidate Port) — a general Contract capability, not
+   a mail-specific exception;
+3. keep 443 out of K for D1 and verify it by ops procedure, accepting that
+   K3/K5 for 443 is not a Receipt-backed condition.
+
+This is recorded as a gap, not decided. The mail-port observations (25/465/
+587/993) are unaffected: those Ports belong to the app.
 
 ### Implementation slices
 
