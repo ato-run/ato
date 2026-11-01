@@ -49,10 +49,19 @@ Behavior:
 - The runtime connects to the endpoint its logical Port resolved to, performs
   the handshake (implicit, or SMTP 220 → EHLO → STARTTLS → 220), and records
   the presented serial, SAN dNSNames, notBefore/notAfter, days remaining,
-  chain length, trust-anchor label and whether the certificate validated.
+  chain length, trust-anchor label, whether the certificate validated, and
+  whether the handshake completed.
 - Verdicts fail closed with distinct codes: `tls_observation_missing`,
   `tls_observation_mismatch`, `tls_server_name_mismatch`,
-  `tls_certificate_outside_validity`, `tls_chain_untrusted`.
+  `tls_certificate_outside_validity`, `tls_chain_untrusted`,
+  `tls_handshake_incomplete`.
+- `tls_observation_missing` is the verdict when no TLS observation was made
+  for a requirement at all (its Port or endpoint is absent from the Run). A
+  connection that yields no certificate aborts the observation as
+  "candidate not observable" (CLI) or abandons the hosted attempt, so the
+  receipt never claims a certificate nobody saw. A certificate that validates
+  but whose handshake then fails is recorded and fails with
+  `tls_handshake_incomplete`.
 - A certificate that was presented but fails a check is still recorded, so the
   receipt says which certificate was served.
 - Receipts carrying certificate evidence use
@@ -70,8 +79,9 @@ Local worktree `.tmp/wt/mail-plan`, branch `feat/mail-tls-contract-observation`
   TLS/STARTTLS servers, committed self-signed fixtures, public-roots rejection,
   expired and wrong-name certificates).
 - `cargo test -p ato-formation --lib tls` — binding, grammar (v1 + v2),
-  identity stability, deferral, runtime verdicts, receipt /3 and evidence.
-- `cargo test -p ato-runtime-attempt tls` — TLS verdicts and receipt facts.
+  identity stability and Formation's deferral.
+- `cargo test -p ato-runtime-attempt tls` — runtime verdicts, receipt /3,
+  evidence consistency and the incomplete-handshake failure.
 - `cargo test -p ato-portable-application --lib tls` — the authored v2 bundle
   carries the TLS requirement into K and refuses an undeclared Port.
 - `cargo check --workspace --all-targets`, `cargo clippy -D warnings` for the
@@ -91,5 +101,10 @@ No staging or production host was touched.
 3. **Fixed-TCP public ports on staging.** S1 was verified against local
    listeners; the real public-port path (fixed TCP 25/465/587/993 with PROXY
    v2 on the dedicated Runner) is S3's acceptance.
-4. **443.** K5 for HTTPS can be observed as an implicit TLS handshake on the
+4. **The Hosted process verifier does not observe TLS.** The
+   `process_run_verification` path on the connected Runner reports HTTP
+   observations only, so a Contract with a TLS requirement fails as unobserved
+   there. The portable-application (OCI/service-group) hosted path is the one
+   that uses `tcp_endpoints`.
+5. **443.** K5 for HTTPS can be observed as an implicit TLS handshake on the
    Port; the HTTP response itself stays with `ato.contract.http@1` (K3).

@@ -223,6 +223,7 @@ pub fn runtime_tls_observation(
         chain_length: facts.chain_length,
         trust_anchor: facts.trust_anchor,
         trusted: facts.trusted,
+        handshake_completed: facts.handshake_completed,
         server_name_matches: facts.server_name_matches,
         within_validity: facts.within_validity,
     }
@@ -848,6 +849,7 @@ mod tests {
             chain_length: 2,
             trust_anchor: "public-roots".to_owned(),
             trusted: true,
+            handshake_completed: true,
             server_name_matches: true,
             within_validity: true,
         }
@@ -1006,5 +1008,76 @@ mod tests {
             },
             "tls_observation_mismatch",
         );
+        // A certificate can validate while the handshake then fails. Nothing
+        // completed on that connection, so the observation cannot satisfy K.
+        assertion(
+            RuntimeTlsObservation {
+                handshake_completed: false,
+                ..tls_facts("imaps", "app.http", "mail.example")
+            },
+            "tls_handshake_incomplete",
+        );
+    }
+
+    #[test]
+    fn a_tls_receipt_is_accepted_only_as_v3_with_public_root_evidence() {
+        let contract = tls_contract(tls_requirement(
+            "imaps",
+            "app.http",
+            "mail.example",
+            TlsStart::Implicit,
+        ));
+        let derivation = derivation();
+        let spec = spec(&contract, &derivation, TREE, None);
+        let point = verify_observed_candidate(
+            &spec,
+            Vec::new(),
+            Vec::new(),
+            vec![tls_facts("imaps", "app.http", "mail.example")],
+            execution(),
+            &hosted(),
+        );
+        let assignment = ato_formation::receipt::ReceiptAssignment {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation_ref: "sha256:d",
+            attempt_id: "attempt-1",
+            request_id: None,
+        };
+        ato_formation::receipt::accept_receipt(&assignment, &point.receipt)
+            .expect("the baseline TLS receipt is consistent");
+
+        let code = |receipt: &ato_formation::verify::ContractVerificationReceipt| {
+            ato_formation::receipt::accept_receipt(&assignment, receipt)
+                .expect_err("the receipt must be refused")
+                .code
+        };
+
+        let mut downgraded = point.receipt.clone();
+        downgraded.schema =
+            ato_formation::verify::CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
+        assert_eq!(code(&downgraded), "receipt_tls_evidence_schema");
+
+        let mut test_anchor = point.receipt.clone();
+        test_anchor.observations[0]
+            .evidence
+            .as_mut()
+            .unwrap()
+            .tls
+            .as_mut()
+            .unwrap()
+            .trust_anchor = "test-only".to_owned();
+        assert_eq!(code(&test_anchor), "receipt_evidence_inconsistent");
+
+        let mut incomplete = point.receipt.clone();
+        incomplete.observations[0]
+            .evidence
+            .as_mut()
+            .unwrap()
+            .tls
+            .as_mut()
+            .unwrap()
+            .handshake_completed = false;
+        assert_eq!(code(&incomplete), "receipt_evidence_inconsistent");
     }
 }
