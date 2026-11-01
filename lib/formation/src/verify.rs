@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    SCENARIO_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart, WORKSPACE_CONTRACT_VERIFIER,
 };
 use crate::scenario::{
     SCENARIO_VERIFIER_VERSION, ScenarioObservation, ScenarioResult, is_scenario_ref,
@@ -48,6 +48,9 @@ use crate::scenario::{
 
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA: &str = "ato.contract-verification-receipt/1";
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2: &str = "ato.contract-verification-receipt/2";
+/// /3 adds structured TLS evidence to an observation: the certificate the run
+/// actually received, not just the fact that a handshake succeeded.
+pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3: &str = "ato.contract-verification-receipt/3";
 
 /// What the executed Derivation actually produced, in the terms `K` observes.
 ///
@@ -181,6 +184,43 @@ impl RuntimeHttpObservation {
     }
 }
 
+/// One certificate as presented on a port the runtime could reach.
+///
+/// Everything here is a measured fact of this attempt. The verdict is not
+/// stored: `verify_runtime` decides it, so a receipt can only state what was
+/// observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTlsObservation {
+    /// The TLS requirement this observation answers.
+    pub requirement_id: String,
+    /// The logical port this was observed on, as the Contract names it.
+    pub port: String,
+    /// The name the handshake verified the certificate against.
+    pub server_name: String,
+    pub start: TlsStart,
+    /// The leaf serial number, lowercase hex without separators.
+    pub presented_serial: String,
+    /// The dNSName entries of the leaf's subjectAltName, ASCII-lowercased.
+    pub san: Vec<String>,
+    /// Validity bounds, RFC 3339 UTC.
+    pub not_before: String,
+    pub not_after: String,
+    /// Whole days from the observation to `not_after`; negative once expired.
+    pub days_remaining: i64,
+    /// Leaf plus intermediates actually presented.
+    pub chain_length: usize,
+    /// The trust anchor set used to decide `trusted`.
+    pub trust_anchor: String,
+    /// The certificate passed full validation (chain to the anchors, name and
+    /// validity) at observation time. Name and validity are also reported on
+    /// their own so a failure can say which check failed.
+    pub trusted: bool,
+    /// The leaf's SAN covers `server_name`.
+    pub server_name_matches: bool,
+    /// Observation time was inside the certificate's validity.
+    pub within_validity: bool,
+}
+
 /// Evidence gathered from an actual running candidate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeObservation {
@@ -191,6 +231,8 @@ pub struct RuntimeObservation {
     /// Empty on paths that do not execute scenarios (Formation, hosted), where
     /// a scenario requirement then fails closed as unobserved.
     pub scenarios: Vec<ScenarioObservation>,
+    /// What the runtime saw when it connected to each TLS-observed port.
+    pub tls: Vec<RuntimeTlsObservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +273,28 @@ pub struct VerificationEvidence {
     pub input: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+    /// `ato.contract.tls@1` only: the certificate that port presented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsEvidence>,
+}
+
+/// The certificate a run actually received, as receipt evidence.
+///
+/// The verdict (satisfied or not) is the observation's outcome; this records
+/// what was presented, including the leaf serial that ops compares with the
+/// current export. It is evidence, never Contract identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsEvidence {
+    pub server_name: String,
+    pub start: TlsStart,
+    pub presented_serial: String,
+    pub san: Vec<String>,
+    pub not_before: String,
+    pub not_after: String,
+    pub days_remaining: i64,
+    pub chain_length: usize,
+    pub trust_anchor: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,6 +445,8 @@ impl ContractVerificationReceipt {
                                 body_sha256: Some(observation.body_digest.clone()),
                                 input: None,
                                 digest: None,
+
+                                tls: None,
                             }),
                         WORKSPACE_CONTRACT_VERIFIER => {
                             requirement
@@ -393,6 +459,8 @@ impl ContractVerificationReceipt {
                                     body_sha256: None,
                                     input: Some(input.clone()),
                                     digest: runtime.input_refs.get(input).cloned(),
+
+                                    tls: None,
                                 })
                         }
                         INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => runtime
@@ -405,6 +473,8 @@ impl ContractVerificationReceipt {
                                 body_sha256: None,
                                 input: None,
                                 digest: Some(digest.clone()),
+
+                                tls: None,
                             }),
                         SCENARIO_CONTRACT_VERIFIER => runtime
                             .scenarios
@@ -417,6 +487,31 @@ impl ContractVerificationReceipt {
                                 body_sha256: Some(observation.transcript_digest.clone()),
                                 input: None,
                                 digest: Some(observation.scenario_ref.clone()),
+
+                                tls: None,
+                            }),
+                        TLS_CONTRACT_VERIFIER => runtime
+                            .tls
+                            .iter()
+                            .find(|observation| observation.requirement_id == requirement.id)
+                            .map(|observation| VerificationEvidence {
+                                method: None,
+                                path: None,
+                                status: None,
+                                body_sha256: None,
+                                input: None,
+                                digest: None,
+                                tls: Some(TlsEvidence {
+                                    server_name: observation.server_name.clone(),
+                                    start: observation.start,
+                                    presented_serial: observation.presented_serial.clone(),
+                                    san: observation.san.clone(),
+                                    not_before: observation.not_before.clone(),
+                                    not_after: observation.not_after.clone(),
+                                    days_remaining: observation.days_remaining,
+                                    chain_length: observation.chain_length,
+                                    trust_anchor: observation.trust_anchor.clone(),
+                                }),
                             }),
                         _ => None,
                     });
@@ -603,6 +698,14 @@ pub fn verify(contract: &BoundContract, candidate: &CandidateObservation) -> Con
                         by: format!("runtime scenario verifier {}", requirement.id),
                     }
                 }
+                TLS_CONTRACT_VERIFIER => {
+                    // A certificate is presented by a running listener.
+                    // Formation builds artifacts and starts nothing, so it
+                    // names the runtime gate that will decide this.
+                    ObservationOutcome::Deferred {
+                        by: format!("runtime tls verifier {}", requirement.id),
+                    }
+                }
                 other => ObservationOutcome::Failed {
                     code: "verifier_unknown",
                     detail: format!("no verifier named {other} is available to decide this"),
@@ -782,6 +885,78 @@ pub fn verify_runtime(
                         Some(_) => ObservationOutcome::Satisfied,
                     }
                 }
+                TLS_CONTRACT_VERIFIER => {
+                    let port = requirement.port.as_deref().unwrap_or_default();
+                    let server_name = requirement.server_name.as_deref().unwrap_or_default();
+                    let start = requirement.start.unwrap_or(TlsStart::Implicit);
+                    match candidate
+                        .tls
+                        .iter()
+                        .find(|observation| observation.requirement_id == requirement.id)
+                    {
+                        None => ObservationOutcome::Failed {
+                            code: "tls_observation_missing",
+                            detail: format!(
+                                "the runtime observed no TLS handshake for {}",
+                                requirement.id
+                            ),
+                        },
+                        Some(observation)
+                            if observation.port != port
+                                || observation.server_name != server_name
+                                || observation.start != start =>
+                        {
+                            ObservationOutcome::Failed {
+                                code: "tls_observation_mismatch",
+                                detail: format!(
+                                    "observed {} on {} with start {}; K observes {} on {port} \
+                                     with start {}",
+                                    observation.server_name,
+                                    observation.port,
+                                    observation.start.as_str(),
+                                    server_name,
+                                    start.as_str()
+                                ),
+                            }
+                        }
+                        // Name and validity are checked before the whole-chain
+                        // result so the failure names what is actually wrong:
+                        // full validation also fails for those two reasons.
+                        Some(observation) if !observation.server_name_matches => {
+                            ObservationOutcome::Failed {
+                                code: "tls_server_name_mismatch",
+                                detail: format!(
+                                    "the certificate presented on {port} covers {}; K requires \
+                                     {server_name}",
+                                    if observation.san.is_empty() {
+                                        "no DNS name".to_owned()
+                                    } else {
+                                        observation.san.join(", ")
+                                    }
+                                ),
+                            }
+                        }
+                        Some(observation) if !observation.within_validity => {
+                            ObservationOutcome::Failed {
+                                code: "tls_certificate_outside_validity",
+                                detail: format!(
+                                    "the certificate presented on {port} is valid {} to {}; it \
+                                     is not valid now",
+                                    observation.not_before, observation.not_after
+                                ),
+                            }
+                        }
+                        Some(observation) if !observation.trusted => ObservationOutcome::Failed {
+                            code: "tls_chain_untrusted",
+                            detail: format!(
+                                "the certificate presented on {port} for {server_name} does not \
+                                 validate to a public root ({})",
+                                observation.trust_anchor
+                            ),
+                        },
+                        Some(_) => ObservationOutcome::Satisfied,
+                    }
+                }
                 other => ObservationOutcome::Failed {
                     code: "verifier_unknown",
                     detail: format!("no verifier named {other} is available to decide this"),
@@ -833,6 +1008,9 @@ mod tests {
             body_digest: None,
             input: None,
             digest: None,
+
+            server_name: None,
+            start: None,
         }
     }
 
@@ -847,6 +1025,9 @@ mod tests {
             body_digest: None,
             input: Some(input.to_owned()),
             digest: Some(digest.to_owned()),
+
+            server_name: None,
+            start: None,
         }
     }
 
@@ -861,6 +1042,9 @@ mod tests {
             body_digest: None,
             input: None,
             digest: Some(digest.to_owned()),
+
+            server_name: None,
+            start: None,
         }
     }
 
@@ -1047,6 +1231,9 @@ mod tests {
             body_digest: None,
             input: None,
             digest: Some(digest.to_owned()),
+
+            server_name: None,
+            start: None,
         }
     }
 

@@ -12,7 +12,8 @@ use serde::Deserialize;
 
 use crate::authoring::{
     ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, SCENARIO_CONTRACT_VERIFIER,
-    STATE_FILESYSTEM_PROTOCOL, TCP_EGRESS_PROTOCOL, WORKSPACE_PROTOCOL,
+    STATE_FILESYSTEM_PROTOCOL, TCP_EGRESS_PROTOCOL, TLS_CONTRACT_VERIFIER, TlsStart,
+    WORKSPACE_PROTOCOL, validate_tls_server_name,
 };
 use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::requirements::HostRequirement;
@@ -51,6 +52,19 @@ pub struct PortableAuthoringDraftV2 {
     /// `ato.contract.scenario@1` observations. Each names a source-relative
     /// scenario file the bundle builder canonicalises and carries.
     pub scenarios: Vec<PortableScenarioDraftV2>,
+    /// `ato.contract.tls@1` observations: the certificate a port presents.
+    pub tls_observations: Vec<PortableTlsObservationDraftV2>,
+}
+
+/// A TLS observation as authored. It names a logical port, the host name the
+/// presented certificate must cover, and how TLS starts there. It states no
+/// expected certificate: the serial is evidence of a run, not identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableTlsObservationDraftV2 {
+    pub id: String,
+    pub port: String,
+    pub server_name: String,
+    pub start: TlsStart,
 }
 
 /// A Scenario observation as authored: the file carried with the source and the
@@ -210,6 +224,12 @@ struct Observation {
     body_digest: Option<String>,
     #[serde(default)]
     scenario: Option<String>,
+    /// `ato.contract.tls@1` only: the host name the certificate must cover.
+    #[serde(default)]
+    server_name: Option<String>,
+    /// `ato.contract.tls@1` only: `implicit` or `smtp-starttls`.
+    #[serde(default)]
+    start: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -565,7 +585,7 @@ fn parse_capsule_toml_v2_impl(
 
     // A declared Contract must still be exactly what the normal grammar
     // allows; only its absence is tolerated in candidate mode.
-    let (observations, scenarios) = match document.contract {
+    let (observations, scenarios, tls_observations) = match document.contract {
         Some(contract) => {
             if contract.mode != ContractMode::All || contract.observation.is_empty() {
                 return Err(invalid(
@@ -599,6 +619,7 @@ fn parse_capsule_toml_v2_impl(
             let mut observation_ids = BTreeSet::new();
             let mut observations = Vec::new();
             let mut scenarios = Vec::new();
+            let mut tls_observations = Vec::new();
             for observation in contract.observation {
                 validate_id("contract.observation.id", &observation.id)?;
                 if !observation_ids.insert(observation.id.clone()) {
@@ -687,16 +708,57 @@ fn parse_capsule_toml_v2_impl(
                             scenario_path,
                         });
                     }
+                    TLS_CONTRACT_VERIFIER => {
+                        if observation.method.is_some()
+                            || observation.path.is_some()
+                            || observation.status.is_some()
+                            || observation.body_digest.is_some()
+                            || observation.scenario.is_some()
+                        {
+                            return Err(invalid(
+                                "contract.observation",
+                                "a TLS observation states only `port`, `server_name` and `start`",
+                            ));
+                        }
+                        let Some(server_name) = observation.server_name else {
+                            return Err(invalid(
+                                "contract.observation.server_name",
+                                "a TLS observation names the host name the certificate must cover",
+                            ));
+                        };
+                        if let Err(detail) = validate_tls_server_name(&server_name) {
+                            return Err(invalid("contract.observation.server_name", detail));
+                        }
+                        let start = match observation.start.as_deref() {
+                            None | Some("implicit") => TlsStart::Implicit,
+                            Some("smtp-starttls") => TlsStart::SmtpStarttls,
+                            Some(other) => {
+                                return Err(invalid(
+                                    "contract.observation.start",
+                                    format!(
+                                        "{other:?} is not a TLS start mode; use implicit or \
+                                         smtp-starttls"
+                                    ),
+                                ));
+                            }
+                        };
+                        tls_observations.push(PortableTlsObservationDraftV2 {
+                            id: observation.id,
+                            port: observation.port,
+                            server_name,
+                            start,
+                        });
+                    }
                     _ => {
                         return Err(invalid(
                             "contract.observation",
-                            "portable v0 supports ato.contract.http@1 and \
-                             ato.contract.scenario@1",
+                            "portable v0 supports ato.contract.http@1, \
+                             ato.contract.scenario@1 and ato.contract.tls@1",
                         ));
                     }
                 }
             }
-            (observations, scenarios)
+            (observations, scenarios, tls_observations)
         }
         None if require_contract => {
             return Err(invalid(
@@ -706,7 +768,7 @@ fn parse_capsule_toml_v2_impl(
         }
         // A derivation-candidate manifest binds to the frozen Contract; it
         // declares no K of its own.
-        None => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
 
     if document.derivation.is_empty() || document.derivation.len() > 16 {
@@ -773,6 +835,7 @@ fn parse_capsule_toml_v2_impl(
         effects,
         model_sets,
         scenarios,
+        tls_observations,
     })
 }
 
@@ -1561,5 +1624,60 @@ status = 200
             "status = 200\nscenario = \"scenarios/crud.json\"",
         );
         assert!(parse_capsule_toml_v2(&text).is_err());
+    }
+
+    #[test]
+    fn a_tls_observation_is_parsed_and_its_fields_are_validated() {
+        let base = TWO_PROCESS_ROUTES;
+        let with_tls = base.replacen(
+            "[[derivation]]",
+            r#"[[contract.observation]]
+id = "imaps"
+use = "ato.contract.tls@1"
+port = "app.http"
+server_name = "mail.example"
+start = "smtp-starttls"
+
+[[derivation]]"#,
+            1,
+        );
+        let draft = parse_capsule_toml_v2(&with_tls).unwrap();
+        assert_eq!(draft.tls_observations.len(), 1);
+        let tls = &draft.tls_observations[0];
+        assert_eq!(tls.id, "imaps");
+        assert_eq!(tls.port, "app.http");
+        assert_eq!(tls.server_name, "mail.example");
+        assert_eq!(tls.start, TlsStart::SmtpStarttls);
+        for (what, text) in [
+            (
+                "no name",
+                with_tls.replace("server_name = \"mail.example\"\n", ""),
+            ),
+            (
+                "uppercase name",
+                with_tls.replace("mail.example", "Mail.Example"),
+            ),
+            ("ip address", with_tls.replace("mail.example", "192.0.2.10")),
+            (
+                "unknown start",
+                with_tls.replace("start = \"smtp-starttls\"", "start = \"tls\""),
+            ),
+            (
+                "http field",
+                with_tls.replace(
+                    "start = \"smtp-starttls\"",
+                    "start = \"smtp-starttls\"\npath = \"/\"",
+                ),
+            ),
+            (
+                "expectation",
+                with_tls.replace(
+                    "server_name = \"mail.example\"",
+                    "server_name = \"mail.example\"\nstatus = 200",
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
+        }
     }
 }

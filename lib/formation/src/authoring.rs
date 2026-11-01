@@ -76,6 +76,13 @@ pub const INSTANCE_SNAPSHOT_CONTRACT_VERIFIER: &str = "ato.contract.instance-sna
 /// steps themselves are an [`crate::scenario::ScenarioV1`] object in the bundle
 /// closure. Execution and receipt evidence belong to the runtime, not here.
 pub const SCENARIO_CONTRACT_VERIFIER: &str = "ato.contract.scenario@1";
+/// The TLS acceptance verifier: the certificate a port actually presents.
+///
+/// K states only what must hold for every valid run — a chain to a public
+/// root, an SAN covering the declared name, and observation time inside the
+/// certificate's validity. The presented leaf serial is evidence, not
+/// identity: it changes on every renewal.
+pub const TLS_CONTRACT_VERIFIER: &str = "ato.contract.tls@1";
 
 pub const BOUND_CONTRACT_SCHEMA: &str = "ato.contract/1";
 pub const BOUND_DERIVATION_SCHEMA: &str = "ato.derivation/1";
@@ -132,6 +139,51 @@ pub(crate) fn malformed(field: impl Into<String>, detail: impl Into<String>) -> 
     }
 }
 
+/// A Contract-declared TLS server name: lowercase ASCII DNS, no trailing dot.
+///
+/// The name is part of K (it is the name the certificate must cover), so this
+/// accepts only the canonical spelling instead of silently rewriting what the
+/// author stated.
+pub fn validate_tls_server_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 253 {
+        return Err("must be a DNS host name of 1 to 253 bytes".to_owned());
+    }
+    if !name.is_ascii() {
+        return Err("must be ASCII (use the A-label form for international names)".to_owned());
+    }
+    if name != name.to_ascii_lowercase() {
+        return Err("must be lowercase".to_owned());
+    }
+    if name.ends_with('.') {
+        return Err("must not have a trailing dot".to_owned());
+    }
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return Err("must be a DNS name, not an IP address".to_owned());
+    }
+    if !name.contains('.') {
+        return Err("must be a fully qualified DNS name with at least two labels".to_owned());
+    }
+    for label in name.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(format!(
+                "label {label:?} must be 1 to 63 bytes between dots"
+            ));
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(format!("label {label:?} must not begin or end with '-'"));
+        }
+        if !label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(format!(
+                "label {label:?} may contain only lowercase letters, digits and '-'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ──────────────────────────────────────────────────────────────────── the draft
 
 /// An observation the author asked for but did not state: resolved at seal time
@@ -162,6 +214,37 @@ pub struct HttpRequirement {
     pub body_digest: Option<Observed<String>>,
 }
 
+/// How TLS starts on an observed port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TlsStart {
+    /// TLS is the first thing on the connection (submission 465, IMAPS 993,
+    /// HTTPS 443).
+    Implicit,
+    /// Plaintext SMTP first; the certificate is presented after `STARTTLS`
+    /// (port 25 and submission 587).
+    SmtpStarttls,
+}
+
+impl TlsStart {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Implicit => "implicit",
+            Self::SmtpStarttls => "smtp-starttls",
+        }
+    }
+}
+
+/// A certificate requirement on a port a Derivation declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsRequirement {
+    pub port: String,
+    /// The host name the presented certificate must cover, as a lowercase DNS
+    /// name. This IS part of K: the service is the one whose name is covered.
+    pub server_name: String,
+    pub start: TlsStart,
+}
+
 /// A content-addressed scenario requirement.
 ///
 /// `scenario` is the `sha256:` reference of an `ato.scenario/1` object. It is
@@ -178,6 +261,7 @@ pub enum RequirementDraft {
     Http(HttpRequirement),
     InputIdentity(InputIdentityRequirement),
     Scenario(ScenarioRequirement),
+    Tls(TlsRequirement),
 }
 
 /// One condition that must hold for a continuation to be this Capsule.
@@ -458,6 +542,14 @@ pub struct BoundRequirement {
     pub input: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+    /// `ato.contract.tls@1` only: the host name the presented certificate
+    /// must cover. Absent from every other requirement, so their bound bytes —
+    /// and therefore their ContractRef — are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    /// `ato.contract.tls@1` only: how TLS starts on the observed port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<TlsStart>,
 }
 
 /// The Capsule's identity, once every captured observation is a value.
@@ -1016,6 +1108,9 @@ fn bind_contract(
                     body_digest,
                     input: None,
                     digest: None,
+
+                    server_name: None,
+                    start: None,
                 }
             }
             RequirementDraft::InputIdentity(identity) => {
@@ -1047,6 +1142,9 @@ fn bind_contract(
                     body_digest: None,
                     input: Some(identity.input.clone()),
                     digest: Some(digest),
+
+                    server_name: None,
+                    start: None,
                 }
             }
             RequirementDraft::Scenario(scenario) => {
@@ -1086,6 +1184,36 @@ fn bind_contract(
                     body_digest: None,
                     input: None,
                     digest: Some(reference),
+                    server_name: None,
+                    start: None,
+                }
+            }
+            RequirementDraft::Tls(tls) => {
+                if !known_ports.contains(tls.port.as_str()) {
+                    return Err(AuthoringError::Unresolved {
+                        referrer: format!("contract.require.{}", observation.id),
+                        what: "port",
+                        id: tls.port.clone(),
+                    });
+                }
+                validate_tls_server_name(&tls.server_name).map_err(|detail| {
+                    malformed(
+                        format!("contract.require.{}.server_name", observation.id),
+                        detail,
+                    )
+                })?;
+                BoundRequirement {
+                    id: observation.id.clone(),
+                    verifier: TLS_CONTRACT_VERIFIER.to_owned(),
+                    port: Some(tls.port.clone()),
+                    method: None,
+                    path: None,
+                    status: None,
+                    body_digest: None,
+                    input: None,
+                    digest: None,
+                    server_name: Some(tls.server_name.clone()),
+                    start: Some(tls.start),
                 }
             }
         };
@@ -1418,5 +1546,60 @@ mod tests {
             bind(&draft, &ctx()).unwrap_err().code(),
             "authoring_malformed"
         );
+    }
+
+    fn tls_draft(server_name: &str, port: &str) -> AuthoringDraft {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.contract.requirements.push(ObservationDraft {
+            id: "imaps".to_owned(),
+            requirement: RequirementDraft::Tls(TlsRequirement {
+                port: port.to_owned(),
+                server_name: server_name.to_owned(),
+                start: TlsStart::SmtpStarttls,
+            }),
+        });
+        draft
+    }
+
+    #[test]
+    fn a_tls_requirement_binds_its_name_and_start_into_k() {
+        let draft = tls_draft("mail.example", "app.http");
+        let (contract, _) = bind(&draft, &ctx()).expect("binds");
+        let requirement = contract
+            .requirements
+            .iter()
+            .find(|requirement| requirement.id == "imaps")
+            .expect("the tls requirement is in K");
+        assert_eq!(requirement.verifier, TLS_CONTRACT_VERIFIER);
+        assert_eq!(requirement.port.as_deref(), Some("app.http"));
+        assert_eq!(requirement.server_name.as_deref(), Some("mail.example"));
+        assert_eq!(requirement.start, Some(TlsStart::SmtpStarttls));
+        assert!(requirement.digest.is_none());
+        assert!(requirement.body_digest.is_none());
+    }
+
+    #[test]
+    fn a_contract_without_tls_serializes_exactly_as_before() {
+        // The added fields are optional and skipped when absent, so every
+        // ContractRef minted before this capability is byte-identical.
+        let (contract, _) = bind(&minimal(AuthoringProvenance::Authored), &ctx()).expect("binds");
+        let json = serde_json::to_string(&contract).unwrap();
+        assert!(!json.contains("server_name"));
+        assert!(!json.contains("\"start\""));
+    }
+
+    #[test]
+    fn a_tls_requirement_refuses_a_name_or_port_this_build_cannot_observe() {
+        for (what, draft) in [
+            ("uppercase name", tls_draft("Mail.Example", "app.http")),
+            ("ip address", tls_draft("192.0.2.10", "app.http")),
+            ("single label", tls_draft("localhost", "app.http")),
+            ("trailing dot", tls_draft("mail.example.", "app.http")),
+            ("undeclared port", tls_draft("mail.example", "smtp")),
+        ] {
+            assert!(bind(&draft, &ctx()).is_err(), "{what} was accepted");
+        }
+        assert!(validate_tls_server_name("mail.example").is_ok());
+        assert!(validate_tls_server_name("mail..example").is_err());
     }
 }
