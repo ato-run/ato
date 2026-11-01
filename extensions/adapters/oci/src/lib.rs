@@ -654,6 +654,10 @@ impl DockerOciAdapter {
         let env_file = runtime_root.join("environment.list");
         let (inline_environment, multiline_environment) = split_environment(&self.spec.environment);
         write_environment_file(&env_file, &inline_environment)?;
+        // Any early return below must not leave a file that may hold Binding
+        // values behind; the explicit removal further down stays for the
+        // normal path, and the guard makes the failure paths safe.
+        let _env_file_guard = EnvironmentFileGuard(&env_file);
 
         let mut argv = docker_run_arguments(
             &self.spec,
@@ -1783,14 +1787,38 @@ fn write_environment_file(path: &Path, inline: &[(String, String)]) -> Result<()
         contents.push_str(value);
         contents.push('\n');
     }
-    fs::write(path, contents).context("write OCI environment file")?;
+    // Create it 0600 from the first byte: this file may hold a secret value,
+    // so a write-then-chmod would leave a window at the process umask.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .context("restrict OCI environment file permissions")?;
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = fs::remove_file(path);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .context("create OCI environment file")?;
+        file.write_all(contents.as_bytes())
+            .context("write OCI environment file")?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents).context("write OCI environment file")?;
     }
     Ok(())
+}
+
+/// Remove the staged environment file on every exit path, including the
+/// question-mark returns between writing it and the explicit removal after
+/// docker run.
+struct EnvironmentFileGuard<'a>(&'a Path);
+
+impl Drop for EnvironmentFileGuard<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
 }
 
 /// How the declared environment reaches the container: the single-line file
