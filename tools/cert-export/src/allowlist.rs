@@ -10,7 +10,7 @@
 //!
 //!   allowlist = "ato.cert-export.allowlist/1"
 //!   # instance_id   domain        cert-path        key-path        cert-binding   key-binding
-//!   i_01J8ZQ0K      mail.ato.run  /srv/certs/mail.ato.run.crt  /srv/certs/mail.ato.run.key  mail_tls_cert  mail_tls_key
+//!   i_01J8ZQ0K      mail.ato.run  /srv/certs/mail.ato.run.crt  /srv/certs/mail.ato.run.key  mail_cert_pem  mail_key_pem
 //!
 //! Whitespace separates fields, '#' starts a comment, and the header line is
 //! mandatory so a future format change cannot be mistaken for this one.
@@ -205,13 +205,13 @@ mod tests {
     #[test]
     fn a_complete_allowlist_parses() {
         let entries = parse(&text(
-            "# mail\ni_01J8ZQ0K mail.ato.run /srv/certs/a.crt /srv/certs/a.key mail_tls_cert mail_tls_key\n",
+            "# mail\ni_01J8ZQ0K mail.ato.run /srv/certs/a.crt /srv/certs/a.key mail_cert_pem mail_key_pem\n",
         ))
         .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].instance_id, "i_01J8ZQ0K");
         assert_eq!(entries[0].domain, "mail.ato.run");
-        assert_eq!(entries[0].binding_ids(), ["mail_tls_cert", "mail_tls_key"]);
+        assert_eq!(entries[0].binding_ids(), ["mail_cert_pem", "mail_key_pem"]);
     }
 
     #[test]

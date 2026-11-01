@@ -145,8 +145,8 @@ mod tests {
             domain: "mail.example.test".to_owned(),
             certificate: "/srv/certs/cert.pem".into(),
             private_key: "/srv/certs/key.pem".into(),
-            certificate_binding: "mail_tls_cert".to_owned(),
-            private_key_binding: "mail_tls_key".to_owned(),
+            certificate_binding: "mail_cert_pem".to_owned(),
+            private_key_binding: "mail_key_pem".to_owned(),
         }
     }
 
@@ -156,8 +156,8 @@ mod tests {
                 schema: META_SCHEMA.to_owned(),
                 instance_id: "i_test".to_owned(),
                 domain: "mail.example.test".to_owned(),
-                certificate_binding: "mail_tls_cert".to_owned(),
-                private_key_binding: "mail_tls_key".to_owned(),
+                certificate_binding: "mail_cert_pem".to_owned(),
+                private_key_binding: "mail_key_pem".to_owned(),
                 source: SourceDigests {
                     certificate_sha256: "cert-digest".to_owned(),
                     private_key_sha256: "key-digest".to_owned(),
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(update.expected_generation, 7);
         assert_eq!(update.values.len(), 2);
         assert_eq!(
-            update.values["mail_tls_cert"],
+            update.values["mail_cert_pem"],
             "-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----\n"
         );
         assert_eq!(update.evidence.serial, "0a1b");
