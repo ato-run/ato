@@ -836,6 +836,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-tls-observe"
+version = "0.1.0"
+dependencies = [
+ "rustls 0.23.40",
+ "rustls-pki-types",
+ "thiserror 2.0.18",
+ "time",
+ "webpki-roots 1.0.7",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
