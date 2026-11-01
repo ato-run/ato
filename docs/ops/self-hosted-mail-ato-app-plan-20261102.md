@@ -222,6 +222,40 @@ those Ports belong to the app.
 
 Production steps (Phase 3 onward) stay gated on separate approval.
 
+### Slice status (2026-11-02, local only)
+
+| Slice | State | PR / evidence |
+|---|---|---|
+| S1 | implemented, local + CI green | ato-run/ato#1666; control plane ato-run/ato-api#1079 (CI queued on the self-hosted runner) |
+| S2 | design + exporter + the OCI enabling fix done; the ato-api grant/replace is specified, not written | ato-run/ato#1669 (ADR-044) |
+| S3 | D1 sample and its TLS/HTTP K done; 443 pending the external Binding; K4/K6 need a decision | ato-run/ato#1668 (stacked on #1666) |
+| Phase 2 design | ADR-043 reviewed and decided | ato-run/ato#1667 |
+| S4, S5 | not started | — |
+
+Decisions and gaps recorded while doing S2/S3:
+
+- **S2 detected blocker, now fixed in #1669**: the OCI environment channel refused
+  any value containing a newline while the binding layer allowed one, so a PEM
+  `ato.secret@1` Binding could not reach D1. Multi-line values now travel as
+  `--env NAME` with the value in the docker client's environment (never argv);
+  the staged env file is `0600`; NUL/CR stay refused. This is not a new Runner
+  feature — it is the existing environment channel carrying what the binding
+  layer already permitted.
+- **S2 decisions**: certificate pair as two secret Bindings; per-(Instance,
+  domain) operator renewal grant rotating on use; dedicated audit table; GET
+  status endpoint; rollback through a root-only `.prev` allowlist; 30-day grant
+  TTL. Open: whether the replace sets `desired_state = stopped` (S3 look).
+- **S3 decisions**: 587 is STARTTLS (the earlier brief said implicit; the plan's
+  K5 table, the port name and the configured listener are STARTTLS). K4
+  (persistence across restart) cannot be one-attempt evidence; K6 (delivery)
+  needs receiver-side or ops evidence. The non-TLS functional observations
+  (SMTP accept, AUTH submission, IMAP mailbox) need credentialed protocol-level
+  observations fed from secret Bindings; the sample README designs them and does
+  not fake them. That design should become its own draft RFC before
+  implementation.
+- **S3 is not `fully_satisfied`**: 443 is served by the host Caddy and needs the
+  ADR-043 implementation.
+
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
 - Robot account: an "Unlock mail ports" request was sent on 2026-11-02 and
