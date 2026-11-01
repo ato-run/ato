@@ -142,9 +142,49 @@ Stalwart v0.16.22 source.
    `ato.contract.scenario@1/2`, workspace and instance-snapshot. K1/K2/K5
    need a new TLS observation; it touches the Contract grammar, the bound
    Contract, the Rust verifier and receipt evidence, so it is its own slice.
+   The design is settled in "S1 design decisions" below.
 5. **Known staging limitations still open:** no id-mapped OCI state mount
    (thin uid-1000 Stalwart image), images preloaded rather than pullable
    (GHCR `write:packages` missing), checkpoints over 64 MiB out of scope.
+
+### S1 design decisions (settled 2026-11-02)
+
+These decide the open questions that must be settled before the TLS
+observation is written. The implementation follows them; nothing here is
+deployed.
+
+- **Observation shape.** `ato.contract.tls@1` names a logical port (like
+  `ato.contract.http@1`), the host name the certificate must cover
+  (`server_name`), and how TLS starts (`start = "implicit" | "smtp-starttls"`).
+  The runtime resolves the Port to the endpoint it actually realized and
+  connects there. Neither an address nor a Runner is in K.
+- **What K states.** A chain to a public root, an SAN covering `server_name`,
+  and observation time inside the validity period. It does **not** pin the
+  leaf serial or any expected certificate: the serial changes on every
+  renewal. The serial, SAN, validity, chain length and trust-anchor label are
+  receipt evidence; K5 compares the serial with the current export in ops,
+  outside the Contract.
+- **PROXY v2 stays an ingress concern.** The verifier is an ordinary client of
+  the Port. On a fixed-TCP public listener the Runner terminates the client
+  connection and inserts PROXY v2 toward the workload; the verifier neither
+  sends nor knows about the header. CLI-local endpoints are direct mappings
+  and have no header either.
+- **Trust anchors.** Public roots only (the Mozilla set), never configurable
+  by K and not part of K. The probe has a test-only anchor seam for unit
+  tests; production callers pass the public set.
+- **ContractRef stability.** The bound TLS fields are optional and omitted when
+  absent, so every Contract and Derivation written before this capability
+  keeps byte-identical canonical bytes and therefore its existing
+  `ContractRef`/`DerivationRef`.
+- **Receipt version.** A receipt that carries certificate evidence is
+  `ato.contract-verification-receipt/3`; /1 and /2 stay valid and unchanged
+  for receipts without it.
+- **Hosted observation transport.** The hosted validator observes TCP only on
+  endpoints the control plane names for the Run (the public fixed-TCP
+  allocations). This slice accepts that list in the validator job; supplying
+  it and accepting receipt /3 is a follow-up `ato-api` change. Until then a
+  TLS requirement on a hosted Run is unobserved and fails closed — it is never
+  assumed satisfied.
 
 ### Implementation slices
 
