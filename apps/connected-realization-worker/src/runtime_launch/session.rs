@@ -257,11 +257,7 @@ while True:
     listener.accept()[0].close()
 "#;
 
-    fn spec_for(
-        run_id: &str,
-        writer_fence: Option<u64>,
-        note: &str,
-    ) -> RuntimeLaunchSpecV1 {
+    fn spec_for(run_id: &str, writer_fence: Option<u64>, note: &str) -> RuntimeLaunchSpecV1 {
         RuntimeLaunchSpecV1 {
             protocol: "ato.runtime-launch-spec.v1".to_owned(),
             context: ato_ipc::runtime_launch::LaunchContextV1 {
