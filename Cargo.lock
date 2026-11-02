@@ -382,6 +382,7 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "clap",
+ "ed25519-dalek",
  "fs2",
  "hex",
  "hmac",
