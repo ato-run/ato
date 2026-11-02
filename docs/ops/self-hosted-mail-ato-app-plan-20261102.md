@@ -307,6 +307,12 @@ Decisions and gaps recorded while doing S2/S3:
   D1's HostBoundary work. It is not the mail contract (D1 remains that); sign-in
   still needs a seeded account. The verification runbook points at it as the
   first way to execute the browser gate.
+- **Local ato run caveat for the browser slice (2026-11-02)**: the stateful
+  slice cannot be reproduced on the macOS Docker-socket workaround — running the
+  CLI as root makes the writable state root-owned (`oci_writable_user_unauthorized`),
+  and running it as uid 1000 cannot write the Docker Desktop bind mount (ENOENT).
+  The Runner runs the CLI as its host user; this is a local boundary, not a
+  Runner defect.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
