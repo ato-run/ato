@@ -16,6 +16,7 @@
 //   MAIL_EXPECT_TEXT            substring that must appear in the mailbox page
 //   MAIL_OPEN_FIRST=1           click the first matching message and capture it
 //   MAIL_EXPECT_BODY            substring that must appear after opening the message
+//   MAIL_AUTHORIZATION          Authorization header for the app proxy (staging)
 //   MAIL_LOGIN_ONLY=1           capture the login page only
 //   CHROME_BIN                  Chrome/Chromium executable
 //
@@ -69,6 +70,10 @@ try {
 
   await call('Page.enable');
   await call('Network.enable');
+  const authorization = process.env.MAIL_AUTHORIZATION || '';
+  if (authorization) {
+    await call('Network.setExtraHTTPHeaders', { headers: { Authorization: authorization } });
+  }
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await call('Page.navigate', { url });
   await waitForTitle(call, (title) => title.length > 0);
