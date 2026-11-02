@@ -658,10 +658,16 @@ fn wait_for_startup(
         let timeout = control.map_or(Ok(timeout), |c| {
             c.cap(crate::control::AttemptPhase::Launch, timeout)
         })?;
+        let condition = crate::startup::ProbeCondition::from(startup);
         crate::startup::wait_for_readiness(
             timeout,
             |budget| {
-                crate::startup::http_probe(&client, &format!("{base}{}", startup.path), budget)
+                crate::startup::http_probe_with(
+                    &client,
+                    &format!("{base}{}", startup.path),
+                    budget,
+                    Some(&condition),
+                )
             },
             || {
                 if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
@@ -1934,6 +1940,9 @@ mod tests {
             path: "/preparation".into(),
             timeout_ms: 2000,
             abi: None,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         wait_for_startup(
             &mut candidate,
