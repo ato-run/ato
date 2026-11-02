@@ -73,3 +73,29 @@ is rejected with `oci_writable_user_unauthorized` (the state directory would be
 owned by 0:0). Run the CLI as the host user/uid 1000, as the Runner does, or
 check an equivalent no-state demo. The browser path itself (Missive + Stalwart
 over the internal JMAP Port) was verified locally that way on 2026-11-02.
+
+## Seed with a sign-in account
+
+Sign-in needs an account in Stalwart's store. `seed/create-seed.sh` creates a
+store seed without touching the Capsule (test-only data; it contains credential
+hashes and the dynamic registry, so never commit it):
+
+```sh
+DOMAIN=demo.test TEST_PASSWORD='<test password>' ADMIN_PASSWORD='<temp bootstrap>' \
+  OUT=/secure/ato-mail-seed.tar.gz \
+  ./seed/create-seed.sh
+```
+
+It runs the pinned Stalwart release on a throwaway volume, creates the domain
+and account through the JMAP registry (admin bootstrap via
+`STALWART_RECOVERY_ADMIN`), stops, and tars `/var/lib/stalwart`. The Runner
+installs the archive as the Instance's initial State Revision before the first
+Run. The temporary admin password exists only during seed creation.
+
+Validated locally on 2026-11-02: a fresh Stalwart started from the generated
+seed (no recovery-admin environment) and the browser harness signed in as the
+seeded account (`signedIn: true`), so the archive carries a working account and
+registry.
+
+Do not use this script against staging/production; it is an operator prep step
+for test data only.
