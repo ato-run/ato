@@ -2,9 +2,9 @@ name: Rust CI
 
 on:
   push:
-    branches: [main, dev, nightly]
+    branches: [main, dev, nightly, stg]
   pull_request:
-    branches: [main, dev, nightly]
+    branches: [main, dev, nightly, stg]
   workflow_dispatch:
 
 permissions:
