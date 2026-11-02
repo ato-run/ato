@@ -23,6 +23,40 @@ availability, and does not create the work root or launch a workload. A missing
 directory has unknown disk capacity. Diagnosis on macOS does not imply Linux
 GPU/process/OCI compatibility; no Windows installer is provided by this slice.
 
+`doctor` also reports, under `capabilities`, what a Worker started with the same
+flags would advertise, and why every capability it does not advertise is
+missing. Each such capability carries a stable `code` and a sentence naming the
+fix:
+
+- `lease_kind:runtime_launch` — `bwrap_binary_missing`;
+  `apparmor_restricts_unprivileged_userns`
+  (`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu 24.04+ default);
+  `unprivileged_userns_clone_disabled`;
+  `process_effective_capabilities_present` (the Worker holds effective
+  capabilities, so `CapEff` is non-zero); `bwrap_probe_failed`; or
+  `platform_unsupported`.
+- `lease_kind:state_volume_maintenance` — `state_volume_root_unconfigured`,
+  `state_volume_store_not_writable`, `state_volume_store_not_verified`, or
+  `runtime_launch_unavailable`.
+- `lease_kind:activity_browser_executor_v0` — `browser_executor_not_evaluated`
+  (doctor does not read the Run-control key) or `browser_executor_unconfigured`.
+- `execution_abi:oci` — `docker_binary_missing`, `docker_socket_access_denied`
+  (this user cannot open the Docker socket), `docker_daemon_unreachable`, or
+  `platform_unsupported`.
+
+Pass `--state-volume-root <directory>` and
+`--require-explicit-runtime-placement` (or the matching
+`ATO_RUNNER_STATE_VOLUME_ROOT` /
+`ATO_RUNNER_REQUIRE_EXPLICIT_RUNTIME_PLACEMENT` variables) to see the admission
+the Worker would compute with those flags; explicit placement keeps
+`runtime_launch` only and says so for every lease kind it removes. Doctor checks
+the volume root without creating it, so a writable directory is reported as
+`state_volume_store_not_verified` rather than as an available store — the
+Worker's first heartbeat is the authority. `unverified` and `unavailable` both
+mean not advertised, and neither is ever emitted without a reason. Doctor only
+reports capabilities it measured: a host with no NVIDIA device is not told it
+has one, and no capability is claimed from a guess.
+
 ## Enroll and reconnect
 
 In ato.run Settings → Connected Runners, request a connection code. It expires
