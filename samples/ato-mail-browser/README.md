@@ -63,3 +63,13 @@ the TLS/fixed-TCP work.
   even when SMTP/IMAP delivery is broken.
 - The images are preloaded by digest; a digest/platform mismatch is an
   admission failure, not a Contract failure.
+
+## Local ato run note
+
+On a Linux host the capsule can be checked with `ato run` after substituting local
+image digests. One environment caveat: when the CLI itself runs inside a
+container as **root** (the macOS Docker-socket workaround), a writable state slot
+is rejected with `oci_writable_user_unauthorized` (the state directory would be
+owned by 0:0). Run the CLI as the host user/uid 1000, as the Runner does, or
+check an equivalent no-state demo. The browser path itself (Missive + Stalwart
+over the internal JMAP Port) was verified locally that way on 2026-11-02.
