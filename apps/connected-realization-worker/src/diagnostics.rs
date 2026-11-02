@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::Parser;
 use serde_json::{Value, json};
 
-use crate::{WorkerConfig, host_capabilities, host_resources};
+use crate::{WorkerConfig, device_key, host_capabilities, host_resources};
 
 pub const OPEN_COMPUTE_VERSION: &str = "ato.open-compute/1";
 
@@ -27,6 +27,10 @@ pub struct DoctorArgs {
     /// without creating it.
     #[arg(long, env = "ATO_RUNNER_STATE_VOLUME_ROOT")]
     state_volume_root: Option<PathBuf>,
+    /// Bearer credential file the worker would use. The device key sits beside
+    /// it; without this flag doctor looks beside the default work-root file.
+    #[arg(long, env = "ATO_RUNNER_CREDENTIALS_FILE")]
+    runner_credentials_file: Option<PathBuf>,
 }
 
 /// Operator configuration the report has to reflect. The defaults describe a
@@ -36,6 +40,7 @@ pub struct DoctorArgs {
 pub struct DoctorOptions {
     pub require_explicit_runtime_placement: bool,
     pub state_volume_root: Option<PathBuf>,
+    pub credentials_file: Option<PathBuf>,
 }
 
 impl From<&DoctorArgs> for DoctorOptions {
@@ -43,6 +48,7 @@ impl From<&DoctorArgs> for DoctorOptions {
         Self {
             require_explicit_runtime_placement: args.require_explicit_runtime_placement,
             state_volume_root: args.state_volume_root.clone(),
+            credentials_file: args.runner_credentials_file.clone(),
         }
     }
 }
@@ -77,6 +83,8 @@ pub fn report_with(work_root: &Path, options: &DoctorOptions) -> Value {
         "host_boundary_isolation_available": cfg!(target_os = "linux") && ato_sandbox::is_sandbox_supported(),
         "control": "outbound_poll",
         "host_deletion": false,
+        // Presence and epoch only: a diagnostic never contains key material.
+        "device_key": device_key_report(work_root, options.credentials_file.as_deref()),
         // Every capability this host would NOT advertise, with a stable reason
         // code and a sentence an operator can act on. A capability that goes
         // missing silently is a diagnosis nobody can act on.
@@ -99,6 +107,22 @@ pub fn report_with(work_root: &Path, options: &DoctorOptions) -> Value {
             },
         },
     })
+}
+
+/// Report whether this Runner has a device key file and which epoch it is at.
+/// The key itself — public or private — is never part of a diagnostic.
+pub fn device_key_report(work_root: &Path, credentials_file: Option<&Path>) -> Value {
+    let path = match credentials_file {
+        Some(credentials) => device_key::path_beside_credentials(credentials),
+        None => work_root.join(device_key::DEVICE_KEY_FILE_NAME),
+    };
+    match device_key::RunnerDeviceKey::load_if_present(&path) {
+        Ok(Some(key)) => json!({ "present": true, "epoch": key.key_epoch() }),
+        Ok(None) => json!({ "present": false, "epoch": null }),
+        // Present but unusable: still a fact the operator must see, without
+        // echoing the file.
+        Err(_) => json!({ "present": true, "epoch": null, "readable": false }),
+    }
 }
 
 /// The lifecycle boundary comes from the enrollment receipt, never host names,
@@ -162,6 +186,7 @@ mod tests {
         let options = DoctorOptions {
             require_explicit_runtime_placement: true,
             state_volume_root: Some(root.path().join("volumes")),
+            credentials_file: None,
         };
         let diagnostic = report_with(root.path(), &options);
         let capabilities = &diagnostic["capabilities"];
@@ -255,6 +280,7 @@ mod tests {
         let options = DoctorOptions {
             require_explicit_runtime_placement: false,
             state_volume_root: Some(volume_root.clone()),
+            credentials_file: None,
         };
         let diagnostic = report_with(&work_root, &options);
         assert!(!work_root.exists());
