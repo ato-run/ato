@@ -13,10 +13,10 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer as _, SigningKey};
 use rand::RngCore as _;
@@ -29,14 +29,34 @@ use crate::write_private_file;
 
 /// Name of the key file kept beside the bearer credential file.
 pub const DEVICE_KEY_FILE_NAME: &str = "runner-device-key.json";
+
 /// Algorithm recorded in the key file. Section 11.2 fixes ed25519.
 pub const DEVICE_KEY_ALGORITHM: &str = "ed25519";
 /// Section 11.2: the only accepted signature freshness window. The Runner only
 /// witnesses it (the stub verifiers do); the control plane enforces it.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub const SIGNATURE_FRESHNESS: Duration = Duration::from_secs(300);
 /// Section 11.2: key epochs start at 1 and strictly increase per Runner.
 pub const FIRST_KEY_EPOCH: u64 = 1;
+
+/// Whether this platform can enforce the owner-only file mode the contract
+/// requires (section 11.8).
+///
+/// Only Unix can: the mode is set at creation and checked again on every load.
+/// Where that cannot be guaranteed this Runner does not hold a device key at
+/// all and keeps the bearer-only behaviour instead. That is an explicit
+/// refusal, never an assumption that the platform is safe.
+pub const fn supported() -> bool {
+    cfg!(unix)
+}
+
+fn ensure_supported() -> Result<()> {
+    ensure!(
+        supported(),
+        "device keys need Unix owner-only file permissions (0600), which this platform cannot enforce; refusing to create one"
+    );
+    Ok(())
+}
 
 /// Section 11.4 header carrying the epoch the signature was made with.
 pub const KEY_EPOCH_HEADER: &str = "X-Ato-Runner-Key-Epoch";
@@ -162,7 +182,7 @@ impl RunnerDeviceKey {
 
     /// Verify a signature made over message by this key's public half. Used by
     /// the stub control plane in tests; never by the Runner in production.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn verifies(&self, message: &[u8], signature_b64: &str) -> bool {
         let Ok(signature) = URL_SAFE_NO_PAD.decode(signature_b64) else {
             return false;
@@ -177,7 +197,7 @@ impl RunnerDeviceKey {
     }
 
     /// The public half of this key, for a server-side verifier in tests.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
         self.signing.verifying_key()
     }
@@ -267,6 +287,19 @@ impl RunnerDeviceKey {
     /// Refuses a file other users can read: a key file with looser mode may
     /// already be compromised, and silently using it would hide that.
     pub fn load_if_present(path: &Path) -> Result<Option<Self>> {
+        if !supported() {
+            // No file is the ordinary bearer-only Runner. A file that exists is
+            // a private key whose permissions this platform cannot check, so it
+            // is refused rather than trusted.
+            return if path.exists() {
+                bail!(
+                    "device key {} exists, but this platform cannot enforce the owner-only (0600) mode the contract requires; refusing to use it",
+                    path.display()
+                )
+            } else {
+                Ok(None)
+            };
+        }
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -353,12 +386,14 @@ impl RunnerDeviceKey {
 
     /// Create the key file (0600, owner only) and refuse to overwrite one.
     pub fn save_new(&self, path: &Path) -> Result<()> {
+        ensure_supported()?;
         write_private_file(path, &self.to_json()?)
     }
 
     /// Atomically replace the key file: write a 0600 sibling then rename, so a
     /// crash never leaves a half-written key the Runner would refuse to load.
     pub fn save_replace(&self, path: &Path) -> Result<()> {
+        ensure_supported()?;
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
         let file_name = path
             .file_name()
@@ -492,7 +527,8 @@ pub fn is_signed_control_request(method: &str, path_and_query: &str) -> bool {
     }
 }
 
-#[cfg(test)]
+// The 0600 contract is Unix-only, so its unit tests are too.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;

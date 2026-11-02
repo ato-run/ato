@@ -10,7 +10,9 @@
 mod activity_controller;
 mod data_plane;
 mod device_key;
-#[cfg(test)]
+// The contract requires an owner-only file mode only Unix can enforce, and these
+// tests generate and store real key files.
+#[cfg(all(test, unix))]
 mod device_key_tests;
 pub mod diagnostics;
 pub mod host_capabilities;
@@ -1452,26 +1454,39 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
     if !already_enrolled {
         fs::create_dir_all(&config.work_root)?;
         let api_base = config.api_base.trim_end_matches('/');
-        // The key is generated before the request because it signs the
-        // enrollment proof, and a retry after a lost response must present the
-        // same public key rather than binding a second identity.
-        let device_key = device_key_for_enrollment(&device_key_file)?;
+        // Device keys need an owner-only file mode this platform may not be able
+        // to enforce. Where it cannot, enrollment proceeds exactly as before and
+        // the Runner stays bearer-only: no key is generated or claimed.
+        let device_key = if device_key::supported() {
+            // Generated before the request because it signs the enrollment
+            // proof, and a retry after a lost response must present the same
+            // public key rather than binding a second identity.
+            Some(device_key_for_enrollment(&device_key_file)?)
+        } else {
+            eprintln!(
+                "[device-key] device keys need Unix owner-only file permissions; enrolling without one and staying bearer-only"
+            );
+            None
+        };
+        let mut request_body = serde_json::json!({
+            "enrollment_token": token,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
+        });
+        if let Some(device_key) = &device_key {
+            // Section 11.5 enrollment binding (RFC errata ato-api#1092): the
+            // single-use token is the replay guard, so this proof is over the
+            // token digest and the epoch, with no challenge.
+            request_body["device_key"] = serde_json::json!({
+                "public_key": device_key.public_key_b64(),
+                "key_epoch": device_key.key_epoch(),
+                "signature": device_key.enrollment_signature(&token),
+            });
+        }
         let response: serde_json::Value = reqwest::blocking::Client::new()
             .post(format!("{api_base}/v1/runners/enroll"))
-            .json(&serde_json::json!({
-                "enrollment_token": token,
-                "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH,
-                "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
-                // Section 11.5 enrollment binding (RFC errata ato-api#1092):
-                // the single-use token is the replay guard, so this proof is
-                // over the token digest and the epoch, with no challenge.
-                "device_key": {
-                    "public_key": device_key.public_key_b64(),
-                    "key_epoch": device_key.key_epoch(),
-                    "signature": device_key.enrollment_signature(&token),
-                },
-            }))
+            .json(&request_body)
             .send()
             .context("enrollment request failed")?
             .error_for_status()
@@ -1487,12 +1502,14 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
         };
         let runner_id = field("/runner/id")?;
         let runner_token = field("/runner_token")?;
-        // Additive enrollment answer (RFC errata): when the control plane says
-        // it stored the key, that is authoritative and the register round trip
-        // is skipped. Older answers carry no block, which keeps the explicit
-        // challenge/register migration path.
-        let registered = enrollment_device_key_registration(&response, device_key.key_epoch())?;
-        bind_device_key_to_identity(&device_key_file, device_key, runner_id, registered)?;
+        if let Some(device_key) = device_key {
+            // Additive enrollment answer (RFC errata): when the control plane
+            // says it stored the key, that is authoritative and the register
+            // round trip is skipped. Older answers carry no block, which keeps
+            // the explicit challenge/register migration path.
+            let registered = enrollment_device_key_registration(&response, device_key.key_epoch())?;
+            bind_device_key_to_identity(&device_key_file, device_key, runner_id, registered)?;
+        }
         write_private_file(
             &credentials_file,
             &serde_json::to_vec(&serde_json::json!({
@@ -1763,27 +1780,41 @@ impl ConnectedWorker {
         // device keys existed; it is generated here and registered with the
         // bearer it already holds.
         let device_key_file = config.device_key_path();
-        let device_key = match device_key::RunnerDeviceKey::load_if_present(&device_key_file)? {
-            Some(key) => {
-                ensure!(
-                    key.runner_id().is_empty() || key.runner_id() == config.runner_id,
-                    "device key {} belongs to another Runner; refusing to use it",
-                    device_key_file.display()
-                );
-                key
-            }
-            None => {
-                let key = device_key::RunnerDeviceKey::generate(
-                    &config.runner_id,
-                    device_key::FIRST_KEY_EPOCH,
-                )?;
-                key.save_new(&device_key_file)?;
-                key
-            }
+        let device_key = if device_key::supported() {
+            let key = match device_key::RunnerDeviceKey::load_if_present(&device_key_file)? {
+                Some(key) => {
+                    ensure!(
+                        key.runner_id().is_empty() || key.runner_id() == config.runner_id,
+                        "device key {} belongs to another Runner; refusing to use it",
+                        device_key_file.display()
+                    );
+                    key
+                }
+                None => {
+                    let key = device_key::RunnerDeviceKey::generate(
+                        &config.runner_id,
+                        device_key::FIRST_KEY_EPOCH,
+                    )?;
+                    key.save_new(&device_key_file)?;
+                    key
+                }
+            };
+            Some(register_device_key_if_needed(&api, &device_key_file, key)?)
+        } else {
+            // Section 11.8 needs a file mode this platform cannot enforce.
+            // Holding a private key it cannot protect would be a false claim of
+            // device identity, so this Runner stays bearer-only instead.
+            eprintln!(
+                "[device-key] device keys need Unix owner-only file permissions; this platform is unsupported, so this Runner stays bearer-only"
+            );
+            None
         };
-        let device_key = register_device_key_if_needed(&api, &device_key_file, device_key)?;
-        api.device_key = Some(device_key);
+        api.device_key = device_key;
         if config.rotate_device_key {
+            ensure!(
+                api.device_key.is_some(),
+                "--rotate-device-key is not supported on this platform: device keys need Unix owner-only file permissions"
+            );
             api.rotate_device_key(&device_key_file)?;
         }
         if config.network_controls {
