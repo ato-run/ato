@@ -116,6 +116,11 @@ enum Commands {
     /// native Surface into a portable wire v3 `.capsule` bundle.
     #[command(name = "__native-bundle", hide = true)]
     NativeBundle(NativeBundleArgs),
+    /// Experimental: compile an ato.capsule/1 route that declares a browser
+    /// (Static Web) Surface into a portable wire v3 `.capsule` bundle from the
+    /// existing source tree, without running a build.
+    #[command(name = "__static-bundle", hide = true)]
+    StaticBundle(StaticBundleArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
     /// Derive and verify a candidate Derivation against an existing .capsule's
@@ -362,6 +367,22 @@ struct NativeBundleArgs {
     /// New bundle file.
     #[arg(short, long, default_value = "native.capsule")]
     output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct StaticBundleArgs {
+    /// The source directory whose tree the bundle carries.
+    #[arg(default_value = ".")]
+    source: PathBuf,
+    /// Application title, part of the bundled Application object.
+    #[arg(long)]
+    title: String,
+    /// New bundle file.
+    #[arg(short, long, default_value = "static.capsule")]
+    output: PathBuf,
+    /// Portable tree schema: v1 (default) or v2. v2 carries arbitrary binary media.
+    #[arg(long, default_value = "v1")]
+    tree_schema: String,
 }
 
 #[derive(Debug, Args)]
@@ -667,6 +688,7 @@ pub fn run() -> Result<()> {
         Commands::Encap(args) => encap(args),
         Commands::Pack(args) => pack(args),
         Commands::NativeBundle(args) => native_bundle(args),
+        Commands::StaticBundle(args) => static_bundle(args),
         Commands::Run(args) => run_capsule(args),
         Commands::Reform(args) => run_reform(args),
         Commands::ModelSet { command } => model_cache::execute(command),
@@ -856,6 +878,31 @@ fn native_bundle(args: NativeBundleArgs) -> Result<()> {
     })?;
     fs::write(&args.output, &bytes)
         .with_context(|| format!("write native bundle {}", args.output.display()))?;
+    println!("Packed: {}", args.output.display());
+    println!("bundle_sha256={}", bundle_sha256(&bytes));
+    println!("contract_ref={}", bundle.index.root_contract_ref);
+    for derivation in &bundle.index.derivations {
+        println!("derivation_ref={derivation}");
+    }
+    Ok(())
+}
+
+/// Compile an `ato.capsule/1` static Web route into a portable wire v3 bundle
+/// with no build: the packer hashes the tree this route already declares.
+fn static_bundle(args: StaticBundleArgs) -> Result<()> {
+    let schema = match args.tree_schema.as_str() {
+        "v1" => "ato.portable-tree/1",
+        "v2" => "ato.portable-tree/2",
+        other => anyhow::bail!("unknown --tree-schema {other}"),
+    };
+    let (bytes, bundle) = ato_portable_application::build_static_bundle_with_schema(
+        &args.source,
+        &args.title,
+        schema,
+    )
+    .with_context(|| format!("compile static bundle from {}", args.source.display()))?;
+    fs::write(&args.output, &bytes)
+        .with_context(|| format!("write static bundle {}", args.output.display()))?;
     println!("Packed: {}", args.output.display());
     println!("bundle_sha256={}", bundle_sha256(&bytes));
     println!("contract_ref={}", bundle.index.root_contract_ref);

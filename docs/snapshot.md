@@ -1,5 +1,7 @@
 # Snapshot materialization
 
+Status: Current technical reference.
+
 A snapshot is a physical realization artifact. Its digest, backend and host
 compatibility evidence are distinct from logical Capsule identity.
 

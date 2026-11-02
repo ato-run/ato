@@ -1,5 +1,7 @@
 # Shared reasoning prototype
 
+Status: Draft.
+
 This unmerged draft implements the user-requested Codex-first prototype.
 Historical ledgers and provider configurations remain immutable. The selected
 OSS and cases are preregistered in formation-codex-prototype-selection.json;

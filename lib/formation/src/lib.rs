@@ -51,6 +51,7 @@ pub mod preset;
 pub mod process_binding;
 #[cfg(feature = "planning")]
 pub mod projection;
+pub mod provider_budget;
 pub mod receipt;
 pub mod repository_evidence;
 pub mod request;

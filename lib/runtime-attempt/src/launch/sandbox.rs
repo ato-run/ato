@@ -334,9 +334,21 @@ pub fn sandboxed_command_scoped(
         GUEST_SHIM.into(),
     ];
     for endpoint in context.endpoints() {
-        options.extend(["--ingress-port".into(), endpoint.host_port.to_string()]);
+        let guest_port = endpoint.guest_port.unwrap_or(endpoint.host_port);
+        options.extend([
+            "--ingress-port".into(),
+            format!("{}:{guest_port}", endpoint.host_port),
+        ]);
     }
     command.argv.splice(separator..separator, options);
+    // The workload lives in its own network namespace: the owner-facing
+    // listener is on host_port while the declared service binds guest_port.
+    // Do not also grant the host port inside the namespace.
+    command.policy.allowed_bind_tcp_ports = context
+        .endpoints()
+        .iter()
+        .map(|endpoint| endpoint.guest_port.unwrap_or(endpoint.host_port))
+        .collect();
     command.policy = command
         .policy
         .allow_tcp_connect([crate::network_bridge::PROXY_PORT]);
