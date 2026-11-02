@@ -279,6 +279,15 @@ Decisions and gaps recorded while doing S2/S3:
   Validated locally against a Docker pair. `ato run` refuses OCI routes on
   macOS ("OCI Container routes require a native Linux Docker host"), so the
   first Ato Run browser check is on the Linux dedicated Runner (Phase 5).
+- **Ato Run browser check passed locally (2026-11-02)**: the current Linux CLI
+  ran the two-service group (Linux container + host Docker socket), K's
+  `webmail-health`/`webmail-ui` were satisfied, and the browser harness signed
+  in and rendered the inbox. Record:
+  `docs/ops/mail-browser-ato-run-local-20261102.md` (S3 branch). Image prep the
+  local Run exposed: strip Stalwart's anonymous VOLUME declarations, strip the
+  `cap_net_bind_service` xattr for `cap-drop=ALL`, keep an ENTRYPOINT (argv is
+  the command), and keep Missive's nondefault-port patch. Staging (fixed TCP,
+  TLS, state, Bindings, 443) is still the gate.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
