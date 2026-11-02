@@ -64,3 +64,20 @@ record the digests produced on the Runner's platform; the pins in
    `getcap /usr/local/bin/stalwart` prints nothing.
 4. Only then run the sample; a digest or platform mismatch is an admission
    failure, not a Contract failure.
+
+## Validation (2026-11-02)
+
+`build-images.sh` was run end-to-end from a clean Govcraft/missive checkout at the
+pinned commit on an arm64 workstation (the pinned base manifests make the
+result `linux/amd64` through emulation):
+
+| Image | platform | user | entrypoint |
+|---|---|---|---|
+| Stalwart thin | linux/amd64 | 1000:1000 | `["/usr/local/bin/stalwart"]` |
+| Missive patched | linux/amd64 | 65532:65532 | `["/usr/local/bin/missive"]` |
+
+`verify-preload.sh` passed on those images, including
+`docker run --cap-drop=ALL --entrypoint /usr/local/bin/stalwart <ref> --version`
+(the behavioral form of the file-capability requirement). The digests produced
+by a local build are **not** the staging pins; only the preloaded staging
+images' digests belong in `images.lock` and `capsule.toml`.
