@@ -1420,6 +1420,16 @@ pub enum IsolationMode {
     HostBoundary,
 }
 
+impl IsolationMode {
+    /// Stable label for diagnostics: the same spelling the CLI accepts.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Namespace => "namespace",
+            Self::HostBoundary => "host-boundary",
+        }
+    }
+}
+
 /// The single-use token a freshly provisioned machine starts with. Read from
 /// the environment only: a command-line argument is visible to every user of
 /// the host through `/proc/<pid>/cmdline`.
@@ -1747,6 +1757,9 @@ struct RuntimeServeControls<'a> {
     hard_deadline: Option<Instant>,
     execution_authorization: Option<&'a mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
     network_authorization: Option<&'a runtime_launch::lease::NetworkAuthorization>,
+    /// Resolved before the workload started; the listener this slot creates
+    /// must use exactly the gate the lease was admitted with.
+    surface_gate: SurfaceGate,
 }
 
 pub struct ConnectedWorker {
@@ -2483,15 +2496,16 @@ impl ConnectedWorker {
             result,
             stop_confirmed: true,
         };
-        // A host-boundary Runner is a machine whose public address is the
-        // provider's proxy, reachable by anyone. Its Surface is published
-        // only behind the assertion gate; a lease that carries no key would
-        // publish the workload ungated, so nothing of it starts.
-        if let Err(error) =
-            require_surface_gate(self.config.isolation, lease, &self.config.runner_id)
-        {
-            return not_started(Err(error));
-        }
+        // A public Surface listener is reachable by anyone: the provider's
+        // proxy for a host-boundary slot, a configured public_base_url (an
+        // operator or Ato-managed slot ingress), or a non-loopback bind. Its
+        // Surface is published only behind the assertion gate; a lease that
+        // carries no key would publish the workload ungated, so nothing of it
+        // starts. The resolved gate is reused when the listener is created.
+        let surface_gate = match require_surface_gate(&self.config, lease) {
+            Ok(gate) => gate,
+            Err(error) => return not_started(Err(error)),
+        };
         let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
             self.api.client.clone(),
             self.api.base.clone(),
@@ -2873,6 +2887,7 @@ impl ConnectedWorker {
                     hard_deadline,
                     execution_authorization: execution_authorization.as_mut(),
                     network_authorization,
+                    surface_gate,
                 },
             )
         });
@@ -2974,6 +2989,7 @@ impl ConnectedWorker {
             hard_deadline,
             mut execution_authorization,
             network_authorization,
+            surface_gate,
         } = controls;
         ensure!(
             hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
@@ -3026,11 +3042,9 @@ impl ConnectedWorker {
         });
         // The public slot port is this worker's gate, not the workload: a
         // request is forwarded to the hidden loopback port only after it
-        // proves it came through the app proxy. When the claim carried no
-        // assertion key the gate is absent and the proxy passes through —
-        // that is exactly the state in which the control plane cannot sign
-        // assertions, so nothing enforceable is lost. A host-boundary Runner
-        // never reaches here without a key (`require_surface_gate`).
+        // proves it came through the app proxy. A public listener never
+        // reaches here without a key (`require_surface_gate` refused the
+        // lease first); only a loopback-only listener forwards without one.
         let mut observation_targets = BTreeMap::new();
         if let (Some(spec), runtime_launch::lease::ActiveWorkload::Oci(launched)) =
             (spec.service_group_spec(), &active.launched)
@@ -3068,7 +3082,7 @@ impl ConnectedWorker {
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
+                gate: surface_gate,
                 guest_surface_gateway: native.is_some(),
                 observation_targets,
             }),
@@ -3256,6 +3270,10 @@ impl ConnectedWorker {
         command: &PortableLeaseCommand,
         lease_root: &Path,
     ) -> Result<()> {
+        // A public listener is refused before the graph is downloaded or any
+        // workload, VM or browser starts: the listener this path creates is
+        // the same gate as the runtime-launch slot.
+        let surface_gate = require_surface_gate(&self.config, lease)?;
         let trace_started_at = Instant::now();
         let source = self.api.graph_source(
             &lease.id,
@@ -3333,7 +3351,7 @@ impl ConnectedWorker {
             Some(SurfaceMux {
                 control_target: browser.as_ref().map(|runtime| runtime.control_address()),
                 presentation_frame: presentation_frame.clone(),
-                gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
+                gate: surface_gate,
                 guest_surface_gateway: true,
                 observation_targets: BTreeMap::new(),
             }),
@@ -3716,6 +3734,13 @@ impl WorkerConfig {
         self.tap_host_cidr
             .as_deref()
             .is_some_and(|cidr| !cidr.trim().is_empty())
+    }
+
+    /// Whether this Runner publishes its Surface listener beyond this host.
+    /// A public listener requires the per-lease assertion key; see
+    /// `SurfacePublication`.
+    pub(crate) fn surface_publication(&self) -> SurfacePublication {
+        SurfacePublication::of(self)
     }
 }
 
@@ -5068,10 +5093,11 @@ struct ClaimedLease {
     command: LeaseCommand,
     expires_at: Option<String>,
     /// Runner-scoped HMAC key for the HTTP proxy-origin gate, delivered by the
-    /// control plane inside the claim. Absent means the API does not mint
-    /// assertions for this Runner — the gate stays off, which is the only
-    /// ordering-safe read (an enforcing gate with a non-signing API would
-    /// refuse every request).
+    /// control plane inside the claim. Absent is allowed only for a private,
+    /// loopback-only Surface listener: a public listener refuses this lease
+    /// (`surface_assertion_key_missing`) before any workload or public socket
+    /// exists, because a non-signing control plane would otherwise publish the
+    /// workload ungated.
     #[serde(default)]
     proxy_assertion_key: Option<String>,
 }
@@ -6066,9 +6092,10 @@ struct HttpProxyAssertionClaims {
 }
 
 impl HttpProxyGate {
-    /// The gate for one lease, or None when the claim carried no key — the
-    /// control plane does not sign assertions for this Runner, so there is
-    /// nothing to enforce with.
+    /// The gate for one lease, or None when the claim carried no key. A
+    /// missing key is only tolerable for a private loopback listener; every
+    /// public listener resolves this through `SurfaceGate::for_lease`, which
+    /// refuses a keyless lease instead of publishing it.
     fn for_lease(lease: &ClaimedLease, runner_id: &str) -> Option<Arc<Self>> {
         let key = lease.proxy_assertion_key.as_ref()?.trim();
         if key.len() < 32 {
@@ -6177,23 +6204,120 @@ fn strip_http_prelude_header(head: &[u8], tail: &[u8], name: &str) -> Vec<u8> {
     out
 }
 
-/// Refuse to serve a lease whose Surface could not be gated. Only the
-/// host-boundary mode requires it: there the slot is a public provider URL and
-/// nothing in front of it authenticates. Other modes keep the existing rollout
-/// rule (no key means the control plane signs nothing, so nothing is lost).
-fn require_surface_gate(
-    isolation: IsolationMode,
-    lease: &ClaimedLease,
-    runner_id: &str,
-) -> Result<()> {
-    if isolation == IsolationMode::HostBoundary
-        && HttpProxyGate::for_lease(lease, runner_id).is_none()
-    {
-        anyhow::bail!(
-            "surface_assertion_key_missing: a host-boundary Runner publishes a Surface only behind the assertion gate, and this lease carried no verification key"
-        );
+/// Why this Runner's Surface listener is reachable from outside the host.
+///
+/// One listener may be public for more than one reason (a host-boundary slot
+/// that also configures a public origin), so every reason is kept. A slot
+/// ingress — an operator reverse proxy or the Ato-managed per-slot host — is
+/// visible to the worker only as `public_base_url`: the worker never sees the
+/// proxy itself. A host-boundary slot is public even without one because the
+/// provider's proxy reaches its listener directly, and a listener bound to a
+/// non-loopback address is public on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SurfacePublication {
+    public_base_url: bool,
+    host_boundary_slot: bool,
+    non_loopback_listener: bool,
+}
+
+impl SurfacePublication {
+    pub(crate) fn of(config: &WorkerConfig) -> Self {
+        Self::from_parts(
+            config.public_base_url.is_some(),
+            config.isolation,
+            config.surface_listen,
+        )
     }
-    Ok(())
+
+    pub(crate) fn from_parts(
+        public_base_url: bool,
+        isolation: IsolationMode,
+        surface_listen: SocketAddr,
+    ) -> Self {
+        Self {
+            public_base_url,
+            host_boundary_slot: isolation == IsolationMode::HostBoundary,
+            non_loopback_listener: !surface_listen.ip().is_loopback(),
+        }
+    }
+
+    pub(crate) fn is_public(self) -> bool {
+        self.public_base_url || self.host_boundary_slot || self.non_loopback_listener
+    }
+
+    /// Stable reason codes, in the order an operator should read them.
+    pub(crate) fn reasons(self) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if self.public_base_url {
+            reasons.push("public_base_url");
+        }
+        if self.host_boundary_slot {
+            reasons.push("host_boundary_slot");
+        }
+        if self.non_loopback_listener {
+            reasons.push("non_loopback_listener");
+        }
+        reasons
+    }
+
+    fn describe(self) -> String {
+        let reasons = self.reasons();
+        if reasons.is_empty() {
+            "loopback-only listener with no public base URL".to_owned()
+        } else {
+            reasons.join(", ")
+        }
+    }
+}
+
+/// The assertion policy of one Surface listener.
+///
+/// A public listener has no pass-through: `SurfaceGate::for_lease` refuses to
+/// build one it cannot enforce, before a workload is materialized or a public
+/// socket is bound. Only a loopback-only listener may run without a key,
+/// because no request from outside this host can reach it.
+enum SurfaceGate {
+    /// Every request must carry a signed assertion scoped to this lease.
+    Assertion(Arc<HttpProxyGate>),
+    /// A listener nothing outside this host can reach. The control plane mints
+    /// no assertion for it, so requests are forwarded without one.
+    LoopbackOnly,
+}
+
+impl std::fmt::Debug for SurfaceGate {
+    /// Never print the key: a gate's Debug is also a diagnostic.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Assertion(_) => formatter.write_str("SurfaceGate::Assertion(..)"),
+            Self::LoopbackOnly => formatter.write_str("SurfaceGate::LoopbackOnly"),
+        }
+    }
+}
+
+impl SurfaceGate {
+    fn for_lease(
+        publication: SurfacePublication,
+        lease: &ClaimedLease,
+        runner_id: &str,
+    ) -> Result<Self> {
+        let Some(gate) = HttpProxyGate::for_lease(lease, runner_id) else {
+            ensure!(
+                !publication.is_public(),
+                "surface_assertion_key_missing: this Runner publishes a public Surface listener ({}), and this lease carried no verification key; neither the workload nor the listener was started",
+                publication.describe()
+            );
+            return Ok(Self::LoopbackOnly);
+        };
+        Ok(Self::Assertion(gate))
+    }
+}
+
+/// Resolve the gate for a lease before anything is started. The key arrives
+/// inside the lease claim, so this is the first moment the Runner can know
+/// whether it can enforce the gate; a public listener without one is refused
+/// here, not after the workload is already reachable.
+fn require_surface_gate(config: &WorkerConfig, lease: &ClaimedLease) -> Result<SurfaceGate> {
+    SurfaceGate::for_lease(config.surface_publication(), lease, &config.runner_id)
 }
 
 fn proxy_assertion_forbidden(client: &mut TcpStream) {
@@ -6209,9 +6333,10 @@ struct SurfaceMux {
     /// credential, verified inside the control server.
     control_target: Option<SocketAddr>,
     presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
-    /// The proxy-origin gate. None only when the control plane does not sign
-    /// assertions for this Runner.
-    gate: Option<Arc<HttpProxyGate>>,
+    /// The proxy-origin gate. A public listener always carries an enforcing
+    /// gate; `LoopbackOnly` exists only for a listener nothing off this host
+    /// can reach.
+    gate: SurfaceGate,
     /// True when surface_target is a guest hosting the session-surface
     /// gateway, which authenticates `SURFACE_CONNECT_PATH` itself. False for
     /// runtime-launch workloads — there the path is just an app path and stays
@@ -6306,71 +6431,79 @@ fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &S
         proxy_connection_with_prelude(&mut client, surface_target, &prelude);
         return;
     }
-    if let Some(claims) = mux.gate.as_deref().and_then(|gate| {
-        http_prelude_header(head, RUN_ASSERTION_HEADER).and_then(|assertion| gate.claims(assertion))
-    }) && claims.kind == "observation"
-    {
-        let request_line = std::str::from_utf8(head)
-            .ok()
-            .and_then(|text| text.split("\r\n").next());
-        let expected = claims
-            .path
-            .as_ref()
-            .map(|path| format!("GET {path} HTTP/1.1"));
-        let target = claims
-            .port
-            .as_ref()
-            .and_then(|port| mux.observation_targets.get(port));
-        if !claims.path.as_deref().is_some_and(|path| {
-            path.starts_with('/')
-                && !path.starts_with("//")
-                && !path
-                    .chars()
-                    .any(|c| c.is_ascii_control() || c.is_ascii_whitespace() || c == '#')
-        }) || claims.method.as_deref() != Some("GET")
-            || request_line != expected.as_deref()
-            || !tail.is_empty()
-            || http_prelude_header(head, "transfer-encoding").is_some()
-            || http_prelude_header(head, "content-length").is_some_and(|value| value != "0")
-        {
-            proxy_assertion_forbidden(&mut client);
-            return;
-        }
-        if let Some(target) = target {
-            // Rebuild one bodyless request. Do not pass Upgrade, credentials, pipelined
-            // requests or arbitrary headers into a private service.
-            let request = format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                claims.path.as_deref().unwrap_or("/"),
-                target
-            );
-            if let Ok(mut upstream) = TcpStream::connect_timeout(target, Duration::from_secs(5)) {
-                let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
-                if upstream.write_all(request.as_bytes()).is_ok() {
-                    let _ = io::copy(&mut upstream.take(1024 * 1024 + 16384), &mut client);
+    match &mux.gate {
+        SurfaceGate::Assertion(gate) => {
+            if let Some(claims) = http_prelude_header(head, RUN_ASSERTION_HEADER)
+                .and_then(|assertion| gate.claims(assertion))
+                && claims.kind == "observation"
+            {
+                let request_line = std::str::from_utf8(head)
+                    .ok()
+                    .and_then(|text| text.split("\r\n").next());
+                let expected = claims
+                    .path
+                    .as_ref()
+                    .map(|path| format!("GET {path} HTTP/1.1"));
+                let target = claims
+                    .port
+                    .as_ref()
+                    .and_then(|port| mux.observation_targets.get(port));
+                if !claims.path.as_deref().is_some_and(|path| {
+                    path.starts_with('/')
+                        && !path.starts_with("//")
+                        && !path
+                            .chars()
+                            .any(|c| c.is_ascii_control() || c.is_ascii_whitespace() || c == '#')
+                }) || claims.method.as_deref() != Some("GET")
+                    || request_line != expected.as_deref()
+                    || !tail.is_empty()
+                    || http_prelude_header(head, "transfer-encoding").is_some()
+                    || http_prelude_header(head, "content-length").is_some_and(|value| value != "0")
+                {
+                    proxy_assertion_forbidden(&mut client);
+                    return;
                 }
+                if let Some(target) = target {
+                    // Rebuild one bodyless request. Do not pass Upgrade, credentials, pipelined
+                    // requests or arbitrary headers into a private service.
+                    let request = format!(
+                        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                        claims.path.as_deref().unwrap_or("/"),
+                        target
+                    );
+                    if let Ok(mut upstream) =
+                        TcpStream::connect_timeout(target, Duration::from_secs(5))
+                    {
+                        let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
+                        if upstream.write_all(request.as_bytes()).is_ok() {
+                            let _ = io::copy(&mut upstream.take(1024 * 1024 + 16384), &mut client);
+                        }
+                    }
+                } else {
+                    proxy_assertion_forbidden(&mut client);
+                }
+                return;
             }
-        } else {
-            proxy_assertion_forbidden(&mut client);
+            if !http_prelude_header(head, RUN_ASSERTION_HEADER)
+                .is_some_and(|assertion| gate.verify(assertion))
+            {
+                proxy_assertion_forbidden(&mut client);
+                return;
+            }
         }
-        return;
-    }
-    if let Some(gate) = mux.gate.as_deref() {
-        let asserted = http_prelude_header(head, RUN_ASSERTION_HEADER)
-            .is_some_and(|assertion| gate.verify(assertion));
-        if !asserted {
-            proxy_assertion_forbidden(&mut client);
-            return;
-        }
+        // A loopback-only listener has no assertion to enforce and no path
+        // from outside this host. A public listener never reaches this arm:
+        // `SurfaceGate::for_lease` refuses it before the socket exists, so
+        // there is no ungated public pass-through.
+        SurfaceGate::LoopbackOnly => {}
     }
     if path == Some(BROWSER_PRESENTATION_PATH) {
         serve_browser_presentation(&mut client, mux.presentation_frame.as_ref());
         return;
     }
-    let forwarded = if mux.gate.is_some() {
-        strip_http_prelude_header(head, tail, RUN_ASSERTION_HEADER)
-    } else {
-        prelude
+    let forwarded = match &mux.gate {
+        SurfaceGate::Assertion(_) => strip_http_prelude_header(head, tail, RUN_ASSERTION_HEADER),
+        SurfaceGate::LoopbackOnly => prelude,
     };
     proxy_connection_with_prelude(&mut client, surface_target, &forwarded);
 }
@@ -8074,7 +8207,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         (address, worker)
     }
 
-    fn gated_proxy(gate: Arc<HttpProxyGate>, target: SocketAddr) -> (SocketAddr, TcpProxy) {
+    fn surface_proxy(gate: SurfaceGate, target: SocketAddr) -> (SocketAddr, TcpProxy) {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let public = reservation.local_addr().unwrap();
         drop(reservation);
@@ -8084,13 +8217,35 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: Some(gate),
+                gate,
                 guest_surface_gateway: false,
                 observation_targets: BTreeMap::new(),
             }),
         )
         .unwrap();
         (public, proxy)
+    }
+
+    fn gated_proxy(gate: Arc<HttpProxyGate>, target: SocketAddr) -> (SocketAddr, TcpProxy) {
+        surface_proxy(SurfaceGate::Assertion(gate), target)
+    }
+
+    fn keyed_lease() -> ClaimedLease {
+        let mut lease = lease(None);
+        lease.proxy_assertion_key = Some("k".repeat(32));
+        lease
+    }
+
+    /// Send one raw request, half-close, and return everything the listener
+    /// answered. Used for WebSocket upgrades and chunked bodies, which the
+    /// GET helper does not express.
+    fn raw_request(public: SocketAddr, request: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect(public).unwrap();
+        client.write_all(request).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        response
     }
 
     fn http_get(public: SocketAddr, path: &str, assertion: Option<&str>) -> Vec<u8> {
@@ -8132,7 +8287,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: Some(gate.clone()),
+                gate: SurfaceGate::Assertion(gate.clone()),
                 guest_surface_gateway: false,
                 observation_targets: BTreeMap::from([("backend.http".to_owned(), upstream)]),
             }),
@@ -8241,22 +8396,151 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(gate.verify(&sign(claims("http", "lease_1", "runner_1"), &key)));
     }
 
+    /// A namespace Runner behind a slot ingress is as public as a host-boundary
+    /// one: public_base_url is the origin that ingress serves, so the lease
+    /// must carry the gate key or nothing starts.
     #[test]
-    fn a_host_boundary_runner_refuses_a_lease_it_cannot_gate() {
-        let mut ungated = lease(None);
-        assert!(require_surface_gate(IsolationMode::Namespace, &ungated, "runner_1").is_ok());
-        let error = require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1")
+    fn q3_a_namespace_runner_with_a_public_base_url_refuses_a_keyless_lease() {
+        let config = capability_test_config(None);
+        assert_eq!(config.isolation, IsolationMode::Namespace);
+        assert!(config.public_base_url.is_some());
+        let error = require_surface_gate(&config, &lease(None))
             .unwrap_err()
             .to_string();
         assert!(
             error.starts_with("surface_assertion_key_missing"),
             "{error}"
         );
+        assert!(error.contains("public_base_url"), "{error}");
         // A key too short to be the derived one is no key.
-        ungated.proxy_assertion_key = Some("short".to_owned());
-        assert!(require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1").is_err());
-        ungated.proxy_assertion_key = Some("k".repeat(32));
-        assert!(require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1").is_ok());
+        let mut short = lease(None);
+        short.proxy_assertion_key = Some("short".to_owned());
+        assert!(require_surface_gate(&config, &short).is_err());
+        // The same lease with the real key resolves an enforcing gate.
+        assert!(matches!(
+            require_surface_gate(&config, &keyed_lease()).unwrap(),
+            SurfaceGate::Assertion(_)
+        ));
+
+        // A host-boundary slot is public even without a public base URL, and a
+        // non-loopback bind is public on its own.
+        let mut boundary = capability_test_config(None);
+        boundary.public_base_url = None;
+        boundary.isolation = IsolationMode::HostBoundary;
+        assert!(boundary.surface_publication().is_public());
+        assert!(require_surface_gate(&boundary, &lease(None)).is_err());
+
+        let mut open = capability_test_config(None);
+        open.public_base_url = None;
+        open.surface_listen = "0.0.0.0:8420".parse().unwrap();
+        assert!(open.surface_publication().is_public());
+        assert!(require_surface_gate(&open, &lease(None)).is_err());
+    }
+
+    /// The gate's public contract: a public listener answers 403 without an
+    /// assertion and forwards a signed request with the credential stripped.
+    #[test]
+    fn q3_a_public_listener_answers_403_ungated_and_200_with_an_assertion() {
+        let gate = test_gate();
+        let (upstream_addr, upstream) = prelude_echo_upstream();
+        let (public, proxy) =
+            surface_proxy(SurfaceGate::Assertion(Arc::clone(&gate)), upstream_addr);
+
+        let response = http_get(public, "/i/", None);
+        assert!(response.starts_with(b"HTTP/1.1 403"), "{response:?}");
+
+        let assertion = http_assertion(
+            &"k".repeat(32),
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        let response = http_get(public, "/i/", Some(&assertion));
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+
+        let forwarded = String::from_utf8(upstream.join().unwrap()).unwrap();
+        assert!(forwarded.starts_with("GET /i/ HTTP/1.1"), "{forwarded}");
+        assert!(!forwarded.contains(RUN_ASSERTION_HEADER), "{forwarded}");
+        drop(proxy);
+    }
+
+    /// WebSocket upgrades and chunked bodies take the same prelude path as
+    /// ordinary HTTP: an unasserted request never reaches the workload, and an
+    /// asserted one is forwarded byte-for-byte.
+    #[test]
+    fn q17_websocket_upgrades_and_chunked_bodies_use_the_same_public_gate() {
+        let gate = test_gate();
+        let (upstream_addr, upstream) = request_capture_upstream();
+        let (public, proxy) =
+            surface_proxy(SurfaceGate::Assertion(Arc::clone(&gate)), upstream_addr);
+
+        let upgrade = b"GET /socket HTTP/1.1\r\nHost: s0-runner.ato.run\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        let response = raw_request(public, upgrade);
+        assert!(
+            response.starts_with(b"HTTP/1.1 403"),
+            "a WS upgrade without an assertion must be refused: {response:?}"
+        );
+
+        let chunked_body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let mut chunked = b"POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        chunked.extend_from_slice(chunked_body);
+        let response = raw_request(public, &chunked);
+        assert!(
+            response.starts_with(b"HTTP/1.1 403"),
+            "a chunked body without an assertion must be refused: {response:?}"
+        );
+
+        // Neither refusal reached the workload; the first upstream connection
+        // is the asserted chunked request below.
+        let assertion = http_assertion(
+            &"k".repeat(32),
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        let mut chunked = format!(
+            "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n{RUN_ASSERTION_HEADER}: {assertion}\r\n\r\n"
+        )
+        .into_bytes();
+        chunked.extend_from_slice(chunked_body);
+        let response = raw_request(public, &chunked);
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+
+        let received = upstream.join().unwrap();
+        assert!(
+            !received
+                .windows(RUN_ASSERTION_HEADER.len())
+                .any(|window| window == RUN_ASSERTION_HEADER.as_bytes()),
+            "the workload must not see the assertion"
+        );
+        assert!(
+            received.ends_with(chunked_body),
+            "the chunked tail must be forwarded untouched"
+        );
+        drop(proxy);
+    }
+
+    /// Requirement's private case: loopback-only with no public base URL keeps
+    /// running without a key, exactly as before.
+    #[test]
+    fn q92_a_loopback_only_runner_serves_without_an_assertion_key() {
+        let mut config = capability_test_config(None);
+        config.public_base_url = None;
+        config.surface_listen = "127.0.0.1:8420".parse().unwrap();
+        config.isolation = IsolationMode::Namespace;
+        assert!(!config.surface_publication().is_public());
+        let gate = require_surface_gate(&config, &lease(None)).unwrap();
+        assert!(matches!(gate, SurfaceGate::LoopbackOnly));
+
+        let (upstream_addr, upstream) = prelude_echo_upstream();
+        let (public, proxy) = surface_proxy(SurfaceGate::LoopbackOnly, upstream_addr);
+        let response = http_get(public, "/i/", None);
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+        let forwarded = String::from_utf8(upstream.join().unwrap()).unwrap();
+        assert!(forwarded.starts_with("GET /i/ HTTP/1.1"), "{forwarded}");
+        drop(proxy);
     }
 
     #[test]
@@ -8275,7 +8559,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: Some(gate),
+                gate: SurfaceGate::Assertion(gate),
                 guest_surface_gateway: true,
                 observation_targets: BTreeMap::new(),
             }),
