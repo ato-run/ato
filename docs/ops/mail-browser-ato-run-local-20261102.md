@@ -57,6 +57,12 @@ preparation must satisfy:
 - A demo domain/account seeded through Stalwart's JMAP registry from a helper
   container on the group network.
 
+## Host browser follow-up
+
+A normal desktop browser was also pointed at the same local Run through a
+local-only port forward; it signed in and rendered the inbox. See
+[host browser against the Ato Run](mail-browser-ato-run-local-host-20261102.md).
+
 ## What this proves, and what it does not
 
 Proves: the D1 component composition (Stalwart JMAP + Missive Web Surface) is
