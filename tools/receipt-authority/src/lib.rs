@@ -292,7 +292,7 @@ enum SearchRequest {
     },
     ValidateProviderJournal {
         plans: Vec<ato_formation::provider_budget::BudgetPlan>,
-        exploration: ato_formation::exploration::ExplorationPolicy,
+        exploration: Box<ato_formation::exploration::ExplorationPolicy>,
         plan_index: usize,
         provider_config: Value,
         prompt_digest: String,
