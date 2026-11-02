@@ -798,23 +798,40 @@ pub fn wait_until_ready(
     launched: &mut LaunchedProcess,
     probe: &dyn ReadinessProbe,
 ) -> Result<()> {
-    let (timeout_ms, target) = match &spec.readiness {
+    let (timeout_ms, target, condition) = match &spec.readiness {
         ReadinessV1::Http {
             endpoint_name,
             path,
             timeout_ms,
-        } => (
-            *timeout_ms,
-            Some((host_port_for(context, endpoint_name)?, path.clone())),
-        ),
+            expect_status,
+            json,
+            max_body_bytes,
+        } => {
+            // A readiness that states nothing beyond 2xx keeps handing the probe
+            // exactly what it was handed before this field existed.
+            let condition = (expect_status.is_some() || json.is_some()).then(|| {
+                crate::startup::ProbeCondition {
+                    expect_status: *expect_status,
+                    json: json.as_ref().map(crate::startup::JsonCondition::from),
+                    max_body_bytes: max_body_bytes
+                        .unwrap_or(ato_formation::requirements::DEFAULT_STARTUP_BODY_MAX_BYTES),
+                }
+            });
+            (
+                *timeout_ms,
+                Some((host_port_for(context, endpoint_name)?, path.clone())),
+                condition,
+            )
+        }
         ReadinessV1::Tcp {
             endpoint_name,
             timeout_ms,
         } => (
             *timeout_ms,
             Some((host_port_for(context, endpoint_name)?, String::new())),
+            None,
         ),
-        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
+        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None, None),
     };
 
     // A `process` readiness has nothing to poll: the workload is ready because
@@ -849,7 +866,7 @@ pub fn wait_until_ready(
                 });
             }
             probe
-                .observe(port, &path, budget)
+                .observe_with(port, &path, budget, condition.as_ref())
                 .map_err(anyhow::Error::msg)
         },
         || {
@@ -904,6 +921,23 @@ pub trait ReadinessProbe {
             }),
         }
     }
+    /// A probe handed a startup condition must evaluate it or refuse.
+    ///
+    /// The default refuses: a probe that quietly ignored the condition would
+    /// call a still-loading application started, which is the failure this
+    /// condition exists to prevent.
+    fn observe_with(
+        &self,
+        host_port: u16,
+        path: &str,
+        budget: Duration,
+        condition: Option<&crate::startup::ProbeCondition>,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        if condition.is_some() {
+            return Err("this probe cannot evaluate a startup condition".to_owned());
+        }
+        self.observe(host_port, path, budget)
+    }
 }
 
 /// Keeps preparation inside the caller's existing stop/authorization fence.
@@ -936,6 +970,16 @@ impl ReadinessProbe for ControlledReadinessProbe<'_> {
         budget: Duration,
     ) -> Result<crate::startup::ReadinessObservation, String> {
         self.inner.observe(port, path, budget)
+    }
+    fn observe_with(
+        &self,
+        port: u16,
+        path: &str,
+        budget: Duration,
+        condition: Option<&crate::startup::ProbeCondition>,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        self.check_control().map_err(|error| error.to_string())?;
+        self.inner.observe_with(port, path, budget, condition)
     }
 }
 
@@ -985,6 +1029,25 @@ impl ReadinessProbe for LoopbackReadinessProbe {
             .map_err(|error| error.to_string())?;
         let status = response.status();
         ensure_ready(status).map_err(|error| error.to_string())
+    }
+    fn observe_with(
+        &self,
+        host_port: u16,
+        path: &str,
+        budget: Duration,
+        condition: Option<&crate::startup::ProbeCondition>,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        // A TCP readiness carries no response, so a condition never reaches it.
+        if path.is_empty() {
+            return self.observe(host_port, path, budget);
+        }
+        crate::startup::http_probe_with(
+            &self.client,
+            &format!("http://127.0.0.1:{host_port}{path}"),
+            budget,
+            condition,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -1164,6 +1227,9 @@ HTTPServer(('127.0.0.1', 8000), H).serve_forever()
             endpoint_name: "web".into(),
             path: "/".into(),
             timeout_ms: 5000,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let runtime = tempfile::Builder::new()
             .prefix("isolated-")
@@ -1252,6 +1318,9 @@ HTTPServer(('127.0.0.1', 8000), H).serve_forever()
             endpoint_name: "nonexistent".to_owned(),
             path: "/health".to_owned(),
             timeout_ms: 10,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let mut launched = LaunchedProcess {
             #[cfg(unix)]
@@ -1344,6 +1413,9 @@ HTTPServer(('127.0.0.1', 8000), H).serve_forever()
             endpoint_name: "web".to_owned(),
             path: "/health".to_owned(),
             timeout_ms: 60,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let mut launched = LaunchedProcess {
             #[cfg(unix)]
@@ -1493,6 +1565,9 @@ HTTPServer(('127.0.0.1', 8000), H).serve_forever()
             endpoint_name: "web".into(),
             path: "/health".into(),
             timeout_ms: 180000,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let mut launched = LaunchedProcess {
             #[cfg(unix)]
