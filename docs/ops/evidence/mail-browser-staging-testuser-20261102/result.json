@@ -1,0 +1,17 @@
+{
+  "url": "https://01m6dgf04cn7vtcybf350vxq0a.stg-app.ato.run",
+  "loginUrl": "https://01m6dgf04cn7vtcybf350vxq0a.stg-app.ato.run/login",
+  "loginTitle": "Login - Missive",
+  "signedIn": true,
+  "inboxUrl": "https://01m6dgf04cn7vtcybf350vxq0a.stg-app.ato.run/inbox",
+  "inboxTitle": "Inbox - Missive",
+  "expectedText": "Welcome to test@atousercontent.com",
+  "expectedTextFound": true,
+  "screenshots": [
+    "login.png",
+    "inbox.png",
+    "message.png"
+  ],
+  "messageOpened": true,
+  "messageBodyFound": true
+}
