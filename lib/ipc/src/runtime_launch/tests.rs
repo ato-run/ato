@@ -379,6 +379,9 @@ fn readiness_must_name_a_declared_endpoint() {
         endpoint_name: "absent".into(),
         path: "/health".into(),
         timeout_ms: 1000,
+        expect_status: None,
+        json: None,
+        max_body_bytes: None,
     };
     assert_eq!(
         spec.validate().unwrap_err().code(),

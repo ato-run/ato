@@ -282,17 +282,30 @@ pub fn wait_until_container_ready(
     launched: &mut OciHandle,
     probe: &dyn ReadinessProbe,
 ) -> Result<()> {
-    let (timeout_ms, target) = match &spec.readiness {
+    let (timeout_ms, target, condition) = match &spec.readiness {
         ReadinessV1::Http {
             endpoint_name,
             path,
             timeout_ms,
-        } => (*timeout_ms, Some((endpoint_name, path.as_str()))),
+            expect_status,
+            json,
+            max_body_bytes,
+        } => {
+            let condition = (expect_status.is_some() || json.is_some()).then(|| {
+                crate::startup::ProbeCondition {
+                    expect_status: *expect_status,
+                    json: json.as_ref().map(crate::startup::JsonCondition::from),
+                    max_body_bytes: max_body_bytes
+                        .unwrap_or(ato_formation::requirements::DEFAULT_STARTUP_BODY_MAX_BYTES),
+                }
+            });
+            (*timeout_ms, Some((endpoint_name, path.as_str())), condition)
+        }
         ReadinessV1::Tcp {
             endpoint_name,
             timeout_ms,
-        } => (*timeout_ms, Some((endpoint_name, ""))),
-        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
+        } => (*timeout_ms, Some((endpoint_name, "")), None),
+        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None, None),
     };
     let Some((endpoint_name, path)) = target else {
         return Ok(());
@@ -308,8 +321,20 @@ pub fn wait_until_container_ready(
         if let Some(code) = launched.exit_code()? {
             bail!("OCI container exited before readiness with code {code}");
         }
-        match probe.probe(host_port, path) {
-            Ok(()) => return Ok(()),
+        // One probe never outlives its turn in the loop; the deadline, not a
+        // single request, decides when the container failed to start.
+        let budget = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .unwrap_or(Duration::from_millis(50))
+            .min(Duration::from_millis(500));
+        match probe.observe_with(host_port, path, budget, condition.as_ref()) {
+            Ok(observation) if observation.ready => return Ok(()),
+            Ok(observation) if Instant::now() >= deadline => {
+                let detail = observation.detail.unwrap_or_default();
+                bail!("OCI container did not become ready within {timeout_ms}ms: {detail}")
+            }
+            Ok(_) => std::thread::sleep(Duration::from_millis(50)),
             Err(error) if Instant::now() >= deadline => {
                 bail!("OCI container did not become ready within {timeout_ms}ms: {error}")
             }

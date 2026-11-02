@@ -138,6 +138,9 @@ fn start_process(root: &Path) -> Candidate {
             endpoint_name: "web".into(),
             path: "/".into(),
             timeout_ms: 10_000,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let endpoint = EndpointV1 {
             name: "web".into(),
