@@ -1,15 +1,15 @@
 # Prebuilt images for the D1 sample
 
-Status: build recipes for the two images the sample pins. The built images are
-**not published to a registry**: the available GHCR credential has no
-`write:packages`, so the dedicated staging Runner is given them as preloaded
-images by digest. This directory makes that preparation reproducible and records
-why each image differs from its upstream.
+Status: build recipes for the images the sample pins. The images are on GHCR
+with the tag `2026-11-02`; the pins are their linux/amd64 manifest digests. The
+packages are private, so a Runner without registry credentials still needs them
+preloaded by digest. This directory makes that preparation reproducible and
+records why each image differs from its upstream.
 
 | Sample pin (capsule.toml) | Built from |
 |---|---|
-| `ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7…e8e0` | `Dockerfile.stalwart` ← `docker.io/stalwartlabs/stalwart@sha256:d898e81b…cdfe` (v0.16.22, linux/amd64) |
-| `ghcr.io/koh0920/govcraft-missive@sha256:f2dd0d89…82fe` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the two patches here |
+| `ghcr.io/koh0920/stalwart-staging@sha256:44d61e88…3c1d` | `Dockerfile.stalwart` ← `docker.io/stalwartlabs/stalwart@sha256:d898e81b…cdfe` (v0.16.22, linux/amd64) |
+| `ghcr.io/koh0920/govcraft-missive@sha256:3dc89054…bc7c` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the two patches here |
 
 ## Why the Stalwart image is a thin layer
 
