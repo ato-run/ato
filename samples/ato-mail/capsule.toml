@@ -10,7 +10,7 @@ schema = "ato.capsule/2"
 title = "ato-mail: Stalwart service group behind fixed TCP"
 # D1 has no HTML UI. The only HTTP Port is Stalwart's JMAP/admin listener, so
 # the Surface entry is that listener's liveness route.
-surface_path = "/healthz/live"
+surface_path = "/health"
 
 [[input]]
 id = "workspace"
@@ -95,32 +95,23 @@ port = "stalwart.imaps"
 server_name = "mx-test.atousercontent.com"
 start = "implicit"
 
-# K3: the JMAP/admin listener answers. See README "HTTP observations" for why
-# these three routes and exactly what each one does and does not prove.
+# K3, browser half: the Web Surface is the mail client, so K observes the
+# client's own health route and that its HTML entry point answers. This proves
+# the browser gets the client, not that every mail feature works: sign-in,
+# mailbox access and delivery are separate functional conditions (README).
 [[contract.observation]]
-id = "http-live"
+id = "webmail-health"
 use = "ato.contract.http@1"
 port = "app.http"
-path = "/healthz/live"
+path = "/health"
 status = 200
 
-# /healthz/ready answers 200 only when the data storage backend is configured
-# (503 otherwise) on the pinned Stalwart build.
 [[contract.observation]]
-id = "http-ready"
+id = "webmail-ui"
 use = "ato.contract.http@1"
 port = "app.http"
-path = "/healthz/ready"
+path = "/"
 status = 200
-
-# JMAP session discovery. 307 with Location: /jmap/session, before any
-# authentication is attempted.
-[[contract.observation]]
-id = "http-jmap-discovery"
-use = "ato.contract.http@1"
-port = "app.http"
-path = "/.well-known/jmap"
-status = 307
 
 # --- D1 --------------------------------------------------------------------
 [[derivation]]
@@ -134,12 +125,13 @@ runtimes = { "oci.platform" = "linux/amd64" }
 id = "stalwart"
 runtimes = { "oci.image" = "ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7ab2749baa5bcd15a56b51f90ba99aea0c3256ce04d4f7e5e3076e8e0", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "1073741824", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
 argv = ["--config", "/app/stalwart-config.json"]
+env = { STALWART_PUBLIC_URL = "http://stalwart:8080" }
 ports = [
   { id = "stalwart.smtp", guest_port = 25, client_address_transport = "proxy_protocol_v2" },
   { id = "stalwart.submissions", guest_port = 465, client_address_transport = "proxy_protocol_v2" },
   { id = "stalwart.submissions-starttls", guest_port = 587, client_address_transport = "proxy_protocol_v2" },
   { id = "stalwart.imaps", guest_port = 993, client_address_transport = "proxy_protocol_v2" },
-  { id = "app.http", guest_port = 8080 },
+  { id = "stalwart.jmap", guest_port = 8080 },
 ]
 state = ["mail_data"]
 bindings = ["relay_auth", "mail_cert_pem", "mail_key_pem"]
@@ -154,6 +146,16 @@ argv = ["serve"]
 env = { SMTP_RELAY_TARGET = "203.0.113.10:2525", SMTP_RELAY_TLS_SERVER_NAME = "smtp-relay.placeholder.invalid", SMTP_RELAY_CA_PEM = "/etc/ssl/certs/ca-certificates.crt", ADAPTER_MAX_CONNECTIONS = "16", ADAPTER_CONNECT_TIMEOUT_SECS = "10", ADAPTER_IDLE_TIMEOUT_SECS = "60" }
 ports = [{ id = "relay.smtp", guest_port = 2525 }]
 bindings = ["smtp_egress"]
+
+# Govcraft Missive: the browser mail client. It is the only Web Surface; it
+# reads its non-secret internal JMAP endpoint from missive-config.toml
+# (http://stalwart:8080) and talks to Stalwart inside the service group network.
+# The browser never contacts the JMAP listener directly.
+[[derivation.service]]
+id = "missive"
+runtimes = { "oci.image" = "ghcr.io/koh0920/govcraft-missive@sha256:f2dd0d893a3fbf83812e35df3510d3fbc9846e9dd31a8a84899cf5fa818682fe", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "128" }
+argv = ["serve", "--config", "/app/missive-config.toml"]
+ports = [{ id = "app.http", guest_port = 8080 }]
 
 [effects]
 default = "requires-confirmation"
