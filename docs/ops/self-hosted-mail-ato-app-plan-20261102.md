@@ -296,6 +296,11 @@ Decisions and gaps recorded while doing S2/S3:
   and the capsule pins from drifting. The thin layer was built locally to verify
   the recipe. This is what the dedicated Runner must preload before the first
   staging Run.
+- **Host browser against the local Ato Run (2026-11-02)**: a normal desktop
+  browser (host macOS Chrome) opened the client served by `ato run` through a
+  local-only socat forward and signed in with the demo account. Evidence:
+  `docs/ops/mail-browser-ato-run-local-host-20261102.md` (S3 branch). Staging
+  ingress, fixed TCP, TLS/K5, state, Bindings and 443 remain the staging gate.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
