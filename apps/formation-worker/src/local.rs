@@ -619,6 +619,9 @@ pub(crate) fn freeze_verified_file_at_with_guard(
     limits: SourceLimits,
     can_continue: &dyn Fn() -> bool,
 ) -> Result<FrozenSource> {
+    if !subdirectory.is_empty() && (subdirectory.starts_with('/') || subdirectory.ends_with('/')) {
+        bail!("selected source path must be a normalized relative directory");
+    }
     let closure_ref = verified.closure_ref(subdirectory)?;
     if !subdirectory.is_empty() && expected_closure.is_none() {
         bail!("selected source requires an expected closure");
@@ -643,7 +646,56 @@ pub(crate) fn freeze_verified_file_at_with_guard(
         limits,
         can_continue,
     )?;
+    if !subdirectory.is_empty() {
+        let mut selected = scratch.join("tree");
+        for segment in subdirectory.split('/') {
+            selected.push(segment);
+            if std::fs::symlink_metadata(&selected)?
+                .file_type()
+                .is_symlink()
+            {
+                bail!("selected source path contains a symlink");
+            }
+        }
+        validate_selected_source_links(&frozen.root, can_continue)?;
+    }
     Ok(frozen)
+}
+
+/// A link contained in the full archive can still escape a selected child.
+/// Walk without following links and apply the existing containment rule again
+/// relative to the selected root before inventory or execution can see it.
+fn validate_selected_source_links(root: &Path, can_continue: &dyn Fn() -> bool) -> Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if !can_continue() {
+            bail!("selected source validation deadline exceeded");
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            if !can_continue() {
+                bail!("selected source validation deadline exceeded");
+            }
+            let path = entry?.path();
+            let kind = std::fs::symlink_metadata(&path)?.file_type();
+            if kind.is_symlink() {
+                let target = std::fs::read_link(&path)?;
+                let target = target
+                    .to_str()
+                    .context("selected source link is not UTF-8")?;
+                let relative = path.strip_prefix(root)?;
+                ato_formation::containment::validate_contained_symlink_target(
+                    relative,
+                    target.as_bytes(),
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("selected source link escapes its root: {}", error.reason)
+                })?;
+            } else if kind.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Verify an archive against the digest it was named by, measure its tree and
@@ -894,6 +946,46 @@ mod selected_source_tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
+    fn verified_link_fixture(
+        root: &Path,
+        link: &str,
+        target: &str,
+    ) -> ato_formation::source::FileVerifiedArchive {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, bytes) in [
+            ("alpha/app.txt", b"alpha".as_slice()),
+            ("beta/app.txt", b"beta".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, bytes).unwrap();
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        builder
+            .append_data(&mut header, link, std::io::empty())
+            .unwrap();
+        let bytes = builder.into_inner().unwrap();
+        let expected = digest(&bytes);
+        let mut file = tempfile::tempfile_in(root).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.rewind().unwrap();
+        ato_formation::source::FileVerifiedArchive::verify(
+            file,
+            &expected,
+            bytes.len() as u64,
+            SourceLimits::default(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn selected_source_freezes_the_requested_directory_and_its_closure() {
         let root = tempfile::tempdir().unwrap();
@@ -936,6 +1028,8 @@ mod selected_source_tests {
         for (path, expected) in [
             ("../beta", &alpha_expected),
             ("/alpha", &alpha_expected),
+            ("/", &alpha_expected),
+            ("alpha/", &alpha_expected),
             ("missing", &missing_expected),
             ("beta", &alpha_expected),
         ] {
@@ -975,5 +1069,45 @@ mod selected_source_tests {
             .is_err()
         );
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn selected_source_rejects_links_to_siblings_and_symlinked_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let limits = SourceLimits::default();
+        for (link, target, selection) in [
+            ("alpha/leak", "../beta/app.txt", "alpha"),
+            ("alias", "alpha", "alias"),
+        ] {
+            let verified = verified_link_fixture(root.path(), link, target);
+            let closure = verified.closure_ref(selection).unwrap();
+            assert!(
+                freeze_verified_file_at_with_guard(
+                    verified,
+                    root.path(),
+                    selection,
+                    Some(&closure),
+                    limits,
+                    &|| true,
+                )
+                .is_err(),
+                "{link} -> {target}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+
+        let verified = verified_link_fixture(root.path(), "alpha/link", "app.txt");
+        let closure = verified.closure_ref("alpha").unwrap();
+        let frozen = freeze_verified_file_at_with_guard(
+            verified,
+            root.path(),
+            "alpha",
+            Some(&closure),
+            limits,
+            &|| true,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(frozen.root.join("link")).unwrap(), b"alpha");
     }
 }
