@@ -600,12 +600,25 @@ pub(crate) fn freeze_verified_file(
 }
 
 pub(crate) fn freeze_verified_file_with_guard(
-    mut verified: ato_formation::source::FileVerifiedArchive,
+    verified: ato_formation::source::FileVerifiedArchive,
     work_root: &Path,
     limits: SourceLimits,
     can_continue: &dyn Fn() -> bool,
 ) -> Result<FrozenSource> {
-    let closure_ref = verified.closure_ref("")?;
+    freeze_verified_file_at_with_guard(verified, work_root, "", limits, can_continue)
+}
+
+/// Materialize a verified archive at an explicitly selected directory.
+/// This primitive does not change the root-only Runtime Network wire contract;
+/// callers accepting non-root selections must bind and authorize the selection.
+pub(crate) fn freeze_verified_file_at_with_guard(
+    mut verified: ato_formation::source::FileVerifiedArchive,
+    work_root: &Path,
+    subdirectory: &str,
+    limits: SourceLimits,
+    can_continue: &dyn Fn() -> bool,
+) -> Result<FrozenSource> {
+    let closure_ref = verified.closure_ref(subdirectory)?;
     let scratch = work_root.join(format!(
         "source-{}-{}",
         std::process::id(),
@@ -617,8 +630,12 @@ pub(crate) fn freeze_verified_file_with_guard(
         root: PathBuf::new(),
         scratch: scratch.clone(),
     };
-    frozen.root =
-        verified.materialize_with_guard(&scratch.join("tree"), "", limits, can_continue)?;
+    frozen.root = verified.materialize_with_guard(
+        &scratch.join("tree"),
+        subdirectory,
+        limits,
+        can_continue,
+    )?;
     Ok(frozen)
 }
 
@@ -837,4 +854,93 @@ pub fn host_triple() -> String {
         other => other,
     };
     format!("{arch}-{os}")
+}
+
+#[cfg(test)]
+mod selected_source_tests {
+    use super::*;
+    use std::io::{Seek, Write};
+
+    fn verified_fixture(root: &Path) -> ato_formation::source::FileVerifiedArchive {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, bytes) in [
+            ("alpha/app.txt", b"alpha".as_slice()),
+            ("beta/app.txt", b"beta".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, bytes).unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        let expected = digest(&bytes);
+        let mut file = tempfile::tempfile_in(root).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.rewind().unwrap();
+        ato_formation::source::FileVerifiedArchive::verify(
+            file,
+            &expected,
+            bytes.len() as u64,
+            SourceLimits::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn selected_source_freezes_the_requested_directory_and_its_closure() {
+        let root = tempfile::tempdir().unwrap();
+        let limits = SourceLimits::default();
+        let alpha = freeze_verified_file_at_with_guard(
+            verified_fixture(root.path()),
+            root.path(),
+            "alpha",
+            limits,
+            &|| true,
+        )
+        .unwrap();
+        let beta = freeze_verified_file_at_with_guard(
+            verified_fixture(root.path()),
+            root.path(),
+            "beta",
+            limits,
+            &|| true,
+        )
+        .unwrap();
+        assert_ne!(alpha.closure_ref, beta.closure_ref);
+        assert_eq!(std::fs::read(alpha.root.join("app.txt")).unwrap(), b"alpha");
+        assert_eq!(std::fs::read(beta.root.join("app.txt")).unwrap(), b"beta");
+        assert!(!alpha.root.join("beta").exists());
+        assert!(!beta.root.join("alpha").exists());
+    }
+
+    #[test]
+    fn selected_source_rejects_escape_missing_path_and_expired_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let limits = SourceLimits::default();
+        for path in ["../beta", "/alpha", "missing"] {
+            assert!(
+                freeze_verified_file_at_with_guard(
+                    verified_fixture(root.path()),
+                    root.path(),
+                    path,
+                    limits,
+                    &|| true,
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
+        assert!(
+            freeze_verified_file_at_with_guard(
+                verified_fixture(root.path()),
+                root.path(),
+                "alpha",
+                limits,
+                &|| false,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 }
