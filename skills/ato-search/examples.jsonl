@@ -1,0 +1,10 @@
+{"id":"cap-ja-001","lang":"ja","nl":"ネットワーク不要のチャットツール","q":"chat","filters":{"network":["none"]}}
+{"id":"cap-ja-006","lang":"ja","nl":"ファイルを削除できるツール","q":"","filters":{"side_effects":["destructive","mutating"],"fs_writes":["user-data","system"]}}
+{"id":"cap-ja-018","lang":"ja","nl":"鍵の設定が要るオンラインAI","q":"AI","filters":{"secrets_required":true,"network":["egress"]}}
+{"id":"cap-ja-019","lang":"ja","nl":"ネット接続なしで閲覧だけするビューワー","q":"viewer","filters":{"network":["none"],"side_effects":["readonly"]}}
+{"id":"cap-ja-014","lang":"ja","nl":"一時ファイルだけに書き込むスクリプト","q":"script","filters":{"fs_writes":["scratch"]}}
+{"id":"cap-en-001","lang":"en","nl":"a chat tool that doesn't need the network","q":"chat","filters":{"network":["none"]}}
+{"id":"cap-en-004","lang":"en","nl":"AI chat that works without an API key","q":"AI chat","filters":{"secrets_required":false}}
+{"id":"cap-en-007","lang":"en","nl":"read-only viewer with no side effects","q":"viewer","filters":{"side_effects":["readonly"],"fs_writes":["none","scratch"]}}
+{"id":"cap-en-006","lang":"en","nl":"something that can delete files","q":"","filters":{"side_effects":["destructive","mutating"],"fs_writes":["user-data","system"]}}
+{"id":"cap-en-013","lang":"en","nl":"bidirectional peer-to-peer tool","q":"p2p","filters":{"network":["bidirectional"]}}
