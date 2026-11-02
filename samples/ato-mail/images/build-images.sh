@@ -20,29 +20,46 @@ for required in package.json Cargo.toml Cargo.lock src templates; do
   }
 done
 
+# The Dockerfile applies the patches itself, so the checkout must be the
+# unpatched pinned commit. A dry run catches an already-patched tree (the
+# Dockerfile would otherwise fail with a reversed patch).
+for patch in missive-nondefault-port.patch missive-identity-submission-capability.patch; do
+  if ! ( cd "${missive_src}" && patch -p1 --dry-run --forward < "${here}/${patch}" >/dev/null 2>&1 ); then
+    echo "error: ${patch} does not apply cleanly to ${missive_src}." >&2
+    echo "       Use a clean checkout at 7716106b6c4638426169dac264657437914bbe7f." >&2
+    exit 1
+  fi
+done
+
 mkdir -p "${missive_src}/ato-patches"
 cp "${here}/missive-nondefault-port.patch" \
    "${here}/missive-identity-submission-capability.patch" \
    "${missive_src}/ato-patches/"
 
-echo "== Stalwart thin image (${platform})"
-docker buildx build --platform "${platform}" --load \
-  -f "${here}/Dockerfile.stalwart" \
-  -t ato-mail/stalwart:local "${here}"
+build_image() {
+  local name=$1 context=$2 dockerfile=$3
+  if docker buildx version >/dev/null 2>&1; then
+    docker buildx build --platform "${platform}" --load \
+      -f "${dockerfile}" -t "ato-mail/${name}:local" "${context}"
+  else
+    echo "note: docker buildx is unavailable; using docker build." >&2
+    echo "      The Dockerfiles pin linux/amd64 base manifests, so this still" >&2
+    echo "      produces the staging platform (possibly through emulation)." >&2
+    docker build -f "${dockerfile}" -t "ato-mail/${name}:local" "${context}"
+  fi
+}
 
-echo "== Missive patched image (${platform})"
-docker buildx build --platform "${platform}" --load \
-  -f "${here}/Dockerfile.missive" \
-  -t ato-mail/missive:local "${missive_src}"
+echo "== Stalwart thin image"
+build_image stalwart "${here}" "${here}/Dockerfile.stalwart"
+
+echo "== Missive patched image"
+build_image missive "${missive_src}" "${here}/Dockerfile.missive"
 
 for image in ato-mail/stalwart:local ato-mail/missive:local; do
   echo "== ${image}"
   docker image inspect "${image}" \
     --format 'platform={{.Os}}/{{.Architecture}} user={{.Config.User}} entrypoint={{json .Config.Entrypoint}} digests={{json .RepoDigests}}'
 done
-
-cat <<'NOTE'
-NOTE
 
 echo
 echo "Next: pin the staging-tag digests in samples/ato-mail/images/images.lock and"
