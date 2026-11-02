@@ -149,7 +149,7 @@ fn k3_observes_the_browser_mail_client_the_pinned_image_serves() {
         // The HTML entry point the browser opens. The client is a browser app,
         // so this is the K3 condition that matters; sign-in and mailbox access
         // are separate functional conditions the README designs for.
-        ("webmail-ui", ("/", 200)),
+        ("webmail-ui", ("/login", 200)),
     ]);
     for (id, (path, status)) in &expected {
         let requirement = requirement(&route.contract.requirements, id);
