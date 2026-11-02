@@ -251,7 +251,7 @@ connection.commit()
 connection.close()
 listener = socket.socket()
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-listener.bind(("127.0.0.1", int(sys.argv[2])))
+listener.bind(("127.0.0.1", int(os.environ["ATO_ENDPOINT_HTTP_PORT"])))
 listener.listen(8)
 while True:
     listener.accept()[0].close()
@@ -261,7 +261,6 @@ while True:
         run_id: &str,
         writer_fence: Option<u64>,
         note: &str,
-        port: u16,
     ) -> RuntimeLaunchSpecV1 {
         RuntimeLaunchSpecV1 {
             protocol: "ato.runtime-launch-spec.v1".to_owned(),
@@ -283,7 +282,6 @@ while True:
                     "-c".to_owned(),
                     APPEND_ROW_THEN_SERVE.to_owned(),
                     note.to_owned(),
-                    port.to_string(),
                 ],
                 executable: None,
             }),
@@ -360,7 +358,7 @@ while True:
             let plane = plane.inner.lock().expect("lock");
             plane.fence + 1
         };
-        let spec = spec_for(run_id, Some(grant_fence), note, port);
+        let spec = spec_for(run_id, Some(grant_fence), note);
 
         let active = start_run(
             &spec,
@@ -442,7 +440,7 @@ while True:
         let workspace = tempfile::tempdir().expect("tempdir");
         let context = context_for(workspace.path(), 39_109);
         let plane = FakeControlPlane::default();
-        let spec = spec_for("run_quarantine", Some(1), "unused", 39_109);
+        let spec = spec_for("run_quarantine", Some(1), "unused");
         let prepared = prepare_run(&spec.state_attachments, &context, &plane, &BTreeMap::new())
             .expect("prepared");
         assert_eq!(prepared.writer_fences().get("app_data"), Some(&1));
@@ -485,7 +483,7 @@ while True:
         // time this Run acquires, the control plane hands out 1. Starting
         // anyway would mean running a workload that believes it holds a
         // generation it does not.
-        let spec = spec_for("run_stale", Some(7), "unused", 39_104);
+        let spec = spec_for("run_stale", Some(7), "unused");
         let error =
             prepare_run(&spec.state_attachments, &context, &plane, &BTreeMap::new()).unwrap_err();
         assert!(error.to_string().contains("re-assigned"), "{error}");
@@ -503,7 +501,7 @@ while True:
         // A Run that touches nothing: same App, same state, no new bytes.
         let workspace = tempfile::tempdir().expect("tempdir");
         let context = context_for(workspace.path(), 39_105);
-        let mut spec = spec_for("run_noop", Some(2), "unused", 39_105);
+        let mut spec = spec_for("run_noop", Some(2), "unused");
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             required_abi: None,
             argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "true".to_owned()],
@@ -561,7 +559,7 @@ while True:
         let plane = FakeControlPlane::default();
         let workspace = tempfile::tempdir().expect("tempdir");
         let context = context_for(workspace.path(), 39_106);
-        let mut spec = spec_for("run_nonexistent", Some(1), "unused", 39_106);
+        let mut spec = spec_for("run_nonexistent", Some(1), "unused");
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             required_abi: None,
             argv: Vec::new(),
@@ -579,7 +577,7 @@ while True:
         let plane = FakeControlPlane::default();
         let workspace = tempfile::tempdir().expect("tempdir");
         let context = context_for(workspace.path(), 39_107);
-        let mut spec = spec_for("run_doomed", Some(1), "unused", 39_107);
+        let mut spec = spec_for("run_doomed", Some(1), "unused");
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             required_abi: None,
             argv: Vec::new(),
@@ -599,7 +597,7 @@ while True:
         let workspace = tempfile::tempdir().expect("tempdir");
         let context = context_for(workspace.path(), 39_108);
         // Projected at generation 7, granted 1 — the slot moved underneath it.
-        let spec = spec_for("run_stale_release", Some(7), "unused", 39_108);
+        let spec = spec_for("run_stale_release", Some(7), "unused");
         prepare_run(&spec.state_attachments, &context, &plane, &BTreeMap::new()).unwrap_err();
 
         let inner = plane.inner.lock().expect("lock");
@@ -995,7 +993,7 @@ while True:
     fn a_hosted_oci_container_starts_serves_stops_and_commits() {
         let workspace = tempfile::tempdir().unwrap();
         let port = free_port();
-        let mut spec = spec_for("run_2ec_container", Some(1), "unused", port);
+        let mut spec = spec_for("run_2ec_container", Some(1), "unused");
         spec.realization = LaunchRealizationV1::Oci(ato_ipc::runtime_launch::OciRealizationV1 {
             native_surface: None,
             image_digest_ref: WHOAMI.rsplit_once('@').unwrap().1.to_owned(),
