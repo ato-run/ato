@@ -924,15 +924,67 @@ pub fn isolated_runtime_available(socket: &Path) -> bool {
 }
 
 pub fn docker_runtime_available() -> bool {
+    docker_access().daemon_reachable
+}
+
+/// Longest stderr excerpt kept from a failed Docker probe. A refusal sentence
+/// is short; the bound keeps a hostile CLI from flooding a diagnostic report.
+const DOCKER_PROBE_STDERR_MAX_CHARS: usize = 300;
+
+/// What the Docker client probe observed.
+///
+/// The admission answer is docker_runtime_available(); this is the same
+/// probe's evidence, kept so an operator is told whether Docker is missing, the
+/// daemon is down, or the socket is not accessible to this user. Nothing here
+/// reaches a workload: it is a local "docker version" invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DockerAccess {
+    /// The docker client resolved on PATH.
+    pub binary: Option<PathBuf>,
+    /// Whether "docker version" reached a daemon and reported a version.
+    pub daemon_reachable: bool,
+    /// Trimmed stderr of a failed probe, bounded.
+    pub stderr: Option<String>,
+}
+
+/// Probe Docker access once, keeping the refusal reason.
+pub fn docker_access() -> DockerAccess {
     if !cfg!(target_os = "linux") {
-        return false;
+        // The Adapter only enables container execution on Linux; Docker
+        // Desktop elsewhere is not this Adapter's boundary.
+        return DockerAccess::default();
     }
     let Some(docker) = find_on_path("docker") else {
-        return false;
+        return DockerAccess::default();
     };
-    command_control::CommandControl::cleanup(Duration::from_secs(2))
-        .output(Command::new(docker).args(["version", "--format", "{{.Server.Version}}"]))
-        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+    let output = command_control::CommandControl::cleanup(Duration::from_secs(2))
+        .output(Command::new(&docker).args(["version", "--format", "{{.Server.Version}}"]));
+    match output {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => DockerAccess {
+            binary: Some(docker),
+            daemon_reachable: true,
+            stderr: None,
+        },
+        Ok(output) => {
+            let text = String::from_utf8_lossy(&output.stderr);
+            let trimmed = text.trim();
+            DockerAccess {
+                binary: Some(docker),
+                daemon_reachable: false,
+                stderr: (!trimmed.is_empty()).then(|| {
+                    trimmed
+                        .chars()
+                        .take(DOCKER_PROBE_STDERR_MAX_CHARS)
+                        .collect::<String>()
+                }),
+            }
+        }
+        Err(error) => DockerAccess {
+            binary: Some(docker),
+            daemon_reachable: false,
+            stderr: Some(error.to_string()),
+        },
+    }
 }
 
 fn validate_inspected_image(spec: &OciSpec, inspected: &str) -> Result<()> {
