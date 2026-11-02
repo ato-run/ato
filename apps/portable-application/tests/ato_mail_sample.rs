@@ -26,7 +26,7 @@ use ato_portable_application::{
     ValidatedPortableApplication, build_authored_bundle_v2, validate_all_derivations,
 };
 
-const STALWART_IMAGE: &str = "ghcr.io/koh0920/stalwart-staging@sha256:44d61e885827f2aa03f7d68afbaac6e74fb222d0bcfa79eed6e40d959f6c3c1d";
+const STALWART_IMAGE: &str = "ghcr.io/koh0920/stalwart-staging@sha256:25723c49ee4968d410f78b35041eb1c79f28fe0cc2afe2487a5c58f99f90629b";
 const ADAPTER_IMAGE: &str = "ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:c7142ba99cbde02e3f392cffe052f7702a259c01501fc727549acec1908eb557";
 const MISSIVE_IMAGE: &str = "ghcr.io/koh0920/govcraft-missive@sha256:3dc89054b1a85ae6ad07e5cf1dc483bffa0ba7253b40fd8274803c765b04bc7c";
 /// The one host name these samples declare for staging. Changing it changes the
