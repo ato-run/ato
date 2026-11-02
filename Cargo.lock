@@ -259,6 +259,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-cert-export"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "ato-cli"
 version = "0.8.1"
 dependencies = [
