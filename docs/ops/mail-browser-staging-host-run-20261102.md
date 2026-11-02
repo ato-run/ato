@@ -42,3 +42,11 @@ slice ran on Linux with the CLI as a non-root user.
 - Fixed-TCP mail Ports, TLS/K5, Bindings, 443, or the full D1 contract.
 - That the staging hosted runners have these images; they do not (the images
   exist only in the host's loopback registry).
+
+## Inbox with a delivered message (2026-11-02)
+
+After the browser check, a message was delivered through the Run's internal SMTP
+listener and moved from Junk to Inbox via the JMAP registry, then the harness was
+re-run with `MAIL_EXPECT_TEXT="Hello from the browser"`:
+`expectedTextFound: true`, `signedIn: true`.
+Evidence: [inbox-with-message.png](evidence/mail-browser-staging-host-20261102/inbox-with-message.png).
