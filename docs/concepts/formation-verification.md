@@ -1,5 +1,7 @@
 # Formation, Verification and Receipt
 
+Status: Current technical reference.
+
 **Formation** takes explicit source/authoring input and produces a candidate
 realization with a bound Contract K and Derivation D. Building, installing and
 launching are Evolutions carried out through existing runtime mechanisms;

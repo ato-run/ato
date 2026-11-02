@@ -107,6 +107,7 @@ fn replay_case(kind: &str) {
                 network: NetworkPolicy::DependencyResolution,
                 limits: BuildLimits::default(),
             },
+            require_private_isolation: false,
         },
         &journal,
     );

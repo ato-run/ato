@@ -1,5 +1,7 @@
 # D2-C — requester-owned DeepSeek CandidateProducer (mock verified, not live)
 
+Status: Draft.
+
 ## Scope and pins
 
 - C2 merge: `d4fa39a693eb253949c65486288908e9ae47cf57`.

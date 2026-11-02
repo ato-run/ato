@@ -59,7 +59,13 @@ Atoは実験的なプロジェクトです。このリポジトリには計算�
 
 異なるホスト間の汎用的な復元、プロセスメモリの復元、AIによる自律的なFormationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixなどのツールの代替を目的とするものではありません。Contractの一致だけでは、状態の継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[状態の継続性](docs/concepts/state-continuity.md)を参照してください。
 
+## ロードマップと作業管理
+
+作業は[GitHub Issues](https://github.com/ato-run/ato/issues)（ボードを使う場合はGitHub Projects）で管理します。このリポジトリにMarkdownのロードマップは置きません。[アーカイブ済みのロードマップ](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)は履歴として残した資料で、更新しません。
+
 ## ドキュメント
+
+一般的な利用者向けドキュメントは[ato.runのドキュメント](https://ato.run/docs/)が所有します。このリポジトリはランタイム、CLI、仕様、運用の技術ドキュメントを所有します（[ドキュメント目次](docs/README.md)）。
 
 - [Getting started](docs/guides/getting-started.md)・[Formationガイド](docs/guides/formation.md)
 - [基本概念](docs/concepts/computation.md)・[アプリケーション契約](docs/concepts/application-contracts.md)・[用語集](docs/glossary-reference.md)
@@ -70,7 +76,9 @@ Atoは実験的なプロジェクトです。このリポジトリには計算�
 
 [貢献方法](CONTRIBUTING.md)と[GitHub issues](https://github.com/ato-run/ato/issues)を参照してください。
 
-ルートにはリポジトリ全体に適用されるライセンスファイルがありません。一部のコンポーネントはmanifestでライセンスを宣言しています。例えば、[CLIのmanifest](apps/cli/Cargo.toml)は`Apache-2.0 OR MPL-2.0`を宣言し、[CLIのライセンスファイル](apps/cli/LICENSE)にはApache 2.0の本文が含まれます。対象コンポーネントのライセンス情報を確認してください。リポジトリ全体への許諾はここでは定められていません。
+プロジェクトが作成したコードは[Mozilla Public License 2.0](LICENSE)（`MPL-2.0`）で提供します。第三者のコード、依存ライブラリ、上流コードを含むパッチ、独自のライセンス表示がある資料には、それぞれの条件が引き続き適用されます。例えば、CPythonのfixture、WiXテンプレート、リリースワークフローは上流のライセンスを、AODDスキルはMITライセンスを維持します。CLIの[Apacheライセンス本文](apps/cli/LICENSE-APACHE)はWiXテンプレートおよび過去に配布されたバージョンのために保持しています。過去に付与されたライセンスは引き続き有効です。
+
+このコードのライセンスは、Capsule Process Modelの理論文書に新たなライセンスを付与するものではありません。
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="ato"></a>

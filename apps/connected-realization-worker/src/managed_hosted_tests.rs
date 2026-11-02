@@ -276,6 +276,7 @@ fn actual_managed_embedding_lease_materializes_redeems_verifies_and_stops() {
                     &attempt,
                     observations,
                     Vec::new(),
+                    Vec::new(),
                     evidence,
                     &ReceiptContext {
                         target: VerificationTargetKind::AtoRunHosted,

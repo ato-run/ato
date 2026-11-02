@@ -2,7 +2,7 @@
 name = "ato-browser-host"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 description = "Runner-owned private Chrome lifecycle for ato.browser@1"
 
 [package.metadata.dist]

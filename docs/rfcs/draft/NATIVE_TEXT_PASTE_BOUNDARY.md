@@ -1,5 +1,7 @@
 # Native text paste boundary (draft)
 
+Status: Draft.
+
 This extends the physical Surface assertion and netd RFB gateway, not K/D, a
 Core Protocol, an authentication model, or a database table. Existing signed
 claims, descriptors and profiles retain their bytes when paste is absent.

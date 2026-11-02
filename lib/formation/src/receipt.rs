@@ -16,12 +16,13 @@ use std::collections::BTreeSet;
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    SCENARIO_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
 };
 use crate::scenario::is_scenario_ref;
 use crate::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
-    ContractVerificationReceipt, ReceiptObservation, ReceiptOutcome,
+    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3, ContractVerificationReceipt, ReceiptObservation,
+    ReceiptOutcome,
 };
 
 /// What the receiver assigned: the attempt a receipt must be about.
@@ -48,6 +49,17 @@ fn reject(code: &'static str, detail: impl Into<String>) -> ReceiptRejection {
     }
 }
 
+/// A certificate serial as `ato.contract.tls@1` evidence states it: the DER
+/// INTEGER content as lowercase hex bytes, no separators.
+fn is_serial_hex(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value.len().is_multiple_of(2)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Parse and check a receipt received as JSON.
 pub fn accept_receipt_json(
     assignment: &ReceiptAssignment<'_>,
@@ -67,8 +79,24 @@ pub fn accept_receipt(
 ) -> Result<(), ReceiptRejection> {
     if receipt.schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA
         && receipt.schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2
+        && receipt.schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3
     {
         return Err(reject("receipt_schema_unknown", receipt.schema.clone()));
+    }
+    // Certificate evidence is exactly what /3 exists for. A /1 or /2 receipt
+    // carrying it is malformed rather than merely newer.
+    if receipt.schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3
+        && receipt.observations.iter().any(|observation| {
+            observation
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.tls.is_some())
+        })
+    {
+        return Err(reject(
+            "receipt_tls_evidence_schema",
+            "certificate evidence requires ato.contract-verification-receipt/3",
+        ));
     }
     if receipt.contract_ref != assignment.contract_ref {
         return Err(reject(
@@ -227,6 +255,42 @@ fn check_observation(
         INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => {
             if evidence.digest != requirement.digest {
                 return inconsistent("the restored snapshot is not the one K requires");
+            }
+        }
+        TLS_CONTRACT_VERIFIER => {
+            let Some(tls) = evidence.tls.as_ref() else {
+                return inconsistent("a satisfied TLS verdict carries no certificate evidence");
+            };
+            if tls.server_name != requirement.server_name.as_deref().unwrap_or_default()
+                || Some(tls.start) != requirement.start
+            {
+                return inconsistent("the evidence is of a different TLS observation than K names");
+            }
+            if evidence.method.is_some()
+                || evidence.path.is_some()
+                || evidence.status.is_some()
+                || evidence.body_sha256.is_some()
+                || evidence.input.is_some()
+                || evidence.digest.is_some()
+            {
+                return inconsistent(
+                    "TLS evidence carries only the certificate facts, not request fields",
+                );
+            }
+            if !is_serial_hex(&tls.presented_serial) {
+                return inconsistent("the presented serial is not a lowercase hex integer");
+            }
+            // A satisfied TLS verdict states that a public port serves a
+            // currently valid, publicly rooted certificate over a completed
+            // handshake. Anything else cannot have satisfied K.
+            if tls.trust_anchor != crate::verify::TLS_TRUST_ANCHOR_PUBLIC_ROOTS {
+                return inconsistent("a satisfied TLS verdict is not anchored in public roots");
+            }
+            if tls.days_remaining < 0 {
+                return inconsistent("a satisfied TLS verdict is already expired");
+            }
+            if !tls.handshake_completed {
+                return inconsistent("a satisfied TLS verdict has no completed handshake");
             }
         }
         SCENARIO_CONTRACT_VERIFIER => {
@@ -467,6 +531,9 @@ mod tests {
                     body_digest: None,
                     input: None,
                     digest: None,
+
+                    server_name: None,
+                    start: None,
                 },
                 BoundRequirement {
                     id: "source".to_owned(),
@@ -478,6 +545,9 @@ mod tests {
                     body_digest: None,
                     input: Some("workspace".to_owned()),
                     digest: Some("sha256:tree".to_owned()),
+
+                    server_name: None,
+                    start: None,
                 },
             ],
         }
@@ -492,6 +562,8 @@ mod tests {
             )],
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
+
+            tls: Vec::new(),
         };
         let mut receipt = ContractVerificationReceipt::from_attempt(
             "sha256:k",
@@ -671,6 +743,9 @@ mod tests {
                     "sha256:1111111111111111111111111111111111111111111111111111111111111111"
                         .to_owned(),
                 ),
+
+                server_name: None,
+                start: None,
             }],
         }
     }

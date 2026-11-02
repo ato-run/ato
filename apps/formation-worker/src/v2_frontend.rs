@@ -25,7 +25,9 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, SCENARIO_CONTRACT_VERIFIER};
+use ato_formation::authoring::{
+    HTTP_CONTRACT_VERIFIER, SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
+};
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, declared_schema};
 use ato_formation::capsule_toml_v2::{
     CAPSULE_SCHEMA_V2, PortableAuthoringDraftV2, parse_capsule_toml_v2,
@@ -418,6 +420,45 @@ fn verify_semantics(
             "contract.observation.scenario",
             &authored_scenarios,
             &bound_scenarios,
+        ));
+    }
+    // A TLS observation must survive as an `ato.contract.tls@1` requirement
+    // that still names the same port, host name and start mode. A requirement
+    // that parsed but lost its name would observe a certificate nobody asked
+    // about.
+    let authored_tls = draft
+        .tls_observations
+        .iter()
+        .map(|observation| {
+            (
+                observation.id.as_str(),
+                observation.port.as_str(),
+                observation.server_name.as_str(),
+                observation.start.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let bound_tls = validated
+        .contract
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == TLS_CONTRACT_VERIFIER)
+        .map(|requirement| {
+            (
+                requirement.id.as_str(),
+                requirement.port.as_deref().unwrap_or_default(),
+                requirement.server_name.as_deref().unwrap_or_default(),
+                requirement.start.map(TlsStart::as_str).unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if authored_tls != bound_tls {
+        return Err(formation_failure(
+            CAPSULE_V2_SEMANTICS_DROPPED,
+            FailureStage::Projection,
+            format!(
+                "the bundle does not carry the authored TLS observations: declared                  {authored_tls:?}, bound {bound_tls:?}"
+            ),
         ));
     }
     for scenario in &validated.scenarios {

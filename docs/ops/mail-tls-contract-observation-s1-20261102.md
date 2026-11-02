@@ -1,0 +1,136 @@
+# `ato.contract.tls@1` — S1 implementation record (2026-11-02)
+
+Status: implemented in the `ato` repository, verified by local build/tests.
+Not deployed, not run against staging or production. Language: en.
+
+This is slice S1 of the self-hosted mail plan (plan PR ato-run/ato#1665):
+a product-agnostic observation of the certificate a public port presents, so
+K5 ("every public port presents a valid certificate for the declared host
+name") can be decided by the runtime instead of by reading exported files.
+
+## What the Contract can now say
+
+```toml
+[[contract.observation]]
+id = "imaps"
+use = "ato.contract.tls@1"
+port = "stalwart.imaps"      # a logical Port the Derivation declares
+server_name = "mail.ato.run" # lowercase DNS name the certificate must cover
+start = "implicit"           # or "smtp-starttls"
+```
+
+The same keys are accepted by the v1 grammar (`[[contract.require]]`) and the
+v2 grammar (`[[contract.observation]]`). Only `port`, `server_name` and
+`start` are accepted; request fields, expectations and captures are refused.
+
+K states what must hold for every valid run: chain to a public root, SAN
+covering `server_name`, observation time inside validity. The leaf serial is
+**not** in K — it changes on every renewal — it is recorded in receipt evidence
+and compared with the current `ato-cert-export` record by the ops procedure.
+
+## Implementation
+
+| Piece | Where |
+|---|---|
+| Verifier id, draft/bound types, server-name validation | `lib/formation/src/authoring.rs` |
+| v1 grammar | `lib/formation/src/capsule_toml.rs` |
+| v2 grammar | `lib/formation/src/capsule_toml_v2.rs` |
+| Formation deferral, runtime verdicts, receipt evidence | `lib/formation/src/verify.rs` |
+| Receipt /3 and its acceptance checks | `lib/formation/src/receipt.rs` |
+| TLS probe (rustls, public roots, implicit + SMTP STARTTLS, DER facts) | `lib/tls-observe` |
+| CLI/local attempt observation | `lib/runtime-attempt/src/{verification,attempt}.rs` |
+| Local OCI service-group endpoints | `apps/portable-application/src/portable_run.rs` |
+| Hosted validator observation | `apps/portable-application/src/validator_agent.rs` |
+
+Behavior:
+
+- Formation defers a TLS requirement to the runtime ("runtime tls verifier
+  <id>"); it never satisfies one.
+- The runtime connects to the endpoint its logical Port resolved to, performs
+  the handshake (implicit, or SMTP 220 → EHLO → STARTTLS → 220), and records
+  the presented serial, SAN dNSNames, notBefore/notAfter, days remaining,
+  chain length, trust-anchor label, whether the certificate validated, and
+  whether the handshake completed.
+- Verdicts fail closed with distinct codes: `tls_observation_missing`,
+  `tls_observation_mismatch`, `tls_server_name_mismatch`,
+  `tls_certificate_outside_validity`, `tls_chain_untrusted`,
+  `tls_handshake_incomplete`.
+- `tls_observation_missing` is the verdict when no TLS observation was made
+  for a requirement at all (its Port or endpoint is absent from the Run). A
+  connection that yields no certificate aborts the observation as
+  "candidate not observable" (CLI) or abandons the hosted attempt, so the
+  receipt never claims a certificate nobody saw. A certificate that validates
+  but whose handshake then fails is recorded and fails with
+  `tls_handshake_incomplete`.
+- A certificate that was presented but fails a check is still recorded, so the
+  receipt says which certificate was served.
+- Receipts carrying certificate evidence use
+  `ato.contract-verification-receipt/3`; /1 and /2 are still accepted and
+  unchanged for receipts without it.
+- PROXY v2 is not handled by the verifier: the Runner's fixed-TCP listener
+  inserts it toward the workload, exactly as it does for a remote client.
+
+## Verification performed
+
+Local worktree `.tmp/wt/mail-plan`, branch `feat/mail-tls-contract-observation`
+(base `origin/stg` `e2e6c3386`):
+
+- `cargo test -p ato-tls-observe` — 16 unit + 8 integration tests (real local
+  TLS/STARTTLS servers, committed self-signed fixtures, public-roots rejection,
+  expired and wrong-name certificates).
+- `cargo test -p ato-formation --lib tls` — binding, grammar (v1 + v2),
+  identity stability and Formation's deferral.
+- `cargo test -p ato-runtime-attempt tls` — runtime verdicts, receipt /3,
+  evidence consistency and the incomplete-handshake failure.
+- `cargo test -p ato-portable-application --lib tls` — the authored v2 bundle
+  carries the TLS requirement into K and refuses an undeclared Port.
+- `cargo check --workspace --all-targets`, `cargo clippy -D warnings` for the
+  touched crates, `cargo fmt --all`.
+
+No staging or production host was touched.
+
+## Integration status (2026-11-02)
+
+Phase 1 integration of S1, verified locally and recorded here honestly:
+
+- **Control plane** ato-run/ato-api#1079 (draft, base main) supplies the Run's
+  fixed-TCP endpoints in the runtime-verification claim and accepts receipt
+  /3. Its endpoints are fenced to the Run **and its current lease and
+  generation and an allocated allocation**; a job without a lease names none.
+  The claim test also seeds a superseded lease of the same Run and a revoked
+  allocation and proves neither is named.
+- **Receipt correspondence**: the hosted validator validates every receipt
+  with the Rust authority (`accept_receipt`) before reporting it — the
+  observation set must equal the frozen K and TLS evidence must belong to its
+  own requirement (server_name/start, serial form, public roots, unexpired,
+  completed handshake). A receipt that fails this is never sent; the attempt
+  is abandoned as `receipt_inconsistent`.
+- **Regressions**: a pre-TLS Contract's canonical bytes are frozen in a test;
+  receipt /1 and /2 handling is unchanged and still refuses TLS evidence.
+- **Read model follow-up**: ato-run/ato-api#1080 (`runtime_image_index`
+  projects only /1; accepted /3 receipts are deliberately not projected yet).
+- **CI**: the ato PR's checks pass. The ato-api PR's Activity CI is still
+  queued because the self-hosted `ato-ci` runner is busy/unavailable; local
+  `pnpm typecheck` and 47 relevant vitest tests pass. CI success is not
+  claimed for that PR.
+- **Merge order**: ato-api#1079 first, then ato#1666. No staging or production
+  host has been touched by either.
+
+## Not in this slice (open)
+
+1. **Hosted transport (ato-api).** Implemented by ato-run/ato-api#1079
+   (draft). Until it merges, a TLS requirement on a hosted Run is unobserved
+   and fails closed.
+2. **K5 serial comparison with the export.** The observation records the
+   presented serial; comparing it with `ato-cert-export`'s `meta.json` belongs
+   to S2/S5 ops.
+3. **Fixed-TCP public ports on staging.** S1 was verified against local
+   listeners; the real public-port path (fixed TCP 25/465/587/993 with PROXY
+   v2 on the dedicated Runner) is S3's acceptance.
+4. **The Hosted process verifier does not observe TLS.** The
+   `process_run_verification` path on the connected Runner reports HTTP
+   observations only, so a Contract with a TLS requirement fails as unobserved
+   there. The portable-application (OCI/service-group) hosted path is the one
+   that uses `tcp_endpoints`.
+5. **443.** K5 for HTTPS can be observed as an implicit TLS handshake on the
+   Port; the HTTP response itself stays with `ato.contract.http@1` (K3).

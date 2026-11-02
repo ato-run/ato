@@ -3,7 +3,7 @@ name = "ato-connected-realization-worker"
 version = "0.1.0"
 edition = "2024"
 description = "Connected Runtime Worker for portable Capsule realizations"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 
 [package.metadata.dist]
@@ -41,6 +41,7 @@ ato-native-surface-gateway = { path = "../native-surface-gateway" }
 netd = { path = "../../services/netd" }
 tokio = { version = "1", features = ["full"] }
 ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
+ato-formation = { path = "../../lib/formation", default-features = false }
 ato-planner = { package = "ato-realization-planner", path = "../../extensions/planner", version = "0.1.0" }
 ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
 ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }
@@ -64,4 +65,3 @@ url = "2"
 tungstenite = "0.28"
 
 [dev-dependencies]
-ato-formation = { path = "../../lib/formation", default-features = false }

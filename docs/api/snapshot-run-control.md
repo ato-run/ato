@@ -1,5 +1,8 @@
 # Snapshot Run Control — API contract (Store Capsule Ready-State Run E2E)
 
+Status: Historical coordination document; the in-body "staging-gated" status
+describes the retired control plane, not current state.
+
 > **Historical coordination document.** This contract belongs to the former
 > Store/Ready-State control-plane model. It may describe deployed external
 > services, but it does not define current Capsule identity, CLI behavior, or

@@ -1,5 +1,7 @@
 # Identifying a deployed Formation worker
 
+Status: operating procedure; verify the deployed binary and environment before use.
+
 ## Why this exists
 
 On 2026-09-11 a staging worker refused sources for a reason that no code on

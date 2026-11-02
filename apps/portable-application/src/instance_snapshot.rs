@@ -1068,6 +1068,9 @@ pub fn attach_instance_snapshot(
         body_digest: None,
         input: None,
         digest: Some(snapshot_ref.clone()),
+
+        server_name: None,
+        start: None,
     });
     contract
         .requirements

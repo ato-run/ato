@@ -14,7 +14,7 @@ use std::{
 use crate::job::SourceFetcher;
 
 mod http;
-pub use http::SourceArchiveApi;
+pub use http::{SourceArchiveApi, SourceArchiveClaimOutcome};
 #[cfg(test)]
 mod tests;
 

@@ -2,7 +2,7 @@
 name = "ato-ipc"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "MPL-2.0"
 description = "Process-to-process wire DTOs for Ato apps, providers, and services"
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"

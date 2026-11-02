@@ -1,5 +1,7 @@
 # Hosted Browser Computation v1
 
+Status: Draft.
+
 ## Decision
 
 `ato.browser@1` remains the interaction Protocol and Adapter identifier.

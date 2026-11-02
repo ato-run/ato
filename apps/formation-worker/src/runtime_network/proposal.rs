@@ -2,6 +2,10 @@
 //! neither its saved candidates nor its compiler verdict grant receipt authority.
 pub mod budget;
 pub mod deepseek;
+pub mod hosted_anthropic;
+pub mod hosted_budget;
+pub mod hosted_budget_http;
+pub mod hosted_proposal_http;
 pub mod provenance;
 pub mod reasoning;
 
@@ -23,6 +27,30 @@ use deepseek::{DeepSeekCandidateProducer, GeneralFailure, GeneralOutput};
 use provenance::{CallStatus, ErrorClass, ProviderCall, ProviderIdentity};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Provider-specific transport is not the proposal compiler or the authority
+/// on K. Every implementation is bound to one frozen configuration and passes
+/// its raw output through the same Coordinator/Rust validation path.
+pub trait GeneralCandidateProducer:
+    CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure> + Send + Sync
+{
+    fn configuration_ref(&self) -> Result<String>;
+    fn identity(&self) -> ProviderIdentity;
+    /// Called only after the Coordinator has returned a valid private claim.
+    /// Hosted transports bind their journal and inference capability here.
+    fn bind_claim(&self, _round: u64, _fence: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl GeneralCandidateProducer for DeepSeekCandidateProducer {
+    fn configuration_ref(&self) -> Result<String> {
+        DeepSeekCandidateProducer::configuration_ref(self)
+    }
+    fn identity(&self) -> ProviderIdentity {
+        DeepSeekCandidateProducer::identity(self)
+    }
+}
 
 pub(super) struct RequesterProposal {
     frozen: FrozenSearchV1,
@@ -258,54 +286,135 @@ pub fn prepare_exploration_submission_auto(
     )?;
     let authorization = match authorization {
         Some(a) => a,
-        None => {
-            let mut paths: Vec<_> = source_file_inventory(&submission.frozen_source.root)?
-                .into_iter()
-                .filter(|p| ato_formation::proposal::source_file_allowed(p))
-                .collect();
-            paths.sort_by_key(|p| {
-                (
-                    ato_formation::proposal::source_inspection_priority(p),
-                    p.clone(),
-                )
-            });
-            let files = paths
-                .into_iter()
-                .take(2048)
-                .map(|path| -> Result<_> {
-                    let id = format!("f_{:x}", Sha256::digest(path.as_bytes()))[..26].to_owned();
-                    let digest =
-                        file_digest(&mut File::open(submission.frozen_source.root.join(&path))?)?;
-                    Ok((
-                        id,
-                        ato_formation::proposal::VerifiedSourceFile { path, digest },
-                    ))
-                })
-                .collect::<Result<_>>()?;
-            ProposalAuthorization {
-                execution_plan: Some(ato_formation::proposal::PlanAuthorization {
-                    runtime_port_operations: true,
-                    files,
-                    toolchains,
-                    source_oci: None,
-                }),
-                modifiable_derivation_refs: vec![],
-                source_domain: ato_formation::proposal::SourceDomain {
-                    entrypoints: BTreeMap::new(),
-                    modules: BTreeMap::new(),
-                },
-                python_http_process: None,
-                node_static_workspace: None,
-                policy: ato_formation::proposal::CandidateProducerPolicy {
-                    max_proposal_rounds: 1,
-                    max_proposals: 1,
-                    timeout_ms: 30_000,
-                    allow_source_text: true,
-                    max_source_bytes: 16 * 1024,
-                },
-            }
-        }
+        None => automatic_source_authorization(&submission, toolchains)?,
     };
+    submission.enable_candidate_producer(authorization)?;
+    Ok(submission)
+}
+
+fn automatic_source_authorization(
+    submission: &Submission,
+    toolchains: BTreeMap<String, String>,
+) -> Result<ProposalAuthorization> {
+    let mut paths: Vec<_> = source_file_inventory(&submission.frozen_source.root)?
+        .into_iter()
+        .filter(|p| ato_formation::proposal::source_file_allowed(p))
+        .collect();
+    paths.sort_by_key(|p| {
+        (
+            ato_formation::proposal::source_inspection_priority(p),
+            p.clone(),
+        )
+    });
+    let files = paths
+        .into_iter()
+        .take(2048)
+        .map(|path| -> Result<_> {
+            let id = format!("f_{:x}", Sha256::digest(path.as_bytes()))[..26].to_owned();
+            let digest = file_digest(&mut File::open(submission.frozen_source.root.join(&path))?)?;
+            Ok((
+                id,
+                ato_formation::proposal::VerifiedSourceFile { path, digest },
+            ))
+        })
+        .collect::<Result<_>>()?;
+    Ok(ProposalAuthorization {
+        execution_plan: Some(ato_formation::proposal::PlanAuthorization {
+            private_process_no_build: false,
+            runtime_port_operations: true,
+            files,
+            toolchains,
+            source_oci: None,
+        }),
+        modifiable_derivation_refs: vec![],
+        source_domain: ato_formation::proposal::SourceDomain {
+            entrypoints: BTreeMap::new(),
+            modules: BTreeMap::new(),
+        },
+        python_http_process: None,
+        node_static_workspace: None,
+        policy: ato_formation::proposal::CandidateProducerPolicy {
+            max_proposal_rounds: 1,
+            max_proposals: 1,
+            timeout_ms: 30_000,
+            allow_source_text: true,
+            max_source_bytes: 16 * 1024,
+        },
+    })
+}
+
+/// Prepare an unstarted Search from the already measured archive itself. The
+/// caller still obtains owner confirmation and creates the Search; this does
+/// not authorize source upload, provider dispatch, execution or publication.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_verified_exploration_submission(
+    verified: FileVerifiedArchive,
+    contract: BoundContract,
+    work_root: &Path,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    toolchains: BTreeMap<String, String>,
+) -> Result<Submission> {
+    budget.validate()?;
+    anyhow::ensure!(
+        policy.exploration.is_some() && policy.proposal.is_none(),
+        "explicit exploration policy required"
+    );
+    anyhow::ensure!(
+        verified.archive_bytes() <= budget.max_transfer_bytes
+            && verified.expanded_bytes() <= budget.max_expanded_bytes,
+        "approved_search_source_budget_exhausted"
+    );
+    let digest = verified.archive_digest().to_owned();
+    let bytes = verified.archive_bytes();
+    let closure = verified.closure_ref("")?;
+    std::fs::create_dir_all(work_root)?;
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(budget.deadline_seconds).min(SOURCE_TRANSFER_TIMEOUT);
+    let mut archive = crate::job::source_fetch::temporary_file(work_root, bytes, deadline)?;
+    let copied = crate::job::source_fetch::copy_bounded(
+        verified.archive_reader()?,
+        &mut archive,
+        bytes,
+        deadline,
+    )?;
+    anyhow::ensure!(
+        copied == digest && archive.metadata()?.len() == bytes,
+        "approved_search_source_copy_mismatch"
+    );
+    let (archive, _) = crate::job::source_fetch::rewind(archive, copied)?;
+    let inventory = local::freeze_verified_file_with_guard(
+        verified,
+        &std::path::absolute(work_root)?,
+        SourceLimits::default(),
+        &|| std::time::Instant::now() < deadline,
+    )?;
+    anyhow::ensure!(
+        inventory.closure_ref.as_str() == closure.as_str(),
+        "approved_search_source_mismatch"
+    );
+    let mut submission = prepare_frozen_submission(
+        archive,
+        inventory,
+        &[],
+        None,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        Some(contract),
+        false,
+    )?;
+    let mut authorization = automatic_source_authorization(&submission, toolchains)?;
+    // This is the independently isolated hosted source intake. The opt-in is
+    // frozen before Search and cannot be chosen by the model.
+    authorization
+        .execution_plan
+        .as_mut()
+        .expect("automatic execution plan")
+        .private_process_no_build = true;
     submission.enable_candidate_producer(authorization)?;
     Ok(submission)
 }
@@ -1272,11 +1381,43 @@ impl Client {
     }
 }
 
+/// The proposal driver uses a scoped Coordinator capability, not an owner
+/// session. The existing CLI client and the future managed transport share the
+/// same claim, compilation and completion logic through this interface.
+pub trait ProposalCoordinator: Send + Sync {
+    fn bounded(&self, deadline_ms: u64) -> Box<dyn ProposalCoordinator>;
+    fn claim_proposal(&self, id: &str, revision: u64, claimant_id: &str) -> Result<Value>;
+    fn complete_proposal(&self, id: &str, bytes: &[u8]) -> Result<Value>;
+    fn report_completion(&self, id: &str, bytes: &[u8]) -> Result<Value>;
+    fn variable_metadata(&self, application: &str, search: &str) -> Result<Vec<Value>>;
+    fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>>;
+}
+impl ProposalCoordinator for Client {
+    fn bounded(&self, deadline_ms: u64) -> Box<dyn ProposalCoordinator> {
+        Box::new(self.with_deadline(deadline_ms))
+    }
+    fn claim_proposal(&self, id: &str, revision: u64, claimant_id: &str) -> Result<Value> {
+        Client::claim_proposal(self, id, revision, claimant_id)
+    }
+    fn complete_proposal(&self, id: &str, bytes: &[u8]) -> Result<Value> {
+        Client::complete_proposal(self, id, bytes)
+    }
+    fn report_completion(&self, id: &str, bytes: &[u8]) -> Result<Value> {
+        self.for_reporting().complete_proposal(id, bytes)
+    }
+    fn variable_metadata(&self, application: &str, search: &str) -> Result<Vec<Value>> {
+        Client::variable_metadata(self, application, search)
+    }
+    fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>> {
+        Client::runtime_capabilities(self, constraint)
+    }
+}
+
 /// One possible invocation per successful durable claim, even with stale GETs.
 /// Transport/lost claim errors consume this local opportunity without calling.
 /// A restarted requester observes claimed/terminal state and never recovers a fence.
 pub fn serve_proposal(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
@@ -1295,12 +1436,12 @@ pub fn serve_proposal(
 
 /// Same durable claim/completion engine; no separate generated-D executor.
 pub fn serve_general_proposal(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
     claimant_id: &str,
-    producer: Arc<DeepSeekCandidateProducer>,
+    producer: Arc<dyn GeneralCandidateProducer>,
 ) -> Result<bool> {
     if let Some(exploration) = &submission.request.policy.exploration {
         anyhow::ensure!(
@@ -1322,7 +1463,7 @@ pub fn serve_general_proposal(
 /// Shared session/API driver. Exact inputs and responses are durable before a
 /// proposal reaches the same independent receiver compiler and Runtime.
 pub fn serve_reasoning_proposal(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
@@ -1354,11 +1495,11 @@ pub fn serve_reasoning_proposal(
 
 enum Invocation {
     Fixed(Arc<dyn CandidateProducer + Send + Sync>),
-    General(Arc<DeepSeekCandidateProducer>),
+    General(Arc<dyn GeneralCandidateProducer>),
     Reasoning(Arc<reasoning::ReasoningProducer>),
 }
 fn serve_proposal_inner(
-    client: &Client,
+    client: &dyn ProposalCoordinator,
     id: &str,
     status: &Value,
     submission: &mut Submission,
@@ -1422,7 +1563,8 @@ fn serve_proposal_inner(
         .exploration
         .as_ref()
         .map_or(0, |p| p.formation.max_retries);
-    let client = &client.with_deadline(expires);
+    let bounded_client = client.bounded(expires);
+    let client = bounded_client.as_ref();
     let claim_revision = if point["claimed"] == true {
         state.revision.saturating_sub(1)
     } else {
@@ -1494,6 +1636,9 @@ fn serve_proposal_inner(
             )?;
         }
         return Ok(false);
+    }
+    if let Invocation::General(producer) = &producer {
+        producer.bind_claim(seq, fence)?;
     }
     let mut completion = json!({"revision":revision,"fence":fence});
     let durable_producer = if let Invocation::Reasoning(p) = &producer {
@@ -1651,7 +1796,7 @@ fn serve_proposal_inner(
     // re-enter the producer or synthesize a new batch to repair that transport.
     if let Some(p) = durable_producer {
         let reported = p.coordinator_operation(seq, "complete", &bytes, retries, expires, || {
-            client.for_reporting().complete_proposal(id, &bytes)
+            client.report_completion(id, &bytes)
         });
         if let Err(error) = reported
             && SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() < u128::from(expires)

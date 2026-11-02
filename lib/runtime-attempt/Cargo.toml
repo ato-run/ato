@@ -3,7 +3,7 @@ name = "ato-runtime-attempt"
 version = "0.1.0"
 edition = "2024"
 description = "The Runtime's attempt: admission, start record, execution, observation, verification and receipt"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 
 [package.metadata.dist]
@@ -27,6 +27,7 @@ ato-formation = { path = "../formation", version = "0.1.0" }
 ato-ipc = { path = "../ipc", version = "0.1.0" }
 ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "0.1.0" }
 ato-sandbox = { path = "../sandbox", version = "0.1.0" }
+ato-tls-observe = { path = "../tls-observe", version = "0.1.0" }
 base64 = "0.22"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

@@ -1,0 +1,14 @@
+{
+  "url": "http://127.0.0.1:18090",
+  "loginUrl": "http://127.0.0.1:18090/login",
+  "loginTitle": "Login - Missive",
+  "signedIn": true,
+  "inboxUrl": "http://127.0.0.1:18090/inbox",
+  "inboxTitle": "Inbox - Missive",
+  "expectedText": null,
+  "expectedTextFound": null,
+  "screenshots": [
+    "login.png",
+    "inbox.png"
+  ]
+}

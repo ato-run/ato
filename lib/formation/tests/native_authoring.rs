@@ -188,7 +188,9 @@ fn the_grammar_authors_one_bounded_terminal_native_surface() {
             output_delimiter,
             max_output_bytes,
             timeout_ms,
+            ready_output,
         } => {
+            assert!(ready_output.is_empty());
             assert_eq!(path, "/result");
             assert_eq!(input, b"go\n");
             assert_eq!(output_delimiter, b"END");
@@ -309,6 +311,48 @@ fn unknown_keys_inside_the_native_table_are_refused() {
     let text = native_with(
         r#"probe_timeout_ms = 5000"#,
         "probe_timeout_ms = 5000\nexpected_output = \"END\"",
+    );
+    assert!(parse_capsule_toml(&text).is_err());
+}
+
+#[test]
+fn an_authored_startup_prompt_is_bound_rendered_and_digested() {
+    let prompted = native_with(
+        "probe_timeout_ms = 5000\n",
+        "probe_timeout_ms = 5000\nprobe_ready_output = \"> \"\n",
+    );
+    let draft = parse_capsule_toml(&prompted).expect("parses");
+    let rendered = render_capsule_toml(&draft).expect("renders");
+    assert!(rendered.contains("probe_ready_output"), "{rendered}");
+    assert_eq!(
+        parse_capsule_toml(&rendered).expect("reparses").derivation,
+        draft.derivation
+    );
+
+    let (_, plain) = bound(NATIVE_MANIFEST);
+    let (_, with_prompt) = bound(&prompted);
+    match &with_prompt.native_surface.as_ref().unwrap().operations[0] {
+        NativeProbeOperation::TerminalExchange { ready_output, .. } => {
+            assert_eq!(ready_output, b"> ");
+        }
+        other => panic!("unexpected operation: {other:?}"),
+    }
+    // The empty value is omitted, so a Terminal D that does not declare a
+    // prompt keeps its bytes; declaring one is a different D.
+    let plain_json = serde_json::to_string(&plain).unwrap();
+    assert!(!plain_json.contains("ready_output"), "{plain_json}");
+    assert_ne!(
+        Sha256::digest(serde_json::to_vec(&plain).unwrap()),
+        Sha256::digest(serde_json::to_vec(&with_prompt).unwrap())
+    );
+}
+
+#[test]
+fn an_oversized_startup_prompt_is_refused() {
+    let long = "x".repeat(257);
+    let text = native_with(
+        "probe_timeout_ms = 5000\n",
+        &format!("probe_timeout_ms = 5000\nprobe_ready_output = \"{long}\"\n"),
     );
     assert!(parse_capsule_toml(&text).is_err());
 }

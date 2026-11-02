@@ -1,0 +1,38 @@
+# Build context must be Govcraft/missive commit
+# 7716106b6c4638426169dac264657437914bbe7f.
+FROM docker.io/library/node@sha256:43aeff40f4afc22e83f7589a2f37e111cff5ca84529571f1c8415bcc5fcc21b2 AS assets
+
+WORKDIR /src
+COPY package.json pnpm-lock.yaml ./
+RUN corepack enable && corepack prepare pnpm@10.30.3 --activate \
+    && pnpm install --frozen-lockfile
+COPY static ./static
+COPY templates ./templates
+RUN mkdir -p static/js static/css && pnpm run build
+
+FROM docker.io/library/rust@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS builder
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY templates ./templates
+COPY ato-patches/missive-nondefault-port.patch /tmp/missive-nondefault-port.patch
+COPY ato-patches/missive-identity-submission-capability.patch /tmp/missive-identity-submission-capability.patch
+RUN patch -p1 < /tmp/missive-nondefault-port.patch \
+    && patch -p1 < /tmp/missive-identity-submission-capability.patch
+COPY --from=assets /src/static ./static
+RUN cargo build --locked --release
+
+FROM docker.io/library/debian@sha256:f3034a6ec3c1205360777c4aae76234998866ad18806ae62b63a3f84ccad782b
+
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libssl.so.3
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /src/target/release/missive /usr/local/bin/missive
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/missive"]
+CMD ["serve"]
+LABEL org.opencontainers.image.source="https://github.com/Govcraft/missive" \
+      org.opencontainers.image.revision="7716106b6c4638426169dac264657437914bbe7f" \
+      run.ato.dev.patch="strip-nondefault-port-from-jmap-redirect-host,identity-get-submission-capability"

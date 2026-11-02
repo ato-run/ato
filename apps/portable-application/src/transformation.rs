@@ -619,6 +619,9 @@ env = { ROUTE_VARIANT = "b" }
             body_digest: None,
             input: Some("workspace".to_owned()),
             digest: Some(format!("sha256:{}", "a".repeat(64))),
+
+            server_name: None,
+            start: None,
         });
         assert!(frozen_contract_is_source_bound(&source_bound));
     }
@@ -659,6 +662,9 @@ env = { ROUTE_VARIANT = "b" }
             body_digest: None,
             input: Some("workspace".to_owned()),
             digest: Some(closure),
+
+            server_name: None,
+            start: None,
         });
         contract
             .requirements

@@ -91,6 +91,9 @@ impl NativeLeaseRun {
     pub fn is_finished(&self) -> bool {
         self.run().is_finished()
     }
+    pub fn ended_by_workload_exit(&self) -> bool {
+        self.run().ended_by_workload_exit()
+    }
     pub fn stop(mut self) -> NativeCompletion {
         self.stop_owned()
     }

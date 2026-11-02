@@ -17,7 +17,8 @@ use ato_formation::authoring::{
     BoundRequirement, BoundStep, ClientAddressTransport, DerivationDraft, EffectClass,
     HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL,
     PortDraft, SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft,
-    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
+    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, TLS_CONTRACT_VERIFIER, TlsStart,
+    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind, validate_tls_server_name,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_formation::capsule_toml_v2::{
@@ -369,6 +370,16 @@ pub struct PortableHttpRequirementSpec {
     pub body_digest: Option<String>,
 }
 
+/// A TLS observation an authored source declares: a logical port, the host
+/// name the presented certificate must cover, and how TLS starts there.
+#[derive(Debug, Clone)]
+pub struct PortableTlsRequirementSpec {
+    pub id: String,
+    pub port: String,
+    pub server_name: String,
+    pub start: TlsStart,
+}
+
 #[derive(Debug, Clone)]
 pub struct PortableExecutionSpec {
     pub runtimes: BTreeMap<String, String>,
@@ -437,6 +448,8 @@ pub struct PortableAuthoredBundleSpec {
     pub filesystem_state: Option<PortableFilesystemStateSpec>,
     pub bindings: Vec<ApplicationBindingV1>,
     pub requirements: Vec<PortableHttpRequirementSpec>,
+    /// `ato.contract.tls@1` observations: the certificate a port presents.
+    pub tls_requirements: Vec<PortableTlsRequirementSpec>,
     pub effects: EffectClass,
     /// `(input id, manifest path in the source, canonical manifest)` consumed
     /// by every route. The manifest file is an input, not workspace content.
@@ -1126,11 +1139,21 @@ pub fn build_static_bundle(
     source_root: &Path,
     title: &str,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_static_bundle_with_schema(source_root, title, PORTABLE_TREE_SCHEMA)
+}
+
+/// Static packer with an explicit tree schema. ato.portable-tree/2 allows
+/// arbitrary binary media (audio, fonts), which the v1 tree rejects.
+pub fn build_static_bundle_with_schema(
+    source_root: &Path,
+    title: &str,
+    tree_schema: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if title.trim().is_empty() {
         return Err(profile("application title must not be empty"));
     }
     let draft = read_authoring_draft(source_root)?;
-    let (mut objects, tree_ref) = build_portable_tree(source_root)?;
+    let (mut objects, tree_ref) = build_portable_tree_with_schema(source_root, tree_schema, &[])?;
     let (contract, derivation) = bind(
         &draft,
         &BindingContext {
@@ -1334,6 +1357,7 @@ pub fn build_dynamic_process_oci_bundle(
             filesystem_state: spec.filesystem_state.clone(),
             bindings: spec.bindings.clone(),
             requirements: spec.requirements.clone(),
+            tls_requirements: Vec::new(),
             effects: EffectClass::Pure,
             model_sets: Vec::new(),
             scenarios: Vec::new(),
@@ -1391,6 +1415,9 @@ pub(crate) fn contract_from_spec(
             body_digest: requirement.body_digest.clone(),
             input: None,
             digest: None,
+
+            server_name: None,
+            start: None,
         })
         .collect::<Vec<_>>();
     bound.extend(spec.scenarios.iter().map(|input| BoundRequirement {
@@ -1403,7 +1430,26 @@ pub(crate) fn contract_from_spec(
         body_digest: None,
         input: None,
         digest: Some(input.reference.clone()),
+        server_name: None,
+        start: None,
     }));
+    for requirement in &spec.tls_requirements {
+        validate_tls_server_name(&requirement.server_name)
+            .map_err(|detail| profile(format!("TLS requirement server_name: {detail}")))?;
+        bound.push(BoundRequirement {
+            id: requirement.id.clone(),
+            verifier: TLS_CONTRACT_VERIFIER.to_owned(),
+            port: Some(requirement.port.clone()),
+            method: None,
+            path: None,
+            status: None,
+            body_digest: None,
+            input: None,
+            digest: None,
+            server_name: Some(requirement.server_name.clone()),
+            start: Some(requirement.start),
+        });
+    }
     bound.sort_by(|left, right| left.id.cmp(&right.id));
     if bound.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(profile(
@@ -1531,6 +1577,16 @@ fn authored_bundle_spec_v2(
                 path: observation.path,
                 status: observation.status,
                 body_digest: observation.body_digest,
+            })
+            .collect(),
+        tls_requirements: draft
+            .tls_observations
+            .into_iter()
+            .map(|observation| PortableTlsRequirementSpec {
+                id: observation.id,
+                port: observation.port,
+                server_name: observation.server_name,
+                start: observation.start,
             })
             .collect(),
         effects: draft.effects,
@@ -2422,6 +2478,34 @@ fn validate_route_requirements(
                 {
                     return Err(profile(
                         "Instance snapshot requirement contains unrelated observation fields",
+                    ));
+                }
+            }
+            TLS_CONTRACT_VERIFIER => {
+                if !requirement
+                    .port
+                    .as_deref()
+                    .is_some_and(|port| observation_ports.contains(port))
+                {
+                    return Err(profile(
+                        "TLS requirement does not target a declared observation Port",
+                    ));
+                }
+                let server_name = requirement.server_name.as_deref().unwrap_or_default();
+                validate_tls_server_name(server_name)
+                    .map_err(|detail| profile(format!("TLS requirement server_name: {detail}")))?;
+                if requirement.start.is_none() {
+                    return Err(profile("TLS requirement omitted its start mode"));
+                }
+                if requirement.method.is_some()
+                    || requirement.path.is_some()
+                    || requirement.status.is_some()
+                    || requirement.body_digest.is_some()
+                    || requirement.input.is_some()
+                    || requirement.digest.is_some()
+                {
+                    return Err(profile(
+                        "TLS requirement contains unrelated observation fields",
                     ));
                 }
             }
@@ -4326,6 +4410,8 @@ status = 200
             )],
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
+
+            tls: Vec::new(),
         };
         assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
         observation.http.push(RuntimeHttpObservation::from_response(
@@ -5951,5 +6037,41 @@ status = 200
         assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
         assert_eq!(route.contract.requirements[0].status, Some(200));
         assert!(route.contract.requirements[0].body_digest.is_some());
+    }
+
+    #[test]
+    fn a_tls_observation_reaches_the_contract_and_must_target_a_declared_port() {
+        let with_tls = SERVICE_GROUP_TOML.replacen(
+            "[[derivation]]",
+            r#"[[contract.observation]]
+id = "group-tls"
+use = "ato.contract.tls@1"
+port = "backend.http"
+server_name = "mail.example"
+start = "implicit"
+
+[[derivation]]"#,
+            1,
+        );
+        let routes = build_group(&with_tls).unwrap();
+        let requirement = routes[0]
+            .contract
+            .requirements
+            .iter()
+            .find(|requirement| requirement.id == "group-tls")
+            .expect("the tls observation is in K");
+        assert_eq!(requirement.verifier, TLS_CONTRACT_VERIFIER);
+        assert_eq!(requirement.port.as_deref(), Some("backend.http"));
+        assert_eq!(requirement.server_name.as_deref(), Some("mail.example"));
+        assert_eq!(requirement.start, Some(TlsStart::Implicit));
+
+        let undeclared = with_tls.replace("port = \"backend.http\"", "port = \"smtp\"");
+        let error = build_group(&undeclared).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("TLS requirement does not target"),
+            "{error}"
+        );
     }
 }

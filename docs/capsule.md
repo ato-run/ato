@@ -1,5 +1,12 @@
 # Portable Capsule bundle
 
+Status: Current technical reference.
+
+The general, user-facing explanation of Capsules is owned by
+[ato.run Capsule](https://ato.run/docs/capsule/); this page is the technical
+reference for the bundle wire profiles (v2 `ComputationRef`, v3/v4
+`ContractRef`) and their validation.
+
 A `.capsule` file transports an immutable root and its validated object closure.
 The file's SHA-256 establishes byte equality; logical identity depends on its
 declared profile.

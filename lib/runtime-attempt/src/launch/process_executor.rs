@@ -532,6 +532,17 @@ fn launch_process_inner(
 
     let mut environment = super::sandbox::guest_environment(context);
     if scoped.is_some() {
+        // Isolated workloads see their declared guest port, while the host
+        // ingress listener remains on the Runner-allocated port.
+        for endpoint in context.endpoints() {
+            environment.insert(
+                super::sandbox::endpoint_port_env_name(&endpoint.name),
+                endpoint
+                    .guest_port
+                    .unwrap_or(endpoint.host_port)
+                    .to_string(),
+            );
+        }
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
             environment.insert(
                 key.into(),
@@ -1090,6 +1101,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn scoped_policy_uses_guest_port_and_owner_socket_uses_host_port() {
+        if !super::super::sandbox::containment_available() {
+            return;
+        }
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let command = super::super::sandbox::sandboxed_command_scoped(
+            &fixture.context,
+            &["/usr/bin/true".into()],
+            std::path::Path::new("/usr/bin/true"),
+            std::path::Path::new("/policy"),
+            std::path::Path::new("/egress"),
+            std::path::Path::new("/ingress"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(command.policy.allowed_bind_tcp_ports, vec![8000]);
+        assert!(
+            command
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--ingress-port", "34567:8000"])
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     #[ignore = "requires a built connected Worker and a Linux namespace host"]
     fn isolated_process_serves_http_but_cannot_reach_host_or_control_credentials() {
         let fixture = context_with_state(StateAccessV1::ReadWrite);
@@ -1103,6 +1140,7 @@ s = socket.socket(); s.settimeout(0.2)
 assert s.connect_ex(('127.0.0.1', {host_port})) != 0, 'host network reachable'
 s.close()
 assert 'ATO_RUNNER_TOKEN' not in os.environ
+assert os.environ['ATO_ENDPOINT_WEB_PORT'] == '8000'
 assert not os.path.exists('/root/.ssh/authorized_keys')
 db = sqlite3.connect('/data/test.sqlite')
 db.execute('CREATE TABLE IF NOT EXISTS proof(value TEXT)')
@@ -1110,7 +1148,7 @@ db.execute('INSERT INTO proof VALUES (?)', ('isolated',)); db.commit()
 class H(BaseHTTPRequestHandler):
  def do_GET(self):
   self.send_response(200); self.end_headers(); self.wfile.write(b'isolated')
-HTTPServer(('127.0.0.1', 34567), H).serve_forever()
+HTTPServer(('127.0.0.1', 8000), H).serve_forever()
 "#
         );
         std::fs::write(fixture.context.workspace_root().join("probe.py"), code).unwrap();

@@ -3,7 +3,7 @@ name = "ato-firecracker-guest-image"
 version = "0.1.0"
 edition = "2024"
 description = "Build bootable Firecracker guest images from resolved Computations"
-license = "Apache-2.0 OR MPL-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 publish = false
 

@@ -1,5 +1,7 @@
 # Explicit nonroot OCI execution identity (draft)
 
+Status: Draft.
+
 The existing OCI Adapter chooses an execution UID:GID from writable state mount
 ownership. A stateless image has no such selection. A route may now declare the
 optional Adapter runtime fact `oci.user = "UID:GID"`, with each integer in

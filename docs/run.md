@@ -1,5 +1,11 @@
 # Local lifecycle
 
+Status: Current technical reference.
+
+General CLI installation and quickstart are owned by the
+[ato.run CLI quickstart](https://ato.run/docs/cli-quickstart/). This page
+documents the computation-root wire and profile lifecycle itself.
+
 This page describes the computation-root CLI lifecycle and its local repository.
 For contract-root `pack` / `form` / `app` workflows use the [Formation guide](guides/formation.md).
 

@@ -13,6 +13,7 @@
 //! | `--api-base` | control plane base URL (required) |
 //! | `--work-root` | worker-owned directory; holds `worker-update.json` |
 //! | `--worker-id` | identity this process claims as |
+//! | `--queue` | `all` (default), `source-only`, `hosted-preparation`, or `hosted-exploration`; dedicated queues require a pinned runner identity |
 //! | `--poll-ms` | idle poll interval (default 2000) |
 //! | `--heartbeat-ms` | lifecycle/identity report interval (default 15000) |
 //! | `--expect-version` | refuse to serve unless the binary reports this version |
@@ -43,6 +44,8 @@ use ato_formation_worker::api::{
     WorkerIdentityReport, WorkerStateReport, bounded_reason, classify_failure as classify,
 };
 use ato_formation_worker::build::BuildAttempt;
+use ato_formation_worker::job::hosted_exploration::HostedExplorationApi;
+use ato_formation_worker::job::hosted_preparation::HostedPreparationApi;
 use ato_formation_worker::job::{JobContext, PinnedSourceFetcher, TreePacker, run_claimed_job};
 use ato_formation_worker::lifecycle::{
     BinaryIdentity, EXIT_DRAINED, EXIT_ROLLBACK_REQUIRED, LoadOutcome, Recovery,
@@ -51,6 +54,9 @@ use ato_formation_worker::lifecycle::{
 };
 use ato_formation_worker::pack::pack_tree;
 use ato_formation_worker::sandbox::{BuildLimits, require_containment};
+use ato_formation_worker::source_archive::{
+    SourceArchiveApi, SourceArchiveClaimOutcome, materialize_source_archive,
+};
 
 /// What produced this binary.
 ///
@@ -531,6 +537,8 @@ fn serve(args: &[String]) -> Result<()> {
     );
     let expect_version = flag(args, "--expect-version");
     let expect_digest = flag(args, "--expect-digest");
+    let queue = queue_mode(args)?;
+    let source_only = queue == QueueMode::SourceOnly;
     let token = std::env::var("ATO_FORMATION_TOKEN")
         .map_err(|_| anyhow!("ATO_FORMATION_TOKEN is required"))?;
 
@@ -555,6 +563,29 @@ fn serve(args: &[String]) -> Result<()> {
         .timeout(Duration::from_secs(900))
         .build()?;
     let api = FormationApi::new(client, api_base.clone(), token.clone());
+    let hosted_preparation_api = if matches!(
+        queue,
+        QueueMode::HostedPreparation | QueueMode::HostedExploration
+    ) {
+        Some(HostedPreparationApi::new(&api_base, &token)?)
+    } else {
+        None
+    };
+    let hosted_exploration_api = if queue == QueueMode::HostedExploration {
+        Some(HostedExplorationApi::new(&api_base, &token)?)
+    } else {
+        None
+    };
+    let source_api = match SourceArchiveApi::new(api_base.clone(), token.clone()) {
+        Ok(api) => Some(api),
+        Err(error) if source_only => {
+            return Err(error.context("source-only polling is unavailable for this API origin"));
+        }
+        Err(_) => {
+            eprintln!("[formation] source-only polling unavailable for this API origin");
+            None
+        }
+    };
     let shim = std::env::current_exe().context("cannot locate this worker's own binary")?;
     let fetcher = PinnedSourceFetcher::new(api_base, token)?;
     let context = JobContext {
@@ -705,11 +736,123 @@ fn serve(args: &[String]) -> Result<()> {
     // `Some` when the loop stopped because the control plane said so, rather
     // than a signal. It carries the target binary from the refusal.
     let mut refusal: Option<ClaimRefusal> = None;
+    let mut poll_source = true;
+    let mut prefer_exploration = true;
     loop {
         // Checked before every claim: after a stop or a drain directive the
         // worker must never take another attempt fence.
         if STOP_REQUESTED.load(Ordering::SeqCst) || state.drain_requested.load(Ordering::SeqCst) {
             break;
+        }
+
+        if let Some(preparation) = &hosted_preparation_api {
+            let preferred = prefer_exploration;
+            prefer_exploration = !prefer_exploration;
+            let drive = || -> Result<bool> {
+                let Some(exploration) = &hosted_exploration_api else {
+                    return Ok(false);
+                };
+                let holder = new_preparation_holder()?;
+                exploration.drive_one(&holder, &work_root, || {
+                    STOP_REQUESTED.load(Ordering::SeqCst)
+                        || state.drain_requested.load(Ordering::SeqCst)
+                })
+            };
+            if preferred {
+                match drive() {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => {
+                        eprintln!("[formation] hosted exploration unavailable or stopped");
+                        pause(&state, idle);
+                        continue;
+                    }
+                }
+            }
+            if STOP_REQUESTED.load(Ordering::SeqCst) || state.drain_requested.load(Ordering::SeqCst)
+            {
+                break;
+            }
+            match new_preparation_holder()
+                .and_then(|holder| preparation.prepare_one(&holder, &work_root))
+            {
+                Ok(true) => {
+                    println!("[formation] hosted source preparation completed");
+                    continue;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    eprintln!("[formation] hosted source preparation unavailable or failed");
+                    pause(&state, idle);
+                    continue;
+                }
+            }
+            if !preferred {
+                if STOP_REQUESTED.load(Ordering::SeqCst)
+                    || state.drain_requested.load(Ordering::SeqCst)
+                {
+                    break;
+                }
+                match drive() {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => eprintln!("[formation] hosted exploration unavailable or stopped"),
+                }
+            }
+            pause(&state, idle);
+            continue;
+        }
+
+        // Alternate source and ordinary work so a continuously busy queue
+        // cannot starve the other. Source-only uses its dedicated claim and
+        // physical materializer; it never enters the application build lane.
+        let source_polled = (source_only || poll_source) && source_api.is_some();
+        poll_source = !poll_source;
+        if let Some(source_api) = source_api.as_ref().filter(|_| source_polled) {
+            match source_api.claim_next_controlled(worker_id) {
+                Ok(SourceArchiveClaimOutcome::Work(claim)) => {
+                    *lock(&state.current_attempt) = Some(claim.attempt_id.clone());
+                    match materialize_source_archive(source_api, &fetcher, &claim, &work_root) {
+                        Ok(_) => println!(
+                            "[formation] source job={} attempt={} materialized",
+                            claim.job_id, claim.attempt_id
+                        ),
+                        Err(_) => {
+                            eprintln!(
+                                "[formation] source job={} attempt={} failed",
+                                claim.job_id, claim.attempt_id
+                            );
+                            if source_api.report_failure(&claim).is_err() {
+                                eprintln!(
+                                    "[formation] source archive failure report was not accepted"
+                                );
+                            }
+                        }
+                    }
+                    *lock(&state.current_attempt) = None;
+                    continue;
+                }
+                Ok(SourceArchiveClaimOutcome::Idle) => {}
+                Ok(SourceArchiveClaimOutcome::Stopped(stop)) => {
+                    refusal = Some(stop);
+                    state.drain_requested.store(true, Ordering::SeqCst);
+                    break;
+                }
+                Err(_) => eprintln!("[formation] source claim failed"),
+            }
+            // A heartbeat may have requested drain while the source poll was
+            // in flight. Do not ask the other queue after that directive.
+            if STOP_REQUESTED.load(Ordering::SeqCst) || state.drain_requested.load(Ordering::SeqCst)
+            {
+                break;
+            }
+        }
+
+        // Dedicated source workers must never consume the normal Formation
+        // queue. Give the source-only endpoint the same bounded idle interval.
+        if source_only {
+            pause(&state, idle);
+            continue;
         }
 
         // A poll that fails is a transient control-plane or network problem,
@@ -718,7 +861,9 @@ fn serve(args: &[String]) -> Result<()> {
         let work = match api.claim_next_controlled(worker_id) {
             Ok(ClaimOutcome::Work(work)) => work,
             Ok(ClaimOutcome::Idle) => {
-                pause(&state, idle);
+                if source_polled || source_api.is_none() {
+                    pause(&state, idle);
+                }
                 continue;
             }
             // The control plane's stop signal is authoritative even if the
@@ -1023,6 +1168,120 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
         .map(String::as_str)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueMode {
+    All,
+    SourceOnly,
+    HostedPreparation,
+    HostedExploration,
+}
+fn queue_mode(args: &[String]) -> Result<QueueMode> {
+    let mut mode = None;
+    for (index, arg) in args.iter().enumerate() {
+        let value = if arg == "--queue" {
+            Some(args.get(index + 1).map(String::as_str).unwrap_or(""))
+        } else if let Some(value) = arg.strip_prefix("--queue=") {
+            Some(value)
+        } else if arg.starts_with("--queue") {
+            return Err(anyhow!("unrecognised --queue option"));
+        } else {
+            None
+        };
+        if let Some(value) = value
+            && mode.replace(value).is_some()
+        {
+            return Err(anyhow!("--queue must be specified at most once"));
+        }
+    }
+    match mode {
+        None | Some("all") => Ok(QueueMode::All),
+        Some("source-only") => Ok(QueueMode::SourceOnly),
+        Some("hosted-preparation") => Ok(QueueMode::HostedPreparation),
+        Some("hosted-exploration") => Ok(QueueMode::HostedExploration),
+        _ => Err(anyhow!(
+            "--queue must be all, source-only, hosted-preparation, or hosted-exploration"
+        )),
+    }
+}
+
+fn new_preparation_holder() -> Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    ))
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::{QueueMode, new_preparation_holder, queue_mode};
+
+    #[test]
+    fn queue_mode_is_explicit_and_malformed_modes_fail_closed() {
+        let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+        assert_eq!(queue_mode(&args(&[])).unwrap(), QueueMode::All);
+        assert_eq!(
+            queue_mode(&args(&["--queue", "all"])).unwrap(),
+            QueueMode::All
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue", "source-only"])).unwrap(),
+            QueueMode::SourceOnly
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue=source-only"])).unwrap(),
+            QueueMode::SourceOnly
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue=hosted-preparation"])).unwrap(),
+            QueueMode::HostedPreparation
+        );
+        assert_eq!(
+            queue_mode(&args(&["--queue=hosted-exploration"])).unwrap(),
+            QueueMode::HostedExploration
+        );
+        for bad in [
+            vec!["--queue"],
+            vec!["--queue", "--worker-id"],
+            vec!["--queue", "source"],
+            vec!["--queue="],
+            vec!["--queue-source-only"],
+            vec!["--queue", "source-only", "--queue", "all"],
+            vec!["--queue=source-only", "--queue=all"],
+        ] {
+            assert!(queue_mode(&args(&bad)).is_err(), "{bad:?}");
+        }
+    }
+    #[test]
+    fn hosted_holders_are_distinct_v4_uuids() {
+        let a = new_preparation_holder().unwrap();
+        let b = new_preparation_holder().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        assert_eq!(&a[14..15], "4");
+        assert!(["8", "9", "a", "b"].contains(&&a[19..20]));
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,39 @@ your task. English is the default for current documentation;
 [README.ja.md](../README.ja.md) is the Japanese overview. Historical Japanese
 or mixed-language sources are labelled in the archive catalogue.
 
+## Documentation ownership
+
+Two surfaces own different kinds of documentation:
+
+| Surface | Owns |
+|---|---|
+| [ato.run documentation](https://ato.run/docs/) | General user documentation: [Overview](https://ato.run/docs/), [What is Ato](https://ato.run/docs/what-is-ato/), [Using apps](https://ato.run/docs/using-apps/), [Library](https://ato.run/docs/library/), [CLI quickstart](https://ato.run/docs/cli-quickstart/), [Core concepts](https://ato.run/docs/core-concepts/), [Capsule](https://ato.run/docs/capsule/) and [Use with AI](https://ato.run/docs/use-with-ai/). |
+| This repository (GitHub) | Architecture, RFC/ADR, protocol and implementation specifications, technical design rationale, operations and the archive. |
+
+Pages that exist on both surfaces are split by purpose. [run.md](run.md),
+[capsule.md](capsule.md) and the [concepts](concepts/computation.md) pages here
+are technical references; the general explanation is owned by the ato.run page
+each of them links to. Minimal build, test and contribution steps stay in
+[README](../README.md) and [CONTRIBUTING](../CONTRIBUTING.md).
+
+Roadmap and work tracking live in [GitHub Issues](https://github.com/ato-run/ato/issues)
+(and GitHub Projects when a board is used), not in a Markdown roadmap file.
+
+## Document status
+
+Status is carried by a `Status:` line in the file; where a page has none, the
+directory decides.
+
+| Status | Meaning | Where |
+|---|---|---|
+| Current | Written against the repository today. It is not a guarantee of implementation, deployment or verification on any environment. | `docs/` root technical pages, `concepts/`, `guides/`, `operations/`, `architecture/`, `specifications/`, `rfcs/accepted/` |
+| Draft | Non-normative proposal or work in progress; not an implementation or deployment promise. | `rfcs/draft/` |
+| Archived | Historical evidence: past reports, plans, experiments or retired procedures. It does not certify current state. | `archive/`, plus the retained collections listed in [archive/2026/README.md](archive/2026/README.md) |
+
+`Current` means "written against the current tree". Deployment state, feature
+flags and measurements are separate claims, and accepted RFCs remain the
+authority for normative behavior.
+
 ## Reading paths
 
 | Task | Read in order |
@@ -59,6 +92,22 @@ deployment and remote migrations stay with their owning service repositories.
 [Archive](archive/README.md) maps past models, reports, experiments and plans.
 [2026](archive/2026/README.md) includes moved ops reports and retained evidence
 trees. Old Markdown paths and heading anchors remain compatibility entry points.
+
+The [2026 repository cleanup record](archive/2026/repository-cleanup-20261028/REPORT.md)
+documents the 2026-10-28 ownership and status pass. Compatibility redirect pages
+under `ops/`, `specs/` and the `docs/` root, and the historical collections in
+[archive/2026/README.md](archive/2026/README.md), are intentionally retained:
+they keep external issue/PR references (including `docs/...` links quoted in
+old issues and PRs) resolving, and scripts and tests still read some of them.
+
+GitHub Pages hosting is retired: the repository-side workflow and site assets
+are removed, and the GitHub-side disable, 133-deployment purge and
+`github-pages` environment deletion were completed on 2026-10-28
+([result record](archive/2026/repository-cleanup-20261028/GITHUB-SETTINGS.md)).
+The former `ato-run.github.io/ato/` URLs now return 404; that external link
+loss is accepted and cannot be redirected from this repository. A few
+historical links remain unresolved by design, while in-repository links stay
+valid and are checked by docs CI.
 
 The [inventory](archive/2026/documentation-reorganization/inventory.tsv) covers
 all baseline docs attachments and repository-wide prose. The

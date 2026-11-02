@@ -1,5 +1,11 @@
 # Computation
 
+Status: Current technical reference.
+
+A shorter, user-facing introduction is owned by
+[ato.run Core concepts](https://ato.run/docs/core-concepts/); this page is the
+technical model and vocabulary reference.
+
 Take a concrete example: Alice runs a build and hits `error[E0277]` at a
 point we call `C42`. Her shell is still sitting there, interactive, waiting
 for the next command.

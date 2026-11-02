@@ -1,5 +1,7 @@
 # Core architecture
 
+Status: Current technical reference.
+
 Computation is the semantic center. The core libraries are:
 
 - `ato-computation` — canonical semantic values, Ports, identity, and pure

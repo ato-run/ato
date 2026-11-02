@@ -624,20 +624,8 @@ fn interpret_claim_response(
     status: reqwest::StatusCode,
     body: serde_json::Value,
 ) -> Result<ClaimOutcome> {
-    if status == reqwest::StatusCode::CONFLICT {
-        return match body.get("error").and_then(serde_json::Value::as_str) {
-            Some("runner_drained") => Ok(ClaimOutcome::Stopped(ClaimRefusal::Drained)),
-            Some("runner_update_required") => {
-                Ok(ClaimOutcome::Stopped(ClaimRefusal::UpdateRequired {
-                    target_version: string_field(&body, "target_version"),
-                    target_digest: string_field(&body, "target_digest"),
-                }))
-            }
-            Some(other) => Err(anyhow!("the control plane refused the claim: {other}")),
-            None => Err(anyhow!(
-                "the control plane refused the claim (HTTP {status}) without a reason"
-            )),
-        };
+    if let Some(refusal) = interpret_claim_refusal(status, &body)? {
+        return Ok(ClaimOutcome::Stopped(refusal));
     }
     if !status.is_success() {
         return Err(anyhow!("failed to ask for Formation work: HTTP {status}"));
@@ -646,6 +634,27 @@ fn interpret_claim_response(
         return Ok(ClaimOutcome::Idle);
     }
     Ok(ClaimOutcome::Work(Box::new(serde_json::from_value(body)?)))
+}
+
+/// Interpret the same stop signals for normal and source-only claims.
+pub(crate) fn interpret_claim_refusal(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> Result<Option<ClaimRefusal>> {
+    if status == reqwest::StatusCode::CONFLICT {
+        return match body.get("error").and_then(serde_json::Value::as_str) {
+            Some("runner_drained") => Ok(Some(ClaimRefusal::Drained)),
+            Some("runner_update_required") => Ok(Some(ClaimRefusal::UpdateRequired {
+                target_version: string_field(body, "target_version"),
+                target_digest: string_field(body, "target_digest"),
+            })),
+            Some(other) => Err(anyhow!("the control plane refused the claim: {other}")),
+            None => Err(anyhow!(
+                "the control plane refused the claim (HTTP {status}) without a reason"
+            )),
+        };
+    }
+    Ok(None)
 }
 
 fn string_field(body: &serde_json::Value, name: &str) -> Option<String> {

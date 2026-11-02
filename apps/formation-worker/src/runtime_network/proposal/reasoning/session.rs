@@ -115,6 +115,7 @@ fn catalog_fact_allowlist(input: &ReasoningInput) -> BTreeMap<String, &'static s
             continue;
         };
         let auth = ato_formation::proposal::PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: *runtime_port_operations,
             files: BTreeMap::new(),
             toolchains: toolchains.clone(),
