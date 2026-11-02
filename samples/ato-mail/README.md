@@ -368,6 +368,13 @@ This is browser-level evidence for the client/backend composition. It is **not**
 an Ato Run and not staging evidence. Commands, evidence PNGs and limits:
 `docs/ops/mail-browser-local-verification-20261102.md`.
 
+## Browser-only slice
+
+\`samples/ato-mail-browser\` is the smallest capsule that serves this client in a
+browser (HTTP observations only, no fixed TCP/TLS/Bindings). It exists so the
+browser gate can run on a Runner before D1's HostBoundary work; it is not the
+mail contract. See its README.
+
 ## Known limits
 
 - **Browser use is not Contract-verified.** The sample asserts that the client is
