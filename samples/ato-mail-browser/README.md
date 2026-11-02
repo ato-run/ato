@@ -44,7 +44,7 @@ work D1 needs.
      MAIL_PASSWORD=<test password> MAIL_EXPECT_TEXT=Inbox \
      node scripts/ops/mail-browser-check.mjs
    ```
-   See [the runbook](../docs/ops/mail-browser-verification-runbook.md) for pass
+   See [the runbook](../../docs/ops/mail-browser-verification-runbook.md) for pass
    criteria and failure interpretation.
 
 ## Local evidence for this path
@@ -52,7 +52,7 @@ work D1 needs.
 The Ato runtime path was exercised locally on 2026-11-02 with an equivalent
 two-service group (public Stalwart image + locally built patched Missive):
 `ato run` served the client and the host browser signed in
-([record](../docs/ops/mail-browser-ato-run-local-host-20261102.md)). This sample
+([record](../../docs/ops/mail-browser-ato-run-local-host-20261102.md)). This sample
 exists so that the same browser check can run on a Runner without waiting for
 the TLS/fixed-TCP work.
 
