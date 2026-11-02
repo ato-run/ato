@@ -228,7 +228,7 @@ Production steps (Phase 3 onward) stay gated on separate approval.
 |---|---|---|
 | S1 | implemented, local + CI green | ato-run/ato#1666; control plane ato-run/ato-api#1079 (CI queued on the self-hosted runner) |
 | S2 | design + exporter + the OCI enabling fix done; the ato-api grant/replace is specified, not written | ato-run/ato#1669 (ADR-044) |
-| S3 | D1 sample and its TLS/HTTP K done; 443 pending the external Binding; K4/K6 need a decision | ato-run/ato#1668 (stacked on #1666) |
+| S3 | D1 sample done, including the **Missive browser mail client** as the Web Surface; 443 pending the external Binding; K4/K6 need a decision; the staging browser check is Phase 5 | ato-run/ato#1668 (stacked on #1666) |
 | Phase 2 design | ADR-043 reviewed and decided | ato-run/ato#1667 |
 | S4, S5 | not started | — |
 
@@ -255,6 +255,14 @@ Decisions and gaps recorded while doing S2/S3:
   implementation.
 - **S3 is not `fully_satisfied`**: 443 is served by the host Caddy and needs the
   ADR-043 implementation.
+- **Browser mail client**: D1's Web Surface is now Govcraft Missive (`app.http`),
+  the client accepted in the 2026-09-20 staging record. Opening the Run's public
+  URL gives the mail client; K3 observes `/health` and `/` on that Surface.
+  Browser access does not depend on the mail-domain 443. Signing in and reading a
+  mailbox are manual Phase 5 steps, because a Contract observation cannot assert
+  an authenticated browser session yet. The Missive image is private to GHCR and
+  the available credential lacks `read:packages`, so a local browser render was
+  not possible; staging (or a pulling credential) is needed for that evidence.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
