@@ -1010,6 +1010,9 @@ while True:
             endpoint_name: "http".to_owned(),
             path: "/".to_owned(),
             timeout_ms: 60_000,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let attachments = spec.state_attachments.clone();
         let document = oci_run(

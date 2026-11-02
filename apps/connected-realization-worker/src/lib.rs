@@ -115,6 +115,11 @@ pub(crate) const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_
 const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     ato_runtime_attempt::startup::PROCESS_STARTUP_RUNTIME_FEATURE,
+    // This build evaluates a D startup condition instead of only accepting a
+    // 2xx, so it may be handed one. A Runner built before it advertises
+    // neither, and the control plane refuses to place such a route there.
+    ato_runtime_attempt::startup::STARTUP_JSON_RUNTIME_FEATURE,
+    ato_runtime_attempt::startup::STARTUP_STATUS_RUNTIME_FEATURE,
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     NAMESPACE_ISOLATION_CAPABILITY,
     "isolation:runtime_launch=untrusted-v1",
