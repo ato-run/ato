@@ -259,6 +259,41 @@ fn the_group_serves_the_standard_mail_ports_and_the_webmail_surface() {
 }
 
 #[test]
+fn the_pinned_images_have_recorded_build_inputs() {
+    let images = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/ato-mail/images");
+    for file in [
+        "Dockerfile.stalwart",
+        "Dockerfile.missive",
+        "missive-nondefault-port.patch",
+        "missive-identity-submission-capability.patch",
+        "images.lock",
+        "README.md",
+    ] {
+        assert!(
+            images.join(file).is_file(),
+            "samples/ato-mail/images/{file} is missing"
+        );
+    }
+    let lock = std::fs::read_to_string(images.join("images.lock")).expect("images.lock");
+    for image in [STALWART_IMAGE, MISSIVE_IMAGE] {
+        assert!(
+            lock.contains(image),
+            "images.lock does not record the pinned image {image}"
+        );
+    }
+    // The recipes must stay the ones that produced the pins: the thin Stalwart
+    // layer copies the binary without xattrs (cap-drop=ALL compatibility), and
+    // Missive is built from the pinned commit with an entrypoint so the step
+    // argv stays a command.
+    let stalwart = std::fs::read_to_string(images.join("Dockerfile.stalwart")).unwrap();
+    assert!(stalwart.contains("no-preserve=xattr"));
+    assert!(stalwart.contains("stalwartlabs/stalwart@sha256:"));
+    let missive = std::fs::read_to_string(images.join("Dockerfile.missive")).unwrap();
+    assert!(missive.contains("7716106b6c4638426169dac264657437914bbe7f"));
+    assert!(missive.contains("ENTRYPOINT [\"/usr/local/bin/missive\"]"));
+}
+
+#[test]
 fn the_mail_store_is_one_state_slot_on_the_stalwart_step() {
     let route = mail_sample_route();
     let [state] = route.derivation.state.as_slice() else {

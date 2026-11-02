@@ -40,6 +40,7 @@ same Bindings and DNS exist; that is the intended "rebind external state".
 | PROXY v2 | the four mail Ports (`client_address_transport = "proxy_protocol_v2"`) |
 | State | `mail_data` → `/var/lib/stalwart`, read-write, Stalwart only |
 | Bindings | `relay_auth`, `mail_cert_pem`, `mail_key_pem` (Stalwart); `smtp_egress` (Adapter) |
+| Image build | `images/` — the Dockerfiles, Missive patches and digests that produced the two pins |
 | Effects | `requires-confirmation` (implied by `ato.tcp-egress@1`) |
 
 Ports are **logical**. The Runner allocates the public fixed-TCP addresses
