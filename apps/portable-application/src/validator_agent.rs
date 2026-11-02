@@ -16,7 +16,8 @@ use ato_materializer_static_web::{
 };
 use ato_objects::{PortableDependencyProfile, PortableOciArchive};
 use ato_runtime_attempt::verification::{
-    HTTP_OBSERVATION_METHOD, ReceiptContext, required_http_observations, verify_observed_candidate,
+    HTTP_OBSERVATION_METHOD, ReceiptContext, probe_tls_start, required_http_observations,
+    required_tls_observations, runtime_tls_observation, verify_observed_candidate,
 };
 use base64::Engine;
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -256,6 +257,55 @@ impl ValidatorAgent {
                 &observed.body,
             ));
         }
+        // Certificates are observed on the Run's public fixed-TCP endpoints,
+        // which the control plane names. An endpoint the job does not supply is
+        // never guessed at: the requirement stays unobserved and fails closed.
+        let mut tls = Vec::new();
+        for required in required_tls_observations(&spec) {
+            let Some(endpoint) = job
+                .tcp_endpoints
+                .iter()
+                .find(|endpoint| endpoint.port == required.port_id)
+            else {
+                continue;
+            };
+            let Some(address) = endpoint_address(&endpoint.address) else {
+                continue;
+            };
+            let observed = match with_retry(deadline, || {
+                ato_tls_observe::observe_tls(
+                    address,
+                    &required.server_name,
+                    probe_tls_start(required.start),
+                    Duration::from_secs(10),
+                    ato_tls_observe::TrustAnchors::PublicRoots,
+                )
+                .map(|facts| runtime_tls_observation(&required, facts))
+                .map_err(|error| RetryableFailure::retryable(error.to_string(), None))
+            }) {
+                Ok(observed) => observed,
+                Err(failure) => {
+                    let code = if failure.retryable {
+                        "observation_unreachable"
+                    } else {
+                        "observation_rejected"
+                    };
+                    if let Err(report_error) =
+                        self.api.report_runtime_failure(&job, code, &failure.reason)
+                    {
+                        eprintln!(
+                            "[validator] could not report abandonment for {}: {report_error:#}",
+                            job.job_id
+                        );
+                    }
+                    return Ok(ValidatorRunOutcome::HostedAbandoned {
+                        bundle_id: job.bundle_id.clone(),
+                        failure_code: code.to_owned(),
+                    });
+                }
+            };
+            tls.push(observed);
+        }
         let mut execution =
             job.execution_evidence
                 .clone()
@@ -290,16 +340,51 @@ impl ValidatorAgent {
             // execute a Scenario in v1, so a scenario requirement fails
             // closed as unobserved instead of being claimed.
             Vec::new(),
+            tls,
             execution,
             &ReceiptContext {
                 target: VerificationTargetKind::AtoRunHosted,
                 bundle_sha256: Some(&transport),
-                // The Hosted receipt is schema /1: it names no dependency
+                // The Hosted receipt is schema /1 — or /3 when it carries
+                // certificate evidence — and never names a dependency
                 // profile, whatever the transport declares.
                 portability_profile: None,
                 run_id: job.run_id.as_deref(),
             },
         );
+        // The receipt leaves this process only if it is internally consistent
+        // with the frozen K and the attempt it names: certificate evidence must
+        // belong to THIS requirement, a satisfied TLS verdict must be a public,
+        // unexpired, completed observation, and the observation set must be
+        // exactly K's. This is the same Rust authority the receiver uses.
+        let assignment = ato_formation::receipt::ReceiptAssignment {
+            contract: spec.contract,
+            contract_ref: spec.contract_ref,
+            derivation_ref: spec.derivation_ref,
+            attempt_id: job
+                .attempt_id
+                .as_deref()
+                .context("runtime job omitted attempt_id")?,
+            request_id: None,
+        };
+        if let Err(rejection) = ato_formation::receipt::accept_receipt(&assignment, &point.receipt)
+        {
+            let code = "receipt_inconsistent";
+            if let Err(report_error) = self.api.report_runtime_failure(
+                &job,
+                code,
+                &format!("{}: {}", rejection.code, rejection.detail),
+            ) {
+                eprintln!(
+                    "[validator] could not report {code} for {}: {report_error:#}",
+                    job.job_id
+                );
+            }
+            return Ok(ValidatorRunOutcome::HostedAbandoned {
+                bundle_id: job.bundle_id.clone(),
+                failure_code: code.to_owned(),
+            });
+        }
         self.api.ack_runtime(&job, &point.receipt)?;
         Ok(ValidatorRunOutcome::HostedVerified {
             bundle_id: job.bundle_id,
@@ -1615,6 +1700,30 @@ struct ValidationJob {
     execution_evidence: Option<VerificationExecutionEvidence>,
     #[serde(default)]
     instance_snapshot_ref: Option<String>,
+    /// Public fixed-TCP endpoints for observations that are not HTTP, by
+    /// logical Port. Supplied by the control plane; an observation that needs
+    /// one of these and does not find it stays unobserved.
+    #[serde(default)]
+    tcp_endpoints: Vec<HostedTcpEndpoint>,
+}
+
+/// One public fixed-TCP endpoint of the Run being observed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostedTcpEndpoint {
+    /// The logical Port this address serves.
+    port: String,
+    /// `host:port` the observation connects to.
+    address: String,
+}
+
+/// The address a TCP observation connects to, resolved once.
+fn endpoint_address(value: &str) -> Option<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let (host, port) = value.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    (host, port).to_socket_addrs().ok()?.next()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1925,6 +2034,7 @@ mod tests {
             endpoint: None,
             execution_evidence: None,
             instance_snapshot_ref: None,
+            tcp_endpoints: Vec::new(),
         };
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
         assert_eq!(report.format_version, 3);
@@ -1983,6 +2093,7 @@ mod tests {
             endpoint: None,
             execution_evidence: None,
             instance_snapshot_ref: None,
+            tcp_endpoints: Vec::new(),
         };
 
         // Inline path (report()): base64 present in the ack, as before this change.
@@ -2129,6 +2240,7 @@ mod tests {
             endpoint: None,
             execution_evidence: None,
             instance_snapshot_ref: None,
+            tcp_endpoints: Vec::new(),
         };
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
         assert_eq!(report.format_version, 4);
@@ -2197,6 +2309,7 @@ mod tests {
             endpoint: None,
             execution_evidence: None,
             instance_snapshot_ref: None,
+            tcp_endpoints: Vec::new(),
         };
 
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
