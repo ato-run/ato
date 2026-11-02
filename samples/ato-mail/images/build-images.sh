@@ -55,7 +55,16 @@ build_image stalwart "${here}" "${here}/Dockerfile.stalwart"
 echo "== Missive patched image"
 build_image missive "${missive_src}" "${here}/Dockerfile.missive"
 
-for image in ato-mail/stalwart:local ato-mail/missive:local; do
+# The Runner refuses an image-declared VOLUME without a mount at that exact path,
+# and upstream Stalwart declares /etc/stalwart. Flattening drops the declaration.
+echo "== Stalwart flat image"
+stalwart_container=$(docker create --platform "${platform}" ato-mail/stalwart:local --version)
+docker export "${stalwart_container}" | docker import --platform "${platform}" \
+  --change 'USER 1000:1000' --change 'ENTRYPOINT ["/usr/local/bin/stalwart"]' \
+  - ato-mail/stalwart:flat >/dev/null
+docker rm "${stalwart_container}" >/dev/null
+
+for image in ato-mail/stalwart:flat ato-mail/missive:local; do
   echo "== ${image}"
   docker image inspect "${image}" \
     --format 'platform={{.Os}}/{{.Architecture}} user={{.Config.User}} entrypoint={{json .Config.Entrypoint}} digests={{json .RepoDigests}}'
