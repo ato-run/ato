@@ -60,6 +60,14 @@ mean not advertised, and neither is ever emitted without a reason. Doctor only
 reports capabilities it measured: a host with no NVIDIA device is not told it
 has one, and no capability is claimed from a guess.
 
+`surface_gate` reports whether the Surface listener this configuration would
+start is public (`publication_reasons`: `public_base_url`,
+`host_boundary_slot`, `non_loopback_listener`) and whether the assertion gate
+is on. The verification key is delivered inside each lease claim and is never a
+host fact, so doctor reports the policy (`per_lease_claim` or `not_required`)
+rather than a key value, and names why the gate is off when no assertion is
+required.
+
 ## Enroll and reconnect
 
 In ato.run Settings → Connected Runners, request a connection code. It expires
@@ -87,9 +95,15 @@ new device. A revoked code only invalidates an unspent registration.
 A public origin is optional for control-plane connection. Add
 `--public-base-url 'https://your-runner.example'` only when you already expose
 the Worker Surface through an authenticated supported route. Outbound control
-alone does not provide remote Web UI access. `--state-volume-root <directory>`
-uses the existing volume-store admission; configured storage is not advertised
-as durable until admission succeeds.
+alone does not provide remote Web UI access. A configured public origin, a
+host-boundary slot, or a non-loopback Surface listener makes the listener
+public, and every public request must then carry the per-Runner assertion the
+control plane signs. The Worker refuses a lease without that key
+(`surface_assertion_key_missing`) instead of publishing the workload ungated; a
+loopback-only Runner with no public origin keeps running without a key.
+`doctor` reports the resulting policy under `surface_gate`.
+`--state-volume-root <directory>` uses the existing volume-store admission;
+configured storage is not advertised as durable until admission succeeds.
 
 ## Supervision
 
