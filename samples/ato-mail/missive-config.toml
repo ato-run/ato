@@ -1,0 +1,9 @@
+jmap_url = "http://stalwart:8080"
+page_size = 50
+
+[service]
+name = "missive"
+port = 8080
+
+[session]
+storage = "memory"

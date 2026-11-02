@@ -1,4 +1,4 @@
-# ato-mail — D1 sample (Stalwart + fixed transport Adapter)
+# ato-mail — D1 sample (Stalwart + Missive webmail + fixed transport Adapter)
 
 Status: **local build verified; not deployed.** The bundle builds and validates
 offline, and `apps/portable-application/tests/ato_mail_sample.rs` keeps the facts
@@ -8,8 +8,9 @@ build or the test. No production change is authorized by this directory.
 
 This is slice S3 of the self-hosted mail plan
 (`docs/ops/self-hosted-mail-ato-app-plan-20261102.md`): Derivation D1 of "run
-the mail service as an Ato app". It is one Capsule with one K; D1 composes two
-components because Stalwart cannot consume the egress grant itself.
+the mail service as an Ato app". It is one Capsule with one K; D1 composes three
+components: the mail server, the browser mail client, and the transport Adapter
+(Stalwart cannot consume the egress grant itself).
 
 ## D1 components
 
@@ -84,47 +85,53 @@ ops. PROXY v2 is an ingress concern: the Runner terminates the client connection
 and inserts the header toward the workload, and the verifier neither sends nor
 knows about it.
 
-## HTTP observations (K3), and what they actually prove
+## Browser mail client (K3), and what the observations prove
 
-All three are unauthenticated `GET`s against the pinned Stalwart build's HTTP
-listener. The shapes come from the pinned source, commit `474dd02`:
+D1's Web Surface is **Govcraft Missive**, a JMAP webmail client. It is the only
+service with `app.http`. The browser opens the Run's public URL and gets the
+client; Missive's own server then talks to Stalwart's JMAP listener
+(`http://stalwart:8080`, the `stalwart.jmap` Port) inside the service group.
+The browser never contacts the JMAP listener directly, and no JMAP URL is in K.
 
-| Requirement | Path | Status | Source of truth in the pinned build | What it proves |
-|---|---|---|---|---|
-| `http-live` | `/healthz/live` | 200 | `crates/http/src/request.rs`: the `healthz` match arm's `live` branch returns `JsonProblemResponse(200)` | the HTTP listener and its routing table answer |
-| `http-ready` | `/healthz/ready` | 200 | same match arm: 200 when a data storage backend is configured, **503** otherwise (`core.storage.data.is_none()`) | the listener answers **and** a store is wired to the state mount |
-| `http-jmap-discovery` | `/.well-known/jmap` | 307 | `crates/http/src/request.rs`: the `"jmap"` arm returns `TEMPORARY_REDIRECT` with `Location: /jmap/session`, **before** any authentication | the JMAP session-discovery route exists |
+Two unauthenticated `GET`s decide the browser half of K3:
+
+| Requirement | Path | Status | Why |
+|---|---|---|---|
+| `webmail-health` | `/health` | 200 | Missive's own health route: the web server is up |
+| `webmail-ui` | `/` | 200 | the HTML entry point the browser opens |
 
 Weaknesses, stated rather than hidden:
 
-- The three routes are answered before any authentication, but they are not
-  exempt from Stalwart's anonymous-request rate limiter
-  (`is_http_anonymous_request_allowed`), which a hostile or broken client can
-  trip. From the verifier's own address, with the shipped defaults, each is a
-  stable answer; it is not a promise that every source sees it.
-- No body digest is pinned. The `/healthz/*` bodies are `serde_json`-generated
-  problem documents; pinning their bytes without observing the pinned image once
-  would make K fragile for no gain. If staging shows the exact body, pinning it
-  is a follow-up, not a rewrite of K.
-- A 307 is a routing fact, not an authorization fact. The session resource it
-  points at (`/jmap/session`) requires authentication, and a `401` there would
-  also "answer" while proving nothing about mail. This sample therefore does not
-  observe `/jmap/session`, and an unauthenticated `401` is never counted as a
-  satisfied K3 (the test enforces that).
-- Any HTTP server can return `200`, `307` or `401`. These observations prove
-  the *listener surface* is the expected one; they say nothing about SMTP, IMAP,
-  accounts, mailboxes or delivery.
+- A 200 on `/` proves the client's HTML is served, **not** that a user can sign
+  in, read a mailbox or send mail. Those are separate functional conditions
+  (below) and are not Receipt-backed yet.
+- No body digest is pinned. The SPA entry point can change between builds; K
+  pins that the client answers, not its bytes.
+- Stalwart's own `/healthz/*` and JMAP discovery are no longer observed: the
+  only HTTP Surface is Missive and the hosted relay observes the Surface Port.
+  Stalwart liveness is implied by Missive starting, not asserted by K.
+- Any HTTP server can return 200. These observations prove the Surface is the
+  expected client; a static page that merely *says* "mail" would not satisfy the
+  functional conditions, which is why they are designed separately.
 
-## 443 is not in this sample
+## Browser access vs the mail-domain 443
 
-K3's HTTPS endpoint and K5 for 443 are served by the host Caddy, outside D1.
-Observing them needs the external-endpoint Binding from
-`docs/rfcs/draft/ADR-043-external-endpoint-observation-binding.md` (a
-binding-backed logical Port plus authorized endpoint resolution), which is not
-implemented. Consequences, recorded here so nobody has to rediscover them:
+Two different URLs matter:
+
+- **The browser gets the client from the Run's public URL** — the Runner's
+  ingress / hosted ready URL for the `app.http` Surface. That is how a person
+  opens Missive in a browser; it does not depend on the mail domain's 443 and it
+  is not in K.
+- **`mail.ato.run:443` (and the JMAP/admin endpoint on the mail domain)** stay
+  served by the host Caddy, outside D1. Observing that endpoint needs the
+  external-endpoint Binding from
+  `docs/rfcs/draft/ADR-043-external-endpoint-observation-binding.md`, which is
+  not implemented.
+
+Consequences, recorded so nobody has to rediscover them:
 
 - this sample declares **no** 443 requirement and no binding-backed Port;
-- the **bundle's own K** (four TLS + three HTTP observations) can reach
+- the **bundle's own K** (four TLS + two HTTP observations) can reach
   `fully_satisfied` once a Run serves them — and that is all it means. It does
   **not** mean the mail service works: K1/K2/K4/K6 are not in this K yet, and
   the plan's mail Capsule stays unsatisfied until 443 and the functional
@@ -338,6 +345,9 @@ protocols, and that each is visible to exactly the one service that needs it.
 
 ## Known limits
 
+- **Browser use is not Contract-verified.** The sample asserts that the client is
+  served (`/` and `/health`); sign-in, mailbox access and sending are manual
+  staging steps until the credentialed observation capability exists.
 - **Not deployed.** Build and validation only. The bundle's own seven
   observations are the only ones it can decide; K1, K2, K4, K6 and the 443 half
   of K3/K5 are not in this K (see above), so a green receipt for this bundle is
