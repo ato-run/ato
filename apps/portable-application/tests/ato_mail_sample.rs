@@ -28,6 +28,7 @@ use ato_portable_application::{
 
 const STALWART_IMAGE: &str = "ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7ab2749baa5bcd15a56b51f90ba99aea0c3256ce04d4f7e5e3076e8e0";
 const ADAPTER_IMAGE: &str = "ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:868ae56c18a004e7e4cc0e8d0707364b9d28242b914ec25f18f3fe1ca3a6aabf";
+const MISSIVE_IMAGE: &str = "ghcr.io/koh0920/govcraft-missive@sha256:f2dd0d893a3fbf83812e35df3510d3fbc9846e9dd31a8a84899cf5fa818682fe";
 /// The one host name these samples declare for staging. Changing it changes the
 /// certificate the staging Runner must present on every mail Port.
 const STAGING_SERVER_NAME: &str = "mx-test.atousercontent.com";
@@ -47,8 +48,8 @@ fn the_bundle_pins_its_effect_policy_and_its_whole_observation_set() {
     // operator-managed TCP egress; losing it would change admission, not just
     // documentation.
     assert_eq!(route.derivation.effects, EffectClass::RequiresConfirmation);
-    // Seven observations decide this bundle's K: four TLS + three HTTP.
-    assert_eq!(route.contract.requirements.len(), 7);
+    // Six observations decide this bundle's K: four TLS + two HTTP.
+    assert_eq!(route.contract.requirements.len(), 6);
     let verifiers = route
         .contract
         .requirements
@@ -140,19 +141,15 @@ fn k5_asks_for_a_certificate_on_every_mail_port_in_the_right_start_mode() {
 }
 
 #[test]
-fn k3_observes_definitions_the_pinned_http_listener_answers_without_a_session() {
+fn k3_observes_the_browser_mail_client_the_pinned_image_serves() {
     let route = mail_sample_route();
     let expected = BTreeMap::from([
-        // Proves the HTTP listener and its routing table are alive. 200 on the
-        // pinned build before any authentication or storage access, subject
-        // only to Stalwart's anonymous-request rate limiter.
-        ("http-live", ("/healthz/live", 200u16)),
-        // 200 only when a data storage backend is configured (503 otherwise),
-        // so it also covers "the state mount is wired to a store".
-        ("http-ready", ("/healthz/ready", 200)),
-        // JMAP session discovery: 307 to /jmap/session, returned on the
-        // pinned build before any authentication is attempted.
-        ("http-jmap-discovery", ("/.well-known/jmap", 307)),
+        // Missive's health route on the pinned image; 200 before any session.
+        ("webmail-health", ("/health", 200u16)),
+        // The HTML entry point the browser opens. The client is a browser app,
+        // so this is the K3 condition that matters; sign-in and mailbox access
+        // are separate functional conditions the README designs for.
+        ("webmail-ui", ("/", 200)),
     ]);
     for (id, (path, status)) in &expected {
         let requirement = requirement(&route.contract.requirements, id);
@@ -203,11 +200,12 @@ fn public_mail_ports_carry_proxy_protocol_v2_and_the_surface_does_not() {
     // MTAs/IMAP clients; the internal relay hop is inside the group. Neither
     // carries a PROXY header.
     assert_eq!(transports.get("app.http"), Some(&None));
+    assert_eq!(transports.get("stalwart.jmap"), Some(&None));
     assert_eq!(transports.get("relay.smtp"), Some(&None));
 }
 
 #[test]
-fn the_group_serves_the_standard_mail_ports_and_the_jmap_surface() {
+fn the_group_serves_the_standard_mail_ports_and_the_webmail_surface() {
     let route = mail_sample_route();
     let guest_ports = route
         .derivation
@@ -220,6 +218,7 @@ fn the_group_serves_the_standard_mail_ports_and_the_jmap_surface() {
         ("stalwart.submissions", 465),
         ("stalwart.submissions-starttls", 587),
         ("stalwart.imaps", 993),
+        ("stalwart.jmap", 8080),
         ("app.http", 8080),
         ("relay.smtp", 2525),
     ] {
@@ -235,12 +234,13 @@ fn the_group_serves_the_standard_mail_ports_and_the_jmap_surface() {
         ("stalwart.submissions", "ato.tcp@1"),
         ("stalwart.submissions-starttls", "ato.tcp@1"),
         ("stalwart.imaps", "ato.tcp@1"),
+        ("stalwart.jmap", "ato.tcp@1"),
         ("relay.smtp", "ato.tcp@1"),
     ] {
         assert_eq!(guest_ports[id].protocol, protocol, "protocol of {id}");
     }
     assert_eq!(route.application.surfaces[0].port, "app.http");
-    assert_eq!(route.application.surfaces[0].path, "/healthz/live");
+    assert_eq!(route.application.surfaces[0].path, "/health");
 
     let images = route
         .derivation
@@ -254,6 +254,7 @@ fn the_group_serves_the_standard_mail_ports_and_the_jmap_surface() {
         })
         .collect::<BTreeMap<_, _>>();
     assert_eq!(images.get("stalwart"), Some(&Some(STALWART_IMAGE)));
+    assert_eq!(images.get("missive"), Some(&Some(MISSIVE_IMAGE)));
     assert_eq!(images.get("relay"), Some(&Some(ADAPTER_IMAGE)));
 }
 
