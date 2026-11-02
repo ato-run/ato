@@ -7,7 +7,19 @@ Status: draft。RunPodの起動準備と診断境界。2回目はHTTP200まで�
 Process開始、HTTP応答可能、準備完了は異なる観測である。既存RuntimeLaunchSpecのHTTP readinessを使用し、選択Dが明示する`requirements.startup`をauthoringの`derivation.startup`から束縛する。
 `port`、`path`、`timeout_ms`はrealizationの準備条件であり、Kの観測・期待status・body digestを書き換えない。省略時は既存経路の動作とcanonical bytesを維持する。
 
-Runtimeは1つの開始時刻・期限を使い、HTTP readinessの200系応答を待つ。503は応答可能だが準備未完了として記録する。準備待ちは停止要求・実行認可・Run期限で中断し、終了したprocessは期限を待たず失敗する。期限後のreadyは採用しない。
+Runtimeは1つの開始時刻・期限を使い、HTTP readinessを待つ。既定は200系応答で、routeが`expect_status`を明示した場合はそのstatusだけをreadyとし、`json`を明示した場合はboundedなbodyのJSON条件も満たすまで待つ。503は応答可能だが準備未完了として記録する。準備待ちは停止要求・実行認可・Run期限で中断し、終了したprocessは期限を待たず失敗する。期限後のreadyは採用しない。
+
+## 起動確認URLと利用者URLの分離（単一OCIへの拡張）
+
+`derivation.startup`はprocess routeに加えて単一OCI routeでも宣言できる。service groupは各containerの準備時刻が異なり1つの条件で表せないため、明示的に拒否する。`port`はそのrouteが宣言済みのPort（単一routeでは`app.http`）でなければならない。
+
+- `expect_status`（任意、100..=599）: 既定は2xx。利用者URLのstatusではない。
+- `json`（任意）: RFC 6901 pointer（`/data/progress`）と`gte`または`equals`のどちらか1つ。floatは拒否する。
+- `max_body_bytes`（任意、既定64KiB、上限1MiB）: `json`指定時のみ。超過は待機継続ではなく失敗。
+
+これらはDの準備条件であり、Kの観測・期待status・body digestを書き換えない。たとえばSiYuanは利用者URL`/`（Kは`/`→200のまま）と起動確認`/api/system/bootProgress`の`data.progress >= 100`を別に宣言する。未指定時のcanonical bytesは変更しない（`skip_serializing_if`）。
+
+RuntimeLaunchSpec v1のHTTP readinessは`expect_status`、`json`、`max_body_bytes`を任意で運ぶ。条件付きstartupを評価できるRunnerだけが`runtime_feature=startup_json_v1`（statusは`startup_expect_status_v1`）を広告し、control planeは広告の無いRunnerへそのrouteを配置しない。条件を評価できないprobeは条件を無視してreadyを返さず拒否する（fail closed）。
 準備完了後に元の固定Kを1回観測・検証する。K不成立を準備待ちとして再試行せず、失敗のまま停止・保存へ進める。
 
 ## ABIとイメージ

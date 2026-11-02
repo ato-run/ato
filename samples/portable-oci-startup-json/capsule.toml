@@ -1,0 +1,67 @@
+# SiYuan Notes, upstream v3.8.9, unmodified.
+#
+# Two different URLs, deliberately:
+#
+#   user URL      /                            the notes UI            -> K
+#   startup URL   /api/system/bootProgress     {"data":{"progress":N}}
+#
+# SiYuan answers 200 on its own UI while the kernel is still indexing a
+# workspace, so "the entry path answered 200" is not the same statement as
+# "the application has started". K stays exactly what a user sees (the UI
+# answering 200); the startup requirement is the physical preparation signal
+# and never enters K, D identity, or a receipt observation.
+
+schema = "ato.capsule/2"
+
+[application]
+title = "SiYuan Notes"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+# SiYuan keeps its data, assets and configuration in one workspace directory.
+# Without this slot the notes would live in scratch space that disappears with
+# the Run.
+[[state]]
+id = "siyuan_data"
+use = "ato.state.filesystem@1"
+mount = "/siyuan/workspace"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+# Deliberately weak about content: a notes app's pages change the moment
+# somebody writes a note. What is preserved is "SiYuan is up and serving its
+# own UI". The boot progress is NOT observed here.
+[[contract.observation]]
+id = "siyuan-serves"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["--workspace=/siyuan/workspace/"]
+cwd = "."
+guest_port = 6806
+runtimes = { "oci.image" = "docker.io/b3log/siyuan@sha256:61bef308dd8ebb54249e10f335cf3d1d3b221047bd4a9614d44534d37078fc55", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/opt/siyuan/entrypoint.sh", "oci.memory_bytes" = "1073741824", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+
+[derivation.startup]
+port = "app.http"
+path = "/api/system/bootProgress"
+timeout_ms = 120000
+expect_status = 200
+
+[derivation.startup.json]
+pointer = "/data/progress"
+gte = 100
+
+[effects]
+default = "pure"

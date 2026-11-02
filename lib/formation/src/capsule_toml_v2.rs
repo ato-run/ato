@@ -803,16 +803,30 @@ fn parse_capsule_toml_v2_impl(
                 startup
                     .validate()
                     .map_err(|e| invalid("derivation.startup", e.0))?;
-                if derivation.protocol != PROCESS_PROTOCOL {
+                // A service group is deliberately out of scope: its containers
+                // become ready at different times, and one startup condition
+                // cannot describe that. It still parses everywhere else.
+                if !derivation.service.is_empty() {
                     return Err(invalid(
                         "derivation.startup",
-                        "startup is supported only by a process route",
+                        "startup is not supported on an OCI service group",
                     ));
                 }
+                if !matches!(
+                    derivation.protocol.as_str(),
+                    PROCESS_PROTOCOL | OCI_PROTOCOL
+                ) {
+                    return Err(invalid(
+                        "derivation.startup",
+                        "startup is supported only by a process route or a single OCI route",
+                    ));
+                }
+                // A single route declares exactly one Port, `app.http`. Naming
+                // any other Port would leave the requirement unobserved.
                 if startup.port != "app.http" {
                     return Err(invalid(
                         "derivation.startup.port",
-                        "startup must name the process route's app.http Port",
+                        "startup must name the route's declared app.http Port",
                     ));
                 }
             }
@@ -1687,5 +1701,183 @@ start = "smtp-starttls"
         ] {
             assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
         }
+    }
+
+    /// One single-container route whose user URL and startup URL differ.
+    const OCI_STARTUP: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Notes"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "oci"
+use = "ato.oci@1"
+argv = ["serve"]
+cwd = "."
+guest_port = 6806
+runtimes = { "oci.image" = "example/notes@sha256:1111111111111111111111111111111111111111111111111111111111111111", "oci.platform" = "linux/amd64" }
+
+[derivation.startup]
+port = "app.http"
+path = "/api/system/bootProgress"
+timeout_ms = 120000
+
+[derivation.startup.json]
+pointer = "/data/progress"
+gte = 100
+
+[effects]
+default = "pure"
+"#;
+
+    #[test]
+    fn q15_startup_stays_available_on_a_process_route() {
+        let process = TWO_PROCESS_ROUTES.replace(
+            "[effects]",
+            r#"[derivation.startup]
+port = "app.http"
+path = "/health"
+timeout_ms = 60000
+
+[effects]"#,
+        );
+        let draft = parse_capsule_toml_v2(&process).unwrap();
+        // The table attaches to the last declared route, and the earlier one
+        // stays exactly as it was.
+        assert!(draft.derivations[0].startup.is_none());
+        let startup = draft.derivations[1].startup.as_ref().expect("startup");
+        assert_eq!(startup.path, "/health");
+        assert_eq!(startup.timeout_ms, 60_000);
+        assert!(startup.json.is_none());
+    }
+
+    #[test]
+    fn q15_a_single_oci_route_accepts_a_startup_requirement() {
+        let draft = parse_capsule_toml_v2(OCI_STARTUP).unwrap();
+        let [route] = draft.derivations.as_slice() else {
+            panic!("one route");
+        };
+        assert_eq!(route.kind, PortableDerivationKindV2::Oci);
+        let startup = route.startup.as_ref().expect("startup");
+        assert_eq!(startup.port, "app.http");
+        assert_eq!(startup.path, "/api/system/bootProgress");
+        let condition = startup.json.as_ref().expect("json condition");
+        assert_eq!(condition.pointer, "/data/progress");
+        assert_eq!(
+            condition.gte,
+            Some(crate::requirements::StartupJsonScalar::Integer(100))
+        );
+        // K is untouched: the user URL is still what the Contract observes.
+        assert_eq!(draft.observations[0].path, "/");
+        assert_eq!(draft.observations[0].status, 200);
+    }
+
+    #[test]
+    fn q15_a_service_group_refuses_a_startup_requirement() {
+        let grouped = SERVICE_GROUP.replace(
+            "[effects]",
+            r#"[derivation.startup]
+port = "app.http"
+path = "/health"
+timeout_ms = 60000
+
+[effects]"#,
+        );
+        let error = parse_capsule_toml_v2(&grouped).unwrap_err();
+        assert!(
+            matches!(&error, CapsuleTomlV2Error::Invalid { path, message }
+                if path == "derivation.startup" && message.contains("service group")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn q15_startup_must_name_the_routes_declared_port() {
+        let error = parse_capsule_toml_v2(&OCI_STARTUP.replace(
+            "port = \"app.http\"\npath = \"/api/system/bootProgress\"",
+            "port = \"other.http\"\npath = \"/api/system/bootProgress\"",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&error, CapsuleTomlV2Error::Invalid { path, .. }
+                if path == "derivation.startup.port"),
+            "{error}"
+        );
+        // An OCI service group's Port is declared per service, so it is refused
+        // by shape before any Port name could match.
+        let group = SERVICE_GROUP.replace(
+            "[effects]",
+            r#"[derivation.startup]
+port = "backend.http"
+path = "/health"
+timeout_ms = 60000
+
+[effects]"#,
+        );
+        assert!(parse_capsule_toml_v2(&group).is_err());
+    }
+
+    #[test]
+    fn q15_startup_json_conditions_are_validated_at_the_grammar() {
+        let without_json = OCI_STARTUP.replace(
+            "\n[derivation.startup.json]\npointer = \"/data/progress\"\ngte = 100\n",
+            "\nmax_body_bytes = 4096\n",
+        );
+        assert!(!without_json.contains("[derivation.startup.json]"));
+        for (what, text) in [
+            (
+                "relative pointer",
+                OCI_STARTUP.replace(
+                    "pointer = \"/data/progress\"",
+                    "pointer = \"data/progress\"",
+                ),
+            ),
+            (
+                "both comparisons",
+                OCI_STARTUP.replace("gte = 100", "gte = 100\nequals = 100"),
+            ),
+            ("no comparison", OCI_STARTUP.replace("gte = 100\n", "")),
+            (
+                "floating threshold",
+                OCI_STARTUP.replace("gte = 100", "gte = 99.5"),
+            ),
+            ("an unused size bound", without_json),
+            (
+                "status out of range",
+                OCI_STARTUP.replace(
+                    "timeout_ms = 120000",
+                    "timeout_ms = 120000\nexpect_status = 99",
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what} was accepted");
+        }
+        // The same grammar accepts the bounded form it does support.
+        let bounded = OCI_STARTUP.replace(
+            "timeout_ms = 120000",
+            "timeout_ms = 120000\nexpect_status = 200\nmax_body_bytes = 4096",
+        );
+        assert!(parse_capsule_toml_v2(&bounded).is_ok());
     }
 }
