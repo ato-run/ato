@@ -356,6 +356,7 @@ async fn real_owned_terminal_freezes_actual_k_bytes_and_cleans_every_endpoint() 
                 port, "GET", "/result", 200, body,
             )],
             Vec::new(),
+            Vec::new(),
             evidence.clone(),
             &receipt_context,
         )

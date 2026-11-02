@@ -604,16 +604,27 @@ impl PortableBundleExecutor<'_> {
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
         let base = format!("http://127.0.0.1:{host_port}");
         let mut observation_endpoints = BTreeMap::from([(surface_port.id.clone(), base.clone())]);
-        for observation in
-            ato_runtime_attempt::verification::required_http_observations(&route.attempt_spec(None))
-        {
-            if observation.port_id == surface_port.id {
+        let attempt_spec = route.attempt_spec(None);
+        let mut observation_ports: Vec<String> =
+            ato_runtime_attempt::verification::required_http_observations(&attempt_spec)
+                .into_iter()
+                .map(|observation| observation.port_id)
+                .collect();
+        // A TLS observation reaches the same logical Port as an HTTP one; the
+        // endpoint map is what the attempt connects through either way.
+        observation_ports.extend(
+            ato_runtime_attempt::verification::required_tls_observations(&attempt_spec)
+                .into_iter()
+                .map(|observation| observation.port_id),
+        );
+        for port_id in observation_ports {
+            if port_id == surface_port.id || observation_endpoints.contains_key(&port_id) {
                 continue;
             }
             let port = derivation
                 .ports
                 .iter()
-                .find(|port| port.id == observation.port_id)
+                .find(|port| port.id == port_id)
                 .context("observation names undeclared service Port")?;
             let (_, handle) = group
                 .services()
