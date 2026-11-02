@@ -10,6 +10,7 @@
 mod activity_controller;
 mod data_plane;
 pub mod diagnostics;
+pub mod host_capabilities;
 pub mod host_resources;
 #[cfg(all(test, target_os = "linux"))]
 mod managed_hosted_tests;
@@ -99,8 +100,8 @@ use activity_controller::{
     ActivityControllerEvent, ActivityControllerPageConfig, ActivityControllerServer,
 };
 
-const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
-const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
+pub(crate) const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
+pub(crate) const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
 /// Capabilities every Runner has, regardless of host.
 ///
 /// The VM-snapshot materializer and Firecracker backend are deliberately NOT
@@ -199,7 +200,9 @@ fn with_explicit_runtime_placement_capability(
     }
     capabilities
 }
-fn explicit_runtime_placement_kinds(
+/// The explicit-placement routing restriction, in one place so the heartbeat
+/// and the doctor apply exactly the same filter.
+pub(crate) fn explicit_runtime_placement_kinds(
     mut kinds: Vec<&'static str>,
     required: bool,
 ) -> Vec<&'static str> {
@@ -5459,32 +5462,40 @@ struct LeaseStatusProbe {
     status: Option<String>,
 }
 
-fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
-    let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
-    // Only advertised where the workload can actually be contained. A Runner
-    // that took `runtime_launch` leases it must then refuse would look
-    // available to the scheduler and fail every Run it won.
-    // A slot still holding an unconfirmed previous Run takes no new runtime
-    // work: its old workload may still be writing.
-    if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
-        && runtime_launch::recovery::slot_recovered()
-    {
-        kinds.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+/// What the heartbeat measures about its own lease kinds.
+///
+/// The decision itself lives in `host_capabilities` so doctor and the heartbeat
+/// cannot disagree. Only the inputs admission actually depends on are set here;
+/// the diagnostic observations behind a negative answer are doctor's business
+/// and are deliberately not probed on every heartbeat.
+fn lease_kind_facts(
+    config: &WorkerConfig,
+    persistent_volumes: bool,
+) -> host_capabilities::HostFacts {
+    host_capabilities::HostFacts {
+        // Only advertised where the workload can actually be contained. A
+        // Runner that took `runtime_launch` leases it must then refuse would
+        // look available to the scheduler and fail every Run it won. A slot
+        // still holding an unconfirmed previous Run takes no new runtime work:
+        // its old workload may still be writing.
+        containment_available: runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED(),
+        slot_recovered: runtime_launch::recovery::slot_recovered(),
         // Volume operations need the volume store, and the same recovered
         // slot: an unrecovered one may still have a workload writing.
-        if persistent_volumes {
-            kinds.push(runtime_launch::volume_maintenance::STATE_VOLUME_MAINTENANCE_LEASE_KIND);
-        }
+        persistent_volumes,
+        explicit_placement: config.require_explicit_runtime_placement,
+        browser_executor_configured: config.browser_chrome.as_deref().is_some_and(Path::is_file)
+            && config
+                .run_control_verification_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+        browser_executor_evaluated: true,
+        ..host_capabilities::HostFacts::default()
     }
-    if config.browser_chrome.as_deref().is_some_and(Path::is_file)
-        && config
-            .run_control_verification_key
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        kinds.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
-    }
-    explicit_runtime_placement_kinds(kinds, config.require_explicit_runtime_placement)
+}
+
+fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
+    host_capabilities::lease_admission(&lease_kind_facts(config, persistent_volumes)).kinds
 }
 
 fn truncate(value: &str, max: usize) -> String {
