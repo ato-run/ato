@@ -343,12 +343,36 @@ PROXY v2 on the four mail Ports and on nothing else; the guest ports; the two
 pinned images; the single state slot and its mount; all four Bindings, their
 protocols, and that each is visible to exactly the one service that needs it.
 
+
+## Local browser verification (2026-11-02)
+
+The pinned images are not pullable here, so the browser path was exercised with
+an equivalent local pair:
+
+- `stalwartlabs/stalwart:v0.16.22` (the public image the staging fixture's
+  Stalwart layer derives from), HTTP listener on 8080, with
+  `STALWART_PUBLIC_URL` and Missive's `jmap_url` both
+  `http://stalwart:8080`. The two must match: Stalwart builds the session URLs
+  from `STALWART_PUBLIC_URL`, and Missive only follows redirects back to its own
+  `jmap_url` host.
+- Missive built from the pinned commit `7716106` with the two compatibility
+  patches (the non-default-port patch is what allows `jmap_url` to carry
+  `:8080`; without it Missive rejects the JMAP discovery redirect).
+- A `demo.test` domain and `demo@demo.test` user, one message delivered over
+  SMTP, then a real browser (headless Chrome over CDP): the login page rendered,
+  sign-in returned 303 to `/inbox`, and the mailbox list plus the delivered
+  message rendered in the client.
+
+This is browser-level evidence for the client/backend composition. It is **not**
+an Ato Run and not staging evidence. Commands, evidence PNGs and limits:
+`docs/ops/mail-browser-local-verification-20261102.md`.
+
 ## Known limits
 
 - **Browser use is not Contract-verified.** The sample asserts that the client is
   served (`/` and `/health`); sign-in, mailbox access and sending are manual
   staging steps until the credentialed observation capability exists.
-- **Not deployed.** Build and validation only. The bundle's own seven
+- **Not deployed.** Build and validation only. The bundle's own six
   observations are the only ones it can decide; K1, K2, K4, K6 and the 443 half
   of K3/K5 are not in this K (see above), so a green receipt for this bundle is
   **not** evidence that mail works.
