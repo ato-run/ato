@@ -271,6 +271,14 @@ Decisions and gaps recorded while doing S2/S3:
   nondefault-port patch for `:8080`. Evidence and limits:
   `samples/ato-mail/README.md` and `docs/ops/mail-browser-local-verification-20261102.md`
   (on the S3 branch). This is not an Ato Run and not staging evidence.
+- **Browser verification harness ready (S3 branch)**: `scripts/ops/mail-browser-check.mjs`
+  opens the Run URL in headless Chrome, signs in with the staging test account,
+  asserts the mailbox renders and writes `login.png`/`inbox.png`/`result.json`;
+  `docs/ops/mail-browser-verification-runbook.md` defines pass criteria (K3
+  receipt + browser evidence + Run/lease/attempt) and failure interpretation.
+  Validated locally against a Docker pair. `ato run` refuses OCI routes on
+  macOS ("OCI Container routes require a native Linux Docker host"), so the
+  first Ato Run browser check is on the Linux dedicated Runner (Phase 5).
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
