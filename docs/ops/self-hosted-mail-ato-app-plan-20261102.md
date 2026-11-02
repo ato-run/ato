@@ -326,6 +326,14 @@ Decisions and gaps recorded while doing S2/S3:
   entrypoint and proves the Stalwart binary execs under `--cap-drop=ALL` for the
   Runner preload. Local digests are not the staging pins; only preloaded images
   belong in the lock/capsule.
+- **Hosted staging browser check PASSED (2026-11-02)**: the browser slice was
+  imported with `managed` placement; the Run verified `fully_satisfied` with
+  Run/lease/attempt, surface `ready`, and the browser harness signed in through
+  the staging app URL. Record: `docs/ops/mail-browser-staging-run-20261102.md`
+  (S3 branch). Images were exposed through an **ephemeral Cloudflare quick
+  tunnel** to the host registry (pinned by digest), a staging workaround rather
+  than a distribution design; sign-in used the test-only recovery admin. Full D1
+  (fixed TCP, TLS/K5, Bindings, 443) remains open.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
