@@ -98,10 +98,18 @@ try {
   const inboxTitle = await evaluate(call, 'document.title');
   const inboxUrl = await evaluate(call, 'location.href');
   await waitForBody(call);
-  const bodyText = await evaluate(
-    call,
-    'document.body ? document.body.innerText.slice(0, 4000) : ""',
-  );
+  const readBody = () =>
+    evaluate(call, 'document.body ? document.body.innerText.slice(0, 4000) : ""');
+  let bodyText = await readBody();
+  if (expectText) {
+    // The message list can render after the page body (HTMX/SSE); give the
+    // expected text the same bounded wait the title gets.
+    const deadline = Date.now() + 15000;
+    while (!bodyText.includes(expectText) && Date.now() < deadline) {
+      await sleep(500);
+      bodyText = await readBody();
+    }
+  }
   await screenshot(call, path.join(outDir, 'inbox.png'));
   const signedIn = /inbox|mail/i.test(inboxTitle) && /mailbox|inbox|deleted|sent/i.test(bodyText);
   result.signedIn = signedIn;
