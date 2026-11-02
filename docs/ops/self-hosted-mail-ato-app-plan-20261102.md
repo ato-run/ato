@@ -319,6 +319,13 @@ Decisions and gaps recorded while doing S2/S3:
   hashes, stays out of the repository, and is an operator prep step. Validated
   locally: a fresh store started from the seed (no recovery admin) and the
   browser harness signed in.
+- **Image build/preload recipes validated (S3 branch)**: `build-images.sh` was run
+  end-to-end from a clean pinned checkout (both images linux/amd64, expected
+  users/entrypoints); it now falls back to `docker build` without BuildKit and
+  refuses an already-patched checkout. `verify-preload.sh` checks platform/user/
+  entrypoint and proves the Stalwart binary execs under `--cap-drop=ALL` for the
+  Runner preload. Local digests are not the staging pins; only preloaded images
+  belong in the lock/capsule.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
