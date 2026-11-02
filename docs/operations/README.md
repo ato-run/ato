@@ -11,6 +11,9 @@ flag state with the operation record.
   drain, quiesce, verify candidate, switch, journal/recovery and rollback.
 - [Connected Runner rollout and rollback](runner-rollout-and-rollback.md):
   stop new assignment and confirm owned resources before switching binaries.
+- [Worker binary distribution](worker-binary-distribution.md): pin the
+  Connected Runner binary to a commit and version, generate and verify its
+  SHA-256 manifest without network trust, install and roll back.
 - [Component compatibility matrix](compatibility-matrix.md): which CLI, bundle,
   API/PWA contract and Runner launch-spec versions must agree (and how a
   capability string can lie about the binary behind it).
