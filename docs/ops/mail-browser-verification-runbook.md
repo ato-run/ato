@@ -22,7 +22,10 @@ must exist on the machine (`CHROME_BIN` overrides the default paths).
 
 ## When to run
 
-After the mail Capsule's Run is ready and its K3 observation is satisfied:
+After the mail Capsule's Run is ready and its K3 observation is satisfied. If
+the full D1 Run is not available yet (it needs fixed-TCP Ports and TLS), the
+[browser slice](../samples/ato-mail-browser/README.md) declares only the browser
+Surface and can be used for this gate first:
 
 - dedicated staging Runner, sample `samples/ato-mail` (PR ato-run/ato#1668),
 - the Run's **public URL** for the `app.http` Surface (hosted ready URL /
