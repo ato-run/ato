@@ -1487,7 +1487,12 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
         };
         let runner_id = field("/runner/id")?;
         let runner_token = field("/runner_token")?;
-        bind_device_key_to_identity(&device_key_file, device_key, runner_id)?;
+        // Additive enrollment answer (RFC errata): when the control plane says
+        // it stored the key, that is authoritative and the register round trip
+        // is skipped. Older answers carry no block, which keeps the explicit
+        // challenge/register migration path.
+        let registered = enrollment_device_key_registration(&response, device_key.key_epoch())?;
+        bind_device_key_to_identity(&device_key_file, device_key, runner_id, registered)?;
         write_private_file(
             &credentials_file,
             &serde_json::to_vec(&serde_json::json!({
@@ -1524,9 +1529,37 @@ fn device_key_for_enrollment(device_key_file: &Path) -> Result<device_key::Runne
     }
 }
 
+/// Whether the enrollment answer says the control plane stored the key we sent.
+///
+/// The block is additive: absent means an older API, and the Runner must then
+/// prove registration itself. A block that contradicts the epoch this Runner
+/// signed for is a protocol error, not something to paper over.
+fn enrollment_device_key_registration(
+    response: &serde_json::Value,
+    signed_key_epoch: u64,
+) -> Result<bool> {
+    let Some(block) = response.get("device_key") else {
+        return Ok(false);
+    };
+    if !block
+        .get("registered")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    match block.get("key_epoch").and_then(serde_json::Value::as_u64) {
+        Some(epoch) if epoch == signed_key_epoch => Ok(true),
+        Some(epoch) => bail!(
+            "the enrollment registered device key epoch {epoch}, not the epoch this Runner signed for ({signed_key_epoch})"
+        ),
+        None => bail!("the enrollment reported a registered device key without its epoch"),
+    }
+}
+
 /// Tie the locally generated key to the identity the enrollment produced.
 ///
-/// Only the runner id is filled in: the key that signed the enrollment proof is
+/// Only the bookkeeping is written: the key that signed the enrollment proof is
 /// exactly the key the control plane bound, so replacing it here would leave the
 /// two sides disagreeing. A key already bound to another Runner is a stale file
 /// an operator has to remove, not something to silently rebind.
@@ -1534,19 +1567,28 @@ fn bind_device_key_to_identity(
     device_key_file: &Path,
     mut key: device_key::RunnerDeviceKey,
     runner_id: &str,
+    registered: bool,
 ) -> Result<()> {
-    if key.runner_id() == runner_id {
-        return Ok(());
+    let mut changed = false;
+    if key.runner_id() != runner_id {
+        ensure!(
+            key.runner_id().is_empty(),
+            "device key {} belongs to Runner {} but the enrollment returned {}; remove the stale key file and enroll again",
+            device_key_file.display(),
+            key.runner_id(),
+            runner_id
+        );
+        key.set_runner_id(runner_id);
+        changed = true;
     }
-    ensure!(
-        key.runner_id().is_empty(),
-        "device key {} belongs to Runner {} but the enrollment returned {}; remove the stale key file and enroll again",
-        device_key_file.display(),
-        key.runner_id(),
-        runner_id
-    );
-    key.set_runner_id(runner_id);
-    key.save_replace(device_key_file)
+    if registered && !key.registered() {
+        key.set_registered(true);
+        changed = true;
+    }
+    if changed {
+        key.save_replace(device_key_file)?;
+    }
+    Ok(())
 }
 
 /// Make sure a locally stored key is also active on the control plane.

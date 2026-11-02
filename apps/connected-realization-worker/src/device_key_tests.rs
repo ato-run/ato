@@ -710,7 +710,7 @@ fn q30_a_key_bound_to_another_runner_is_not_silently_rebound() {
     key.save_new(&path).unwrap();
     let old_public = key.public_key_b64();
 
-    let error = bind_device_key_to_identity(&path, key, "runner_1").unwrap_err();
+    let error = bind_device_key_to_identity(&path, key, "runner_1", false).unwrap_err();
     assert!(format!("{error:#}").contains("stale key file"), "{error:#}");
     // Nothing was rewritten: the control plane may still hold this key.
     let reloaded = RunnerDeviceKey::load_if_present(&path).unwrap().unwrap();
@@ -734,10 +734,90 @@ fn q4_an_interrupted_enrollment_reuses_its_key_but_a_stale_identity_key_is_repla
     assert_eq!(retry.public_key_b64(), first.public_key_b64());
 
     // A key already tied to another identity must never sign a new enrollment.
-    bind_device_key_to_identity(&path, retry, "runner_old").unwrap();
+    bind_device_key_to_identity(&path, retry, "runner_old", false).unwrap();
     let next = device_key_for_enrollment(&path).unwrap();
     assert!(next.runner_id().is_empty());
     assert_ne!(next.public_key_b64(), first.public_key_b64());
     let reloaded = RunnerDeviceKey::load_if_present(&path).unwrap().unwrap();
     assert_eq!(reloaded.public_key_b64(), next.public_key_b64());
+}
+
+#[test]
+fn q30_an_enrollment_that_registered_the_key_needs_no_register_call() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join(device_key::DEVICE_KEY_FILE_NAME);
+    let key = RunnerDeviceKey::generate("", device_key::FIRST_KEY_EPOCH).unwrap();
+    key.save_new(&path).unwrap();
+
+    // The additive answer the control plane now returns when it stored the key.
+    let response = json!({
+        "runner": { "id": "runner_1" },
+        "runner_token": "token",
+        "device_key": { "key_epoch": 1, "registered": true },
+    });
+    let registered = enrollment_device_key_registration(&response, key.key_epoch()).unwrap();
+    assert!(registered, "the response is authoritative");
+    bind_device_key_to_identity(&path, key, "runner_1", registered).unwrap();
+    let reloaded = RunnerDeviceKey::load_if_present(&path).unwrap().unwrap();
+    assert!(reloaded.registered());
+    assert_eq!(reloaded.runner_id(), "runner_1");
+
+    // With the key already registered, the migration path must not touch the
+    // network at all.
+    let server = StubControlPlane::start(&reloaded, true, false, vec![(500, "{}".to_owned())]);
+    let api = api_for(&server, None);
+    let key = register_device_key_if_needed(&api, &path, reloaded).unwrap();
+    assert!(key.registered());
+    assert!(
+        server.requests().is_empty(),
+        "a registered key must not fall back to challenge/register"
+    );
+}
+
+#[test]
+fn q30_an_older_enrollment_answer_still_uses_the_register_migration_path() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join(device_key::DEVICE_KEY_FILE_NAME);
+    let key = RunnerDeviceKey::generate("", device_key::FIRST_KEY_EPOCH).unwrap();
+    key.save_new(&path).unwrap();
+
+    // No device_key block: an API that predates the additive field.
+    let response = json!({
+        "runner": { "id": "runner_1" },
+        "runner_token": "token",
+    });
+    let registered = enrollment_device_key_registration(&response, key.key_epoch()).unwrap();
+    assert!(!registered);
+    bind_device_key_to_identity(&path, key, "runner_1", registered).unwrap();
+    let reloaded = RunnerDeviceKey::load_if_present(&path).unwrap().unwrap();
+    assert!(!reloaded.registered());
+
+    // The migration path proves the key with the bearer it already holds.
+    let server = StubControlPlane::start(
+        &reloaded,
+        true,
+        false,
+        vec![(200, challenge_body()), (201, "{}".to_owned())],
+    );
+    let api = api_for(&server, None);
+    let key = register_device_key_if_needed(&api, &path, reloaded).unwrap();
+    assert!(key.registered());
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[test]
+fn q30_an_enrollment_answer_for_another_epoch_fails_closed() {
+    let key = RunnerDeviceKey::generate("runner_1", 1).unwrap();
+    let response = json!({ "device_key": { "key_epoch": 2, "registered": true } });
+    let error = enrollment_device_key_registration(&response, key.key_epoch()).unwrap_err();
+    assert!(format!("{error:#}").contains("epoch"), "{error:#}");
+
+    // A registered flag without the epoch the contract promises is not trusted
+    // either: the Runner cannot tell which key the control plane really holds.
+    let response = json!({ "device_key": { "registered": true } });
+    assert!(enrollment_device_key_registration(&response, key.key_epoch()).is_err());
+
+    // registered:false keeps the migration path.
+    let response = json!({ "device_key": { "key_epoch": 1, "registered": false } });
+    assert!(!enrollment_device_key_registration(&response, key.key_epoch()).unwrap());
 }
