@@ -17,7 +17,10 @@ ato-connected-realization-worker doctor --work-root "$HOME/.local/share/ato-runn
 ```
 
 For a reproducible installation add `--rev <reviewed-commit>` to the install
-command. `doctor` needs neither an account credential nor an enrollment code.
+command. A distributed prebuilt binary, once a release publishes one, is
+checked against its pinned checksum manifest before use; see
+[worker binary distribution](../operations/worker-binary-distribution.md).
+`doctor` needs neither an account credential nor an enrollment code.
 It measures cgroup limits, disk and NVIDIA devices, plus Docker and isolation
 availability, and does not create the work root or launch a workload. A missing
 directory has unknown disk capacity. Diagnosis on macOS does not imply Linux
