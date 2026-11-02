@@ -1,0 +1,68 @@
+{
+  "bundle_id": "bnd_01M6DFH0DX4KT5ZPXNM50535Q0",
+  "import_id": "pai_01M6DFH501K6TFPB9RGR8HSFZM",
+  "run_id": "run_01M6DFH52GJA1SVDVF4KMQ09WD",
+  "lease_id": "01M6DFH52GK700PDMDBQ4HNT0W",
+  "verification_status": "verified",
+  "surface": {
+    "status": "ready",
+    "run_id": "run_01M6DFH52GJA1SVDVF4KMQ09WD",
+    "lease_id": "01M6DFH52GK700PDMDBQ4HNT0W"
+  },
+  "app_url": "https://cinst-5xiptbfrwsswoict.stg-app.ato.run/",
+  "contract_ref": "sha256:409253a3748bcce210e9f38f084b7aae7e12004b21b28dfbb3b518fdc90972d4",
+  "derivation_ref": "sha256:add46a0ed8c33101ad1e89787720c8b89415d943821a0b85557fba206ba481f3",
+  "verification_receipt": {
+    "bundle_sha256": "sha256:ed60f3fe308ce7fc22ee7954b98576e145b3a73009a3a600b488a83ddef5f4a3",
+    "contract_ref": "sha256:409253a3748bcce210e9f38f084b7aae7e12004b21b28dfbb3b518fdc90972d4",
+    "derivation_ref": "sha256:add46a0ed8c33101ad1e89787720c8b89415d943821a0b85557fba206ba481f3",
+    "execution": {
+      "attempt_id": "pav_01M6DFH5V7RE0RSB9S5K0PYHPP",
+      "endpoint": "https://s0-rstg002.ato.run",
+      "lease_id": "01M6DFH52GK700PDMDBQ4HNT0W",
+      "platform": "linux/amd64",
+      "realization": "oci_service_group",
+      "run_id": "run_01M6DFH52GJA1SVDVF4KMQ09WD",
+      "runtime_executable": "docker",
+      "services": [
+        {
+          "container_id": "1a7bfcf4602883aca398f9670a847f0c3065c1ca58e03428f86212bc5a0bf6e8",
+          "image": "compared-initiatives-scenario-albany.trycloudflare.com/staging-mail/stalwart@sha256:017bcb0a0bf0d9d0c01d619f403232d6b389b5119a4ee49e381500ec97b2ec2e",
+          "name": "stalwart"
+        },
+        {
+          "container_id": "a9bc96fd9088cab5a017a93ddae678a9d3b97d6fe10857121ca3aa10c2cd1731",
+          "image": "compared-initiatives-scenario-albany.trycloudflare.com/staging-mail/missive@sha256:b1afd7d91311e971165359f74fef402b89f106f82fe8f6f0d8f436328adea991",
+          "name": "missive"
+        }
+      ]
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:a48c3649a31b2f430f98e4c2aad315ee3e2dae6c39822bccc27ca9a58ac07450",
+          "method": "GET",
+          "path": "/health",
+          "status": 200
+        },
+        "id": "webmail-health",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "body_sha256": "sha256:8a6608fc3341ca2da6a5e95ef82c20bc9634b289daa40bff9b780564bca82094",
+          "method": "GET",
+          "path": "/login",
+          "status": 200
+        },
+        "id": "webmail-ui",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "ato-run-hosted"
+    }
+  }
+}
