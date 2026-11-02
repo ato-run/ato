@@ -26,6 +26,7 @@ ato-materializer-static-web = { path = "../../extensions/materializers/static-we
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-sandbox = { path = "../../lib/sandbox", version = "0.1.0" }
 ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
+ato-tls-observe = { path = "../../lib/tls-observe", version = "0.1.0" }
 netd = { path = "../../services/netd" }
 base64 = "0.22"
 anyhow = "1"

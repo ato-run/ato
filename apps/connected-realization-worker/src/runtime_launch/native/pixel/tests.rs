@@ -475,6 +475,7 @@ async fn actual_gui_helper_app_probe_original_k_and_owned_cleanup() {
                 port, "GET", "/result", 200, body,
             )],
             Vec::new(),
+            Vec::new(),
             execution.clone(),
             &receipt_context,
         )
