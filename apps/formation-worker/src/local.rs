@@ -605,7 +605,7 @@ pub(crate) fn freeze_verified_file_with_guard(
     limits: SourceLimits,
     can_continue: &dyn Fn() -> bool,
 ) -> Result<FrozenSource> {
-    freeze_verified_file_at_with_guard(verified, work_root, "", limits, can_continue)
+    freeze_verified_file_at_with_guard(verified, work_root, "", None, limits, can_continue)
 }
 
 /// Materialize a verified archive at an explicitly selected directory.
@@ -615,10 +615,17 @@ pub(crate) fn freeze_verified_file_at_with_guard(
     mut verified: ato_formation::source::FileVerifiedArchive,
     work_root: &Path,
     subdirectory: &str,
+    expected_closure: Option<&SourceClosureRef>,
     limits: SourceLimits,
     can_continue: &dyn Fn() -> bool,
 ) -> Result<FrozenSource> {
     let closure_ref = verified.closure_ref(subdirectory)?;
+    if !subdirectory.is_empty() && expected_closure.is_none() {
+        bail!("selected source requires an expected closure");
+    }
+    if expected_closure.is_some_and(|expected| expected != &closure_ref) {
+        bail!("selected source closure does not match the expected closure");
+    }
     let scratch = work_root.join(format!(
         "source-{}-{}",
         std::process::id(),
@@ -891,10 +898,13 @@ mod selected_source_tests {
     fn selected_source_freezes_the_requested_directory_and_its_closure() {
         let root = tempfile::tempdir().unwrap();
         let limits = SourceLimits::default();
+        let alpha_expected = verified_fixture(root.path()).closure_ref("alpha").unwrap();
+        let beta_expected = verified_fixture(root.path()).closure_ref("beta").unwrap();
         let alpha = freeze_verified_file_at_with_guard(
             verified_fixture(root.path()),
             root.path(),
             "alpha",
+            Some(&alpha_expected),
             limits,
             &|| true,
         )
@@ -903,6 +913,7 @@ mod selected_source_tests {
             verified_fixture(root.path()),
             root.path(),
             "beta",
+            Some(&beta_expected),
             limits,
             &|| true,
         )
@@ -918,12 +929,22 @@ mod selected_source_tests {
     fn selected_source_rejects_escape_missing_path_and_expired_guard() {
         let root = tempfile::tempdir().unwrap();
         let limits = SourceLimits::default();
-        for path in ["../beta", "/alpha", "missing"] {
+        let alpha_expected = verified_fixture(root.path()).closure_ref("alpha").unwrap();
+        let missing_expected = verified_fixture(root.path())
+            .closure_ref("missing")
+            .unwrap();
+        for (path, expected) in [
+            ("../beta", &alpha_expected),
+            ("/alpha", &alpha_expected),
+            ("missing", &missing_expected),
+            ("beta", &alpha_expected),
+        ] {
             assert!(
                 freeze_verified_file_at_with_guard(
                     verified_fixture(root.path()),
                     root.path(),
                     path,
+                    Some(expected),
                     limits,
                     &|| true,
                 )
@@ -936,8 +957,20 @@ mod selected_source_tests {
                 verified_fixture(root.path()),
                 root.path(),
                 "alpha",
+                Some(&alpha_expected),
                 limits,
                 &|| false,
+            )
+            .is_err()
+        );
+        assert!(
+            freeze_verified_file_at_with_guard(
+                verified_fixture(root.path()),
+                root.path(),
+                "alpha",
+                None,
+                limits,
+                &|| true,
             )
             .is_err()
         );
