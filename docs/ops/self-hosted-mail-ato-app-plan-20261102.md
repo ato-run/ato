@@ -263,6 +263,14 @@ Decisions and gaps recorded while doing S2/S3:
   an authenticated browser session yet. The Missive image is private to GHCR and
   the available credential lacks `read:packages`, so a local browser render was
   not possible; staging (or a pulling credential) is needed for that evidence.
+- **Browser client verified locally (2026-11-02)**: a real browser (headless
+  Chrome via CDP) signed in to Missive against Stalwart's JMAP and rendered a
+  mailbox with a message delivered over SMTP. Findings folded into the sample:
+  K3 must observe `/login` (root is 303), `STALWART_PUBLIC_URL` must equal
+  Missive's `jmap_url`, and the pinned Missive image needs the
+  nondefault-port patch for `:8080`. Evidence and limits:
+  `samples/ato-mail/README.md` and `docs/ops/mail-browser-local-verification-20261102.md`
+  (on the S3 branch). This is not an Ato Run and not staging evidence.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
