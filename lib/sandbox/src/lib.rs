@@ -62,6 +62,30 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// What the one bubblewrap capability probe observed.
+///
+/// The probe is the authority for "may this host contain a workload": finding
+/// the binary is not enough, because some container hosts install it while
+/// denying the user/network namespaces that `--unshare-all` needs. The
+/// whole observation is kept — not only the boolean — so diagnostics can say
+/// WHICH refusal caused it instead of reporting the same silence for four
+/// different causes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BubblewrapProbe {
+    /// The `bwrap` the probe would run, resolved on `PATH`.
+    pub binary: Option<PathBuf>,
+    /// Whether the probe created its namespaces and ran true.
+    pub succeeded: bool,
+    /// Trimmed stderr of a failed probe, bounded. Diagnostic only: it names the
+    /// kernel/AppArmor refusal and never carries workload data.
+    pub stderr: Option<String>,
+}
+
+/// Longest stderr excerpt kept. A refusal sentence is short; the bound is only
+/// there so a hostile binary cannot flood a diagnostic report.
+#[cfg(target_os = "linux")]
+const PROBE_STDERR_MAX_CHARS: usize = 300;
+
 /// Whether this Linux host can create the namespaces used by Ato's
 /// bubblewrap-based workload and build sandboxes.
 ///
@@ -72,19 +96,34 @@ use tracing::debug;
 /// fail closed on every other platform.
 #[cfg(target_os = "linux")]
 pub fn bubblewrap_containment_available() -> bool {
+    probe_bubblewrap().succeeded
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn bubblewrap_containment_available() -> bool {
+    false
+}
+
+/// The bubblewrap probe, keeping the binary it found and why a failure failed.
+///
+/// Cached once per process: the host boundary does not change while a Runner is
+/// running, and a launch path that probed per launch would pay a process spawn
+/// every time.
+#[cfg(target_os = "linux")]
+pub fn probe_bubblewrap() -> &'static BubblewrapProbe {
     use std::process::{Command, Stdio};
     use std::sync::OnceLock;
 
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
+    static PROBE: OnceLock<BubblewrapProbe> = OnceLock::new();
+    PROBE.get_or_init(|| {
         let Some(binary) = std::env::var_os("PATH").and_then(|path| {
             std::env::split_paths(&path)
                 .map(|directory| directory.join("bwrap"))
                 .find(|candidate| candidate.is_file())
         }) else {
-            return false;
+            return BubblewrapProbe::default();
         };
-        Command::new(binary)
+        let output = Command::new(&binary)
             .args([
                 "--unshare-all",
                 "--die-with-parent",
@@ -108,15 +147,43 @@ pub fn bubblewrap_containment_available() -> bool {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+            .stderr(Stdio::piped())
+            .output();
+        let (succeeded, stderr) = match output {
+            Ok(output) if output.status.success() => (true, None),
+            Ok(output) => {
+                let text = String::from_utf8_lossy(&output.stderr);
+                let trimmed = text.trim();
+                (
+                    false,
+                    (!trimmed.is_empty()).then(|| {
+                        trimmed
+                            .chars()
+                            .take(PROBE_STDERR_MAX_CHARS)
+                            .collect::<String>()
+                    }),
+                )
+            }
+            // The binary existed but could not be executed at all (permission
+            // bits, wrong architecture). That is still a containment failure.
+            Err(error) => (false, Some(error.to_string())),
+        };
+        BubblewrapProbe {
+            binary: Some(binary),
+            succeeded,
+            stderr,
+        }
     })
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn bubblewrap_containment_available() -> bool {
-    false
+pub fn probe_bubblewrap() -> &'static BubblewrapProbe {
+    static PROBE: BubblewrapProbe = BubblewrapProbe {
+        binary: None,
+        succeeded: false,
+        stderr: None,
+    };
+    &PROBE
 }
 
 #[cfg(target_os = "linux")]
