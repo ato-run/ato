@@ -774,6 +774,7 @@ mod autonomous_tests {
                 .contains("derivation_ref")
         );
         auth.execution_plan = Some(PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: false,
             files: BTreeMap::new(),
             toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
@@ -842,6 +843,7 @@ mod autonomous_tests {
     fn root_scope_requires_an_acquired_reference_and_preserves_its_digest() {
         use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
         let domain = PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),
@@ -903,6 +905,7 @@ mod autonomous_tests {
                 "unrelated/package.json".to_owned(),
             ]);
         let mut domain = PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),
@@ -962,6 +965,7 @@ mod autonomous_tests {
     fn explicit_python_import_exposes_only_module_or_initializer() {
         use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
         let domain = PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),
@@ -1031,6 +1035,7 @@ mod autonomous_tests {
     fn relative_js_imports_use_exact_bounded_files_and_reject_ambiguity() {
         use ato_formation::proposal::{PlanAuthorization, VerifiedSourceFile};
         let mut domain = PlanAuthorization {
+            private_process_no_build: false,
             runtime_port_operations: false,
             source_oci: None,
             toolchains: BTreeMap::new(),

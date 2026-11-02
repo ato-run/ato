@@ -31,6 +31,9 @@ pub struct FormationRealizer<'a> {
     pub shim: &'a Path,
     /// What the build may reach. The candidate itself never gets egress.
     pub network: NetworkPolicy,
+    /// The unreviewed private lane requires an isolated network for the
+    /// verification candidate as well as for later Runs.
+    pub require_private_isolation: bool,
 }
 
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
@@ -41,12 +44,71 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     })
 }
 
+fn private_build_supported(
+    actions: &[ato_formation::execution::BuildAction],
+    toolchains: &BTreeMap<String, String>,
+) -> bool {
+    actions.iter().all(|action| match action {
+        ato_formation::execution::BuildAction::Authored { .. } => false,
+        ato_formation::execution::BuildAction::Prerequisite(step) => {
+            let runtime = match step.name.as_str() {
+                "verify-provisioned-python" => "python",
+                "verify-provisioned-node" => "node",
+                _ => return false,
+            };
+            let Some(version) = toolchains.get(runtime) else { return false };
+            let parts: Vec<_> = version.split('.').map(str::parse::<u32>).collect();
+            let [Ok(major), Ok(minor), Ok(patch)] = parts.as_slice() else { return false };
+            let expected = if runtime == "python" {
+                vec![format!("{}/bin/python3", ato_formation::intent::python_home(version)),
+                    "-I".into(), "-S".into(), "-c".into(),
+                    format!("import sys; assert sys.version_info[:3] == ({major}, {minor}, {patch}), 'pinned Python version mismatch'")]
+            } else {
+                vec![format!("{}/bin/node", ato_formation::intent::node_home(version)), "-e".into(),
+                    format!("if (process.versions.node !== '{}') process.exit(1)", version)]
+            };
+            step.argv == expected && !step.needs_network
+                && step.network_phase.is_none()
+                && step.env.is_empty()
+                && step.cwd_relative.is_empty()
+                && step.toolchain_access == ato_formation::intent::ToolchainAccess::ReadOnly
+        }
+    })
+}
+
 impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
+        if self.require_private_isolation
+            && (self.network != NetworkPolicy::Denied
+                || !planned.plan.lane.is_process()
+                || !planned.derivation.state.is_empty()
+                || planned.derivation.ports.len() != 1
+                || planned.derivation.ports[0].protocol != ato_formation::authoring::HTTP_PROTOCOL)
+        {
+            return refused(
+                "private_formation_policy_unsupported",
+                "private Formation requires a stateless, single-HTTP-port process with denied build network",
+            );
+        }
+        if self.require_private_isolation
+            && !private_build_supported(&planned.plan.actions, &planned.plan.toolchains)
+        {
+            return refused(
+                "private_formation_build_unsupported",
+                "private Formation accepts only preinstalled toolchains and no authored build steps",
+            );
+        }
         if planned.derivation.source_oci.is_some()
             || planned.derivation.runtimes.contains_key("oci.image")
-            || !planned.derivation.requirements.is_empty()
+            || (!planned.derivation.requirements.is_empty()
+                && (!self.require_private_isolation
+                    || planned.derivation.requirements.startup.is_some()
+                    || planned
+                        .derivation
+                        .requirements
+                        .within(&crate::admission::private_http_bind_ceiling())
+                        .is_err()))
             || !planned.derivation.variable_bindings.is_empty()
             || !planned.derivation.runtime_port_operations.is_empty()
             || planned.derivation.steps.iter().any(|s| {
@@ -112,8 +174,57 @@ impl CandidateRealizer for FormationRealizer<'_> {
             planned: self.planned,
             shim: self.shim,
             network: self.network,
+            require_private_isolation: self.require_private_isolation,
         }
         .realize(executed, attempt_id, attempt_root)
+    }
+}
+
+#[cfg(test)]
+mod private_build_tests {
+    use super::*;
+    use ato_formation::execution::BuildAction;
+    use ato_formation::intent::{BuildStepV1, ToolchainAccess};
+
+    #[test]
+    fn private_build_rejects_authored_and_privileged_work() {
+        let mut step = BuildStepV1 {
+            name: "verify-provisioned-python".into(),
+            argv: vec!["/opt/ato/toolchains/python/3.12.7/bin/python3".into(), "-I".into(), "-S".into(), "-c".into(),
+                "import sys; assert sys.version_info[:3] == (3, 12, 7), 'pinned Python version mismatch'".into()],
+            needs_network: false,
+            network_phase: None,
+            cwd_relative: String::new(),
+            env: BTreeMap::new(),
+            toolchain_access: ToolchainAccess::ReadOnly,
+        };
+        let tools = BTreeMap::from([("python".to_owned(), "3.12.7".to_owned())]);
+        assert!(private_build_supported(&[], &tools));
+        assert!(private_build_supported(
+            &[BuildAction::Prerequisite(step.clone())],
+            &tools
+        ));
+        assert!(!private_build_supported(
+            &[BuildAction::Authored { step: 0 }],
+            &tools
+        ));
+        let mut forged = step.clone();
+        forged.argv = vec!["/app/attacker".into()];
+        assert!(!private_build_supported(
+            &[BuildAction::Prerequisite(forged)],
+            &tools
+        ));
+        step.needs_network = true;
+        assert!(!private_build_supported(
+            &[BuildAction::Prerequisite(step.clone())],
+            &tools
+        ));
+        step.needs_network = false;
+        step.toolchain_access = ToolchainAccess::Provision;
+        assert!(!private_build_supported(
+            &[BuildAction::Prerequisite(step)],
+            &tools
+        ));
     }
 }
 
@@ -128,6 +239,7 @@ pub(crate) struct CandidateLauncher<'a> {
     pub planned: &'a PlannedCandidate,
     pub shim: &'a Path,
     pub network: NetworkPolicy,
+    pub require_private_isolation: bool,
 }
 
 #[derive(Default)]
@@ -277,7 +389,9 @@ impl CandidateLauncher<'_> {
             // no egress, TCP bind only on the allocated host ports. A
             // `dependency-resolution` request widens the BUILD, never the run.
             build_network: crate::attempt::network_name(self.network).to_owned(),
-            candidate_network: if bindings.gate.is_some() {
+            candidate_network: if self.require_private_isolation {
+                "isolated namespace; declared ingress; no egress"
+            } else if bindings.gate.is_some() {
                 "isolated namespace; declared ingress; phase-scoped HTTPS egress broker"
             } else {
                 "no-egress; tcp bind limited to allocated host ports"
@@ -295,13 +409,24 @@ impl CandidateLauncher<'_> {
             shim: self.shim,
             attempt_id,
         };
-        let launched = TemporaryRealization::launch_controlled_with_state(
-            &request,
-            bindings.gate,
-            bindings.variables,
-            bindings.state,
-            control,
-        );
+        let launched = if self.require_private_isolation {
+            if bindings.gate.is_some() || !bindings.variables.is_empty() || bindings.state.is_some()
+            {
+                Err(anyhow::anyhow!(
+                    "private Formation does not accept external bindings"
+                ))
+            } else {
+                TemporaryRealization::launch_private_isolated(&request, control)
+            }
+        } else {
+            TemporaryRealization::launch_controlled_with_state(
+                &request,
+                bindings.gate,
+                bindings.variables,
+                bindings.state,
+                control,
+            )
+        };
         let realization = match launched {
             Ok(realization) => realization,
             Err(error) => {

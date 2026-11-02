@@ -1,5 +1,7 @@
 # Testing Isolation
 
+Status: current; hermetic test isolation.
+
 Hermetic verification in this repo is driven by one root switch: `ATO_HOME`.
 All global ato state under `.ato/` should follow that root. For CLI and desktop flows that still need OS-level config locations, pair it with isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME`.
 

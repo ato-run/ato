@@ -1,5 +1,7 @@
 # Execution identity and diagnostics
 
+Status: Current technical reference.
+
 Computation-root identity is the BLAKE3 `ComputationRef` derived from canonical
 `ComputationObject` bytes. Portable application identity is the SHA-256
 `ContractRef` derived from canonical `BoundContract` bytes. Its selected

@@ -1,0 +1,30 @@
+[package]
+license = "MPL-2.0"
+name = "ato-cert-export"
+version = "0.1.0"
+edition = "2024"
+description = "Validate an allowlisted certificate/key pair and export it for an ato certificate Binding"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "tool"
+
+[lib]
+name = "ato_cert_export"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ato-cert-export"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
