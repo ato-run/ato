@@ -9,6 +9,11 @@
 
 mod activity_controller;
 mod data_plane;
+mod device_key;
+// The contract requires an owner-only file mode only Unix can enforce, and these
+// tests generate and store real key files.
+#[cfg(all(test, unix))]
+mod device_key_tests;
 pub mod diagnostics;
 pub mod host_capabilities;
 pub mod host_resources;
@@ -1397,6 +1402,11 @@ pub struct WorkerConfig {
     pub workload_gid: Option<u32>,
     #[arg(long)]
     pub once: bool,
+    /// Rotate this Runner's device key once, before serving. The rotation is
+    /// signed with the current key; if the control plane refuses it the old key
+    /// is kept and the worker exits with the error.
+    #[arg(long, env = "ATO_RUNNER_ROTATE_DEVICE_KEY", default_value_t = false)]
+    pub rotate_device_key: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -1437,20 +1447,46 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
         .runner_credentials_file
         .clone()
         .unwrap_or_else(|| config.work_root.join("runner-credentials.json"));
+    let device_key_file = device_key::path_beside_credentials(&credentials_file);
     // An identity already exists (a restart on the same machine): keep it and
     // only drop the stale token. The control plane would refuse it anyway.
     let already_enrolled = credentials_file.is_file() || !config.runner_token.trim().is_empty();
     if !already_enrolled {
         fs::create_dir_all(&config.work_root)?;
         let api_base = config.api_base.trim_end_matches('/');
+        // Device keys need an owner-only file mode this platform may not be able
+        // to enforce. Where it cannot, enrollment proceeds exactly as before and
+        // the Runner stays bearer-only: no key is generated or claimed.
+        let device_key = if device_key::supported() {
+            // Generated before the request because it signs the enrollment
+            // proof, and a retry after a lost response must present the same
+            // public key rather than binding a second identity.
+            Some(device_key_for_enrollment(&device_key_file)?)
+        } else {
+            eprintln!(
+                "[device-key] device keys need Unix owner-only file permissions; enrolling without one and staying bearer-only"
+            );
+            None
+        };
+        let mut request_body = serde_json::json!({
+            "enrollment_token": token,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
+        });
+        if let Some(device_key) = &device_key {
+            // Section 11.5 enrollment binding (RFC errata ato-api#1092): the
+            // single-use token is the replay guard, so this proof is over the
+            // token digest and the epoch, with no challenge.
+            request_body["device_key"] = serde_json::json!({
+                "public_key": device_key.public_key_b64(),
+                "key_epoch": device_key.key_epoch(),
+                "signature": device_key.enrollment_signature(&token),
+            });
+        }
         let response: serde_json::Value = reqwest::blocking::Client::new()
             .post(format!("{api_base}/v1/runners/enroll"))
-            .json(&serde_json::json!({
-                "enrollment_token": token,
-                "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH,
-                "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
-            }))
+            .json(&request_body)
             .send()
             .context("enrollment request failed")?
             .error_for_status()
@@ -1464,17 +1500,152 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
                 .filter(|value| !value.is_empty())
                 .with_context(|| format!("enrollment response has no {pointer}"))
         };
+        let runner_id = field("/runner/id")?;
+        let runner_token = field("/runner_token")?;
+        if let Some(device_key) = device_key {
+            // Additive enrollment answer (RFC errata): when the control plane
+            // says it stored the key, that is authoritative and the register
+            // round trip is skipped. Older answers carry no block, which keeps
+            // the explicit challenge/register migration path.
+            let registered = enrollment_device_key_registration(&response, device_key.key_epoch())?;
+            bind_device_key_to_identity(&device_key_file, device_key, runner_id, registered)?;
+        }
         write_private_file(
             &credentials_file,
             &serde_json::to_vec(&serde_json::json!({
                 "api_base": api_base,
-                "runner_id": field("/runner/id")?,
-                "runner_token": field("/runner_token")?,
+                "runner_id": runner_id,
+                "runner_token": runner_token,
                 "management_kind": response.pointer("/runner/management_kind").and_then(serde_json::Value::as_str),
             }))?,
         )?;
     }
     reexec_without_enrollment_token(&credentials_file)
+}
+
+/// The key that will sign this enrollment, generated if necessary.
+///
+/// A retry of an interrupted enrollment must present the SAME public key (it may
+/// already have been bound by a response this process never saw). A key bound to
+/// a different identity cannot be active for the next one, and must not sign its
+/// enrollment proof either, so it is replaced BEFORE the request — never after,
+/// where the control plane would end up holding a key this host no longer has.
+fn device_key_for_enrollment(device_key_file: &Path) -> Result<device_key::RunnerDeviceKey> {
+    match device_key::RunnerDeviceKey::load_if_present(device_key_file)? {
+        Some(key) if key.runner_id().is_empty() => Ok(key),
+        Some(_) => {
+            let key = device_key::RunnerDeviceKey::generate("", device_key::FIRST_KEY_EPOCH)?;
+            key.save_replace(device_key_file)?;
+            Ok(key)
+        }
+        None => {
+            let key = device_key::RunnerDeviceKey::generate("", device_key::FIRST_KEY_EPOCH)?;
+            key.save_new(device_key_file)?;
+            Ok(key)
+        }
+    }
+}
+
+/// Whether the enrollment answer says the control plane stored the key we sent.
+///
+/// The block is additive: absent means an older API, and the Runner must then
+/// prove registration itself. A block that contradicts the epoch this Runner
+/// signed for is a protocol error, not something to paper over.
+fn enrollment_device_key_registration(
+    response: &serde_json::Value,
+    signed_key_epoch: u64,
+) -> Result<bool> {
+    let Some(block) = response.get("device_key") else {
+        return Ok(false);
+    };
+    if !block
+        .get("registered")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    match block.get("key_epoch").and_then(serde_json::Value::as_u64) {
+        Some(epoch) if epoch == signed_key_epoch => Ok(true),
+        Some(epoch) => bail!(
+            "the enrollment registered device key epoch {epoch}, not the epoch this Runner signed for ({signed_key_epoch})"
+        ),
+        None => bail!("the enrollment reported a registered device key without its epoch"),
+    }
+}
+
+/// Tie the locally generated key to the identity the enrollment produced.
+///
+/// Only the bookkeeping is written: the key that signed the enrollment proof is
+/// exactly the key the control plane bound, so replacing it here would leave the
+/// two sides disagreeing. A key already bound to another Runner is a stale file
+/// an operator has to remove, not something to silently rebind.
+fn bind_device_key_to_identity(
+    device_key_file: &Path,
+    mut key: device_key::RunnerDeviceKey,
+    runner_id: &str,
+    registered: bool,
+) -> Result<()> {
+    let mut changed = false;
+    if key.runner_id() != runner_id {
+        ensure!(
+            key.runner_id().is_empty(),
+            "device key {} belongs to Runner {} but the enrollment returned {}; remove the stale key file and enroll again",
+            device_key_file.display(),
+            key.runner_id(),
+            runner_id
+        );
+        key.set_runner_id(runner_id);
+        changed = true;
+    }
+    if registered && !key.registered() {
+        key.set_registered(true);
+        changed = true;
+    }
+    if changed {
+        key.save_replace(device_key_file)?;
+    }
+    Ok(())
+}
+
+/// Make sure a locally stored key is also active on the control plane.
+///
+/// Enrollment normally binds the key in the same request, so this is the
+/// migration path for a Runner enrolled before device keys existed: a Runner
+/// that already holds a bearer credential but has no registered key. A control
+/// plane without the device-key endpoints (flag off) answers 404 and this Runner
+/// keeps the bearer-only behaviour section 11.1 promises.
+///
+/// Registration is not an execution authorization and is never a reason to
+/// silently downgrade a signature: if a key IS active, a bearer-only request
+/// fails with signature_required and the worker stops.
+fn register_device_key_if_needed(
+    api: &HttpRunnerApi,
+    device_key_file: &Path,
+    mut key: device_key::RunnerDeviceKey,
+) -> Result<device_key::RunnerDeviceKey> {
+    if key.registered() {
+        return Ok(key);
+    }
+    match api.register_device_key(&key) {
+        Ok(DeviceKeyRegistration::Registered | DeviceKeyRegistration::AlreadyActive) => {
+            key.set_registered(true);
+            key.save_replace(device_key_file)?;
+            Ok(key)
+        }
+        Ok(DeviceKeyRegistration::Unsupported) => {
+            eprintln!(
+                "[device-key] the control plane does not expose the device-key endpoints; this Runner stays bearer-only"
+            );
+            Ok(key)
+        }
+        Err(error) => {
+            eprintln!(
+                "[device-key] registration was not accepted; this Runner stays bearer-only until it succeeds: {error:#}"
+            );
+            Ok(key)
+        }
+    }
 }
 
 /// A host-boundary workload runs as another user from a directory under the
@@ -1603,6 +1774,49 @@ impl ConnectedWorker {
             .prepare(&config.work_root, config.max_slots)?;
         let mut api =
             HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
+        // The device key is a local identity, never a capability: holding one
+        // changes what this Runner can sign and nothing about what it claims.
+        // A missing key file is the migration case for a Runner enrolled before
+        // device keys existed; it is generated here and registered with the
+        // bearer it already holds.
+        let device_key_file = config.device_key_path();
+        let device_key = if device_key::supported() {
+            let key = match device_key::RunnerDeviceKey::load_if_present(&device_key_file)? {
+                Some(key) => {
+                    ensure!(
+                        key.runner_id().is_empty() || key.runner_id() == config.runner_id,
+                        "device key {} belongs to another Runner; refusing to use it",
+                        device_key_file.display()
+                    );
+                    key
+                }
+                None => {
+                    let key = device_key::RunnerDeviceKey::generate(
+                        &config.runner_id,
+                        device_key::FIRST_KEY_EPOCH,
+                    )?;
+                    key.save_new(&device_key_file)?;
+                    key
+                }
+            };
+            Some(register_device_key_if_needed(&api, &device_key_file, key)?)
+        } else {
+            // Section 11.8 needs a file mode this platform cannot enforce.
+            // Holding a private key it cannot protect would be a false claim of
+            // device identity, so this Runner stays bearer-only instead.
+            eprintln!(
+                "[device-key] device keys need Unix owner-only file permissions; this platform is unsupported, so this Runner stays bearer-only"
+            );
+            None
+        };
+        api.device_key = device_key;
+        if config.rotate_device_key {
+            ensure!(
+                api.device_key.is_some(),
+                "--rotate-device-key is not supported on this platform: device keys need Unix owner-only file permissions"
+            );
+            api.rotate_device_key(&device_key_file)?;
+        }
         if config.network_controls {
             runtime_launch::network_broker::prepare_egress_firewall().context(
                 "TCP egress controls failed host firewall admission; capability not advertised",
@@ -3479,6 +3693,15 @@ fn activity_surface_id(run_id: &str, lease_id: &str) -> String {
 }
 
 impl WorkerConfig {
+    /// Where this Runner's Ed25519 device key lives: beside the bearer
+    /// credential file, never inside it (RFC section 11.8).
+    pub fn device_key_path(&self) -> PathBuf {
+        match self.runner_credentials_file.as_deref() {
+            Some(credentials) => device_key::path_beside_credentials(credentials),
+            None => self.work_root.join(device_key::DEVICE_KEY_FILE_NAME),
+        }
+    }
+
     /// Whether this host is configured to restore VM snapshots.
     ///
     /// One predicate, used by BOTH the capability advertisement and the VM
@@ -5044,6 +5267,24 @@ struct ReadyReport<'a> {
     control: Option<BrowserControlReport<'a>>,
 }
 
+/// Outcome of asking the control plane to activate a locally generated key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceKeyRegistration {
+    /// The control plane now has this key active.
+    Registered,
+    /// The Runner already had an active key: for a freshly enrolled Runner that
+    /// can only be the key the enrollment bound in the same transaction.
+    AlreadyActive,
+    /// The control plane does not implement the device-key endpoints (flag off).
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeviceKeyChallenge {
+    challenge_id: String,
+    nonce: String,
+}
+
 #[derive(Clone)]
 pub struct HttpRunnerApi {
     client: Client,
@@ -5052,6 +5293,9 @@ pub struct HttpRunnerApi {
     token: String,
     /// Whether this worker has a usable persistent volume store.
     persistent_volumes: bool,
+    /// This Runner's control-signing key. Present only once the control plane
+    /// has it active; until then every request stays bearer-only.
+    device_key: Option<device_key::RunnerDeviceKey>,
 }
 
 impl HttpRunnerApi {
@@ -5062,11 +5306,152 @@ impl HttpRunnerApi {
             runner_id: runner_id.to_owned(),
             token: token.to_owned(),
             persistent_volumes: false,
+            device_key: None,
         })
     }
 
     fn authorized(&self, request: RequestBuilder) -> RequestBuilder {
         request.bearer_auth(&self.token)
+    }
+
+    /// Map a full control-plane URL back to the path and query that the
+    /// signature covers. A URL outside the configured base is a programming
+    /// error, never a reason to send an unsigned request.
+    fn path_and_query(&self, url: &str) -> Result<String> {
+        match url.strip_prefix(&self.base) {
+            Some(path) if path.starts_with('/') => Ok(path.to_owned()),
+            _ => bail!("control-plane URL {url} is not under the configured API base"),
+        }
+    }
+
+    /// Section 11.4 headers, or None while this Runner has no active key.
+    fn signature_headers(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        body: &[u8],
+    ) -> Option<device_key::SignedControlHeaders> {
+        self.device_key
+            .as_ref()
+            .filter(|key| key.registered())
+            .map(|key| key.sign_control(method, path_and_query, body))
+    }
+
+    /// Start a signed request body. The bytes are the ones the signature covers,
+    /// so the body is serialized once and sent verbatim.
+    fn signed_request(
+        &self,
+        method: reqwest::Method,
+        path_and_query: &str,
+        body: Option<&[u8]>,
+    ) -> RequestBuilder {
+        let url = format!("{}{}", self.base, path_and_query);
+        let mut request = self.authorized(self.client.request(method.clone(), url));
+        if let Some(body) = body {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_vec());
+        }
+        if device_key::is_signed_control_request(method.as_str(), path_and_query) {
+            let empty = [];
+            if let Some(headers) =
+                self.signature_headers(method.as_str(), path_and_query, body.unwrap_or(&empty))
+            {
+                for (name, value) in headers.into_pairs() {
+                    request = request.header(name, value);
+                }
+            }
+        }
+        request
+    }
+
+    /// Ask the control plane for a single-use key challenge. None means the
+    /// endpoints do not exist (flag off).
+    fn device_key_challenge(&self) -> Result<Option<DeviceKeyChallenge>> {
+        let path = format!("/v1/runners/{}/device-keys/challenge", self.runner_id);
+        let response = self
+            .signed_request(reqwest::Method::POST, &path, None)
+            .send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(response.error_for_status()?.json()?))
+    }
+
+    /// Register the locally generated key with the bearer this Runner already
+    /// holds (section 11.5): prove the register string with the new key.
+    fn register_device_key(
+        &self,
+        key: &device_key::RunnerDeviceKey,
+    ) -> Result<DeviceKeyRegistration> {
+        let Some(challenge) = self.device_key_challenge()? else {
+            return Ok(DeviceKeyRegistration::Unsupported);
+        };
+        let path = format!("/v1/runners/{}/device-keys", self.runner_id);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "challenge_id": challenge.challenge_id,
+            "public_key": key.public_key_b64(),
+            "key_epoch": key.key_epoch(),
+            "signature": key.register_signature(&self.runner_id, &challenge.nonce),
+        }))?;
+        let response = self
+            .signed_request(reqwest::Method::POST, &path, Some(&body))
+            .send()?;
+        match response.status() {
+            status if status.is_success() => Ok(DeviceKeyRegistration::Registered),
+            reqwest::StatusCode::CONFLICT => Ok(DeviceKeyRegistration::AlreadyActive),
+            reqwest::StatusCode::NOT_FOUND => Ok(DeviceKeyRegistration::Unsupported),
+            status => bail!(
+                "the control plane refused device-key registration with {status}: {}",
+                truncate(&response.text().unwrap_or_default(), 300)
+            ),
+        }
+    }
+
+    /// Rotate this Runner's key (section 11.5). The old key keeps authority
+    /// until the control plane accepts the rotation and the successor is durably
+    /// written; a failure leaves the old key file untouched.
+    fn rotate_device_key(&mut self, device_key_file: &Path) -> Result<()> {
+        let current = self.device_key.clone().context(
+            "--rotate-device-key needs an enrolled device key; none was found beside the credential file",
+        )?;
+        ensure!(
+            current.registered(),
+            "device key is not registered with the control plane; refusing to rotate"
+        );
+        let Some(challenge) = self.device_key_challenge()? else {
+            bail!("the control plane does not expose the device-key endpoints; cannot rotate");
+        };
+        let next =
+            device_key::RunnerDeviceKey::generate(current.runner_id(), current.key_epoch() + 1)?;
+        let path = format!("/v1/runners/{}/device-keys/rotate", self.runner_id);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "challenge_id": challenge.challenge_id,
+            "next_public_key": next.public_key_b64(),
+            "next_key_epoch": next.key_epoch(),
+            // Proved by the OLD key over the successor's epoch and public key.
+            "signature": current.rotate_signature(&self.runner_id, &next, &challenge.nonce),
+        }))?;
+        // The rotation is itself a control request: sign it with the key that
+        // still has authority. The body proof above is the mandatory part; the
+        // headers are additional evidence the API accepts.
+        let response = self
+            .signed_request(reqwest::Method::POST, &path, Some(&body))
+            .send()?;
+        let response = response.error_for_status().with_context(|| {
+            format!(
+                "the control plane refused the device-key rotation for {}",
+                self.runner_id
+            )
+        })?;
+        drop(response);
+        let mut next = next;
+        next.set_registered(true);
+        // Only after the control plane accepted: the old key is still the only
+        // one that can sign if this write fails, so it is reported, not hidden.
+        next.save_replace(device_key_file)?;
+        self.device_key = Some(next);
+        Ok(())
     }
 
     fn heartbeat(&self, config: &WorkerConfig, active_slots: u32) -> Result<()> {
@@ -5086,11 +5471,7 @@ impl HttpRunnerApi {
         let pixel = config
             .native_pixel
             .available(&config.work_root, oci_available);
-        self.authorized(self.client.post(format!(
-            "{}/v1/runners/{}/heartbeat",
-            self.base, self.runner_id
-        )))
-        .json(&serde_json::json!({
+        let body = serde_json::json!({
             "capabilities": with_explicit_runtime_placement_capability(advertised_capabilities(
                 with_native_pixel_control_capabilities(
                     with_native_terminal_capability(runner_capabilities(
@@ -5119,14 +5500,17 @@ impl HttpRunnerApi {
             "slot_recovered": runtime_launch::recovery::slot_recovered(),
             // Refresh mutable capacity and device visibility on every heartbeat.
             "host_resources": resources,
-        }))
-        .timeout(if config.native_terminal || config.native_pixel.enabled {
-            Duration::from_millis(500)
-        } else {
-            Duration::from_secs(60)
-        })
-        .send()?
-        .error_for_status()?;
+        });
+        let path = format!("/v1/runners/{}/heartbeat", self.runner_id);
+        let bytes = serde_json::to_vec(&body)?;
+        self.signed_request(reqwest::Method::POST, &path, Some(&bytes))
+            .timeout(if config.native_terminal || config.native_pixel.enabled {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_secs(60)
+            })
+            .send()?
+            .error_for_status()?;
         Ok(())
     }
 
@@ -5140,14 +5524,19 @@ impl HttpRunnerApi {
         url: String,
         body: &T,
     ) -> Result<()> {
+        // Serialize once: the signature covers these exact bytes, and every
+        // retry resends the same body.
+        let bytes = serde_json::to_vec(body)?;
+        let path_and_query = self.path_and_query(&url)?;
         let mut last_error = None;
         for delay in TERMINAL_REPORT_RETRY_DELAYS {
             if !delay.is_zero() {
                 thread::sleep(delay);
             }
+            // A nonce is single use, so a retry is re-signed with a fresh one
+            // even though the body is byte-identical.
             match self
-                .authorized(self.client.post(&url))
-                .json(body)
+                .signed_request(reqwest::Method::POST, &path_and_query, Some(&bytes))
                 .send()
                 .and_then(reqwest::blocking::Response::error_for_status)
             {
@@ -5164,22 +5553,18 @@ impl HttpRunnerApi {
     }
 
     fn claim_next(&self) -> Result<ClaimResponse> {
+        let path = format!("/v1/runners/{}/leases/next?wait_ms=20000", self.runner_id);
         Ok(self
-            .authorized(self.client.get(format!(
-                "{}/v1/runners/{}/leases/next?wait_ms=20000",
-                self.base, self.runner_id
-            )))
+            .signed_request(reqwest::Method::GET, &path, None)
             .send()?
             .error_for_status()?
             .json()?)
     }
 
     fn open_leases(&self) -> Result<Vec<OpenLease>> {
+        let path = format!("/v1/runners/{}/leases/open", self.runner_id);
         Ok(self
-            .authorized(self.client.get(format!(
-                "{}/v1/runners/{}/leases/open",
-                self.base, self.runner_id
-            )))
+            .signed_request(reqwest::Method::GET, &path, None)
             .send()?
             .error_for_status()?
             .json::<OpenLeasesResponse>()?
@@ -5285,12 +5670,10 @@ impl HttpRunnerApi {
     }
 
     fn control_with_timeout(&self, lease_id: &str, timeout: Duration) -> Result<ControlResponse> {
+        let path = format!("/v1/runner-leases/{lease_id}/control");
         Ok(self
-            .authorized(
-                self.client
-                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base))
-                    .timeout(timeout),
-            )
+            .signed_request(reqwest::Method::GET, &path, None)
+            .timeout(timeout)
             .send()?
             .error_for_status()?
             .json()?)
@@ -5433,11 +5816,9 @@ impl runtime_launch::recovery::RecoveryReporter for HttpRunnerApi {
     /// existed), which leaves nothing live for a dir to belong to.
     fn lease_liveness(&self, lease_id: &str) -> Result<runtime_launch::recovery::LeaseLiveness> {
         use runtime_launch::recovery::LeaseLiveness;
+        let path = format!("/v1/runner-leases/{lease_id}/control");
         let response = self
-            .authorized(
-                self.client
-                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base)),
-            )
+            .signed_request(reqwest::Method::GET, &path, None)
             .send()?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(LeaseLiveness::Terminal);
@@ -7201,6 +7582,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         assert!(validate_config(&config).is_err());
     }
@@ -7233,6 +7615,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         assert!(validate_config(&config).is_err());
         config.max_slots = 64;
@@ -7276,6 +7659,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         resolve_runner_credentials(&mut config).unwrap();
         assert_eq!(config.runner_id, "runner-file");
@@ -7337,6 +7721,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         assert_eq!(ready_local_port(&config), 8420);
         assert_ne!(
@@ -7403,6 +7788,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         }
     }
 
@@ -7614,6 +8000,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         runtime_launch::recovery::mark_slot_recovered(true);
         let mut expected = vec![PORTABLE_CAPSULE_LEASE_KIND];
