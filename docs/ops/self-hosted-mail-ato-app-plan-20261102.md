@@ -301,6 +301,12 @@ Decisions and gaps recorded while doing S2/S3:
   local-only socat forward and signed in with the demo account. Evidence:
   `docs/ops/mail-browser-ato-run-local-host-20261102.md` (S3 branch). Staging
   ingress, fixed TCP, TLS/K5, state, Bindings and 443 remain the staging gate.
+- **Browser-only slice added (S3 branch)**: `samples/ato-mail-browser` composes
+  the same Stalwart + Missive with only the two browser observations, no fixed
+  TCP, no TLS and no Bindings, so the browser gate can run on a Runner before
+  D1's HostBoundary work. It is not the mail contract (D1 remains that); sign-in
+  still needs a seeded account. The verification runbook points at it as the
+  first way to execute the browser gate.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
