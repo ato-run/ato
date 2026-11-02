@@ -313,6 +313,12 @@ Decisions and gaps recorded while doing S2/S3:
   and running it as uid 1000 cannot write the Docker Desktop bind mount (ENOENT).
   The Runner runs the CLI as its host user; this is a local boundary, not a
   Runner defect.
+- **Browser-slice sign-in seed (S3 branch)**: `seed/create-seed.sh` generates the
+  Stalwart store seed (domain + test account via the JMAP registry) for the
+  Runner to install as the initial State Revision; it contains credential
+  hashes, stays out of the repository, and is an operator prep step. Validated
+  locally: a fresh store started from the seed (no recovery admin) and the
+  browser harness signed in.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
