@@ -166,13 +166,14 @@ fn observe_http(spec: &AttemptSpec<'_>, port: u16) -> Result<Vec<RuntimeHttpObse
             continue;
         };
         let status = response.status().as_u16();
-        let Ok(body) = response
+        let mut body = Vec::new();
+        if response
             .take(1024 * 1024 + 1)
-            .bytes()
-            .collect::<std::io::Result<Vec<_>>>()
-        else {
+            .read_to_end(&mut body)
+            .is_err()
+        {
             continue;
-        };
+        }
         if body.len() > 1024 * 1024 {
             continue;
         }
@@ -212,10 +213,8 @@ pub(super) fn report(
         return Ok(());
     }
     let response = response.error_for_status()?;
-    let bytes = response
-        .take(256 * 1024 + 1)
-        .bytes()
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut bytes = Vec::new();
+    response.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 256 * 1024, "assignment too large");
     let assignment: Response = serde_json::from_slice(&bytes)?;
     let spec = check_assignment(
@@ -551,10 +550,10 @@ mod tests {
         assignment.frozen_input.contract.requirements[0].status = Some(404);
         assert!(check_assignment(&assignment, "run1", "lease1", &spec, "http").is_err());
         let (assignment, mut spec) = example();
-        if let RuntimeLaunchSpec::V1(ref mut launch) = spec {
-            if let LaunchRealizationV1::Process(ref mut process) = launch.realization {
-                process.argv[0] = "different".into();
-            }
+        if let RuntimeLaunchSpec::V1(ref mut launch) = spec
+            && let LaunchRealizationV1::Process(ref mut process) = launch.realization
+        {
+            process.argv[0] = "different".into();
         }
         assert!(check_assignment(&assignment, "run1", "lease1", &spec, "http").is_err());
         let (mut assignment, spec) = example();

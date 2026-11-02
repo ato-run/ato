@@ -228,6 +228,7 @@ pub fn san_covers(sans: &[String], host: &str) -> bool {
 }
 
 /// Refuse a binary that a non-root user could have replaced.
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn verify_program(program: &Path, privileged: bool) -> Result<()> {
     if !program.is_absolute() {
         bail!("the openssl program must be an absolute path");
