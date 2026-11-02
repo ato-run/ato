@@ -1,0 +1,14 @@
+{
+  "url": "https://cinst-5xiptbfrwsswoict.stg-app.ato.run",
+  "loginUrl": "https://cinst-5xiptbfrwsswoict.stg-app.ato.run/login",
+  "loginTitle": "ato-mail browser slice: Missive over Stalwart JMAP",
+  "signedIn": true,
+  "inboxUrl": "https://cinst-5xiptbfrwsswoict.stg-app.ato.run/inbox",
+  "inboxTitle": "ato-mail browser slice: Missive over Stalwart JMAP",
+  "expectedText": null,
+  "expectedTextFound": null,
+  "screenshots": [
+    "login.png",
+    "inbox.png"
+  ]
+}
