@@ -2177,10 +2177,14 @@ fn validate_route_profile(
         return Err(profile("invalid portable Application object"));
     }
     if derivation.requirements.startup.is_some()
-        && (derivation.steps.len() != 1 || derivation.steps[0].protocol != PROCESS_PROTOCOL)
+        && (derivation.steps.len() != 1
+            || !matches!(
+                derivation.steps[0].protocol.as_str(),
+                PROCESS_PROTOCOL | OCI_PROTOCOL
+            ))
     {
         return Err(profile(
-            "startup is supported only on a single process derivation",
+            "startup is supported only on a single process or single OCI derivation",
         ));
     }
     if derivation.steps.len() > 1 {
@@ -2337,6 +2341,14 @@ fn validate_route_profile(
             if let Some(user) = derivation.runtimes.get(OCI_USER_RUNTIME) {
                 user.parse::<ato_adapter_oci::OciUser>()
                     .map_err(|error| profile(error.to_string()))?;
+            }
+            // The route's one Port is where the startup probe must land; a
+            // name that is not this route's Port would never be observed.
+            if let Some(startup) = &derivation.requirements.startup {
+                startup.validate().map_err(|error| profile(error.0))?;
+                if startup.port != port.id {
+                    return Err(profile("startup names an undeclared OCI Port"));
+                }
             }
             if let Some(entrypoint) = derivation.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
                 validate_oci_entrypoint(entrypoint)?;
@@ -6029,14 +6041,60 @@ status = 200
         let mut derivation = route.derivation.clone();
         derivation.requirements.startup.as_mut().unwrap().port = "other.http".into();
         assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
+        // A service group becomes ready per container, so one startup
+        // condition cannot describe it.
         derivation = route.derivation.clone();
-        derivation.steps[0].protocol = OCI_PROTOCOL.into();
+        let mut second = derivation.steps[0].clone();
+        second.id = "second-site".to_owned();
+        derivation.steps.push(second);
         assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
         derivation = route.derivation.clone();
         derivation.requirements.startup.as_mut().unwrap().timeout_ms = 0;
         assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
         assert_eq!(route.contract.requirements[0].status, Some(200));
         assert!(route.contract.requirements[0].body_digest.is_some());
+    }
+
+    #[test]
+    fn q15_a_single_oci_route_may_gate_its_startup_separately_from_k() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-oci-startup-json");
+        let (bytes, bundle) = build_authored_bundle_v2(&source).unwrap();
+        assert!(!bytes.is_empty());
+        let routes = validate_all_derivations(&bundle).unwrap();
+        let [route] = routes.as_slice() else {
+            panic!("one route");
+        };
+        assert_eq!(route.realization, PortableRealizationKind::OciContainer);
+        let startup = route
+            .derivation
+            .requirements
+            .startup
+            .as_ref()
+            .expect("startup");
+        assert_eq!(startup.path, "/api/system/bootProgress");
+        assert_eq!(startup.expect_status, Some(200));
+        let json = startup.json.as_ref().expect("json condition");
+        assert_eq!(json.pointer, "/data/progress");
+        assert_eq!(
+            json.gte,
+            Some(ato_formation::requirements::StartupJsonScalar::Integer(100))
+        );
+        // K is unchanged: the user URL is the only thing the Contract observes,
+        // and the boot progress never becomes an observation.
+        let http = route
+            .contract
+            .requirements
+            .iter()
+            .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
+            .collect::<Vec<_>>();
+        assert_eq!(http.len(), 1);
+        assert_eq!(http[0].path.as_deref(), Some("/"));
+        assert_eq!(http[0].status, Some(200));
+        // Naming any Port but the route's own leaves the condition unobserved.
+        let mut wrong = route.derivation.clone();
+        wrong.requirements.startup.as_mut().unwrap().port = "other.http".into();
+        assert!(validate_initial_route(&route.contract, &route.application, &wrong).is_err());
     }
 
     #[test]
