@@ -110,7 +110,7 @@ status = 200
 id = "webmail-ui"
 use = "ato.contract.http@1"
 port = "app.http"
-path = "/"
+path = "/login"
 status = 200
 
 # --- D1 --------------------------------------------------------------------
