@@ -14,6 +14,8 @@
 // Optional:
 //   MAIL_USER / MAIL_PASSWORD   when set, perform a real sign-in
 //   MAIL_EXPECT_TEXT            substring that must appear in the mailbox page
+//   MAIL_OPEN_FIRST=1           click the first matching message and capture it
+//   MAIL_EXPECT_BODY            substring that must appear after opening the message
 //   MAIL_LOGIN_ONLY=1           capture the login page only
 //   CHROME_BIN                  Chrome/Chromium executable
 //
@@ -121,6 +123,37 @@ try {
   if (expectText && !result.expectedTextFound) {
     writeResult(result);
     finish(ws, 2, result);
+  }
+  if (process.env.MAIL_OPEN_FIRST === '1') {
+    const clicked = await evaluate(
+      call,
+      `(() => {
+        const needle = ${JSON.stringify(expectText || '')};
+        const nodes = [...document.querySelectorAll('a,button,div,span,td')];
+        const matches = nodes.filter((node) => node.textContent && node.textContent.includes(needle));
+        if (!matches.length) return false;
+        matches[matches.length - 1].click();
+        return true;
+      })()`,
+    );
+    result.messageOpened = clicked;
+    if (clicked) {
+      await sleep(1000);
+      let detail = await readBody();
+      const bodyNeedle = process.env.MAIL_EXPECT_BODY || '';
+      const bodyDeadline = Date.now() + 10000;
+      while (bodyNeedle && !detail.includes(bodyNeedle) && Date.now() < bodyDeadline) {
+        await sleep(400);
+        detail = await readBody();
+      }
+      if (bodyNeedle) result.messageBodyFound = detail.includes(bodyNeedle);
+      await screenshot(call, path.join(outDir, 'message.png'));
+      result.screenshots.push('message.png');
+    }
+    if (clicked && process.env.MAIL_EXPECT_BODY && !result.messageBodyFound) {
+      writeResult(result);
+      finish(ws, 2, result);
+    }
   }
   writeResult(result);
   finish(ws, 0, result);
