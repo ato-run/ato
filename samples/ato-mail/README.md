@@ -32,7 +32,7 @@ same Bindings and DNS exist; that is the intended "rebind external state".
 |---|---|
 | Schema | `ato.capsule/2`, one Derivation `oci-service-group` (linux/amd64) |
 | Surface | `app.http` at `/healthz/live` (D1 has no HTML UI) |
-| Stalwart image | `ghcr.io/koh0920/stalwart-staging@sha256:44d61e88…3c1d` (Stalwart v0.16.22, commit `474dd02`) |
+| Stalwart image | `ghcr.io/koh0920/stalwart-staging@sha256:25723c49…629b` (Stalwart v0.16.22, commit `474dd02`) |
 | Adapter image | `ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:c7142ba9…b557` |
 | Mail Ports | `stalwart.smtp` 25, `stalwart.submissions` 465, `stalwart.submissions-starttls` 587, `stalwart.imaps` 993 |
 | Surface Port | `app.http` 8080 (JMAP/admin listener) |
