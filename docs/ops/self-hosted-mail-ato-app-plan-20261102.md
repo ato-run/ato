@@ -288,6 +288,14 @@ Decisions and gaps recorded while doing S2/S3:
   `cap_net_bind_service` xattr for `cap-drop=ALL`, keep an ENTRYPOINT (argv is
   the command), and keep Missive's nondefault-port patch. Staging (fixed TCP,
   TLS, state, Bindings, 443) is still the gate.
+- **Image build recipes committed (S3 branch)**: `samples/ato-mail/images/` records
+  the thin Stalwart layer (binary copied without xattrs for `cap-drop=ALL`, uid
+  1000), the patched Missive build (non-default port + `Identity/get`
+  Submission capability, ENTRYPOINT), `images.lock`, a BuildKit build script and
+  the staging preload checklist. A sample test keeps the lock, the Dockerfiles
+  and the capsule pins from drifting. The thin layer was built locally to verify
+  the recipe. This is what the dedicated Runner must preload before the first
+  staging Run.
 
 ## Hetzner outbound mail-port status (checked 2026-11-02)
 
