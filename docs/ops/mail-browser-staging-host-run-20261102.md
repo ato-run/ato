@@ -50,3 +50,12 @@ listener and moved from Junk to Inbox via the JMAP registry, then the harness wa
 re-run with `MAIL_EXPECT_TEXT="Hello from the browser"`:
 `expectedTextFound: true`, `signedIn: true`.
 Evidence: [inbox-with-message.png](evidence/mail-browser-staging-host-20261102/inbox-with-message.png).
+
+## Reading a message in the browser (2026-11-02)
+
+With `MAIL_OPEN_FIRST=1` and
+`MAIL_EXPECT_BODY="This message arrived through SMTP"`, the harness opened the
+message in the browser and observed its body:
+`messageOpened: true`, `messageBodyFound: true`,
+`expectedTextFound: true`. Evidence:
+[message-open.png](evidence/mail-browser-staging-host-20261102/message-open.png).
