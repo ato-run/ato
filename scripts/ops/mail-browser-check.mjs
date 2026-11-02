@@ -40,7 +40,7 @@ const profile = path.join(outDir, '.chrome-profile');
 fs.rmSync(profile, { recursive: true, force: true });
 fs.mkdirSync(profile, { recursive: true });
 const chrome = spawn(chromeBin, [
-  '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-breakpad',
+  '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--disable-breakpad',
   '--disable-crash-reporter', `--crash-dumps-dir=${path.join(profile, 'crashes')}`,
   '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0',
   `--user-data-dir=${profile}`, 'about:blank',
