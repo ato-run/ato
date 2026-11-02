@@ -97,7 +97,11 @@ try {
   await waitForTitle(call, (title) => /inbox|mail/i.test(title), 15000);
   const inboxTitle = await evaluate(call, 'document.title');
   const inboxUrl = await evaluate(call, 'location.href');
-  const bodyText = await evaluate(call, 'document.body.innerText.slice(0, 4000)');
+  await waitForBody(call);
+  const bodyText = await evaluate(
+    call,
+    'document.body ? document.body.innerText.slice(0, 4000) : ""',
+  );
   await screenshot(call, path.join(outDir, 'inbox.png'));
   const signedIn = /inbox|mail/i.test(inboxTitle) && /mailbox|inbox|deleted|sent/i.test(bodyText);
   result.signedIn = signedIn;
@@ -160,6 +164,15 @@ async function waitForTitle(call, predicate, timeoutMs = 20000) {
     await sleep(250);
   }
   throw new Error('timed out waiting for the page title');
+}
+
+async function waitForBody(call, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await evaluate(call, 'Boolean(document.body)')) return;
+    await sleep(200);
+  }
+  throw new Error('timed out waiting for the page body');
 }
 
 async function screenshot(call, file) {
