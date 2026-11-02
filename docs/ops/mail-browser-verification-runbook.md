@@ -25,7 +25,9 @@ must exist on the machine (`CHROME_BIN` overrides the default paths).
 After the mail Capsule's Run is ready and its K3 observation is satisfied. If
 the full D1 Run is not available yet (it needs fixed-TCP Ports and TLS), the
 [browser slice](../../samples/ato-mail-browser/README.md) declares only the browser
-Surface and can be used for this gate first:
+Surface and can be used for this gate first (create its sign-in account with
+`samples/ato-mail-browser/seed/create-seed.sh` and install the archive as the Run's initial
+state; it is test data and stays out of the repository):
 
 - dedicated staging Runner, sample `samples/ato-mail` (PR ato-run/ato#1668),
 - the Run's **public URL** for the `app.http` Surface (hosted ready URL /
