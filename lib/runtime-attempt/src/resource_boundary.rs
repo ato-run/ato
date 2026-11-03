@@ -82,6 +82,52 @@ pub fn verify_current() -> Result<()> {
     )
 }
 
+/// A container started by a separate daemon does not inherit the worker's
+/// cgroup. Private multi-process realizations must prove that the worker and
+/// the daemon-selected workload parent share the same bounded ancestor.
+#[cfg(target_os = "linux")]
+pub fn verify_common_parent(parent: &std::path::Path) -> Result<()> {
+    use std::path::{Component, Path};
+    let root = Path::new("/sys/fs/cgroup").canonicalize()?;
+    let parent = parent.canonicalize()?;
+    ensure!(
+        parent.starts_with(&root) && parent != root,
+        "invalid private common cgroup parent"
+    );
+    let membership = std::fs::read_to_string("/proc/self/cgroup")?;
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::/"))
+        .context("cgroup v2 membership required")?;
+    ensure!(
+        Path::new(relative)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_))),
+        "invalid cgroup path"
+    );
+    let current = root.join(relative).canonicalize()?;
+    ensure!(
+        current.starts_with(&parent) && current != parent,
+        "worker is outside the private common cgroup parent"
+    );
+    let read = |name: &str| {
+        std::fs::read_to_string(parent.join(name))
+            .with_context(|| format!("missing common cgroup controller {name}"))
+    };
+    check_limits(
+        &read("memory.max")?,
+        &read("memory.swap.max")?,
+        &read("pids.max")?,
+        &read("cpu.max")?,
+    )?;
+    verify_current()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn verify_common_parent(_parent: &std::path::Path) -> Result<()> {
+    anyhow::bail!("private common resource isolation requires Linux cgroup v2")
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn verify_current() -> Result<()> {
     anyhow::bail!("private resource isolation requires Linux cgroup v2")
@@ -115,5 +161,15 @@ mod tests {
     #[ignore = "requires an explicitly bounded cgroup v2 scope"]
     fn current_worker_is_inside_a_bounded_cgroup() {
         verify_current().expect("bounded cgroup v2");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires an explicitly bounded common cgroup v2 parent"]
+    fn current_worker_shares_bounded_parent_with_container_placement() {
+        let parent = std::env::var_os("ATO_PRIVATE_COMMON_CGROUP").expect("common parent path");
+        verify_common_parent(std::path::Path::new(&parent)).expect("bounded common cgroup");
+        assert!(verify_common_parent(std::path::Path::new("/sys/fs/cgroup")).is_err());
+        assert!(verify_common_parent(std::path::Path::new("/sys/fs/cgroup/system.slice")).is_err());
     }
 }
