@@ -59,6 +59,21 @@ The same verifier rejected both a substitute readiness body and the correct
 body on the wrong Port. This was a local adapter verification, with no
 Formation, Hosted Run, browser session or hosted verification receipt.
 
+A follow-up direct adapter attempt used the validated portable bundle
+`sha256:3b1c9fee71b9e664780a29d7381f58e27a3fb5fe860ad4e9ba033ba42eaa2705`,
+including its original ContractRef above and DerivationRef
+`sha256:0dc98f01b28bdc159adcb0b0223d80ea23c5a9314ae62a6741c48a3ab9723aa7`.
+The Runner test materialized the bundle's empty `main.py` workspace and used
+the bundle's K and D without changing them. The actual first-key observation
+satisfied K; an unrelated body and a wrong Port were rejected. The authored
+input is [the fixture](fixtures/native-geany-linux-amd64-20261104.toml), built
+with the experimental `__native-bundle` command and an empty `main.py`. The
+image reference identifies a locally held, digest-pinned image; this does not
+make the image available to a registered staging Runner. The ignored test takes
+the bundle via `ATO_NATIVE_PIXEL_TEST_BUNDLE` in addition to the explicit app
+and helper archive paths. This remains a direct adapter test, not a Formation
+or hosted attempt.
+
 The staging Studio source attempt still failed in Formation's static HTML
 path. The Formation executor explicitly refuses native surfaces, and the
 staging Runner was not advertising the required Pixel capability when
