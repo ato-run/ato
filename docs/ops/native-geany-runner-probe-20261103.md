@@ -81,6 +81,41 @@ Port remained rejected and the owned resources were stopped. This validates
 the projection through a real local adapter, not the Formation frontend or a
 registered staging Runner.
 
+A subsequent Linux test ran the fixed portable Geany bundle through the
+dedicated native realizer and the common Formation attempt, using the trusted
+helper and immutable application archive. The Rust-issued FormationRuntime
+receipt named K `sha256:0118d5aab2d8e3bb86e87a627a3a0405ff675e006862b6cd0c337efecf4df442`
+and D `sha256:0dc98f01b28bdc159adcb0b0223d80ea23c5a9314ae62a6741c48a3ab9723aa7`;
+all observations were satisfied, the attempt record finished, cleanup was
+confirmed, and the Runner-owned journal contained no leftover entry. The test
+ran locally on Linux, not through the Studio or staging control plane.
+
+The source selection was then changed to the unmodified `src` subtree of the
+same GitHub commit. The full repository contains a safe relative symlink which
+the portable tree currently refuses, so this test does not claim to package
+the repository root. The previous K failed twice: the first-key frame was
+`1f842ea46ef5cb0a877471d4fa7eb346ff8b221d85d6ab3bc3a19f227f01b72b`,
+whose probe response body hashes to
+`7b8ab639863f5b895e7656b186a9665bb92c51f88df46d2a04570c19a12c37ce`.
+After those independent observations, the [source fixture](fixtures/native-geany-source-linux-amd64-20261104.toml)
+fixed that body digest before a new attempt. The resulting bundle was
+`sha256:12c90761ce8cb75cf43f2997c662bce33234caeda6f9f76349766ca83a72a86d`.
+The separate common Formation attempt produced a fully satisfied receipt for K
+`sha256:dba72da3da110f31dd551a046a69cd8c50ae53bb2aba5b02f1bd00dd2b89e395`
+and D `sha256:84cc0aefc3e05d888e9ba7bed711e55f51f593ae135bd9f8ccfdfc82391caa3d`,
+finished its attempt record, and confirmed cleanup. This is a host-specific
+frame digest, not a claim of cross-host reproducibility or staging acceptance.
+
+An additional Linux integration test ran the same source fixture through
+`run_claimed_job`: source extraction, the v1 native authoring route, portable
+bundle construction, native Formation attempt, Rust receipt, and result
+publication. The API was a local test fixture, not the staging API. The
+published result retained the K and D above, `fully_satisfied=true`, and the
+current attempt ID. The test also checked the bundle upload occurred. Two
+earlier trials were stopped during an unacceptably slow archive read, before
+the attempt record advanced from `not_started`; the final trial used a bounded,
+pre-admitted buffered read. Its physical attempt finished and cleaned up.
+
 The `actual_geany_owned_lease_uses_verified_application_archive` Linux test
 then exercised `NativeLeaseRun` itself with the same bundle and its projected
 launch spec, the exact Geany OCI archive, and a helper prepared through the

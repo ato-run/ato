@@ -467,6 +467,7 @@ dependencies = [
  "ato-adapter-api",
  "ato-adapter-oci",
  "ato-adapter-process",
+ "ato-connected-realization-worker",
  "ato-formation",
  "ato-ipc",
  "ato-materializer-static-web",

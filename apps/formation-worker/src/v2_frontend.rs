@@ -17,8 +17,8 @@
 //! 6. runs the bundle through the shared portable attempt and publishes the
 //!    additive v2 result the control plane accepts.
 //!
-//! A v1 source never enters this module: `job.rs` routes on the declared
-//! schema, and the v1 path below the branch is unchanged.
+//! A v1 source declaring a native Surface also uses this portable publication
+//! path, after the v1 parser has validated its authored route.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -61,12 +61,11 @@ pub const CAPSULE_V2_DERIVATION_NOT_DECLARED: &str = "derivation_selection_not_d
 pub const CAPSULE_V2_BUNDLE_PUBLICATION_FAILED: &str = "capsule_v2_bundle_publication_failed";
 pub const CAPSULE_V2_CONTRACT_NOT_SATISFIED: &str = "capsule_v2_contract_not_satisfied";
 
-/// Whether a job's authored document belongs to this frontend.
+/// Whether a job's authored document declares the v2 frontend.
 ///
 /// Routing only: the parser decides validity. A document that declares
-/// `ato.capsule/2` gets the v2 frontend; every other document (including an
-/// unknown schema, which the v1 parser refuses as `unsupported_capsule_schema`)
-/// keeps the v1 path byte-for-byte.
+/// `ato.capsule/2` gets the v2 frontend; other documents reach the v1 parser,
+/// which can subsequently route an explicitly declared native Surface here.
 pub(crate) fn owns(manifest: &str) -> Result<bool, FormationFailure> {
     Ok(declared_schema(manifest).map_err(FormationFailure::from)?
         == Some(CAPSULE_SCHEMA_V2.to_owned()))
@@ -93,6 +92,10 @@ pub(crate) struct V2Request<'a> {
     /// `job.authoring.derivation_ref` — required only when the bundle declares
     /// more than one Derivation. v1 jobs never carry it.
     pub requested_derivation: Option<&'a str>,
+    /// A v1 native manifest uses the same portable publication path. The
+    /// title is presentation metadata, not a substitute for the original K.
+    pub native_title: Option<&'a str>,
+    pub private_isolated: bool,
     pub permit: Option<Box<dyn AttemptPermit>>,
 }
 
@@ -103,9 +106,13 @@ const PORTABLE_GUEST_ROOT: &str = "/app";
 
 pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
     let attempt = request.attempt;
-    let draft = parse_capsule_toml_v2(request.manifest).map_err(|error| {
-        formation_failure(error.code(), FailureStage::Authoring, error.to_string())
-    })?;
+    let draft = if request.native_title.is_none() {
+        Some(parse_capsule_toml_v2(request.manifest).map_err(|error| {
+            formation_failure(error.code(), FailureStage::Authoring, error.to_string())
+        })?)
+    } else {
+        None
+    };
 
     // 1. The control plane's copy is the document it accepted and recorded.
     //    `capsule.toml` is excluded from the bundle's workspace digest, so
@@ -123,9 +130,12 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
     })?;
 
     // 2. Same builder as `ato pack`. No second compiler.
-    let (bundle_bytes, bundle) =
+    let (bundle_bytes, bundle) = if let Some(title) = request.native_title {
+        ato_portable_application::build_native_bundle(request.source_root, &manifest_path, title)
+    } else {
         ato_portable_application::build_authored_bundle_v2(request.source_root)
-            .map_err(bundle_failure)?;
+    }
+    .map_err(bundle_failure)?;
     let transport = ato_portable_application::bundle_sha256(&bundle_bytes);
 
     // 3. Which Derivation runs is the caller's decision, never a planner's.
@@ -139,7 +149,9 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
         })?;
 
     // 4. Nothing the author declared may be silently ignored.
-    verify_semantics(&draft, validated)?;
+    if let Some(draft) = &draft {
+        verify_semantics(draft, validated)?;
+    }
 
     // 5. An OCI route pulls its pinned image. This Runtime may only do that
     //    under an admitted policy; `denied` is an admission refusal, not a
@@ -148,11 +160,13 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
         "dependency_resolution" => NetworkPolicy::DependencyResolution,
         _ => NetworkPolicy::Denied,
     };
-    if matches!(
-        validated.realization,
-        ato_portable_application::PortableRealizationKind::OciContainer
-            | ato_portable_application::PortableRealizationKind::OciServiceGroup
-    ) && network != NetworkPolicy::DependencyResolution
+    if request.native_title.is_none()
+        && matches!(
+            validated.realization,
+            ato_portable_application::PortableRealizationKind::OciContainer
+                | ato_portable_application::PortableRealizationKind::OciServiceGroup
+        )
+        && network != NetworkPolicy::DependencyResolution
     {
         return Err(formation_failure(
             CAPSULE_V2_NETWORK_NOT_ADMITTED,
@@ -166,37 +180,51 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
 
     let profile = crate::local::probe_local_runtime();
     let cache_root = request.work_root.join("cache");
-    let outcome = run_portable_bundle_attempt(
-        &PortableBundleAttempt {
-            bundle_bytes: &bundle_bytes,
-            bundle: &bundle,
-            derivation_ref: &derivation_ref,
-            runtime_root: request.attempt_root,
-            cache_root: &cache_root,
-            sandbox_shim: request.shim,
-            sandbox_subcommand: "sandbox-exec",
-            request_id: &attempt.job_id,
-            attempt_id: &attempt.attempt_id,
-            label: "portable_v2",
-            runtime_id: request
-                .work_root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("formation"),
-            profile: &profile,
-            authorization: ato_runtime_attempt::admission::EffectAuthorization::Unattended,
-            network,
-            receipt_target: ato_formation::verify::VerificationTargetKind::FormationRuntime,
-            run_id: None,
-            binding_environment: &Default::default(),
-            interrupt: None,
+    let portable_attempt = PortableBundleAttempt {
+        bundle_bytes: &bundle_bytes,
+        bundle: &bundle,
+        derivation_ref: &derivation_ref,
+        runtime_root: request.attempt_root,
+        cache_root: &cache_root,
+        sandbox_shim: request.shim,
+        sandbox_subcommand: "sandbox-exec",
+        request_id: &attempt.job_id,
+        attempt_id: &attempt.attempt_id,
+        label: "portable_v2",
+        runtime_id: request
+            .work_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("formation"),
+        profile: &profile,
+        authorization: if request.private_isolated {
+            ato_runtime_attempt::admission::EffectAuthorization::PrivateIsolatedFormation
+        } else {
+            ato_runtime_attempt::admission::EffectAuthorization::Unattended
         },
-        request
-            .permit
-            .take()
-            .context("the v2 frontend was given no attempt permit")?,
-    )
+        network,
+        receipt_target: ato_formation::verify::VerificationTargetKind::FormationRuntime,
+        run_id: None,
+        binding_environment: &Default::default(),
+        interrupt: None,
+    };
+    let permit = request
+        .permit
+        .take()
+        .context("the portable frontend was given no attempt permit")?;
+    let outcome = if request.native_title.is_some() {
+        crate::native_runtime::run(&portable_attempt, permit)
+    } else {
+        run_portable_bundle_attempt(&portable_attempt, permit)
+    }
     .map_err(|error| {
+        if request.native_title.is_some() {
+            return formation_failure(
+                "native_surface_unavailable",
+                FailureStage::Admission,
+                "the native Formation runtime could not admit the requested surface".to_owned(),
+            );
+        }
         formation_failure(
             CAPSULE_V2_BUNDLE_INVALID,
             FailureStage::Projection,
@@ -537,7 +565,11 @@ fn compose_result(
         .derivation
         .ports
         .iter()
-        .filter(|port| port.id == surface_port)
+        .filter(|port| {
+            port.id == surface_port
+                && port.protocol == ato_formation::authoring::HTTP_PROTOCOL
+                && port.guest_port.is_some()
+        })
         .map(|port| {
             serde_json::json!({
                 "name": "http",
