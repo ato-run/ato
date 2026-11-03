@@ -601,6 +601,18 @@ impl DockerOciAdapter {
         OciNetwork::create_with(&self.docker, label, &self.spec.labels, "ator", true)
     }
 
+    /// Use Docker's built-in loopback-only namespace. It is not an owned
+    /// bridge and must never be removed or attached to another container.
+    pub fn no_network(&self) -> OciNetwork {
+        OciNetwork {
+            docker: self.docker.clone(),
+            name: "none".into(),
+            bridge_name: String::new(),
+            removed: false,
+            owned: false,
+        }
+    }
+
     /// Launch into a network the caller owns, optionally under a network
     /// alias sibling containers resolve by DNS. The handle does NOT own the
     /// network: an [`OciServiceGroup`] removes it after its last service.
@@ -612,6 +624,10 @@ impl DockerOciAdapter {
         alias: Option<&str>,
     ) -> Result<OciHandle> {
         ensure!(workspace.is_dir(), "OCI workspace does not exist");
+        ensure!(
+            network.owned || (alias.is_none() && self.spec.endpoints.is_empty()),
+            "network none cannot expose endpoints or use an alias"
+        );
         if let Some(alias) = alias {
             ensure!(
                 !alias.is_empty()
@@ -756,7 +772,14 @@ impl DockerOciAdapter {
         } else {
             None
         };
-        let inspect = || inspect_container_address(&self.docker, &container_id);
+        let inspect = || {
+            if network.owned {
+                inspect_container_address(&self.docker, &container_id)
+                    .map(|(address, principal)| (Some(address), principal))
+            } else {
+                inspect_no_network(&self.docker, &container_id).map(|principal| (None, principal))
+            }
+        };
         let observation = if terminal.is_some() {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -784,7 +807,14 @@ impl DockerOciAdapter {
         };
         let mut forwarders = Vec::with_capacity(self.spec.endpoints.len());
         for endpoint in &self.spec.endpoints {
-            match PortForwarder::start(endpoint.host_port, container_address, endpoint.guest_port) {
+            let Some(address) = container_address else {
+                return Err(failed_launch(
+                    &self.docker,
+                    &container_id,
+                    anyhow::anyhow!("network-free container cannot expose endpoints"),
+                ));
+            };
+            match PortForwarder::start(endpoint.host_port, address, endpoint.guest_port) {
                 Ok(forwarder) => forwarders.push(forwarder),
                 Err(error) => {
                     drop(forwarders);
@@ -1063,6 +1093,7 @@ pub struct OciNetwork {
     name: String,
     bridge_name: String,
     removed: bool,
+    owned: bool,
 }
 
 impl OciNetwork {
@@ -1117,6 +1148,7 @@ impl OciNetwork {
             name,
             bridge_name,
             removed: false,
+            owned: true,
         })
     }
 
@@ -1132,6 +1164,7 @@ impl OciNetwork {
     /// external forwarding, but containers may reach a Runner-owned broker on
     /// this exact address.
     pub fn gateway_address(&self) -> Result<IpAddr> {
+        ensure!(self.owned, "network none has no gateway");
         let output = run_checked(
             &self.docker,
             [
@@ -1152,6 +1185,7 @@ impl OciNetwork {
     /// Attach one already-running owned container. The network is internal,
     /// so this adds access only to host-side listeners on its bridge.
     pub fn connect_container(&self, container_id: &str) -> Result<()> {
+        ensure!(self.owned, "network none cannot attach a container");
         ensure!(!container_id.trim().is_empty(), "container id is empty");
         run_checked(
             &self.docker,
@@ -1163,7 +1197,11 @@ impl OciNetwork {
 
     pub fn remove(mut self) -> Result<()> {
         self.removed = true;
-        remove_network(&self.docker, &self.name)
+        if self.owned {
+            remove_network(&self.docker, &self.name)
+        } else {
+            Ok(())
+        }
     }
 
     /// Give up ownership without removing: the network still has a container
@@ -1175,7 +1213,7 @@ impl OciNetwork {
 
 impl Drop for OciNetwork {
     fn drop(&mut self) {
-        if !self.removed {
+        if self.owned && !self.removed {
             let _ = remove_network(&self.docker, &self.name);
         }
     }
@@ -1230,6 +1268,7 @@ impl OciServiceGroup {
         self.network
             .iter()
             .chain(&self.auxiliary_networks)
+            .filter(|network| network.owned)
             .map(|network| network.name().to_owned())
             .collect()
     }
@@ -1338,7 +1377,7 @@ impl Drop for OciServiceGroup {
 pub struct OciHandle {
     docker: DockerClient,
     container_id: String,
-    container_address: IpAddr,
+    container_address: Option<IpAddr>,
     execution_principal: Option<Box<OciExecutionPrincipal>>,
     container_name: String,
     /// Owned only by a single-container route; a group owns its network.
@@ -1425,7 +1464,7 @@ impl OciHandle {
 
     /// The bridge address and exact Port mapping used by this Run's forwarder.
     /// Diagnostic only: neither value participates in Derivation identity.
-    pub fn port_mapping(&self) -> (IpAddr, &[OciEndpoint]) {
+    pub fn port_mapping(&self) -> (Option<IpAddr>, &[OciEndpoint]) {
         (self.container_address, &self.endpoints)
     }
 
@@ -1435,7 +1474,7 @@ impl OciHandle {
 
     /// The container's address on its Run network. Used to probe internal
     /// Endpoints from the Runner, which is the trusted execution substrate.
-    pub fn container_address(&self) -> IpAddr {
+    pub fn container_address(&self) -> Option<IpAddr> {
         self.container_address
     }
 
@@ -1603,6 +1642,58 @@ fn forward_connection(client: TcpStream, target: SocketAddr) {
     let _ = client_write.shutdown(Shutdown::Write);
     let _ = client_write.shutdown(Shutdown::Read);
     let _ = upload.join();
+}
+
+fn inspect_no_network(
+    docker: &DockerClient,
+    container_id: &str,
+) -> Result<Option<OciExecutionPrincipal>> {
+    let value = run_checked(
+        docker,
+        [
+            "inspect",
+            "--format",
+            "{{json .HostConfig.NetworkMode}}|{{json .NetworkSettings.Networks}}|{{.Id}}|{{.State.Pid}}",
+            container_id,
+        ],
+        "inspect network-free OCI container",
+    )?;
+    let pid = parse_no_network_inspection(&value, container_id)?;
+    Ok(principal::observe(container_id, pid))
+}
+
+fn parse_no_network_inspection<'a>(value: &'a str, container_id: &str) -> Result<&'a str> {
+    let mut fields = value.trim().split('|');
+    let mode: String = serde_json::from_str(fields.next().context("missing network mode")?)?;
+    let networks: serde_json::Value =
+        serde_json::from_str(fields.next().context("missing network evidence")?)?;
+    let observed = fields.next().context("missing container identity")?;
+    let pid = fields.next().context("missing container pid")?;
+    ensure!(
+        fields.next().is_none()
+            && mode == "none"
+            && observed == container_id
+            && pid.parse::<u32>().is_ok_and(|p| p > 0),
+        "network-free OCI identity or mode mismatch"
+    );
+    let networks = networks
+        .as_object()
+        .context("invalid OCI network evidence")?;
+    ensure!(
+        networks.len() == 1,
+        "network-free OCI container joined another network"
+    );
+    let endpoint = networks
+        .get("none")
+        .and_then(serde_json::Value::as_object)
+        .context("network-free OCI endpoint missing")?;
+    for key in ["IPAddress", "GlobalIPv6Address", "Gateway", "IPv6Gateway"] {
+        ensure!(
+            endpoint.get(key).and_then(serde_json::Value::as_str) == Some(""),
+            "network-free OCI endpoint has an address or gateway"
+        );
+    }
+    Ok(pid)
 }
 
 fn inspect_container_address(
@@ -2104,6 +2195,30 @@ pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn no_network_evidence_requires_exact_running_container_with_no_addresses() {
+        let endpoint =
+            r#"{"none":{"IPAddress":"","GlobalIPv6Address":"","Gateway":"","IPv6Gateway":""}}"#;
+        let valid = format!("\"none\"|{endpoint}|container|123");
+        assert_eq!(
+            parse_no_network_inspection(&valid, "container").unwrap(),
+            "123"
+        );
+        for invalid in [
+            valid.replace("\"none\"|", "\"bridge\"|"),
+            valid.replace("|container|", "|other|"),
+            valid.replace("|123", "|0"),
+            valid.replace("\"IPAddress\":\"\"", "\"IPAddress\":\"172.18.0.2\""),
+            valid.replace("\"none\":{", "\"extra\":{},\"none\":{"),
+            valid.replace("\"IPv6Gateway\":\"\"", "\"IPv6Gateway\":null"),
+        ] {
+            assert!(
+                parse_no_network_inspection(&invalid, "container").is_err(),
+                "{invalid}"
+            );
+        }
+    }
 
     #[test]
     fn exploration_docker_command_has_only_explicit_owner_bindings() {
