@@ -1616,7 +1616,7 @@ fn authored_bundle_spec_v2(
     })
 }
 
-/// Compile one `ato.capsule/1` route that declares a Terminal `native_surface`
+/// Compile one `ato.capsule/1` route that declares a native `native_surface`
 /// into the canonical wire v3 bundle the hosted validator imports.
 ///
 /// The manifest is authoring input and is never embedded in the artifact tree.
@@ -1627,6 +1627,24 @@ pub fn build_native_terminal_bundle(
     source_root: &Path,
     manifest: &Path,
     title: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_native_bundle_inner(source_root, manifest, title, true)
+}
+
+/// Compile a declared Terminal or Pixel Surface into a portable bundle.
+pub fn build_native_bundle(
+    source_root: &Path,
+    manifest: &Path,
+    title: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_native_bundle_inner(source_root, manifest, title, false)
+}
+
+fn build_native_bundle_inner(
+    source_root: &Path,
+    manifest: &Path,
+    title: &str,
+    terminal_only: bool,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if title.trim().is_empty() {
         return Err(profile("application title must not be empty"));
@@ -1640,7 +1658,7 @@ pub fn build_native_terminal_bundle(
         draft.derivation.native_surface.clone().ok_or_else(|| {
             profile("native bundle requires a [derive.native_surface] declaration")
         })?;
-    if native.surface.kind() != "terminal" {
+    if terminal_only && native.surface.kind() != "terminal" {
         return Err(profile(
             "this bundle profile carries one declared Terminal native Surface",
         ));
