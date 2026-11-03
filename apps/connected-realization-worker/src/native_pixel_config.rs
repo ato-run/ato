@@ -93,7 +93,7 @@ impl fmt::Debug for NativePixelConfig {
     }
 }
 impl NativePixelConfig {
-    pub(crate) fn prepare(&mut self, work_root: &Path, slots: u32) -> Result<()> {
+    pub fn prepare(&mut self, work_root: &Path, slots: u32) -> Result<()> {
         ensure!(
             self.enabled || (!self.text_paste && !self.framebuffer_resize),
             "native_surface_controls_unsupported: controls require enabled Native Pixel"
@@ -211,7 +211,7 @@ impl NativePixelConfig {
         self.prepared.clone()
     }
     #[cfg(unix)]
-    pub(crate) fn helper(
+    pub fn helper(
         &self,
         work_root: &Path,
     ) -> Result<crate::runtime_launch::native::pixel::PixelHelper> {

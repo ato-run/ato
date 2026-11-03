@@ -20,6 +20,7 @@ pub mod host_resources;
 #[cfg(all(test, target_os = "linux"))]
 mod managed_hosted_tests;
 mod native_pixel_config;
+pub use native_pixel_config::NativePixelConfig;
 mod process_run_verification;
 pub mod runtime_launch;
 mod slot_state;
