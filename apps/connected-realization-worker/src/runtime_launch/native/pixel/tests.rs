@@ -101,6 +101,11 @@ fn image() -> String {
 }
 
 #[test]
+fn private_formation_requires_a_prepared_owner_boundary() {
+    assert!(stub_helper().verify_private_formation_boundary().is_err());
+}
+
+#[test]
 fn application_archive_for_terminal_is_refused_before_startup() {
     let image = format!("example.invalid/app@sha256:{}", "1".repeat(64));
     let (spec, descriptor, _, d) = terminal::fixture(&image);
@@ -403,7 +408,8 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         helper.image,
         "ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037"
     );
-    let run = start_pixel(
+    let no_network = std::env::var("ATO_NATIVE_PIXEL_TEST_NO_NETWORK").as_deref() == Ok("1");
+    let run = start_pixel_with_network(
         &spec,
         &d.derivation_ref().unwrap(),
         &descriptor,
@@ -413,10 +419,52 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         helper,
         Some(app_archive()),
         rx,
+        no_network,
     )
     .await
     .unwrap();
     let observation: anyhow::Result<(Vec<u8>, Vec<u8>)> = async {
+        if no_network {
+            let host: std::net::IpAddr = std::env::var("ATO_NATIVE_PIXEL_TEST_HOST_IP")?.parse()?;
+            anyhow::ensure!(
+                !host.is_loopback() && !host.is_unspecified(),
+                "host probe needs a non-loopback address"
+            );
+            let listener = std::net::TcpListener::bind((host, 0))?;
+            let target = listener.local_addr()?;
+            // Prove the exact listener is actually reachable on the host.
+            std::net::TcpStream::connect_timeout(&target, Duration::from_secs(1))?;
+            let evidence = run.execution_evidence();
+            let ids = std::iter::once(
+                evidence
+                    .container_id
+                    .as_deref()
+                    .context("app container missing")?,
+            )
+            .chain(
+                evidence
+                    .services
+                    .iter()
+                    .map(|service| service.container_id.as_str()),
+            );
+            for id in ids {
+                let shell = std::process::Command::new("docker")
+                    .args(["exec", id, "/bin/bash", "-c", "exit 0"])
+                    .status()?;
+                anyhow::ensure!(shell.success(), "test shell unavailable in container");
+                let script = format!("echo test > /dev/tcp/{host}/{}", target.port());
+                let output = std::process::Command::new("docker")
+                    .args(["exec", id, "/bin/bash", "-c", &script])
+                    .output()?;
+                anyhow::ensure!(
+                    !output.status.success(),
+                    "network-free container reached host listener"
+                );
+            }
+            eprintln!(
+                "GEANY_NETWORK_NONE host_listener_reachable=true containers_cannot_connect=true"
+            );
+        }
         let mut stream = tokio::net::TcpStream::connect(run.observation_addr()).await?;
         stream
             .write_all(b"GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")

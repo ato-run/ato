@@ -261,7 +261,7 @@ fn actual_native_geany_job_publishes_the_original_contract_after_cleanup() {
     let result = captured.as_ref().expect("published Formation result");
     assert_eq!(
         result["provenance"]["isolation"],
-        "oci-internal-network;native-pixel"
+        "oci-network-none;native-pixel"
     );
     if let Some(path) = std::env::var_os("ATO_NATIVE_GEANY_RESULT") {
         std::fs::write(path, serde_json::to_vec_pretty(result).unwrap()).unwrap();
