@@ -41,6 +41,16 @@ status and confirmed cleanup even when the observation receipt says K was
 satisfied. The receipt remains evidence if stopping or recording fails, but it
 does not by itself authorize publication.
 
+The dedicated native portable realizer uses the existing Runner-owned Pixel
+lease lifecycle within the common Formation attempt and passes its private
+probe Port to the shared Rust verifier. It requires an exact verified app
+archive and a pre-admitted helper; it never falls back to a registry pull. A
+slot lock and durable ownership journal precede container startup. The lock
+follows a handed-off candidate, and an unconfirmed stop retains the journal
+and scratch. Stale journal entries or labelled resources refuse the next
+attempt until they are recovered. This implementation does not, by itself,
+register the Formation worker or enable a staging Runner.
+
 The owned Native lease lifecycle also accepts an optional explicitly supplied
 application OCI archive for Pixel. It passes the archive to the existing
 adapter validation, which checks its digest, image reference and platform
