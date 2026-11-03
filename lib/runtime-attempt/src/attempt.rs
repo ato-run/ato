@@ -216,6 +216,7 @@ pub fn run_reserved_attempt(
         request.authorization,
         request.browser,
         realizer.delivers_model_sets(),
+        realizer.native_surface_profile(),
     )
     .or_else(|| realizer.admit(request.profile))
     {
