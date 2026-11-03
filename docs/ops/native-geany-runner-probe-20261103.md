@@ -50,6 +50,15 @@ frame cannot be copied into K during the same execution: the independently
 authored contract must remain unchanged and the verifier must evaluate real
 observations.
 
+On 2026-11-04 a new direct Linux adapter attempt used the independently
+recorded first-key body above as an input to K *before* launching Geany. The
+runtime verifier evaluated the actual private-probe response against that
+unchanged K and returned all observations satisfied. Its ContractRef was
+`sha256:0118d5aab2d8e3bb86e87a627a3a0405ff675e006862b6cd0c337efecf4df442`.
+The same verifier rejected both a substitute readiness body and the correct
+body on the wrong Port. This was a local adapter verification, with no
+Formation, Hosted Run, browser session or hosted verification receipt.
+
 The staging Studio source attempt still failed in Formation's static HTML
 path. The Formation executor explicitly refuses native surfaces, and the
 staging Runner was not advertising the required Pixel capability when
