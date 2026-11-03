@@ -106,41 +106,29 @@ fn image() -> String {
 #[tokio::test]
 #[ignore = "requires explicit Geany and display-helper OCI archives on Linux"]
 async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
-    let (mut spec, _, mut k, mut d) = fixture(&image());
+    let (mut spec, _, _, _) = fixture(&image());
     assert_eq!(
         image(),
         "ato-source/afd3c22b6d2e@sha256:b4ff17ab8c8c58f36644c35826b09396724c765994eba1eaa8a2837322e575ce"
     );
-    let reference_body =
-        b"sha256:763deb416a7116074edd6493142881f581e64728ce9ffe2423bf23b6d33a3139\n";
-    k.requirements[0].body_digest = Some(
-        RuntimeHttpObservation::from_response("app.probe", "GET", "/result", 200, reference_body)
-            .body_digest,
-    );
-    let original_k = k.contract_ref().unwrap();
-    d.runtimes
-        .insert("oci.entrypoint".into(), "/usr/local/bin/geany".into());
-    d.runtimes
-        .insert("oci.memory_bytes".into(), "536870912".into());
-    d.runtimes
-        .insert("oci.cpu_limit_millis".into(), "1000".into());
-    d.runtimes.insert("oci.pids_limit".into(), "128".into());
-    d.steps[0].argv = vec![
-        "--new-instance".into(),
-        "--no-msgwin".into(),
-        "/app/main.py".into(),
-    ];
-    d.steps[0].env.insert("HOME".into(), "/tmp".into());
-    let NativeProbeOperation::PixelKeyFrame {
-        timeout_ms,
-        settle_ms,
-        ..
-    } = &mut d.native_surface.as_mut().unwrap().operations[0]
-    else {
-        unreachable!()
+    let path = std::env::var_os("ATO_NATIVE_PIXEL_TEST_BUNDLE")
+        .expect("explicit frozen Geany portable bundle");
+    let bytes = std::fs::read(path).unwrap();
+    let (bundle, routes) = ato_portable_application::validate_bytes_all(&bytes).unwrap();
+    let [route] = routes.as_slice() else {
+        panic!("one route required")
     };
-    *timeout_ms = 10_000;
-    *settle_ms = 1000;
+    let k = &route.contract;
+    let d = &route.derivation;
+    let original_k = k.contract_ref().unwrap();
+    assert_eq!(
+        original_k,
+        "sha256:0118d5aab2d8e3bb86e87a627a3a0405ff675e006862b6cd0c337efecf4df442"
+    );
+    assert_eq!(
+        d.derivation_ref().unwrap(),
+        "sha256:0dc98f01b28bdc159adcb0b0223d80ea23c5a9314ae62a6741c48a3ab9723aa7"
+    );
     let declaration = NativeLaunchDeclaration::new(
         d.derivation_ref().unwrap(),
         d.native_surface.clone().unwrap(),
@@ -164,9 +152,10 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
     oci.native_surface = Some(serde_json::to_value(declaration).unwrap());
     spec.public_env = serde_json::from_value(json!([{"name":"HOME","value":"/tmp"}])).unwrap();
     let root = terminal::scratch();
-    let base_context = terminal::context(root.path(), "");
+    let workspace = root.path().join("workspace");
+    ato_portable_application::materialize_tree(&bundle, route, &workspace).unwrap();
     let context = ResolvedRuntimeLaunchContext::new(
-        base_context.workspace_root().to_path_buf(),
+        workspace,
         "",
         BTreeMap::from([("HOME".into(), "/tmp".into())]),
         vec![],
@@ -258,15 +247,15 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         scenarios: Vec::new(),
         tls: Vec::new(),
     };
-    let verification = ato_formation::verify::verify_runtime(&k, &runtime);
+    let verification = ato_formation::verify::verify_runtime(k, &runtime);
     assert!(verification.fully_satisfied(), "{verification:?}");
     let mut wrong_runtime = runtime.clone();
     wrong_runtime.http[0] =
         RuntimeHttpObservation::from_response("app.probe", "GET", "/result", 200, b"surface ready");
-    assert!(!ato_formation::verify::verify_runtime(&k, &wrong_runtime).fully_satisfied());
+    assert!(!ato_formation::verify::verify_runtime(k, &wrong_runtime).fully_satisfied());
     wrong_runtime.http[0] =
         RuntimeHttpObservation::from_response("app.native", "GET", "/result", 200, &observation.0);
-    assert!(!ato_formation::verify::verify_runtime(&k, &wrong_runtime).fully_satisfied());
+    assert!(!ato_formation::verify::verify_runtime(k, &wrong_runtime).fully_satisfied());
     assert_eq!(k.contract_ref().unwrap(), original_k);
     assert_ne!(
         observation.0, observation.1,
