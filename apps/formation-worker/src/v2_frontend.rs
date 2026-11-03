@@ -33,7 +33,7 @@ use ato_formation::capsule_toml_v2::{
     CAPSULE_SCHEMA_V2, PortableAuthoringDraftV2, parse_capsule_toml_v2,
 };
 use ato_formation::failure::{FailureStage, FormationFailure};
-use ato_formation::request::AttemptOutcomes;
+use ato_formation::request::{AttemptOutcomes, AttemptStatus};
 use ato_formation::source::SourceClosureRef;
 use ato_formation::verify::{ContractVerification, ContractVerificationReceipt};
 use ato_portable_application::portable_run::{
@@ -41,8 +41,9 @@ use ato_portable_application::portable_run::{
 };
 use ato_portable_application::{ValidatedPortableApplication, validate_all_derivations};
 use ato_runtime_attempt::build_sandbox::NetworkPolicy;
-use ato_runtime_attempt::journal::AttemptPermit;
+use ato_runtime_attempt::journal::{AttemptPermit, AttemptRecordState};
 use ato_runtime_attempt::plan::digest;
+use ato_runtime_attempt::realize::StopClass;
 
 use crate::api::FormationApi;
 use crate::build::BuildAttempt;
@@ -205,30 +206,7 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
 
     // 6. A result is published only for a fully satisfied Contract: a
     //    `fully_satisfied=false` receipt is evidence, never a published result.
-    let receipt = outcome.receipt.clone().ok_or_else(|| {
-        attempt_failure(
-            &outcome,
-            CAPSULE_V2_CONTRACT_NOT_SATISFIED,
-            "the candidate produced no verification receipt".to_owned(),
-        )
-    })?;
-    if !receipt.fully_satisfied {
-        let code = outcome
-            .attempt
-            .failure
-            .as_ref()
-            .map(|failure| failure.code.clone())
-            .unwrap_or_else(|| failed_observation_code(&receipt).to_owned());
-        return Err(attempt_failure(
-            &outcome,
-            &code,
-            format!(
-                "the candidate did not satisfy K ({} observations)",
-                receipt.observations.len()
-            ),
-        )
-        .into());
-    }
+    let receipt = publishable_receipt(&outcome)?.clone();
 
     // 7. Register the bundle before the result names it: an artifact ref that
     //    resolves to nothing is worse than a result that was never published.
@@ -251,7 +229,6 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
                 Some(error),
             )
         })?;
-
     let verification = outcome.verification.clone().ok_or_else(|| {
         attempt_failure(
             &outcome,
@@ -709,6 +686,43 @@ fn failed_observation_code(receipt: &ContractVerificationReceipt) -> &'static st
     CAPSULE_V2_CONTRACT_NOT_SATISFIED
 }
 
+/// A satisfied observation remains evidence even when cleanup or durable
+/// recording fails. Publishing requires all three to have completed.
+fn publishable_receipt(
+    outcome: &PortableBundleAttemptOutcome,
+) -> Result<&ContractVerificationReceipt> {
+    let receipt = outcome.receipt.as_ref().ok_or_else(|| {
+        attempt_failure(
+            outcome,
+            CAPSULE_V2_CONTRACT_NOT_SATISFIED,
+            "the candidate produced no verification receipt".to_owned(),
+        )
+    })?;
+    if !receipt.fully_satisfied {
+        let code = outcome
+            .attempt
+            .failure
+            .as_ref()
+            .map(|failure| failure.code.as_str())
+            .unwrap_or_else(|| failed_observation_code(receipt));
+        return Err(
+            attempt_failure(outcome, code, "the candidate did not satisfy K".to_owned()).into(),
+        );
+    }
+    if outcome.attempt.status != AttemptStatus::Verified
+        || outcome.attempt_record != AttemptRecordState::Finished
+        || outcome.stop != Some(StopClass::Confirmed)
+    {
+        return Err(attempt_failure(
+            outcome,
+            "candidate_not_publishable",
+            "the verified attempt did not finish and clean up".to_owned(),
+        )
+        .into());
+    }
+    Ok(receipt)
+}
+
 fn attempt_failure(
     outcome: &PortableBundleAttemptOutcome,
     fallback_code: &str,
@@ -769,6 +783,80 @@ fn formation_failure(code: &str, stage: FailureStage, message: String) -> Format
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn observed_outcome() -> PortableBundleAttemptOutcome {
+        use ato_formation::request::FormationAttempt;
+        use ato_formation::verify::VerificationTargetKind;
+        let verification = ContractVerification {
+            verdicts: Vec::new(),
+        };
+        let receipt = ContractVerificationReceipt::new(
+            "sha256:bundle",
+            "sha256:contract",
+            "sha256:derivation",
+            VerificationTargetKind::FormationRuntime,
+            verification.clone(),
+        );
+        let outcomes = AttemptOutcomes::not_run("fixture");
+        let attempt = FormationAttempt {
+            candidate: "portable".into(),
+            attempt_id: Some("attempt".into()),
+            derivation_ref: Some("sha256:derivation".into()),
+            contract_ref: Some("sha256:contract".into()),
+            base_contract_ref: None,
+            runtime_id: "runtime".into(),
+            status: AttemptStatus::Verified,
+            verification: Some(verification.clone()),
+            realization: None,
+            browser_verification: None,
+            receipt: Some(receipt.clone()),
+            outcomes: outcomes.clone(),
+            failure: None,
+        };
+        PortableBundleAttemptOutcome {
+            attempt,
+            attempt_record: AttemptRecordState::Finished,
+            receipt: Some(receipt),
+            verification: Some(verification),
+            realization: None,
+            outcomes,
+            stop: Some(StopClass::Confirmed),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn observed_receipt_is_not_published_after_uncertain_cleanup_or_recording() {
+        assert!(publishable_receipt(&observed_outcome()).is_ok());
+        let mut failed_stop = observed_outcome();
+        failed_stop.attempt.status = AttemptStatus::Failed;
+        failed_stop.stop = Some(StopClass::Unconfirmed {
+            reason: "container still running".into(),
+            resources: vec!["container".into()],
+        });
+        failed_stop.attempt.failure = Some(ato_formation::request::AttemptFailure {
+            code: "candidate_cleanup_failed".into(),
+            stage: "cleanup".into(),
+            message: "stop not confirmed".into(),
+        });
+        let error = publishable_receipt(&failed_stop).unwrap_err();
+        let failure = error.downcast_ref::<HostedAttemptFailure>().unwrap();
+        assert_eq!(failure.report.code, "candidate_cleanup_failed");
+        assert!(
+            failure.report.receipt.as_ref().unwrap()["fully_satisfied"]
+                .as_bool()
+                .unwrap()
+        );
+        let mut failed_record = observed_outcome();
+        failed_record.attempt_record = AttemptRecordState::StartedUnfinished;
+        assert!(publishable_receipt(&failed_record).is_err());
+        let mut no_cleanup = observed_outcome();
+        no_cleanup.stop = None;
+        assert!(publishable_receipt(&no_cleanup).is_err());
+        let mut false_receipt = observed_outcome();
+        false_receipt.receipt.as_mut().unwrap().fully_satisfied = false;
+        assert!(publishable_receipt(&false_receipt).is_err());
+    }
 
     const PROCESS_TOML: &str = r#"
 schema = "ato.capsule/2"
