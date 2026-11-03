@@ -2,7 +2,7 @@
 //! This is neither a new Capsule identity nor a claim that Contract K passed.
 
 use anyhow::{Context, Result, ensure};
-use ato_formation::authoring::BoundPort;
+use ato_formation::authoring::{BoundDerivation, BoundPort};
 use ato_formation::native_surface::{NativePresentation, NativeSurfaceAdapter};
 use ato_ipc::runtime_launch::MAX_NATIVE_LAUNCH_DECLARATION_BYTES;
 use ato_ipc::session_surface::{
@@ -21,6 +21,19 @@ pub struct NativeLaunchDeclaration {
 }
 
 impl NativeLaunchDeclaration {
+    /// Project an already-bound D without accepting a separately supplied ref
+    /// or Port set. Physical ownership and admission are separate checks.
+    pub fn from_derivation(derivation: &BoundDerivation) -> Result<Self> {
+        let adapter = derivation
+            .native_surface
+            .clone()
+            .context("Derivation does not declare a native Adapter")?;
+        adapter
+            .validate(&derivation.ports, &derivation.steps)
+            .map_err(anyhow::Error::msg)?;
+        Self::new(derivation.derivation_ref()?, adapter)?.with_ports(derivation.ports.clone())
+    }
+
     pub fn new(derivation_ref: String, adapter: NativeSurfaceAdapter) -> Result<Self> {
         let declaration = Self {
             derivation_ref,
@@ -212,6 +225,26 @@ mod tests {
             "probe_port":"app.probe","operations":[{"kind":"terminal_exchange","path":"/result",
                 "input":[50,43,50,13],"output_delimiter":[69,78,68],"max_output_bytes":1024,"timeout_ms":1000}]
         }})
+    }
+
+    #[test]
+    fn projection_uses_selected_derivation_identity_and_validated_ports() {
+        let mut d: BoundDerivation = serde_json::from_value(json!({
+            "schema":"ato.derivation/1", "inputs":[], "runtimes":{}, "state":[], "effects":"pure",
+            "steps":[{"id":"serve", "protocol":"ato.oci@1", "op":"serve"}],
+            "ports":[{"id":"app.native", "protocol":"ato.pty@1", "from":"serve"},
+                     {"id":"app.probe", "protocol":"ato.http@1", "from":"serve"}],
+            "native_surface": declaration()["adapter"].clone()
+        }))
+        .unwrap();
+        let selected = NativeLaunchDeclaration::from_derivation(&d).unwrap();
+        assert_eq!(selected.derivation_ref, d.derivation_ref().unwrap());
+        assert_eq!(selected.ports.as_ref(), Some(&d.ports));
+        selected.require_host_terminal_ports().unwrap();
+        d.ports[0].from = "different".into();
+        assert!(NativeLaunchDeclaration::from_derivation(&d).is_err());
+        d.native_surface = None;
+        assert!(NativeLaunchDeclaration::from_derivation(&d).is_err());
     }
 
     #[test]
