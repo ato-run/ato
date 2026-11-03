@@ -544,3 +544,8 @@ with the explicit `ato.pixel-stream.v1` / `rfb_websocket` typed intersection onl
 after these physical checks. Terminal and legacy Web opt-ins remain independent.
 The existing same-attempt Rust K/receipt and API viewer-access authority continue
 to gate acceptance; transport readiness never grants browser access on its own.
+
+The experimental native Formation realizer uses an OCI internal network, not
+the process sandbox. It records that physical isolation explicitly and refuses
+private-isolated Formation until host-service access is independently blocked
+and verified. A denied forwarding route by itself is not that boundary.

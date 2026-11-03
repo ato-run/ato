@@ -189,6 +189,7 @@ pub fn run_portable_native_attempt(
         request.binding_environment.is_empty(),
         "native Formation cannot silently ignore Binding values"
     );
+    admit_native_policy(request.authorization, request.network)?;
     let work_root = request
         .runtime_root
         .parent()
@@ -268,6 +269,49 @@ pub fn run_portable_native_attempt(
             error,
         },
     )
+}
+
+fn admit_native_policy(
+    authorization: ato_runtime_attempt::admission::EffectAuthorization<'_>,
+    network: ato_runtime_attempt::build_sandbox::NetworkPolicy,
+) -> Result<()> {
+    ensure!(
+        authorization
+            != ato_runtime_attempt::admission::EffectAuthorization::PrivateIsolatedFormation,
+        "native private Formation requires an enforced host-network boundary"
+    );
+    ensure!(
+        network == ato_runtime_attempt::build_sandbox::NetworkPolicy::Denied,
+        "native Formation supports only an internal OCI network"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admit_native_policy;
+    use ato_runtime_attempt::{admission::EffectAuthorization, build_sandbox::NetworkPolicy};
+
+    #[test]
+    fn native_formation_refuses_unproven_private_isolation_and_network_grants() {
+        assert!(
+            admit_native_policy(EffectAuthorization::Unattended, NetworkPolicy::Denied).is_ok()
+        );
+        assert!(
+            admit_native_policy(
+                EffectAuthorization::PrivateIsolatedFormation,
+                NetworkPolicy::Denied
+            )
+            .is_err()
+        );
+        assert!(
+            admit_native_policy(
+                EffectAuthorization::Unattended,
+                NetworkPolicy::DependencyResolution
+            )
+            .is_err()
+        );
+    }
 }
 
 impl CandidateRealizer for NativePortableRealizer<'_> {
@@ -416,7 +460,9 @@ impl CandidateRealizer for NativePortableRealizer<'_> {
             platform: e.platform.clone(),
             endpoint: Some(base.clone()),
             run_id: None,
-            lease_id: Some(self.owner.lease_id.clone()),
+            // This is a temporary Formation candidate, not a hosted lease.
+            // The common attempt supplies its request and attempt IDs below.
+            lease_id: None,
             attempt_id: None,
             request_id: None,
             dependency_fetches: vec![],
