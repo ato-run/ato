@@ -106,7 +106,7 @@ fn image() -> String {
 #[tokio::test]
 #[ignore = "requires explicit Geany and display-helper OCI archives on Linux"]
 async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
-    let (mut spec, _, _, _) = fixture(&image());
+    let (fixture_spec, _, _, _) = fixture(&image());
     assert_eq!(
         image(),
         "ato-source/afd3c22b6d2e@sha256:b4ff17ab8c8c58f36644c35826b09396724c765994eba1eaa8a2837322e575ce"
@@ -129,28 +129,17 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         d.derivation_ref().unwrap(),
         "sha256:0dc98f01b28bdc159adcb0b0223d80ea23c5a9314ae62a6741c48a3ab9723aa7"
     );
-    let declaration = NativeLaunchDeclaration::new(
-        d.derivation_ref().unwrap(),
-        d.native_surface.clone().unwrap(),
-    )
-    .unwrap()
-    .with_ports(d.ports.clone())
-    .unwrap();
+    let declaration = NativeLaunchDeclaration::from_derivation(d).unwrap();
     let descriptor = declaration
         .session_surface_descriptor("native-terminal")
         .unwrap();
-    let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
-        unreachable!()
-    };
-    oci.entrypoint = Some("/usr/local/bin/geany".into());
-    oci.argv = Some(d.steps[0].argv.clone());
-    oci.resource_limits = Some(ato_ipc::runtime_launch::OciResourceLimitsV1 {
-        memory_bytes: 536_870_912,
-        cpu_limit_millis: 1000,
-        pids_limit: 128,
-    });
-    oci.native_surface = Some(serde_json::to_value(declaration).unwrap());
-    spec.public_env = serde_json::from_value(json!([{"name":"HOME","value":"/tmp"}])).unwrap();
+    let spec = ato_portable_application::portable_run::native_launch_spec(
+        &bundle,
+        &d.derivation_ref().unwrap(),
+        fixture_spec.context,
+        route.tree_ref.to_string(),
+    )
+    .unwrap();
     let root = terminal::scratch();
     let workspace = root.path().join("workspace");
     ato_portable_application::materialize_tree(&bundle, route, &workspace).unwrap();

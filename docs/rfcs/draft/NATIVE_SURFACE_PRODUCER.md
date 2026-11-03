@@ -26,6 +26,15 @@ effect, authority, host or platform checks. A realizer must still independently
 admit and own all physical resources; this gate alone does not provide a native
 executor or enable Formation.
 
+For the initial portable native OCI profile, the shared portable Runtime can
+project the validated bundle's selected D into `RuntimeLaunchSpecV1`. The
+projection recomputes the D reference, preserves its exact Adapter, Ports,
+image, platform, user, resource limits, argv and public environment, and
+refuses promised guest listeners. The first projection refuses declared state,
+Model Sets and Bindings rather than dropping them. Attempt identity and the
+materialized workspace reference are caller-supplied physical inputs. The
+projection neither authorizes launch nor claims K satisfaction.
+
 ## Trusted HostBoundary identity for GUI file exchange
 
 The accepted Materialization and Protocol Adapter contracts keep physical
