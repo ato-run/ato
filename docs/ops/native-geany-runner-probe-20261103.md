@@ -116,6 +116,18 @@ earlier trials were stopped during an unacceptably slow archive read, before
 the attempt record advanced from `not_started`; the final trial used a bounded,
 pre-admitted buffered read. Its physical attempt finished and cleaned up.
 
+Cross-repository validation of the first real result exposed an internal
+`lease_id` in its Formation receipt, which the API correctly refused as an
+execution-only field. After removing that field from Formation evidence, a new
+real Worker job with the same fixed K and D passed the API's existing
+`validateFormationResultV2` unchanged. This checks the result wire contract;
+it does not exercise staging admission, registration, or hosted execution.
+The native OCI path records its actual internal-network isolation rather than
+the process sandbox's bubblewrap/Landlock description. An internal Docker
+bridge alone does not establish that a container cannot reach host services;
+private-isolated native Formation therefore refuses admission until that host
+boundary is enforced and tested.
+
 The `actual_geany_owned_lease_uses_verified_application_archive` Linux test
 then exercised `NativeLeaseRun` itself with the same bundle and its projected
 launch spec, the exact Geany OCI archive, and a helper prepared through the

@@ -465,6 +465,10 @@ pub fn run_claimed_job_with_ledger(
 
     validate_native_outputs(job, draft.derivation.native_surface.is_some())?;
     if draft.derivation.native_surface.is_some() {
+        anyhow::ensure!(
+            !private_isolated,
+            "native private Formation requires an enforced host-network boundary"
+        );
         let text = authored_toml
             .as_deref()
             .context("native route has no authored manifest")?;

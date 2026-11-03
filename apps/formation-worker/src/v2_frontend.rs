@@ -661,7 +661,7 @@ fn compose_result(
                 NetworkPolicy::DependencyResolution => "dependency_resolution",
                 NetworkPolicy::Scoped => "phase_scoped_connect",
             },
-            "isolation": network.provenance(),
+            "isolation": if request.native_title.is_some() { "oci-internal-network;native-pixel" } else { network.provenance() },
             "field_origins": {},
         },
         "diagnostics": [],
