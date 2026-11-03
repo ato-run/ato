@@ -211,12 +211,20 @@ pub fn run_reserved_attempt(
         }
     };
 
+    if spec.derivation.native_surface.is_some() && request.contract_ref != spec.contract_ref {
+        attempt.failure = Some(AttemptFailure {
+            code: "native_assignment_mismatch".to_owned(),
+            stage: "admission".to_owned(),
+            message: "native attempt must verify its selected original Contract".to_owned(),
+        });
+        return not_run(attempt, AttemptRecordState::NotStarted);
+    }
     if let Some(failure) = admit_with_model_delivery(
         spec,
         request.authorization,
         request.browser,
         realizer.delivers_model_sets(),
-        realizer.native_surface_profile(),
+        realizer.native_surface_binding(),
     )
     .or_else(|| realizer.admit(request.profile))
     {

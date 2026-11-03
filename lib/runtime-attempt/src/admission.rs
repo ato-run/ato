@@ -121,10 +121,10 @@ pub(crate) fn admit_with_model_delivery(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
     delivers_model_sets: bool,
-    native_surface_profile: Option<&str>,
+    native_surface_binding: Option<(&str, &str)>,
 ) -> Option<AttemptFailure> {
     if let Some(native) = &spec.derivation.native_surface {
-        if native_surface_profile != Some(native.surface.profile()) {
+        if native_surface_binding.map(|binding| binding.0) != Some(native.surface.profile()) {
             return refused(
                 "native_surface_unavailable",
                 "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
@@ -137,6 +137,17 @@ pub(crate) fn admit_with_model_delivery(
             return refused(
                 "native_surface_invalid",
                 "native Adapter declaration is invalid",
+            );
+        }
+        let canonical_d = spec.derivation.derivation_ref();
+        let canonical_k = spec.contract.contract_ref();
+        if canonical_d.ok().as_deref() != Some(spec.derivation_ref)
+            || native_surface_binding.map(|binding| binding.1) != Some(spec.derivation_ref)
+            || canonical_k.ok().as_deref() != Some(spec.contract_ref)
+        {
+            return refused(
+                "native_assignment_mismatch",
+                "native attempt K or D differs from the selected realizer and canonical objects",
             );
         }
     }
@@ -603,18 +614,23 @@ mod tests {
             }))
             .unwrap(),
         );
+        let contract_ref = contract.contract_ref().unwrap();
+        let derivation_ref = d.derivation_ref().unwrap();
         let make_spec = |derivation| AttemptSpec {
             contract: &contract,
-            contract_ref: "sha256:k",
+            contract_ref: &contract_ref,
             derivation,
-            derivation_ref: "sha256:d",
+            derivation_ref: &derivation_ref,
             shape: CandidateShape::Process,
             input_refs: Default::default(),
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
         };
         let spec = make_spec(&d);
-        for profile in [None, Some("ato.terminal-surface.v1")] {
+        for profile in [
+            None,
+            Some(("ato.terminal-surface.v1", derivation_ref.as_str())),
+        ] {
             assert_eq!(
                 admit_with_model_delivery(
                     &spec,
@@ -634,9 +650,37 @@ mod tests {
                 EffectAuthorization::Unattended,
                 None,
                 false,
-                Some("ato.pixel-stream.v1")
+                Some(("ato.pixel-stream.v1", &derivation_ref))
             )
             .is_none()
+        );
+        assert_eq!(
+            admit_with_model_delivery(
+                &spec,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some(("ato.pixel-stream.v1", "sha256:other"))
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("native_assignment_mismatch")
+        );
+        let wrong_k = AttemptSpec {
+            contract_ref: "sha256:other",
+            ..make_spec(&d)
+        };
+        assert_eq!(
+            admit_with_model_delivery(
+                &wrong_k,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some(("ato.pixel-stream.v1", &derivation_ref))
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("native_assignment_mismatch")
         );
         let mut invalid_d = d.clone();
         invalid_d.ports[0].from = "other".into();
@@ -647,7 +691,7 @@ mod tests {
                 EffectAuthorization::Unattended,
                 None,
                 false,
-                Some("ato.pixel-stream.v1")
+                Some(("ato.pixel-stream.v1", &derivation_ref))
             )
             .map(|f| f.code)
             .as_deref(),
@@ -655,14 +699,18 @@ mod tests {
         );
         let mut external_d = d.clone();
         external_d.effects = EffectClass::RequiresConfirmation;
-        let external = make_spec(&external_d);
+        let external_ref = external_d.derivation_ref().unwrap();
+        let external = AttemptSpec {
+            derivation_ref: &external_ref,
+            ..make_spec(&external_d)
+        };
         assert_eq!(
             admit_with_model_delivery(
                 &external,
                 EffectAuthorization::Unattended,
                 None,
                 false,
-                Some("ato.pixel-stream.v1")
+                Some(("ato.pixel-stream.v1", &external_ref))
             )
             .map(|f| f.code)
             .as_deref(),
