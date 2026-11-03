@@ -224,6 +224,124 @@ fn actual_geany_owned_lease_uses_verified_application_archive() {
     assert!(verification.fully_satisfied(), "{verification:?}");
 }
 
+#[test]
+#[ignore = "requires Linux Docker, the frozen Geany bundle, app and verified display helper"]
+fn actual_geany_common_formation_attempt_verifies_original_contract_and_cleans_up() {
+    use ato_runtime_attempt::{
+        admission::EffectAuthorization,
+        build_sandbox::NetworkPolicy,
+        journal::{AttemptJournal, AttemptLedger, AttemptRecordState},
+        realize::StopClass,
+    };
+    let path = std::env::var_os("ATO_NATIVE_PIXEL_TEST_BUNDLE").expect("frozen bundle");
+    let bytes = std::fs::read(path).unwrap();
+    let (bundle, routes) = ato_portable_application::validate_bytes_all(&bytes).unwrap();
+    let [route] = routes.as_slice() else {
+        panic!("one route required")
+    };
+    let selected = route.derivation_ref.to_string();
+    let (fixture_spec, _, _, _) = fixture(&image());
+    let mut owner = terminal::owner(&fixture_spec);
+    owner.lease_id = "native-formation-attempt".into();
+    let root = terminal::scratch();
+    let attempt_root = root.path().join(&owner.lease_id);
+    std::fs::create_dir(&attempt_root).unwrap();
+    let mut trusted = crate::NativePixelConfig::default();
+    trusted.enabled = true;
+    trusted.helper_archive = Some(
+        std::env::var_os("ATO_NATIVE_PIXEL_HELPER_ARCHIVE")
+            .unwrap()
+            .into(),
+    );
+    trusted.helper_image = Some("ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037".into());
+    trusted.cgroup_parent = Some(
+        std::env::var("ATO_NATIVE_PIXEL_TEST_CGROUP_PARENT")
+            .unwrap_or_else(|_| "system.slice".into()),
+    );
+    trusted.prepare(root.path(), 1).unwrap();
+    let helper = trusted.helper(root.path()).unwrap();
+    let mut config = terminal::config();
+    config.startup_timeout = Duration::from_secs(30);
+    let contract_ref = route.contract_ref.to_string();
+    let profile = ato_formation::request::RuntimeProfile::default();
+    let journal = AttemptJournal::new(root.path().join("attempt-journal"));
+    let permit = journal
+        .acquire("native-formation-request", &owner.lease_id)
+        .unwrap();
+    let binding_environment = BTreeMap::new();
+    let result = super::super::formation::run_portable_native_attempt(
+        &ato_portable_application::portable_run::PortableBundleAttempt {
+            bundle_bytes: &bytes,
+            bundle: &bundle,
+            derivation_ref: &selected,
+            runtime_root: &attempt_root,
+            cache_root: root.path(),
+            sandbox_shim: Path::new("/unused"),
+            sandbox_subcommand: "unused",
+            request_id: "native-formation-request",
+            attempt_id: &owner.lease_id,
+            label: "native",
+            runtime_id: "native-formation-local",
+            profile: &profile,
+            authorization: EffectAuthorization::Unattended,
+            network: NetworkPolicy::Denied,
+            receipt_target: VerificationTargetKind::FormationRuntime,
+            run_id: None,
+            binding_environment: &binding_environment,
+            interrupt: None,
+        },
+        owner.clone(),
+        helper,
+        app_archive(),
+        config,
+        permit,
+    )
+    .unwrap();
+    assert_eq!(result.attempt_record, AttemptRecordState::Finished);
+    assert_eq!(result.stop, Some(StopClass::Confirmed));
+    if result.attempt.status != ato_formation::request::AttemptStatus::Verified {
+        eprintln!(
+            "GEANY_FORMATION_FAILURE failure={:?} receipt={:?}",
+            result.attempt.failure, result.attempt.receipt
+        );
+    }
+    assert_eq!(
+        result.attempt.status,
+        ato_formation::request::AttemptStatus::Verified
+    );
+    let receipt = result.attempt.receipt.expect("original-K receipt");
+    assert!(receipt.fully_satisfied);
+    assert_eq!(receipt.contract_ref, contract_ref);
+    assert_eq!(receipt.derivation_ref, selected);
+    assert_eq!(
+        receipt.target.kind,
+        VerificationTargetKind::FormationRuntime
+    );
+    assert_eq!(
+        receipt
+            .execution
+            .as_ref()
+            .and_then(|e| e.attempt_id.as_deref()),
+        Some(owner.lease_id.as_str())
+    );
+    assert_eq!(route.contract.contract_ref().unwrap(), contract_ref);
+    assert_no_resources(&owner);
+    assert!(
+        crate::runtime_launch::recovery::RunJournal::new(
+            root.path(),
+            &owner.runner_id,
+            &owner.slot_id
+        )
+        .unwrap()
+        .load()
+        .unwrap()
+        .is_empty()
+    );
+    eprintln!(
+        "GEANY_FORMATION_ATTEMPT contract_ref={contract_ref} derivation_ref={selected} fully_satisfied=true record=finished cleanup=confirmed"
+    );
+}
+
 /// Geany's expected first-key frame was observed independently before this
 /// attempt, with the pinned app and display-helper images in the ops record.
 /// This direct adapter test is not a hosted Run or a Formation receipt.
@@ -249,10 +367,10 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         original_k,
         "sha256:0118d5aab2d8e3bb86e87a627a3a0405ff675e006862b6cd0c337efecf4df442"
     );
-    assert_eq!(
-        d.derivation_ref().unwrap(),
-        "sha256:0dc98f01b28bdc159adcb0b0223d80ea23c5a9314ae62a6741c48a3ab9723aa7"
-    );
+    let expected_d = std::env::var("ATO_NATIVE_PIXEL_TEST_DERIVATION").unwrap_or_else(|_| {
+        "sha256:0dc98f01b28bdc159adcb0b0223d80ea23c5a9314ae62a6741c48a3ab9723aa7".into()
+    });
+    assert_eq!(d.derivation_ref().unwrap(), expected_d);
     let declaration = NativeLaunchDeclaration::from_derivation(d).unwrap();
     let descriptor = declaration
         .session_surface_descriptor("native-terminal")
@@ -347,6 +465,10 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
     assert!(completion.stop.is_confirmed());
     assert_no_resources(&owner);
     let observation = observation.expect("Geany frame observation failed");
+    eprintln!(
+        "GEANY_OBSERVED_FIRST_KEY {}",
+        String::from_utf8_lossy(&observation.0).trim()
+    );
     let runtime = ato_formation::verify::RuntimeObservation {
         input_refs: BTreeMap::new(),
         http: vec![RuntimeHttpObservation::from_response(

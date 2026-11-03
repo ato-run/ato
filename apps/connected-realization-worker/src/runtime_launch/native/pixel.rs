@@ -174,6 +174,14 @@ impl PixelHelper {
     }
 
     pub(crate) fn admit_spec(&self, spec: &RuntimeLaunchSpecV1) -> Result<()> {
+        self.admit_spec_with_reserve(spec, 0)
+    }
+
+    pub(crate) fn admit_spec_with_reserve(
+        &self,
+        spec: &RuntimeLaunchSpecV1,
+        reserve: u64,
+    ) -> Result<()> {
         let LaunchRealizationV1::Oci(oci) = &spec.realization else {
             anyhow::bail!("Pixel requires OCI");
         };
@@ -191,14 +199,33 @@ impl PixelHelper {
         self.owner
             .as_ref()
             .context("Pixel omitted local owner binding")?
-            .admit(
+            .admit_with_reserve(
                 &OciResourceLimits {
                     memory_bytes: limits.memory_bytes,
                     cpu_limit_millis: limits.cpu_limit_millis,
                     pids_limit: limits.pids_limit,
                 },
                 &self.limits,
+                reserve,
             )?;
+        Ok(())
+    }
+
+    /// Bound the transient memory needed to read and verify an operator-owned
+    /// OCI archive before creating either workload container.
+    pub fn admit_archive_loading(&self, encoded_bytes: u64) -> Result<()> {
+        let reserve = encoded_bytes
+            .checked_mul(3)
+            .context("archive memory overflow")?;
+        let capacity = self
+            .owner
+            .as_ref()
+            .context("Pixel omitted local owner binding")?
+            .measure()?;
+        ensure!(
+            reserve <= capacity.memory_available,
+            "resource_insufficient: native archive exceeds measured local capacity"
+        );
         Ok(())
     }
 }

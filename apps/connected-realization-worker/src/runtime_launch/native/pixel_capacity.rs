@@ -267,17 +267,35 @@ impl PixelOwner {
         )
     }
     pub fn admit(&self, app: &OciResourceLimits, helper: &OciResourceLimits) -> Result<Capacity> {
+        self.admit_with_reserve(app, helper, 0)
+    }
+    pub fn admit_with_reserve(
+        &self,
+        app: &OciResourceLimits,
+        helper: &OciResourceLimits,
+        reserve: u64,
+    ) -> Result<Capacity> {
         let capacity = self.measure()?;
-        capacity.admit(app, helper)?;
+        capacity.admit_with_reserve(app, helper, reserve)?;
         Ok(capacity)
     }
 }
 impl Capacity {
+    #[cfg(test)]
     fn admit(&self, app: &OciResourceLimits, helper: &OciResourceLimits) -> Result<()> {
+        self.admit_with_reserve(app, helper, 0)
+    }
+    fn admit_with_reserve(
+        &self,
+        app: &OciResourceLimits,
+        helper: &OciResourceLimits,
+        reserve: u64,
+    ) -> Result<()> {
         let memory = app
             .memory_bytes
             .checked_add(helper.memory_bytes)
             .and_then(|bytes| bytes.checked_add(RUNNER_FRAME_HEADROOM_BYTES))
+            .and_then(|bytes| bytes.checked_add(reserve))
             .context("combined GUI memory overflow")?;
         let cpu = app
             .cpu_limit_millis
@@ -381,6 +399,21 @@ mod tests {
         assert!(
             capacity
                 .admit(&limits(u64::MAX, u64::MAX), &limits(1, 1))
+                .is_err()
+        );
+        assert!(
+            capacity
+                .admit_with_reserve(&limits(127, 500), &limits(256, 500), 1)
+                .is_ok()
+        );
+        assert!(
+            capacity
+                .admit_with_reserve(&limits(128, 500), &limits(256, 500), 1)
+                .is_err()
+        );
+        assert!(
+            capacity
+                .admit_with_reserve(&limits(128, 500), &limits(256, 500), u64::MAX)
                 .is_err()
         );
     }
