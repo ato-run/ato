@@ -97,9 +97,9 @@ pub trait CandidateRealizer {
     }
 
     /// Native execution remains refused unless this trusted realizer names
-    /// the exact Adapter profile it can own. Its `admit` must still establish
-    /// physical availability and resource boundaries before anything starts.
-    fn native_surface_profile(&self) -> Option<&'static str> {
+    /// the exact Adapter profile and Derivation it can own. Its `admit` must
+    /// still establish physical availability and resource boundaries.
+    fn native_surface_binding(&self) -> Option<(&str, &str)> {
         None
     }
 

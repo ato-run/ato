@@ -19,12 +19,13 @@ Runner, run a native workload during Formation, or satisfy a Contract. The
 original K must independently declare the observation and verification
 continues to use measured output from the selected Run.
 
-The common attempt admission can recognize an exact native profile named by
-the trusted candidate realizer. Omission remains a refusal, a mismatched or
-invalid Adapter is refused before launch, and this capability does not bypass
-effect, authority, host or platform checks. A realizer must still independently
-admit and own all physical resources; this gate alone does not provide a native
-executor or enable Formation.
+The common attempt admission can recognize an exact native profile and D
+named by the trusted candidate realizer. Omission remains a refusal; it checks
+the canonical K and D refs, the realizer's selected D, and the Adapter/Port
+graph before launch. An attempt cannot substitute another effective K. This
+capability does not bypass effect, authority, host or platform checks. A
+realizer must still independently admit and own all physical resources; this
+gate alone does not provide a native executor or enable Formation.
 
 For the initial portable native OCI profile, the shared portable Runtime can
 project the validated bundle's selected D into `RuntimeLaunchSpecV1`. The
@@ -34,6 +35,11 @@ refuses promised guest listeners. The first projection refuses declared state,
 Model Sets and Bindings rather than dropping them. Attempt identity and the
 materialized workspace reference are caller-supplied physical inputs. The
 projection neither authorizes launch nor claims K satisfaction.
+
+Portable Formation publication requires a finished attempt record, verified
+status and confirmed cleanup even when the observation receipt says K was
+satisfied. The receipt remains evidence if stopping or recording fails, but it
+does not by itself authorize publication.
 
 The owned Native lease lifecycle also accepts an optional explicitly supplied
 application OCI archive for Pixel. It passes the archive to the existing
