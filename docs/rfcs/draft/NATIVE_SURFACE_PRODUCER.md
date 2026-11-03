@@ -2,6 +2,23 @@
 
 Status: Draft. Adapter/runtime orchestration, outside Capsule identity.
 
+## Pixel authoring in capsule.toml
+
+The `ato.capsule/1` authoring grammar can represent one `pixel_stream`
+presentation with its existing `ato.pixel-stream.v1` profile and one bounded
+`pixel_key_frame` operation. Authors declare the surface Port, width, height,
+private probe Port and path, keysyms, frame byte bound, timeout and optional
+settling time. Only the declared Pixel Port can use `ato.tcp@1` in this
+grammar. The shared Native catalog and bound Port validation remain the
+authority for limits and ownership; unknown and inconsistent fields are
+rejected. Rendering must preserve the same declaration, and omission of the
+optional settle time remains zero in the wire catalog.
+
+This is authoring support only. It does not add a source builder, enable a
+Runner, run a native workload during Formation, or satisfy a Contract. The
+original K must independently declare the observation and verification
+continues to use measured output from the selected Run.
+
 ## Trusted HostBoundary identity for GUI file exchange
 
 The accepted Materialization and Protocol Adapter contracts keep physical
