@@ -36,8 +36,29 @@ pub fn run(
     pixel.helper_archive = Some(PathBuf::from(value("ATO_FORMATION_NATIVE_HELPER_ARCHIVE")?));
     pixel.helper_image = Some(value("ATO_FORMATION_NATIVE_HELPER_IMAGE")?);
     pixel.cgroup_parent = Some(value("ATO_FORMATION_NATIVE_CGROUP_PARENT")?);
+    let optional_number = |name: &str, default: u64| -> Result<u64> {
+        match std::env::var(name) {
+            Ok(value) => value.parse().with_context(|| format!("invalid {name}")),
+            Err(std::env::VarError::NotPresent) => Ok(default),
+            Err(error) => Err(error).with_context(|| format!("invalid {name}")),
+        }
+    };
+    pixel.helper_memory_mib = optional_number(
+        "ATO_FORMATION_NATIVE_HELPER_MEMORY_MIB",
+        pixel.helper_memory_mib,
+    )?;
+    pixel.helper_cpu_millis = optional_number(
+        "ATO_FORMATION_NATIVE_HELPER_CPU_MILLIS",
+        pixel.helper_cpu_millis,
+    )?;
+    pixel.helper_pids = optional_number("ATO_FORMATION_NATIVE_HELPER_PIDS", pixel.helper_pids)?;
     pixel.prepare(work_root, 1)?;
     let helper = pixel.helper(work_root)?;
+    if request.authorization
+        == ato_runtime_attempt::admission::EffectAuthorization::PrivateIsolatedFormation
+    {
+        helper.verify_private_formation_boundary()?;
+    }
 
     let archive_file = std::fs::File::open(value("ATO_FORMATION_NATIVE_APP_ARCHIVE")?)?;
     let max = (ato_portable_application::oci_archive::MAX_ARCHIVE_BYTES as u64 * 4 / 3) + 4096;

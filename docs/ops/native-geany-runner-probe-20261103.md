@@ -125,8 +125,22 @@ it does not exercise staging admission, registration, or hosted execution.
 The native OCI path records its actual internal-network isolation rather than
 the process sandbox's bubblewrap/Landlock description. An internal Docker
 bridge alone does not establish that a container cannot reach host services;
-private-isolated native Formation therefore refuses admission until that host
-boundary is enforced and tested.
+private-isolated native Formation therefore initially refused admission until
+that host boundary was enforced and tested.
+
+A subsequent isolated Linux adapter run used separate Docker `none` network
+namespaces for the exact Geany image and helper. Docker inspection confirmed
+that each had no IP address or gateway; a host listener was reachable from the
+host, but connection attempts from each container failed. The same run observed
+the original fixed Contract as satisfied and confirmed cleanup. The worker now
+records `oci-network-none;native-pixel` for this execution. Separately, a
+Linux worker test inside a temporary systemd slice confirmed that a bounded
+common parent is accepted and the root or unrelated system slice is refused;
+the test slice and its temporary limits were removed afterward. Private native
+Formation now checks that common boundary before archive loading and before
+realization. No complete private Geany attempt has yet been demonstrated under
+the existing resource ceilings. These tests did not exercise Studio, staging
+or a browser.
 
 The `actual_geany_owned_lease_uses_verified_application_archive` Linux test
 then exercised `NativeLeaseRun` itself with the same bundle and its projected

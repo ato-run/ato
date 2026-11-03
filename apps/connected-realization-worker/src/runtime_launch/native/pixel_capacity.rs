@@ -231,6 +231,11 @@ fn info(socket: &Path) -> Result<Info> {
 }
 
 impl PixelOwner {
+    pub(crate) fn verify_private_formation_boundary(&self) -> Result<()> {
+        ato_runtime_attempt::resource_boundary::verify_common_parent(
+            &Path::new("/sys/fs/cgroup").join(&self.cgroup),
+        )
+    }
     pub(crate) fn verify_container(&self, container: &ato_adapter_oci::OciHandle) -> Result<()> {
         container.verify_cgroup_parent(&self.docker_parent, &self.cgroup)
     }
