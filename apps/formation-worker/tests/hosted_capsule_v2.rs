@@ -260,6 +260,13 @@ fn actual_native_geany_job_publishes_the_original_contract_after_cleanup() {
     let captured = fixture.captured.result.lock().unwrap();
     let result = captured.as_ref().expect("published Formation result");
     assert_eq!(
+        result["provenance"]["isolation"],
+        "oci-internal-network;native-pixel"
+    );
+    if let Some(path) = std::env::var_os("ATO_NATIVE_GEANY_RESULT") {
+        std::fs::write(path, serde_json::to_vec_pretty(result).unwrap()).unwrap();
+    }
+    assert_eq!(
         result["contract_ref"],
         "sha256:dba72da3da110f31dd551a046a69cd8c50ae53bb2aba5b02f1bd00dd2b89e395"
     );
@@ -271,6 +278,11 @@ fn actual_native_geany_job_publishes_the_original_contract_after_cleanup() {
     assert_eq!(
         result["verification_receipt"]["execution"]["attempt_id"],
         "geany_attempt"
+    );
+    assert!(
+        result["verification_receipt"]["execution"]
+            .get("lease_id")
+            .is_none()
     );
     assert_eq!(fixture.captured.uploads.load(Ordering::SeqCst), 1);
 }
