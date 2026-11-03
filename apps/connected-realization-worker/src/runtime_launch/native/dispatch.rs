@@ -19,6 +19,42 @@ impl NativeLeaseRun {
         pixel_helper: Option<super::pixel::PixelHelper>,
         check_startup: &mut dyn FnMut() -> Result<()>,
     ) -> std::result::Result<Self, super::super::lease::StartFailure> {
+        Self::start_with_archive(
+            spec,
+            selected_ref,
+            descriptor,
+            context,
+            owner,
+            config,
+            pixel_helper,
+            None,
+            check_startup,
+        )
+    }
+
+    /// Start the same owned lifecycle with an explicitly supplied immutable
+    /// application archive. The Pixel adapter verifies its image and platform
+    /// against the selected D before any container is created.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_archive(
+        spec: &RuntimeLaunchSpecV1,
+        selected_ref: &str,
+        descriptor: &SessionSurfaceDescriptor,
+        context: &ResolvedRuntimeLaunchContext,
+        owner: &OciOwner,
+        config: NativeLeaseSurfaceConfig,
+        pixel_helper: Option<super::pixel::PixelHelper>,
+        application_archive: Option<ato_objects::PortableOciArchive>,
+        check_startup: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<Self, super::super::lease::StartFailure> {
+        if application_archive.is_some()
+            && !matches!(descriptor, SessionSurfaceDescriptor::PixelStream { .. })
+        {
+            return Err(anyhow::anyhow!(
+                "application archive is supported only by the owned Pixel adapter"
+            )
+            .into());
+        }
         check_startup()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -31,7 +67,7 @@ impl NativeLeaseRun {
                 match descriptor {
                     SessionSurfaceDescriptor::Terminal { .. } => start_terminal(spec, selected_ref, descriptor, context, owner, config, owner_rx).await,
                     SessionSurfaceDescriptor::PixelStream { .. } => super::pixel::start_pixel(spec, selected_ref, descriptor, context, owner, config,
-                        pixel_helper.context("native_surface_unavailable: Pixel helper is not owned")?, None, owner_rx).await,
+                        pixel_helper.context("native_surface_unavailable: Pixel helper is not owned")?, application_archive, owner_rx).await,
                     _ => Err(anyhow::anyhow!("native_surface_unavailable: unsupported Native Surface").into()),
                 }
             };
