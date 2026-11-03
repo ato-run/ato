@@ -61,6 +61,106 @@ pub struct PortableRunContext<'a> {
     pub sandbox_subcommand: &'a str,
 }
 
+/// Project a validated native OCI route into the existing Runner wire contract.
+/// The caller supplies attempt identity, never a replacement for K, D or their
+/// Ports. This performs no execution and grants no physical capability.
+pub fn native_launch_spec(
+    bundle: &ato_objects::PortableApplicationBundle,
+    derivation_ref: &str,
+    context: ato_ipc::runtime_launch::LaunchContextV1,
+    materialization_ref: String,
+) -> Result<ato_ipc::runtime_launch::RuntimeLaunchSpecV1> {
+    use ato_ipc::runtime_launch::{
+        LaunchRealizationV1, LaunchWorkspaceV1, LifecycleV1, OciRealizationV1, OciResourceLimitsV1,
+        OciUserV1, PublicEnvV1, RUNTIME_LAUNCH_SPEC_V1_PROTOCOL, ReadinessV1, RuntimeLaunchSpecV1,
+    };
+    let route = crate::validate_bundle_for_derivation(bundle, derivation_ref)?;
+    let d = &route.derivation;
+    ensure!(
+        route.realization == PortableRealizationKind::OciContainer,
+        "native launch needs OCI"
+    );
+    ensure!(
+        d.state.is_empty() && route.model_sets.is_empty() && route.application.bindings.is_empty(),
+        "native launch does not yet project state, Model Sets or Bindings"
+    );
+    let declaration =
+        ato_runtime_attempt::native_launch::NativeLaunchDeclaration::from_derivation(d)?;
+    match &declaration.adapter.surface {
+        ato_formation::native_surface::NativePresentation::Terminal { .. } => {
+            declaration.require_host_terminal_ports()?
+        }
+        ato_formation::native_surface::NativePresentation::PixelStream { .. } => {
+            declaration.require_host_pixel_ports()?
+        }
+    }
+    ensure!(
+        declaration.derivation_ref == derivation_ref,
+        "selected native D changed"
+    );
+    let step = d.steps.first().context("native route omitted step")?;
+    let runtime = &d.runtimes;
+    let image = runtime
+        .get(OCI_IMAGE_RUNTIME)
+        .context("native OCI image missing")?;
+    let digest = image
+        .rsplit_once('@')
+        .context("native image is not pinned")?
+        .1
+        .to_owned();
+    let limits = oci_limits(runtime)?;
+    let user: ato_adapter_oci::OciUser = runtime
+        .get(OCI_USER_RUNTIME)
+        .context("native OCI user missing")?
+        .parse()?;
+    let spec = RuntimeLaunchSpecV1 {
+        protocol: RUNTIME_LAUNCH_SPEC_V1_PROTOCOL.to_owned(),
+        context,
+        workspace: LaunchWorkspaceV1 {
+            materialization_ref,
+            cwd_relative: ato_formation::projection::workspace_relative_cwd(&step.cwd)
+                .map_err(anyhow::Error::msg)?,
+        },
+        realization: LaunchRealizationV1::Oci(OciRealizationV1 {
+            native_surface: Some(serde_json::to_value(declaration)?),
+            image_digest_ref: digest,
+            image_reference: Some(image.clone()),
+            platform: runtime.get(OCI_PLATFORM_RUNTIME).cloned(),
+            resource_limits: Some(OciResourceLimitsV1 {
+                memory_bytes: limits.memory_bytes,
+                cpu_limit_millis: limits.cpu_limit_millis,
+                pids_limit: limits.pids_limit,
+            }),
+            entrypoint: runtime.get(OCI_ENTRYPOINT_RUNTIME).cloned(),
+            user: Some(OciUserV1 {
+                uid: user.uid,
+                gid: user.gid,
+            }),
+            argv: Some(step.argv.clone()),
+            working_dir: runtime.get(OCI_WORKING_DIR_RUNTIME).cloned(),
+            workspace_mount_path: runtime.get(OCI_WORKSPACE_MOUNT_RUNTIME).cloned(),
+        }),
+        public_env: step
+            .env
+            .iter()
+            .map(|(name, value)| PublicEnvV1 {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        secret_grants: vec![],
+        state_attachments: vec![],
+        endpoints: vec![],
+        readiness: ReadinessV1::Process { timeout_ms: 5000 },
+        lifecycle: LifecycleV1 {
+            graceful_shutdown_ms: 5000,
+            force_kill_after_ms: 10000,
+        },
+    };
+    spec.validate()?;
+    Ok(spec)
+}
+
 /// Makes a validated portable route runnable and starts it.
 pub struct PortableBundleExecutor<'a> {
     /// The bundle as it arrived; a thin bundle's external objects are

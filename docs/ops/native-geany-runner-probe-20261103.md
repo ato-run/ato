@@ -74,6 +74,13 @@ the bundle via `ATO_NATIVE_PIXEL_TEST_BUNDLE` in addition to the explicit app
 and helper archive paths. This remains a direct adapter test, not a Formation
 or hosted attempt.
 
+The direct adapter test was repeated after adding the shared native launch
+projection. It started the same immutable Geany bundle using the generated
+`RuntimeLaunchSpecV1` and again satisfied the unchanged K. Wrong body and wrong
+Port remained rejected and the owned resources were stopped. This validates
+the projection through a real local adapter, not the Formation frontend or a
+registered staging Runner.
+
 The staging Studio source attempt still failed in Formation's static HTML
 path. The Formation executor explicitly refuses native surfaces, and the
 staging Runner was not advertising the required Pixel capability when

@@ -116,6 +116,40 @@ fn a_pixel_declaration_produces_a_validated_native_bundle() {
         reports[0].session_surface,
         Some(ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream { .. })
     ));
+    let context = ato_ipc::runtime_launch::LaunchContextV1 {
+        run_id: "run".into(),
+        compute_id: "compute".into(),
+        compute_schema_id: "schema".into(),
+        compute_instance_id: "instance".into(),
+    };
+    let selected = routes[0].derivation_ref.to_string();
+    let launch = crate::portable_run::native_launch_spec(
+        &bundle,
+        &selected,
+        context.clone(),
+        "materialization".into(),
+    )
+    .unwrap();
+    let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = launch.realization else {
+        panic!("OCI expected")
+    };
+    let declared = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(
+        oci.native_surface.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(declared.derivation_ref, selected);
+    assert_eq!(declared.ports.as_ref(), Some(&routes[0].derivation.ports));
+    assert_eq!(oci.image_reference.as_deref(), Some(IMAGE));
+    assert_eq!(oci.argv.as_ref(), Some(&routes[0].derivation.steps[0].argv));
+    assert!(
+        crate::portable_run::native_launch_spec(
+            &bundle,
+            &format!("sha256:{}", "0".repeat(64)),
+            context,
+            "materialization".into()
+        )
+        .is_err()
+    );
 }
 
 #[test]
