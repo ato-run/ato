@@ -197,7 +197,10 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
         .unwrap()
         .1;
     let backend_body = client
-        .get(format!("http://{}:8080/", backend.container_address()))
+        .get(format!(
+            "http://{}:8080/",
+            backend.container_address().unwrap()
+        ))
         .send()
         .unwrap()
         .error_for_status()

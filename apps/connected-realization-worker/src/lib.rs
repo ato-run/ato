@@ -3070,11 +3070,14 @@ impl ConnectedWorker {
         let execution_evidence = active.execution_evidence();
         let oci_port_mapping = active.launched.surface_container().and_then(|container| {
             let (container_ip, mappings) = container.port_mapping();
-            mappings.first().map(|mapping| OciPortMappingReport {
-                container_ip: container_ip.to_string(),
-                guest_port: mapping.guest_port,
-                runner_forward_port: mapping.host_port,
-            })
+            mappings
+                .first()
+                .zip(container_ip)
+                .map(|(mapping, container_ip)| OciPortMappingReport {
+                    container_ip: container_ip.to_string(),
+                    guest_port: mapping.guest_port,
+                    runner_forward_port: mapping.host_port,
+                })
         });
         // The public slot port is this worker's gate, not the workload: a
         // request is forwarded to the hidden loopback port only after it
@@ -3094,7 +3097,12 @@ impl ConnectedWorker {
                 for endpoint in &service.endpoints {
                     observation_targets.insert(
                         endpoint.name.clone(),
-                        SocketAddr::new(handle.container_address(), endpoint.guest_port),
+                        SocketAddr::new(
+                            handle
+                                .container_address()
+                                .context("observation service has no network address")?,
+                            endpoint.guest_port,
+                        ),
                     );
                 }
             }
@@ -3175,13 +3183,19 @@ impl ConnectedWorker {
                 self.fixed_tcp.activate(
                     &lease.run_id,
                     allocation,
-                    SocketAddr::new(container.container_address(), allocation.guest_port),
+                    SocketAddr::new(
+                        container
+                            .container_address()
+                            .context("fixed TCP service has no network address")?,
+                        allocation.guest_port,
+                    ),
                 )?;
             }
         }
         if let Some(container) = active.launched.surface_container() {
             let (container_ip, mappings) = container.port_mapping();
             for mapping in mappings {
+                let container_ip = container_ip.context("port mapping has no container address")?;
                 eprintln!(
                     "[runtime-launch-surface] {}",
                     serde_json::json!({
