@@ -226,6 +226,29 @@ fn private_isolation_policy(job: &serde_json::Value) -> Result<bool> {
     Ok(enabled)
 }
 
+fn validate_native_outputs(job: &serde_json::Value, native: bool) -> Result<()> {
+    let outputs = job["requested_outputs"].as_array();
+    let portable = outputs.is_some_and(|outputs| {
+        outputs
+            .iter()
+            .any(|output| output.as_str() == Some("portable_application"))
+    });
+    if native {
+        anyhow::ensure!(
+            outputs
+                .is_some_and(|outputs| outputs.len() == 1
+                    && outputs[0].as_str() == Some("portable_application")),
+            "native Formation requires exactly the portable_application output"
+        );
+    } else {
+        anyhow::ensure!(
+            !portable,
+            "portable_application output requires a portable manifest or native surface"
+        );
+    }
+    Ok(())
+}
+
 /// Run a job whose attempt was already claimed. The control plane supplies the
 /// attempt fence; this function does not decide which attempt is current.
 pub fn run_claimed_job(
@@ -391,13 +414,15 @@ pub fn run_claimed_job_with_ledger(
                 .get("authoring")
                 .and_then(|authoring| authoring.get("derivation_ref"))
                 .and_then(|value| value.as_str()),
+            native_title: None,
+            private_isolated: false,
             permit: Some(permit),
         });
     }
 
-    let draft = match authored_toml {
+    let draft = match authored_toml.as_deref() {
         Some(text) => {
-            let mut draft = parse_capsule_toml(&text).map_err(FormationFailure::from)?;
+            let mut draft = parse_capsule_toml(text).map_err(FormationFailure::from)?;
             draft.contract.identity =
                 resolve_authored_identity(draft.contract.identity, requested_identity)?;
             draft
@@ -437,6 +462,47 @@ pub fn run_claimed_job_with_ledger(
             }
         }
     };
+
+    validate_native_outputs(job, draft.derivation.native_surface.is_some())?;
+    if draft.derivation.native_surface.is_some() {
+        let text = authored_toml
+            .as_deref()
+            .context("native route has no authored manifest")?;
+        let original = parse_capsule_toml(text).map_err(FormationFailure::from)?;
+        if original.contract.identity != draft.contract.identity {
+            return Err(FormationFailure::new(
+                "native_contract_identity_conflict",
+                FailureStage::Authoring,
+                "native portable Formation cannot change the authored Contract identity".to_owned(),
+            )
+            .into());
+        }
+        let title = job["source"]["repository"]
+            .as_str()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or("Native application");
+        return crate::v2_frontend::run(crate::v2_frontend::V2Request {
+            api: context.api,
+            attempt: &attempt,
+            manifest: text,
+            source_root: &source_root,
+            attempt_root: &attempt_root,
+            work_root: context.work_root,
+            shim: context.shim,
+            closure_ref: &closure_ref,
+            source_evidence: &source_evidence,
+            compute_id,
+            capsule_revision_id,
+            triple: job["target"]["triple"]
+                .as_str()
+                .unwrap_or("x86_64-linux-gnu"),
+            network_policy: job["policy"]["network"].as_str().unwrap_or("denied"),
+            requested_derivation: job["authoring"]["derivation_ref"].as_str(),
+            native_title: Some(title),
+            private_isolated,
+            permit: Some(permit),
+        });
+    }
 
     let authored_overrides: BTreeMap<String, String> = job["authoring"]["overrides"]
         .as_object()
@@ -1219,6 +1285,32 @@ mod contract_identity_tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_output_admission_is_explicit_and_exclusive() {
+        assert!(
+            validate_native_outputs(&json!({"requested_outputs":["portable_application"]}), true)
+                .is_ok()
+        );
+        for outputs in [
+            json!([]),
+            json!(["static_web"]),
+            json!(["portable_application", "process_workspace"]),
+            json!(["portable_application", "portable_application"]),
+        ] {
+            assert!(validate_native_outputs(&json!({"requested_outputs": outputs}), true).is_err());
+        }
+        assert!(
+            validate_native_outputs(
+                &json!({"requested_outputs":["portable_application"]}),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_outputs(&json!({"requested_outputs":["static_web"]}), false).is_ok()
+        );
+    }
 
     #[test]
     fn private_isolation_requires_an_explicit_denied_network_policy() {
