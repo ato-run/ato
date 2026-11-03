@@ -40,9 +40,15 @@ Two runs with the same app and helper produced distinct observations:
 | 2 | `165b588bf51ad20c5e81e42589371ae626e0ea4fad12105a7c65fed3b3a5f63b` | `5c8e497daf399fa49ed16736eb6cbf58a1959afcf5fcf8f3b5c25628c7d30796` |
 
 Geany displays timestamps in the captured window. Full-frame digest equality
-is therefore not established across runs. A measured frame cannot be copied
-into K during the same execution: the independently authored contract must
-remain unchanged and the verifier must evaluate real observations.
+is therefore not established across runs with that configuration. An
+exploratory variation adding Geany's `--no-msgwin` produced the same first-key
+digest (`763deb416a7116074edd6493142881f581e64728ce9ffe2423bf23b6d33a3139`)
+and second-key digest (`2a78ee2796bb0e67dc2ea17ee7eda7cd6b3e77b89a6d6d02e1c65a0a18fc922e`)
+in two consecutive runs on the same host. This is a useful lead, not a
+cross-environment reproducibility guarantee or a verified Contract. A measured
+frame cannot be copied into K during the same execution: the independently
+authored contract must remain unchanged and the verifier must evaluate real
+observations.
 
 The staging Studio source attempt still failed in Formation's static HTML
 path. The Formation executor explicitly refuses native surfaces, and the
