@@ -19,6 +19,13 @@ Runner, run a native workload during Formation, or satisfy a Contract. The
 original K must independently declare the observation and verification
 continues to use measured output from the selected Run.
 
+The common attempt admission can recognize an exact native profile named by
+the trusted candidate realizer. Omission remains a refusal, a mismatched or
+invalid Adapter is refused before launch, and this capability does not bypass
+effect, authority, host or platform checks. A realizer must still independently
+admit and own all physical resources; this gate alone does not provide a native
+executor or enable Formation.
+
 ## Trusted HostBoundary identity for GUI file exchange
 
 The accepted Materialization and Protocol Adapter contracts keep physical
@@ -249,13 +256,12 @@ as before. The Runner lease DTO can carry the existing typed
 `SessionSurfaceDescriptor` as optional `session_surface` metadata outside
 the launch-spec digest.
 
-This slice admits the native bundle format, not native execution. Existing
-local/Formation execution lowering and attempt admission refuse a native D.
-The Connected Runner rejects native `session_surface` before launch and
-continues to advertise Web only. Native probe implementation, producer
-attachment, capability matching, private endpoint resolution, authenticated
-publication, lease-owned cleanup and staging app acceptance require subsequent
-implementation and validation. No existing deployment flag is enabled here.
+The initial format-only slice admitted no native execution. Subsequent sections
+describe the native Runner and its independent rollout gates. Ordinary
+local/Formation lowering still refuses a native D; common attempt admission
+defaults to refusal unless a trusted realizer explicitly supplies the matching
+profile and independently passes physical admission. Format admission alone
+never enables a deployment flag.
 
 ### Runner-owned application observation probe
 

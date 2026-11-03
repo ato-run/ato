@@ -113,7 +113,7 @@ pub fn admit(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
 ) -> Option<AttemptFailure> {
-    admit_with_model_delivery(spec, authorization, browser, false)
+    admit_with_model_delivery(spec, authorization, browser, false, None)
 }
 
 pub(crate) fn admit_with_model_delivery(
@@ -121,12 +121,24 @@ pub(crate) fn admit_with_model_delivery(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
     delivers_model_sets: bool,
+    native_surface_profile: Option<&str>,
 ) -> Option<AttemptFailure> {
-    if spec.derivation.native_surface.is_some() {
-        return refused(
-            "native_surface_unavailable",
-            "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
-        );
+    if let Some(native) = &spec.derivation.native_surface {
+        if native_surface_profile != Some(native.surface.profile()) {
+            return refused(
+                "native_surface_unavailable",
+                "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
+            );
+        }
+        if native
+            .validate(&spec.derivation.ports, &spec.derivation.steps)
+            .is_err()
+        {
+            return refused(
+                "native_surface_invalid",
+                "native Adapter declaration is invalid",
+            );
+        }
     }
     // No entry into this attempt path measures its host against a route's
     // host condition, so none may run such a route. The route is not wrong;
@@ -562,8 +574,100 @@ mod tests {
                 admit(&spec, authorization, None).map(|f| f.code).as_deref(),
                 Some(MODEL_SET_UNAVAILABLE)
             );
-            assert!(admit_with_model_delivery(&spec, authorization, None, true).is_none());
+            assert!(admit_with_model_delivery(&spec, authorization, None, true, None).is_none());
         }
+    }
+
+    #[test]
+    fn native_admission_requires_the_exact_trusted_profile_and_keeps_other_gates() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let mut d = derivation(EffectClass::Pure);
+        d.steps = serde_json::from_value(serde_json::json!([
+            {"id":"serve", "protocol":"ato.oci@1", "op":"serve"}
+        ]))
+        .unwrap();
+        d.ports = serde_json::from_value(serde_json::json!([
+            {"id":"app.native", "protocol":"ato.tcp@1", "from":"serve"},
+            {"id":"app.probe", "protocol":"ato.http@1", "from":"serve"}
+        ]))
+        .unwrap();
+        d.native_surface = Some(
+            serde_json::from_value(serde_json::json!({
+                "surface":{"kind":"pixel_stream", "port":"app.native", "width":640, "height":480},
+                "probe_port":"app.probe",
+                "operations":[{"kind":"pixel_key_frame", "path":"/result", "keysyms":[103],
+                    "max_frame_bytes":1228800, "timeout_ms":1000}]
+            }))
+            .unwrap(),
+        );
+        let make_spec = |derivation| AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        let spec = make_spec(&d);
+        for profile in [None, Some("ato.terminal-surface.v1")] {
+            assert_eq!(
+                admit_with_model_delivery(
+                    &spec,
+                    EffectAuthorization::Unattended,
+                    None,
+                    false,
+                    profile
+                )
+                .map(|f| f.code)
+                .as_deref(),
+                Some("native_surface_unavailable")
+            );
+        }
+        assert!(
+            admit_with_model_delivery(
+                &spec,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some("ato.pixel-stream.v1")
+            )
+            .is_none()
+        );
+        let mut invalid_d = d.clone();
+        invalid_d.ports[0].from = "other".into();
+        let invalid = make_spec(&invalid_d);
+        assert_eq!(
+            admit_with_model_delivery(
+                &invalid,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some("ato.pixel-stream.v1")
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("native_surface_invalid")
+        );
+        let mut external_d = d.clone();
+        external_d.effects = EffectClass::RequiresConfirmation;
+        let external = make_spec(&external_d);
+        assert_eq!(
+            admit_with_model_delivery(
+                &external,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some("ato.pixel-stream.v1")
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("effect_policy")
+        );
     }
 
     #[test]
@@ -608,7 +712,7 @@ mod tests {
                 Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
             );
             assert_eq!(
-                admit_with_model_delivery(&spec, authorization, None, true)
+                admit_with_model_delivery(&spec, authorization, None, true, None)
                     .map(|f| f.code)
                     .as_deref(),
                 Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
