@@ -100,6 +100,130 @@ fn image() -> String {
     app_archive().image
 }
 
+#[test]
+fn application_archive_for_terminal_is_refused_before_startup() {
+    let image = format!("example.invalid/app@sha256:{}", "1".repeat(64));
+    let (spec, descriptor, _, d) = terminal::fixture(&image);
+    let root = terminal::scratch();
+    let context = terminal::context(root.path(), "");
+    let owner = terminal::owner(&spec);
+    let archive = PortableOciArchive {
+        image,
+        platform: "linux/amd64".into(),
+        bytes: String::new(),
+    };
+    let mut checked = false;
+    let result = NativeLeaseRun::start_with_archive(
+        &spec,
+        &d.derivation_ref().unwrap(),
+        &descriptor,
+        &context,
+        &owner,
+        terminal::config(),
+        None,
+        Some(archive),
+        &mut || {
+            checked = true;
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!checked);
+    assert!(!root.path().join("oci-runtime").exists());
+}
+
+#[test]
+#[ignore = "requires Linux Docker, the frozen Geany bundle, app and verified display helper"]
+fn actual_geany_owned_lease_uses_verified_application_archive() {
+    use std::io::{Read, Write};
+    let path = std::env::var_os("ATO_NATIVE_PIXEL_TEST_BUNDLE").expect("frozen bundle");
+    let (bundle, routes) =
+        ato_portable_application::validate_bytes_all(&std::fs::read(path).unwrap()).unwrap();
+    let [route] = routes.as_slice() else {
+        panic!("one route required")
+    };
+    let (fixture_spec, _, _, _) = fixture(&image());
+    let selected = route.derivation_ref.to_string();
+    let spec = ato_portable_application::portable_run::native_launch_spec(
+        &bundle,
+        &selected,
+        fixture_spec.context,
+        route.tree_ref.to_string(),
+    )
+    .unwrap();
+    let descriptor = NativeLaunchDeclaration::from_derivation(&route.derivation)
+        .unwrap()
+        .session_surface_descriptor("native-terminal")
+        .unwrap();
+    let root = terminal::scratch();
+    let workspace = root.path().join("workspace");
+    ato_portable_application::materialize_tree(&bundle, route, &workspace).unwrap();
+    let context = ResolvedRuntimeLaunchContext::new(
+        workspace,
+        "",
+        route.derivation.steps[0].env.clone(),
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let owner = terminal::owner(&spec);
+    let mut trusted = crate::native_pixel_config::NativePixelConfig::default();
+    trusted.enabled = true;
+    trusted.helper_archive = Some(
+        std::env::var_os("ATO_NATIVE_PIXEL_HELPER_ARCHIVE")
+            .unwrap()
+            .into(),
+    );
+    trusted.helper_image = Some("ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037".into());
+    trusted.cgroup_parent = Some(
+        std::env::var("ATO_NATIVE_PIXEL_TEST_CGROUP_PARENT")
+            .unwrap_or_else(|_| "system.slice".into()),
+    );
+    trusted.prepare(root.path(), 1).unwrap();
+    let helper = trusted.helper(root.path()).unwrap();
+    let mut config = terminal::config();
+    config.startup_timeout = Duration::from_secs(30);
+    let run = NativeLeaseRun::start_with_archive(
+        &spec,
+        &selected,
+        &descriptor,
+        &context,
+        &owner,
+        config,
+        Some(helper),
+        Some(app_archive()),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    let mut stream = std::net::TcpStream::connect(run.observation_addr()).unwrap();
+    stream
+        .write_all(b"GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    let body_start = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let runtime = ato_formation::verify::RuntimeObservation {
+        input_refs: BTreeMap::new(),
+        http: vec![RuntimeHttpObservation::from_response(
+            "app.probe",
+            "GET",
+            "/result",
+            200,
+            &response[body_start..],
+        )],
+        instance_snapshot_ref: None,
+        scenarios: vec![],
+        tls: vec![],
+    };
+    let verification = ato_formation::verify::verify_runtime(&route.contract, &runtime);
+    let completion = run.stop();
+    assert!(completion.stop.is_confirmed());
+    assert_no_resources(&owner);
+    assert!(verification.fully_satisfied(), "{verification:?}");
+}
+
 /// Geany's expected first-key frame was observed independently before this
 /// attempt, with the pinned app and display-helper images in the ops record.
 /// This direct adapter test is not a hosted Run or a Formation receipt.

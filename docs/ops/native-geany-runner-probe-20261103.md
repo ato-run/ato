@@ -81,6 +81,13 @@ Port remained rejected and the owned resources were stopped. This validates
 the projection through a real local adapter, not the Formation frontend or a
 registered staging Runner.
 
+The `actual_geany_owned_lease_uses_verified_application_archive` Linux test
+then exercised `NativeLeaseRun` itself with the same bundle and its projected
+launch spec, the exact Geany OCI archive, and a helper prepared through the
+normal local cgroup and warm-image admission checks. The private observation
+satisfied the unchanged K, and stopping the lease confirmed resource cleanup.
+No staging lease, hosted receipt or browser session was involved.
+
 The staging Studio source attempt still failed in Formation's static HTML
 path. The Formation executor explicitly refuses native surfaces, and the
 staging Runner was not advertising the required Pixel capability when

@@ -35,6 +35,13 @@ Model Sets and Bindings rather than dropping them. Attempt identity and the
 materialized workspace reference are caller-supplied physical inputs. The
 projection neither authorizes launch nor claims K satisfaction.
 
+The owned Native lease lifecycle also accepts an optional explicitly supplied
+application OCI archive for Pixel. It passes the archive to the existing
+adapter validation, which checks its digest, image reference and platform
+against the selected D before creating any container. The existing entry point
+continues to omit the archive; Terminal rejects it. This adds no control-plane
+transport or automatic publication of an archive.
+
 ## Trusted HostBoundary identity for GUI file exchange
 
 The accepted Materialization and Protocol Adapter contracts keep physical
