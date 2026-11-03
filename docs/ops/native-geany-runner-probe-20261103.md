@@ -1,0 +1,50 @@
+# Geany native Pixel runner probe (2026-11-03)
+
+This is a physical adapter investigation, not a Studio acceptance or a
+verification receipt. No shared staging deployment, flag or migration was
+changed.
+
+The application was built from GitHub `geany/geany` commit
+`0e02cc52a7634d1fed8511bd44730ea0ab791d9f`. The build context contained that
+source and a separately authored Dockerfile; it was built through the isolated
+source-OCI builder with its explicit network gate. The app has no VNC server.
+The built app image was
+`ato-source/afd3c22b6d2e@sha256:b4ff17ab8c8c58f36644c35826b09396724c765994eba1eaa8a2837322e575ce`
+and the OCI archive SHA-256 was
+`2924016ad35d8d3e8f98dbbe61dbcd9c1352c9ef53eee95f7111ea6fbd88b40c`.
+
+A separate Runner-owned display helper was built from
+`tools/native-display-helper/native-display` and TigerVNC. Its image was
+`ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037`;
+its tar was 111,056,896 bytes and its `PortableOciArchive` JSON was 148,076,007
+bytes, below the 256 MiB configuration limit. Size and a direct adapter test
+do not establish Runner admission or staging readiness.
+
+On an isolated Linux test root, the ignored
+`actual_geany_pixel_frame_changes_after_keyboard_input` test started Geany
+with `HOME=/tmp`, opened an empty workspace file, sent `g` via the Native
+Pixel probe and `h` through the private RFB relay, captured a frame, stopped the
+run and checked resource cleanup. Manual inspection of the captured frame
+confirmed `gh` in the Geany editor. The test records frame changes; the visual
+inspection is the evidence for the entered characters. It does not construct a
+Contract or produce a receipt.
+
+Two runs with the same app and helper produced distinct observations:
+
+| Run | After first key | After second key |
+| --- | --- | --- |
+| 1 | `554da8fc8112601b5189ee5f57f92570ab5f66d607f60461db260cb1d086b35c` | `001d72a0ef43539361c01218247c7b58d6293abcf496a652cfc299d409d7a7ea` |
+| 2 | `165b588bf51ad20c5e81e42589371ae626e0ea4fad12105a7c65fed3b3a5f63b` | `5c8e497daf399fa49ed16736eb6cbf58a1959afcf5fcf8f3b5c25628c7d30796` |
+
+Geany displays timestamps in the captured window. Full-frame digest equality
+is therefore not established across runs. A measured frame cannot be copied
+into K during the same execution: the independently authored contract must
+remain unchanged and the verifier must evaluate real observations.
+
+The staging Studio source attempt still failed in Formation's static HTML
+path. The Formation executor explicitly refuses native surfaces, and the
+staging Runner was not advertising the required Pixel capability when
+inspected. These are distinct from the successful direct Linux adapter probe.
+End-to-end work still requires a supported Studio authoring/build/verification
+route, independently reproducible observations, and an admitted, explicitly
+enabled staging Runner, followed by an actual browser operation and receipt.

@@ -100,6 +100,141 @@ fn image() -> String {
     app_archive().image
 }
 
+/// A real, externally built OSS application. This records physical frame
+/// observations only; it does not create K or claim a verification receipt.
+#[tokio::test]
+#[ignore = "requires explicit Geany and display-helper OCI archives on Linux"]
+async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
+    let (mut spec, _, _, mut d) = fixture(&image());
+    d.runtimes
+        .insert("oci.entrypoint".into(), "/usr/local/bin/geany".into());
+    d.runtimes
+        .insert("oci.memory_bytes".into(), "536870912".into());
+    d.runtimes
+        .insert("oci.cpu_limit_millis".into(), "1000".into());
+    d.runtimes.insert("oci.pids_limit".into(), "128".into());
+    d.steps[0].argv = vec!["--new-instance".into(), "/app/main.py".into()];
+    d.steps[0].env.insert("HOME".into(), "/tmp".into());
+    let NativeProbeOperation::PixelKeyFrame {
+        timeout_ms,
+        settle_ms,
+        ..
+    } = &mut d.native_surface.as_mut().unwrap().operations[0]
+    else {
+        unreachable!()
+    };
+    *timeout_ms = 10_000;
+    *settle_ms = 1000;
+    let declaration = NativeLaunchDeclaration::new(
+        d.derivation_ref().unwrap(),
+        d.native_surface.clone().unwrap(),
+    )
+    .unwrap()
+    .with_ports(d.ports.clone())
+    .unwrap();
+    let descriptor = declaration
+        .session_surface_descriptor("native-terminal")
+        .unwrap();
+    let LaunchRealizationV1::Oci(oci) = &mut spec.realization else {
+        unreachable!()
+    };
+    oci.entrypoint = Some("/usr/local/bin/geany".into());
+    oci.argv = Some(vec!["--new-instance".into(), "/app/main.py".into()]);
+    oci.resource_limits = Some(ato_ipc::runtime_launch::OciResourceLimitsV1 {
+        memory_bytes: 536_870_912,
+        cpu_limit_millis: 1000,
+        pids_limit: 128,
+    });
+    oci.native_surface = Some(serde_json::to_value(declaration).unwrap());
+    spec.public_env = serde_json::from_value(json!([{"name":"HOME","value":"/tmp"}])).unwrap();
+    let root = terminal::scratch();
+    let base_context = terminal::context(root.path(), "");
+    let context = ResolvedRuntimeLaunchContext::new(
+        base_context.workspace_root().to_path_buf(),
+        "",
+        BTreeMap::from([("HOME".into(), "/tmp".into())]),
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let owner = terminal::owner(&spec);
+    let mut config = terminal::config();
+    config.startup_timeout = Duration::from_secs(30);
+    let (_alive, rx) = watch::channel(true);
+    let run = start_pixel(
+        &spec,
+        &d.derivation_ref().unwrap(),
+        &descriptor,
+        &context,
+        &owner,
+        config,
+        helper(),
+        Some(app_archive()),
+        rx,
+    )
+    .await
+    .unwrap();
+    let observation: anyhow::Result<(Vec<u8>, Vec<u8>)> = async {
+        let mut stream = tokio::net::TcpStream::connect(run.observation_addr()).await?;
+        stream
+            .write_all(b"GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+        anyhow::ensure!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "probe did not return 200"
+        );
+        let body_start = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .context("missing HTTP header terminator")?
+            + 4;
+        let before = response.split_off(body_start);
+        use std::os::fd::AsRawFd;
+        let dir = std::fs::File::open(root.path().join("oci-runtime/display/rfb"))?;
+        let socket = PathBuf::from(format!("/proc/self/fd/{}/display.sock", dir.as_raw_fd()));
+        let mut relay = RfbRelay::start(socket).await?;
+        let frame = netd::rfb_probe::capture_private_rfb_frame_with_settle(
+            relay.addr,
+            640,
+            480,
+            &[0x68],
+            640 * 480 * 4,
+            Duration::from_millis(500),
+            Duration::from_secs(5),
+        )
+        .await;
+        let stopped = relay.stop().await;
+        let frame = frame?;
+        stopped?;
+        if let Some(path) = std::env::var_os("ATO_NATIVE_GEANY_FRAME") {
+            let mut ppm = b"P6\n640 480\n255\n".to_vec();
+            for pixel in frame.chunks_exact(4) {
+                ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            }
+            std::fs::write(path, ppm)?;
+        }
+        let after = pixel_probe_result(&frame).map_err(anyhow::Error::msg)?;
+        Ok((before, after))
+    }
+    .await;
+    let completion = run.stop().await;
+    assert!(completion.stop.is_confirmed());
+    assert_no_resources(&owner);
+    let observation = observation.expect("Geany frame observation failed");
+    assert_ne!(
+        observation.0, observation.1,
+        "Geany frame did not change after input"
+    );
+    eprintln!(
+        "GEANY_FRAME_OBSERVATION before={} after={} contract_verified=false",
+        String::from_utf8_lossy(&observation.0).trim(),
+        String::from_utf8_lossy(&observation.1).trim()
+    );
+}
+
 async fn get(addr: SocketAddr) -> Vec<u8> {
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     s.write_all(b"GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
