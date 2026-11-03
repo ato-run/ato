@@ -140,6 +140,83 @@ fn native_with(from: &str, to: &str) -> String {
     NATIVE_MANIFEST.replacen(from, to, 1)
 }
 
+fn pixel_manifest() -> String {
+    NATIVE_MANIFEST
+        .replace("kind = \"terminal\"\nprofile = \"ato.terminal-surface.v1\"\ncols = 120\nrows = 40", "kind = \"pixel_stream\"\nprofile = \"ato.pixel-stream.v1\"\nwidth = 640\nheight = 480")
+        .replace("probe_input = \"go\\n\"\nprobe_output_delimiter = \"END\"\nprobe_max_output_bytes = 4096", "probe_keysyms = [103, 65293]\nprobe_max_frame_bytes = 1228800\nprobe_settle_ms = 250")
+        .replace("use = \"ato.pty@1\"", "use = \"ato.tcp@1\"")
+}
+
+#[test]
+fn pixel_surface_is_bound_and_round_trips_without_changing_contract() {
+    let text = pixel_manifest();
+    let draft = parse_capsule_toml(&text).expect("pixel grammar");
+    let native = draft.derivation.native_surface.as_ref().unwrap();
+    assert_eq!(
+        native.surface,
+        NativePresentation::PixelStream {
+            port: "app.native".into(),
+            width: 640,
+            height: 480
+        }
+    );
+    assert!(
+        matches!(&native.operations[0], NativeProbeOperation::PixelKeyFrame { keysyms, settle_ms: 250, max_frame_bytes: 1228800, .. } if keysyms == &[103, 65293])
+    );
+    let rendered = render_capsule_toml(&draft).expect("render pixel declaration");
+    assert_eq!(
+        parse_capsule_toml(&rendered).unwrap().derivation,
+        draft.derivation
+    );
+    let (contract, derivation) = bound(&text);
+    assert_eq!(
+        contract.contract_ref().unwrap(),
+        bound(NATIVE_MANIFEST).0.contract_ref().unwrap()
+    );
+    assert_eq!(derivation.native_surface.as_ref(), Some(native));
+}
+
+#[test]
+fn pixel_surface_rejects_invalid_and_inconsistent_declarations() {
+    let text = pixel_manifest();
+    for (from, to) in [
+        ("width = 640", "width = 63"),
+        (
+            "probe_max_frame_bytes = 1228800",
+            "probe_max_frame_bytes = 1",
+        ),
+        ("probe_keysyms = [103, 65293]", "probe_keysyms = []"),
+        ("probe_settle_ms = 250", "probe_settle_ms = 1001"),
+        (
+            "profile = \"ato.pixel-stream.v1\"",
+            "profile = \"ato.terminal-surface.v1\"",
+        ),
+        (
+            "probe_timeout_ms = 5000",
+            "probe_timeout_ms = 5000\nexpected_frame = \"fake\"",
+        ),
+    ] {
+        assert!(
+            parse_capsule_toml(&text.replacen(from, to, 1)).is_err(),
+            "{to}"
+        );
+    }
+    let wrong_port = text.replace("use = \"ato.tcp@1\"", "use = \"ato.pty@1\"");
+    let draft = parse_capsule_toml(&wrong_port).unwrap();
+    assert!(
+        bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: SOURCE_CLOSURE
+            }
+        )
+        .is_err()
+    );
+    let extra_tcp =
+        format!("{text}\n[[port]]\nid = \"extra\"\nuse = \"ato.tcp@1\"\nfrom = \"serve\"\n");
+    assert!(parse_capsule_toml(&extra_tcp).is_err());
+}
+
 #[test]
 fn a_derivation_without_native_surface_keeps_its_exact_pre_feature_identity() {
     let (contract, derivation) = bound(LEGACY_MANIFEST);
