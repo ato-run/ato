@@ -769,13 +769,20 @@ fn source_oci_build(args: SourceOciBuildArgs) -> Result<()> {
     let materialized = source_oci_session_build(&prepared, &args)?;
     let provenance = serde_json::to_vec_pretty(&materialized.provenance)?;
     fs::write(args.out.join(PROVENANCE_FILE), &provenance)?;
-    let authored = args.out.join("authored");
-    fs::create_dir(&authored)?;
-    fs::write(authored.join("capsule.toml"), &materialized.capsule_toml)?;
-    fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+    let authored = if let Some(capsule_toml) = &materialized.capsule_toml {
+        let authored = args.out.join("authored");
+        fs::create_dir(&authored)?;
+        fs::write(authored.join("capsule.toml"), capsule_toml)?;
+        fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+        Some(authored)
+    } else {
+        None
+    };
     println!("image_reference={}", materialized.image_reference);
     println!("archive={}", materialized.archive.display());
-    println!("authored={}", authored.display());
+    if let Some(authored) = authored {
+        println!("authored={}", authored.display());
+    }
     Ok(())
 }
 

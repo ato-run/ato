@@ -4,6 +4,19 @@ Status: draft implementation contract; offline integration verified, not
 merged or deployed. Evidence: [first offline ledger](../../ops/formation-source-oci-d2.md),
 [hardened session ledger](../../ops/formation-source-oci-d2-hardening.md).
 
+## Image-only output
+
+A source OCI request may explicitly set `image_only = true` and omit
+`declared_transport_port` when the build is intended to produce an immutable
+image for a separately authored route. This mode retains the same source,
+base-image, sandbox, resource, output digest and cleanup checks. It rejects
+any image declaring exposed ports, and produces no `capsule.toml`, HTTP
+observation or Contract. In particular it does not declare a Native Surface
+or make the image runnable. A later route must declare its own argv, Ports,
+Adapter and original Contract, and pass the ordinary runtime admission and
+verification. An HTTP request without a port remains invalid; legacy requests
+retain their existing serialized shape and behavior.
+
 ## Boundary
 
 Ato fixes **inputs** before a build and verifies **outputs** after it. A
