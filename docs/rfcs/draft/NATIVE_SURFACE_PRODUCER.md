@@ -545,7 +545,12 @@ after these physical checks. Terminal and legacy Web opt-ins remain independent.
 The existing same-attempt Rust K/receipt and API viewer-access authority continue
 to gate acceptance; transport readiness never grants browser access on its own.
 
-The experimental native Formation realizer uses an OCI internal network, not
-the process sandbox. It records that physical isolation explicitly and refuses
-private-isolated Formation until host-service access is independently blocked
-and verified. A denied forwarding route by itself is not that boundary.
+The experimental native Formation realizer uses separate Docker `none` network
+namespaces for the application and the display helper, which communicate only
+over their explicitly mounted Unix sockets. It checks the actual container
+network mode and absence of addresses or gateways before continuing. Formation
+records that isolation, rather than the process sandbox. Private-isolated
+Formation additionally requires the worker and Docker's selected container
+parent to share a cgroup with the existing private resource ceilings, and
+checks that boundary before loading the application archive and again before
+realization. An unbounded or unrelated parent is refused.

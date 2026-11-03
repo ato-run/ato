@@ -189,7 +189,12 @@ pub fn run_portable_native_attempt(
         request.binding_environment.is_empty(),
         "native Formation cannot silently ignore Binding values"
     );
-    admit_native_policy(request.authorization, request.network)?;
+    admit_native_policy(request.network)?;
+    if request.authorization
+        == ato_runtime_attempt::admission::EffectAuthorization::PrivateIsolatedFormation
+    {
+        helper.verify_private_formation_boundary()?;
+    }
     let work_root = request
         .runtime_root
         .parent()
@@ -271,18 +276,10 @@ pub fn run_portable_native_attempt(
     )
 }
 
-fn admit_native_policy(
-    authorization: ato_runtime_attempt::admission::EffectAuthorization<'_>,
-    network: ato_runtime_attempt::build_sandbox::NetworkPolicy,
-) -> Result<()> {
-    ensure!(
-        authorization
-            != ato_runtime_attempt::admission::EffectAuthorization::PrivateIsolatedFormation,
-        "native private Formation requires an enforced host-network boundary"
-    );
+fn admit_native_policy(network: ato_runtime_attempt::build_sandbox::NetworkPolicy) -> Result<()> {
     ensure!(
         network == ato_runtime_attempt::build_sandbox::NetworkPolicy::Denied,
-        "native Formation supports only an internal OCI network"
+        "native Formation requires denied networking"
     );
     Ok(())
 }
@@ -290,27 +287,12 @@ fn admit_native_policy(
 #[cfg(test)]
 mod tests {
     use super::admit_native_policy;
-    use ato_runtime_attempt::{admission::EffectAuthorization, build_sandbox::NetworkPolicy};
+    use ato_runtime_attempt::build_sandbox::NetworkPolicy;
 
     #[test]
-    fn native_formation_refuses_unproven_private_isolation_and_network_grants() {
-        assert!(
-            admit_native_policy(EffectAuthorization::Unattended, NetworkPolicy::Denied).is_ok()
-        );
-        assert!(
-            admit_native_policy(
-                EffectAuthorization::PrivateIsolatedFormation,
-                NetworkPolicy::Denied
-            )
-            .is_err()
-        );
-        assert!(
-            admit_native_policy(
-                EffectAuthorization::Unattended,
-                NetworkPolicy::DependencyResolution
-            )
-            .is_err()
-        );
+    fn native_formation_refuses_network_grants() {
+        assert!(admit_native_policy(NetworkPolicy::Denied).is_ok());
+        assert!(admit_native_policy(NetworkPolicy::DependencyResolution).is_err());
     }
 }
 
@@ -403,7 +385,7 @@ impl CandidateRealizer for NativePortableRealizer<'_> {
             }
             Ok(())
         };
-        let started = NativeLeaseRun::start_with_archive(
+        let started = NativeLeaseRun::start_formation_with_archive(
             &self.spec,
             &self.selected,
             &descriptor,

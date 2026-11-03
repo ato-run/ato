@@ -228,6 +228,16 @@ impl PixelHelper {
         );
         Ok(())
     }
+
+    /// Verify that this operator-selected Docker parent also encloses the
+    /// worker and enforces the private Formation resource ceiling.
+    pub fn verify_private_formation_boundary(&self) -> Result<()> {
+        let owner = self
+            .owner
+            .as_ref()
+            .context("Pixel omitted local owner binding")?;
+        owner.verify_private_formation_boundary()
+    }
 }
 
 /// Only these child directories are bind mounted; the owning parent remains
@@ -416,7 +426,35 @@ pub async fn start_pixel(
     config: NativeLeaseSurfaceConfig,
     helper: PixelHelper,
     application_archive: Option<PortableOciArchive>,
+    owner_alive: watch::Receiver<bool>,
+) -> std::result::Result<OwnedNativeTerminalRun, super::super::lease::StartFailure> {
+    start_pixel_with_network(
+        spec,
+        selected_ref,
+        descriptor,
+        context,
+        owner,
+        config,
+        helper,
+        application_archive,
+        owner_alive,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn start_pixel_with_network(
+    spec: &RuntimeLaunchSpecV1,
+    selected_ref: &str,
+    descriptor: &SessionSurfaceDescriptor,
+    context: &ResolvedRuntimeLaunchContext,
+    owner: &OciOwner,
+    config: NativeLeaseSurfaceConfig,
+    helper: PixelHelper,
+    application_archive: Option<PortableOciArchive>,
     mut owner_alive: watch::Receiver<bool>,
+    network_none: bool,
 ) -> std::result::Result<OwnedNativeTerminalRun, super::super::lease::StartFailure> {
     let started = Instant::now();
     // All declaration/config/key/scope checks precede mounts, native actions
@@ -629,7 +667,12 @@ pub async fn start_pixel(
             socket_directory,
         ))
     })()?;
-    let network = match helper_adapter.create_internal_network(&owner.run_id) {
+    let network_result = if network_none {
+        Ok(helper_adapter.no_network())
+    } else {
+        helper_adapter.create_internal_network(&owner.run_id)
+    };
+    let network = match network_result {
         Ok(network) => network,
         Err(error) => {
             return Err(super::super::lease::StartFailure {
@@ -663,7 +706,11 @@ pub async fn start_pixel(
             &empty_workspace,
             &runtime.join("display-helper"),
             group.network(),
-            Some("native-display"),
+            if network_none {
+                None
+            } else {
+                Some("native-display")
+            },
         )?;
         group.push("native-display".into(), handle);
         if let Some(owner) = &helper.owner {
@@ -696,7 +743,7 @@ pub async fn start_pixel(
             context.workspace_root(),
             &runtime.join("application"),
             group.network(),
-            Some("main"),
+            if network_none { None } else { Some("main") },
         )?;
         group.push("main".into(), handle);
         if let Some(owner) = &helper.owner {

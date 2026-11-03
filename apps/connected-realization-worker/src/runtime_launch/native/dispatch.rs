@@ -47,6 +47,60 @@ impl NativeLeaseRun {
         application_archive: Option<ato_objects::PortableOciArchive>,
         check_startup: &mut dyn FnMut() -> Result<()>,
     ) -> std::result::Result<Self, super::super::lease::StartFailure> {
+        Self::start_with_network(
+            spec,
+            selected_ref,
+            descriptor,
+            context,
+            owner,
+            config,
+            pixel_helper,
+            application_archive,
+            check_startup,
+            false,
+        )
+    }
+
+    /// Formation-only mode: neither container joins a host-reachable bridge.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_formation_with_archive(
+        spec: &RuntimeLaunchSpecV1,
+        selected_ref: &str,
+        descriptor: &SessionSurfaceDescriptor,
+        context: &ResolvedRuntimeLaunchContext,
+        owner: &OciOwner,
+        config: NativeLeaseSurfaceConfig,
+        pixel_helper: Option<super::pixel::PixelHelper>,
+        application_archive: Option<ato_objects::PortableOciArchive>,
+        check_startup: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<Self, super::super::lease::StartFailure> {
+        Self::start_with_network(
+            spec,
+            selected_ref,
+            descriptor,
+            context,
+            owner,
+            config,
+            pixel_helper,
+            application_archive,
+            check_startup,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_network(
+        spec: &RuntimeLaunchSpecV1,
+        selected_ref: &str,
+        descriptor: &SessionSurfaceDescriptor,
+        context: &ResolvedRuntimeLaunchContext,
+        owner: &OciOwner,
+        config: NativeLeaseSurfaceConfig,
+        pixel_helper: Option<super::pixel::PixelHelper>,
+        application_archive: Option<ato_objects::PortableOciArchive>,
+        check_startup: &mut dyn FnMut() -> Result<()>,
+        network_none: bool,
+    ) -> std::result::Result<Self, super::super::lease::StartFailure> {
         if application_archive.is_some()
             && !matches!(descriptor, SessionSurfaceDescriptor::PixelStream { .. })
         {
@@ -66,8 +120,8 @@ impl NativeLeaseRun {
             let start = async {
                 match descriptor {
                     SessionSurfaceDescriptor::Terminal { .. } => start_terminal(spec, selected_ref, descriptor, context, owner, config, owner_rx).await,
-                    SessionSurfaceDescriptor::PixelStream { .. } => super::pixel::start_pixel(spec, selected_ref, descriptor, context, owner, config,
-                        pixel_helper.context("native_surface_unavailable: Pixel helper is not owned")?, application_archive, owner_rx).await,
+                    SessionSurfaceDescriptor::PixelStream { .. } => super::pixel::start_pixel_with_network(spec, selected_ref, descriptor, context, owner, config,
+                        pixel_helper.context("native_surface_unavailable: Pixel helper is not owned")?, application_archive, owner_rx, network_none).await,
                     _ => Err(anyhow::anyhow!("native_surface_unavailable: unsupported Native Surface").into()),
                 }
             };
