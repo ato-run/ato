@@ -731,7 +731,9 @@ impl PortableBundleExecutor<'_> {
                 .find(|(name, _)| *name == port.from)
                 .context("observation service was not started")?;
             let address = std::net::SocketAddr::new(
-                handle.container_address(),
+                handle
+                    .container_address()
+                    .context("observation service has no network address")?,
                 port.guest_port
                     .context("observation Port omitted guest port")?,
             );
@@ -792,7 +794,7 @@ fn wait_until_service_accepts_tcp(
     let address = group
         .services()
         .find(|(service, _)| *service == name)
-        .map(|(_, handle)| handle.container_address())
+        .and_then(|(_, handle)| handle.container_address())
         .context("service was not started")?;
     let guest_port = route
         .derivation
