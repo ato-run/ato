@@ -100,12 +100,24 @@ fn image() -> String {
     app_archive().image
 }
 
-/// A real, externally built OSS application. This records physical frame
-/// observations only; it does not create K or claim a verification receipt.
+/// Geany's expected first-key frame was observed independently before this
+/// attempt, with the pinned app and display-helper images in the ops record.
+/// This direct adapter test is not a hosted Run or a Formation receipt.
 #[tokio::test]
 #[ignore = "requires explicit Geany and display-helper OCI archives on Linux"]
 async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
-    let (mut spec, _, _, mut d) = fixture(&image());
+    let (mut spec, _, mut k, mut d) = fixture(&image());
+    assert_eq!(
+        image(),
+        "ato-source/afd3c22b6d2e@sha256:b4ff17ab8c8c58f36644c35826b09396724c765994eba1eaa8a2837322e575ce"
+    );
+    let reference_body =
+        b"sha256:763deb416a7116074edd6493142881f581e64728ce9ffe2423bf23b6d33a3139\n";
+    k.requirements[0].body_digest = Some(
+        RuntimeHttpObservation::from_response("app.probe", "GET", "/result", 200, reference_body)
+            .body_digest,
+    );
+    let original_k = k.contract_ref().unwrap();
     d.runtimes
         .insert("oci.entrypoint".into(), "/usr/local/bin/geany".into());
     d.runtimes
@@ -113,7 +125,11 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
     d.runtimes
         .insert("oci.cpu_limit_millis".into(), "1000".into());
     d.runtimes.insert("oci.pids_limit".into(), "128".into());
-    d.steps[0].argv = vec!["--new-instance".into(), "/app/main.py".into()];
+    d.steps[0].argv = vec![
+        "--new-instance".into(),
+        "--no-msgwin".into(),
+        "/app/main.py".into(),
+    ];
     d.steps[0].env.insert("HOME".into(), "/tmp".into());
     let NativeProbeOperation::PixelKeyFrame {
         timeout_ms,
@@ -139,7 +155,7 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         unreachable!()
     };
     oci.entrypoint = Some("/usr/local/bin/geany".into());
-    oci.argv = Some(vec!["--new-instance".into(), "/app/main.py".into()]);
+    oci.argv = Some(d.steps[0].argv.clone());
     oci.resource_limits = Some(ato_ipc::runtime_launch::OciResourceLimitsV1 {
         memory_bytes: 536_870_912,
         cpu_limit_millis: 1000,
@@ -162,6 +178,11 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
     let mut config = terminal::config();
     config.startup_timeout = Duration::from_secs(30);
     let (_alive, rx) = watch::channel(true);
+    let helper = helper();
+    assert_eq!(
+        helper.image,
+        "ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037"
+    );
     let run = start_pixel(
         &spec,
         &d.derivation_ref().unwrap(),
@@ -169,7 +190,7 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         &context,
         &owner,
         config,
-        helper(),
+        helper,
         Some(app_archive()),
         rx,
     )
@@ -224,12 +245,35 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
     assert!(completion.stop.is_confirmed());
     assert_no_resources(&owner);
     let observation = observation.expect("Geany frame observation failed");
+    let runtime = ato_formation::verify::RuntimeObservation {
+        input_refs: BTreeMap::new(),
+        http: vec![RuntimeHttpObservation::from_response(
+            "app.probe",
+            "GET",
+            "/result",
+            200,
+            &observation.0,
+        )],
+        instance_snapshot_ref: None,
+        scenarios: Vec::new(),
+        tls: Vec::new(),
+    };
+    let verification = ato_formation::verify::verify_runtime(&k, &runtime);
+    assert!(verification.fully_satisfied(), "{verification:?}");
+    let mut wrong_runtime = runtime.clone();
+    wrong_runtime.http[0] =
+        RuntimeHttpObservation::from_response("app.probe", "GET", "/result", 200, b"surface ready");
+    assert!(!ato_formation::verify::verify_runtime(&k, &wrong_runtime).fully_satisfied());
+    wrong_runtime.http[0] =
+        RuntimeHttpObservation::from_response("app.native", "GET", "/result", 200, &observation.0);
+    assert!(!ato_formation::verify::verify_runtime(&k, &wrong_runtime).fully_satisfied());
+    assert_eq!(k.contract_ref().unwrap(), original_k);
     assert_ne!(
         observation.0, observation.1,
         "Geany frame did not change after input"
     );
     eprintln!(
-        "GEANY_FRAME_OBSERVATION before={} after={} contract_verified=false",
+        "GEANY_FRAME_OBSERVATION before={} after={} local_original_k_satisfied=true contract_ref={original_k}",
         String::from_utf8_lossy(&observation.0).trim(),
         String::from_utf8_lossy(&observation.1).trim()
     );
