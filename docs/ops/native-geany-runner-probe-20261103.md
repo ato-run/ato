@@ -88,6 +88,16 @@ normal local cgroup and warm-image admission checks. The private observation
 satisfied the unchanged K, and stopping the lease confirmed resource cleanup.
 No staging lease, hosted receipt or browser session was involved.
 
+The current staging Runner only reports its package version, so that value
+cannot identify its deployed commit or build. A candidate change adds optional
+semver build metadata to `agent_version` when `ATO_BUILD_COMMIT` is a canonical
+40-character commit and `ATO_BUILD_DIRTY=clean`; an optional alphanumeric
+`ATO_BUILD_ID` can identify the build within the API's length limit. This is a
+build-supplied claim, not an attestation of the binary. A deployment must still
+verify the clean source, actual executable digest, and the API-reported value.
+An absent or invalid commit, a dirty/unknown build, or oversized metadata keeps
+the legacy version unchanged. This capability is not deployed to staging.
+
 The staging Studio source attempt still failed in Formation's static HTML
 path. The Formation executor explicitly refuses native surfaces, and the
 staging Runner was not advertising the required Pixel capability when

@@ -24,6 +24,41 @@ mod process_run_verification;
 pub mod runtime_launch;
 mod slot_state;
 
+/// Preserve the existing semver when a build has no supplied source commit.
+/// A release build may embed the exact source commit as semver build metadata;
+/// the control plane exposes `agent_version` without changing precedence.
+fn runner_agent_version(
+    version: &str,
+    commit: Option<&str>,
+    build_id: Option<&str>,
+    clean: bool,
+) -> String {
+    if !clean {
+        return version.to_owned();
+    }
+    let Some(commit) = commit.filter(|value| {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) else {
+        return version.to_owned();
+    };
+    let separator = if version.contains('+') { "." } else { "+" };
+    let build_suffix = build_id
+        .filter(|id| {
+            !id.is_empty() && id.len() <= 10 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+        .map(|id| format!(".b.{id}"))
+        .unwrap_or_default();
+    let stamped = format!("{version}{separator}git.{commit}{build_suffix}");
+    if stamped.len() <= 64 {
+        stamped
+    } else {
+        version.to_owned()
+    }
+}
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -5523,7 +5558,7 @@ impl HttpRunnerApi {
             "arch": std::env::consts::ARCH,
             "max_slots": config.max_slots,
             "active_slots": active_slots,
-            "agent_version": env!("CARGO_PKG_VERSION"),
+            "agent_version": runner_agent_version(env!("CARGO_PKG_VERSION"), option_env!("ATO_BUILD_COMMIT"), option_env!("ATO_BUILD_ID"), option_env!("ATO_BUILD_DIRTY") == Some("clean")),
             // Observability, not scheduling truth: whether this slot finished
             // reconciling its previous incarnation's leftovers. An
             // unrecovered slot claims nothing, so the control plane can tell
@@ -6709,6 +6744,38 @@ mod tests {
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn runner_version_reports_only_a_valid_explicit_build_commit() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), None, true),
+            format!("0.1.0+git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0+ci.1", Some(commit), None, true),
+            format!("0.1.0+ci.1.git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), Some("12345678"), true),
+            format!("0.1.0+git.{commit}.b.12345678")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), Some("invalid!"), true),
+            format!("0.1.0+git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), None, false),
+            "0.1.0"
+        );
+        for invalid in [
+            None,
+            Some("dirty"),
+            Some("A123456789abcdef0123456789abcdef01234567"),
+        ] {
+            assert_eq!(runner_agent_version("0.1.0", invalid, None, true), "0.1.0");
+        }
+    }
 
     #[test]
     fn journal_entry_is_dropped_only_once_the_terminal_report_is_delivered() {
