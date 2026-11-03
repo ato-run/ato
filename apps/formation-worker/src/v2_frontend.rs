@@ -206,7 +206,14 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
 
     // 6. A result is published only for a fully satisfied Contract: a
     //    `fully_satisfied=false` receipt is evidence, never a published result.
-    let receipt = publishable_receipt(&outcome)?.clone();
+    let receipt = publishable_receipt(
+        &outcome,
+        validated.contract_ref.as_str(),
+        &derivation_ref,
+        &attempt.attempt_id,
+        &transport,
+    )?
+    .clone();
 
     // 7. Register the bundle before the result names it: an artifact ref that
     //    resolves to nothing is worse than a result that was never published.
@@ -688,9 +695,13 @@ fn failed_observation_code(receipt: &ContractVerificationReceipt) -> &'static st
 
 /// A satisfied observation remains evidence even when cleanup or durable
 /// recording fails. Publishing requires all three to have completed.
-fn publishable_receipt(
-    outcome: &PortableBundleAttemptOutcome,
-) -> Result<&ContractVerificationReceipt> {
+fn publishable_receipt<'a>(
+    outcome: &'a PortableBundleAttemptOutcome,
+    expected_contract: &str,
+    expected_derivation: &str,
+    expected_attempt: &str,
+    expected_bundle: &str,
+) -> Result<&'a ContractVerificationReceipt> {
     let receipt = outcome.receipt.as_ref().ok_or_else(|| {
         attempt_failure(
             outcome,
@@ -708,6 +719,27 @@ fn publishable_receipt(
         return Err(
             attempt_failure(outcome, code, "the candidate did not satisfy K".to_owned()).into(),
         );
+    }
+    if receipt.contract_ref != expected_contract
+        || receipt.derivation_ref != expected_derivation
+        || receipt.bundle_sha256.as_deref() != Some(expected_bundle)
+        || receipt.target.kind != ato_formation::verify::VerificationTargetKind::FormationRuntime
+        || receipt
+            .execution
+            .as_ref()
+            .and_then(|e| e.attempt_id.as_deref())
+            != Some(expected_attempt)
+        || !outcome
+            .verification
+            .as_ref()
+            .is_some_and(ContractVerification::fully_satisfied)
+    {
+        return Err(attempt_failure(
+            outcome,
+            "candidate_receipt_mismatch",
+            "the receipt does not match this portable attempt".to_owned(),
+        )
+        .into());
     }
     if outcome.attempt.status != AttemptStatus::Verified
         || outcome.attempt_record != AttemptRecordState::Finished
@@ -790,12 +822,18 @@ mod tests {
         let verification = ContractVerification {
             verdicts: Vec::new(),
         };
-        let receipt = ContractVerificationReceipt::new(
+        let mut receipt = ContractVerificationReceipt::new(
             "sha256:bundle",
             "sha256:contract",
             "sha256:derivation",
             VerificationTargetKind::FormationRuntime,
             verification.clone(),
+        );
+        receipt.execution = Some(
+            serde_json::from_value(serde_json::json!({
+                "realization":"oci", "attempt_id":"attempt"
+            }))
+            .unwrap(),
         );
         let outcomes = AttemptOutcomes::not_run("fixture");
         let attempt = FormationAttempt {
@@ -827,7 +865,17 @@ mod tests {
 
     #[test]
     fn observed_receipt_is_not_published_after_uncertain_cleanup_or_recording() {
-        assert!(publishable_receipt(&observed_outcome()).is_ok());
+        let check = |outcome: &PortableBundleAttemptOutcome| {
+            publishable_receipt(
+                outcome,
+                "sha256:contract",
+                "sha256:derivation",
+                "attempt",
+                "sha256:bundle",
+            )
+            .map(|_| ())
+        };
+        assert!(check(&observed_outcome()).is_ok());
         let mut failed_stop = observed_outcome();
         failed_stop.attempt.status = AttemptStatus::Failed;
         failed_stop.stop = Some(StopClass::Unconfirmed {
@@ -839,7 +887,7 @@ mod tests {
             stage: "cleanup".into(),
             message: "stop not confirmed".into(),
         });
-        let error = publishable_receipt(&failed_stop).unwrap_err();
+        let error = check(&failed_stop).unwrap_err();
         let failure = error.downcast_ref::<HostedAttemptFailure>().unwrap();
         assert_eq!(failure.report.code, "candidate_cleanup_failed");
         assert!(
@@ -849,13 +897,37 @@ mod tests {
         );
         let mut failed_record = observed_outcome();
         failed_record.attempt_record = AttemptRecordState::StartedUnfinished;
-        assert!(publishable_receipt(&failed_record).is_err());
+        assert!(check(&failed_record).is_err());
         let mut no_cleanup = observed_outcome();
         no_cleanup.stop = None;
-        assert!(publishable_receipt(&no_cleanup).is_err());
+        assert!(check(&no_cleanup).is_err());
         let mut false_receipt = observed_outcome();
         false_receipt.receipt.as_mut().unwrap().fully_satisfied = false;
-        assert!(publishable_receipt(&false_receipt).is_err());
+        assert!(check(&false_receipt).is_err());
+        let mut wrong_attempt = observed_outcome();
+        wrong_attempt
+            .receipt
+            .as_mut()
+            .unwrap()
+            .execution
+            .as_mut()
+            .unwrap()
+            .attempt_id = Some("other".into());
+        assert_eq!(
+            check(&wrong_attempt)
+                .unwrap_err()
+                .downcast_ref::<HostedAttemptFailure>()
+                .unwrap()
+                .report
+                .code,
+            "candidate_receipt_mismatch"
+        );
+        let mut wrong_bundle = observed_outcome();
+        wrong_bundle.receipt.as_mut().unwrap().bundle_sha256 = Some("sha256:other".into());
+        assert!(check(&wrong_bundle).is_err());
+        let mut no_verification = observed_outcome();
+        no_verification.verification = None;
+        assert!(check(&no_verification).is_err());
     }
 
     const PROCESS_TOML: &str = r#"
