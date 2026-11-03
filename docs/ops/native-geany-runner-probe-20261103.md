@@ -17,8 +17,11 @@ A separate Runner-owned display helper was built from
 `tools/native-display-helper/native-display` and TigerVNC. Its image was
 `ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037`;
 its tar was 111,056,896 bytes and its `PortableOciArchive` JSON was 148,076,007
-bytes, below the 256 MiB configuration limit. Size and a direct adapter test
-do not establish Runner admission or staging readiness.
+bytes, below the 256 MiB configuration limit. On the same Linux host,
+`actual_local_parent_and_warm_helper_preflight_refuses_aggregate_overcommit`
+passed with this exact image and archive, checking the existing local cgroup,
+the warm helper image and aggregate-resource refusal. This local preflight does
+not establish staging registration or readiness.
 
 On an isolated Linux test root, the ignored
 `actual_geany_pixel_frame_changes_after_keyboard_input` test started Geany
