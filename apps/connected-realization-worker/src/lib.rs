@@ -5578,7 +5578,7 @@ impl HttpRunnerApi {
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
                 config.max_slots == 1 && ato_runtime_attempt::resource_boundary::verify_current().is_ok(),
             ), pixel && config.max_slots == 1 && runtime_launch::host_boundary::active().is_none()
-                && config.native_pixel.prepared_helper().is_some_and(|helper| helper.verify_private_formation_boundary().is_ok())), config.require_explicit_runtime_placement),
+                && config.native_pixel.private_boundary_available()), config.require_explicit_runtime_placement),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
             "public_base_url": config.public_base_url,

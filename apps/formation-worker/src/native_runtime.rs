@@ -1,7 +1,9 @@
 //! Operator-configured native Pixel Formation execution. Default is disabled.
 //! No app, lease or authoring input may supply the trusted display helper.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
+#[cfg(unix)]
+use anyhow::{Context, ensure};
 use ato_portable_application::portable_run::{PortableBundleAttempt, PortableBundleAttemptOutcome};
 use ato_runtime_attempt::journal::AttemptPermit;
 

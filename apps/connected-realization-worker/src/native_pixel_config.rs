@@ -211,6 +211,18 @@ impl NativePixelConfig {
             false
         }
     }
+    pub(crate) fn private_boundary_available(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.prepared
+                .as_ref()
+                .is_some_and(|helper| helper.verify_private_formation_boundary().is_ok())
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
     #[cfg(unix)]
     pub(crate) fn prepared_helper(
         &self,
