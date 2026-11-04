@@ -304,6 +304,16 @@ fn with_native_pixel_control_capabilities(
     capabilities
 }
 
+fn with_private_pixel_capability(
+    mut capabilities: Vec<&'static str>,
+    available: bool,
+) -> Vec<&'static str> {
+    if available {
+        capabilities.push(runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE);
+    }
+    capabilities
+}
+
 fn supported_session_surfaces(native: bool, pixel: bool) -> serde_json::Value {
     let mut surfaces = vec![
         serde_json::json!({"kind":"web","profiles":["ato.web-surface.v1"],"transports":["https"]}),
@@ -2830,6 +2840,7 @@ impl ConnectedWorker {
                     } else {
                         None
                     },
+                    command.requires_private_isolation,
                     &mut check_startup,
                 )
             }
@@ -5553,7 +5564,7 @@ impl HttpRunnerApi {
             .native_pixel
             .available(&config.work_root, oci_available);
         let body = serde_json::json!({
-            "capabilities": with_explicit_runtime_placement_capability(advertised_capabilities(
+            "capabilities": with_explicit_runtime_placement_capability(with_private_pixel_capability(advertised_capabilities(
                 with_native_pixel_control_capabilities(
                     with_native_terminal_capability(runner_capabilities(
                         config.firecracker_configured(), oci_available, self.persistent_volumes,
@@ -5565,7 +5576,8 @@ impl HttpRunnerApi {
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
                 config.max_slots == 1 && ato_runtime_attempt::resource_boundary::verify_current().is_ok(),
-            ), config.require_explicit_runtime_placement),
+            ), pixel && config.max_slots == 1 && runtime_launch::host_boundary::active().is_none()
+                && config.native_pixel.prepared_helper().is_some_and(|helper| helper.verify_private_formation_boundary().is_ok())), config.require_explicit_runtime_placement),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
             "public_base_url": config.public_base_url,
@@ -8087,6 +8099,19 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(
             !advertised_capabilities(base.clone(), false, false, false)
                 .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE)
+        );
+    }
+
+    #[test]
+    fn private_pixel_capability_is_only_advertised_after_its_separate_preflight() {
+        let base = vec![runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE];
+        assert!(
+            !with_private_pixel_capability(base.clone(), false)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE)
+        );
+        assert!(
+            with_private_pixel_capability(base, true)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE)
         );
     }
 

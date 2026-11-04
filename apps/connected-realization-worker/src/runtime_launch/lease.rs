@@ -55,6 +55,8 @@ pub const RUNTIME_LAUNCH_LEASE_KIND: &str = "runtime_launch";
 /// Never advertise this on a host-boundary Runner, whose process shares a host network.
 pub const PRIVATE_ISOLATED_PROCESS_FEATURE: &str =
     "runtime_feature=private_isolated_bounded_process_v1";
+pub const PRIVATE_ISOLATED_PIXEL_FEATURE: &str =
+    "runtime_feature=private_isolated_bounded_pixel_v1";
 /// Absolute upper bound accepted from the control plane for one workload.
 /// Public previews may request a shorter lease-owned deadline; omitting the
 /// field preserves the ordinary one-hour safety cap.
@@ -627,19 +629,37 @@ fn validate_private_isolation(
         bail!("private_process_requires_v1_process")
     };
     ensure!(
-        matches!(spec.realization, LaunchRealizationV1::Process(_)),
-        "private_process_requires_v1_process"
-    );
-    ensure!(
         spec.state_attachments.is_empty()
             && spec.secret_grants.is_empty()
             && command.network_authorization.is_none(),
         "private_process_unsupported_authority"
     );
-    ensure!(
-        spec.endpoints.len() == 1 && spec.endpoints[0].protocol == "http",
-        "private_process_requires_one_http_endpoint"
-    );
+    match &spec.realization {
+        LaunchRealizationV1::Process(_) => ensure!(
+            spec.endpoints.len() == 1 && spec.endpoints[0].protocol == "http",
+            "private_process_requires_one_http_endpoint"
+        ),
+        LaunchRealizationV1::Oci(oci) if oci.native_surface.is_some() => {
+            ensure!(
+                spec.endpoints.is_empty(),
+                "private_pixel_cannot_expose_network_endpoints"
+            );
+            let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(
+                oci.native_surface.as_ref().unwrap(),
+            )?;
+            ensure!(
+                declaration.adapter.surface.kind() == "pixel_stream"
+                    && matches!(
+                        command.session_surface,
+                        Some(
+                            ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream { .. }
+                        )
+                    ),
+                "private_native_requires_pixel"
+            );
+        }
+        _ => bail!("private_isolation_requires_process_or_pixel"),
+    }
     ensure!(
         command.max_duration_secs.is_some(),
         "private_process_requires_bounded_lifetime"
@@ -1272,18 +1292,55 @@ pub fn start_native(
     descriptor: &ato_ipc::session_surface::SessionSurfaceDescriptor,
     config: super::native::NativeLeaseSurfaceConfig,
     pixel_helper: Option<super::native::pixel::PixelHelper>,
+    private_isolated: bool,
     check_startup: &mut dyn FnMut() -> Result<()>,
 ) -> std::result::Result<ActiveRun, StartFailure> {
-    match super::native::NativeLeaseRun::start(
-        spec,
-        selected_ref,
-        descriptor,
-        &resolved.context,
-        owner,
-        config,
-        pixel_helper,
-        check_startup,
-    ) {
+    let started = if private_isolated {
+        let boundary = (|| -> Result<()> {
+            ensure!(
+                matches!(
+                    descriptor,
+                    ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream { .. }
+                ),
+                "private native launch requires a Pixel surface"
+            );
+            pixel_helper
+                .as_ref()
+                .context("private Pixel requires a prepared display helper")?
+                .verify_private_formation_boundary()
+        })();
+        if let Err(error) = boundary {
+            return Err(settle_failed_start(
+                state,
+                &resolved.prepared,
+                &StopOutcome::AlreadyExited { exit_code: 0 },
+                error,
+            ));
+        }
+        super::native::NativeLeaseRun::start_without_network(
+            spec,
+            selected_ref,
+            descriptor,
+            &resolved.context,
+            owner,
+            config,
+            pixel_helper,
+            None,
+            check_startup,
+        )
+    } else {
+        super::native::NativeLeaseRun::start(
+            spec,
+            selected_ref,
+            descriptor,
+            &resolved.context,
+            owner,
+            config,
+            pixel_helper,
+            check_startup,
+        )
+    };
+    match started {
         Ok(native) => Ok(ActiveRun {
             launched: ActiveWorkload::Native(Box::new(native)),
             resolved,
@@ -1485,6 +1542,56 @@ mod tests {
         assert!(validate_private_isolation(&command, &group_spec, false, true).is_err());
         command.requires_private_isolation = false;
         assert!(validate_private_isolation(&command, &with_secrets, true, false).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_pixel_requires_its_surface_and_no_network_or_state_authority() {
+        let image = format!("example.invalid/gui@sha256:{}", "1".repeat(64));
+        let (spec, surface, _, _) = crate::runtime_launch::native::pixel::tests::fixture(&image);
+        let mut command = command_for(&spec, &spec.canonical_digest().unwrap());
+        command.requires_private_isolation = true;
+        command.max_duration_secs = Some(60);
+        command.session_surface = Some(surface);
+        let launch = RuntimeLaunchSpec::V1(spec.clone());
+        assert!(validate_private_isolation(&command, &launch, false, true).is_ok());
+        assert!(validate_private_isolation(&command, &launch, true, true).is_err());
+        assert!(validate_private_isolation(&command, &launch, false, false).is_err());
+        command.session_surface = None;
+        assert!(validate_private_isolation(&command, &launch, false, true).is_err());
+        let (_, surface, _, _) = crate::runtime_launch::native::pixel::tests::fixture(&image);
+        command.session_surface = Some(surface);
+        command.max_duration_secs = None;
+        assert!(validate_private_isolation(&command, &launch, false, true).is_err());
+        command.max_duration_secs = Some(60);
+        command.network_authorization = Some(NetworkAuthorization {
+            egress: vec![],
+            fixed_tcp: vec![],
+            managed_embeddings: vec![],
+        });
+        assert!(validate_private_isolation(&command, &launch, false, true).is_err());
+        command.network_authorization = None;
+        let mut with_secret = spec.clone();
+        with_secret.secret_grants = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE)
+            .unwrap()
+            .secret_grants;
+        assert!(
+            validate_private_isolation(&command, &RuntimeLaunchSpec::V1(with_secret), false, true)
+                .is_err()
+        );
+        let mut with_endpoint = spec;
+        with_endpoint.endpoints = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE)
+            .unwrap()
+            .endpoints;
+        assert!(
+            validate_private_isolation(
+                &command,
+                &RuntimeLaunchSpec::V1(with_endpoint),
+                false,
+                true
+            )
+            .is_err()
+        );
     }
 
     #[test]
