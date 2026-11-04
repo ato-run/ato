@@ -1,336 +1,251 @@
-# Security Policy
+# Security Policy — Nacelle provider
 
-## Reporting Security Vulnerabilities
+Status: Current. This page is the provider-specific threat model and the
+reporting entry point for Nacelle; it does not define a second project policy.
 
-The Nacelle project takes security seriously. If you discover a security vulnerability, **please do not open a public GitHub issue**. Instead, follow this responsible disclosure process:
+Nacelle (`extensions/providers/nacelle`) is the OS-native sandbox and
+source-execution provider Ato uses to realize a computation on a host. The
+reporting contact, scope, disclosure terms and incident response for the
+project are owned by the official [Ato Security
+Policy](https://ato.run/legal/security/). Read that page for current terms.
 
-### How to Report
+## Reporting a vulnerability
 
-1. **Email Security Team:** Send a detailed report to `security@nacelle.dev` (if available) or create a **private security advisory** on GitHub:
-   - Navigate to: **Settings → Security → Private Vulnerability Reporting**
-   - Report the vulnerability using GitHub's Security Advisory form
+**Do not open a public GitHub issue or pull request for a vulnerability.**
 
-2. **Include in Report:**
-   - Clear description of the vulnerability
-   - Steps to reproduce (if applicable)
-   - Affected version(s)
-   - Suggested fix (if available)
-   - Your contact information and PGP key (if available)
+1. Report through the official [Ato Security Policy](https://ato.run/legal/security/)
+   to `kohsuke@ato.run`. The same contact and its expiry are published in
+   [`security.txt`](https://ato.run/.well-known/security.txt). Reports in
+   English or Japanese are welcome.
+2. Include what is needed to reproduce the finding:
+   - the affected component and exact version (release tag or commit);
+   - platform and OS version;
+   - the `capsule.toml` isolation settings involved (`[isolation]`,
+     `[isolation.network]`, the `[isolation.filesystem]` paths, and development
+     mode);
+   - reproduction steps and the impact you believe it has;
+   - for a sandbox finding, which boundary you crossed: filesystem, network,
+     IPC/Unix socket, process, or macOS Keychain mach services.
+3. Do not disclose publicly before a mitigation is available, and use only
+   accounts and data you own or have permission to test. Those are the terms of
+   the official policy.
 
-3. **Response Timeline:**
-   - **Initial acknowledgment:** Within 48 hours
-   - **Assessment:** Within 5 business days
-   - **Patch development & testing:** 2-4 weeks (depending on severity)
-   - **Public disclosure:** Coordinated with reporter (typically 30-90 days after patch release)
+GitHub private vulnerability reporting is not an alternate entry point: the
+feature is currently disabled for this repository, so a report sent only there
+would not reach anyone. Use the official contact above.
 
----
+## Scope
 
-## Vulnerability Management
+In scope for this page, as part of the Ato CLI and runtime published by the
+project:
 
-### Severity Levels
+- sandbox policy construction and application on macOS (Seatbelt) and Linux
+  (Bubblewrap with Landlock);
+- sensitive-path protection and filtering of user-declared allow-lists;
+- the command-execution boundary and its portability checks;
+- network isolation, including what it does and does not enforce.
 
-- **Critical:** RCE, auth bypass, data exfiltration affecting production systems
-- **High:** Local privilege escalation, significant data exposure, DoS
-- **Medium:** Information disclosure, minor privilege escalation
-- **Low:** Non-security issues, hardening recommendations
+The official policy defines the service scope — `ato.run`, `api.ato.run`, app
+execution origins under `ato.run`, and the Ato CLI and runtime published by the
+project — and excludes software published by other users, denial-of-service
+testing, social engineering and physical attacks. A Nacelle finding inside that
+scope is reported the same way.
 
-### Patching Process
+## Supported versions
 
-1. **Assessment:** Security team evaluates the report
-2. **Reproduction:** Confirm the vulnerability in current and recent versions
-3. **Fix:** Develop and test the patch
-4. **Release:** Push patch to `main` and release new version (e.g., `v0.2.8`)
-5. **Disclosure:** Public advisory with CVE (if applicable)
+Ato publishes CLI and runtime artifacts in
+[GitHub Releases](https://github.com/ato-run/ato/releases); the provider crate
+version is declared in its `Cargo.toml`. This page does not maintain a
+version-by-version support matrix and promises no fixed support window. Report
+the version you actually ran.
 
-### Supported Versions
+## Severity
 
-| Version | Supported  | End of Support |
-| ------- | ---------- | -------------- |
-| 0.2.x   | ✅ Yes     | N/A (current)  |
-| 0.1.x   | ⚠️ Limited | 2025-12-31     |
-| < 0.1   | ❌ No      | Unsupported    |
+Classified by what a workload gains beyond what its declared policy allows:
 
-**Security patches are provided for the current version and the previous minor version only.**
+- **Critical** — escapes the sandbox: host code execution outside the declared
+  workspace, or read access to a default-denied sensitive path.
+- **High** — privilege escalation on the host, significant data exposure, or a
+  bypass of network isolation when the workload is not granted network access.
+- **Medium** — limited information disclosure, or a policy weakening that needs
+  an additional precondition to exploit.
+- **Low** — hardening recommendations and non-security defects.
 
----
+## Response and disclosure
 
-## Security Best Practices for Users
-
-### For Production Deployment
-
-1. **Keep Nacelle Updated**
-
-   ```bash
-   # Check for updates
-   cargo install --path ./ato-cli --force
-   ```
-
-2. **Key Management**
-   - Never commit private keys to version control
-   - Use environment variables or secure vaults for key storage
-   - Regenerate keys if compromised: `ato keygen --name <name>`
-
-3. **Capsule Signing**
-   - Always sign capsules with a private key
-   - Verify signature before deployment: `ato pack --bundle --manifest ./capsule.toml --key <key>`
-
-4. **Network Security**
-   - Use HTTPS/TLS for all remote capsule downloads
-   - Validate checksums after download
-   - Use firewalls to restrict egress from running capsules
-
-5. **Container Runtime**
-   - Run Nacelle engine with minimal privileges (non-root when possible)
-   - Use security modules (AppArmor, SELinux) in production
-   - Enable audit logging for all deployments
-
-### For Development
-
-1. **Code Review**
-   - All changes undergo security review before merge
-   - Use `cargo clippy` for static analysis
-   - Run `cargo audit` to check for known vulnerabilities
-
-   ```bash
-   cargo audit --deny warnings
-   ```
-
-2. **Dependencies**
-   - Keep all dependencies up-to-date
-   - Review dependency changes in PR reviews
-   - Use `Cargo.lock` for reproducible builds
-
-3. **Testing**
-   - Write security tests for auth, validation, crypto
-   - Use fuzzing for parsing/serialization code
-   - Perform manual security review for new features
+The official policy states the response process: reports are acknowledged,
+triaged, contained where needed, and reporters are kept informed; affected
+listings or accounts may be disabled while remediation is in progress, and
+affected users and authorities are notified where required by law. It does not
+publish fixed acknowledgement or patch deadlines, so this page promises none —
+use the official policy for current terms. Reporters are asked to hold public
+disclosure until a mitigation is available; a public advisory (and CVE where
+applicable) is published with the fix.
 
 ---
 
-## Security Features
+## Threat model
 
-### Implemented
+Nacelle runs commands on the host. The declared isolation policy, lowered to
+OS-native mechanisms, is the security boundary — there is no binary allowlist
+standing in front of it.
 
-- ✅ **Ed25519 Cryptography:** Signature and verification
-- ✅ **Capsule Manifest Signing:** Tamper detection
-- ✅ **gRPC/TLS Support:** Encrypted communication
-- ✅ **Input Validation:** Manifest parsing and validation
-- ✅ **OS-Native Sandboxing:** Seatbelt (macOS) / Bubblewrap + Landlock (Linux)
-- ✅ **Sensitive Path Protection:** `~/.ssh`, `~/.aws`, `~/.gnupg` etc. auto-denied
-- ✅ **Network Isolation:** Per-capsule network access control
-- ✅ **Audit Logging:** Deployment and execution logging
+### Command execution: no binary allowlist
 
-### In Development / Planned
+Nacelle does **not** maintain a binary allowlist for capsule commands. Any
+command declared in `capsule.toml` (`execution.entrypoint` /
+`execution.command`) may execute.
 
-- 🔄 **Domain-level Egress Filtering:** Via Sidecar Proxy (tsnet/SOCKS5)
-- 🔄 **Encrypted Secrets Management:** Secure secret handling for capsules
-- 🔄 **Rate Limiting:** Engine API protection
-- 🔄 **Certificate Pinning:** Secure gRPC communication
-- 🔄 **Hardware Security Module (HSM) Support:** Key management
-
----
-
-## Runtime Security Model
-
-### Command Execution Policy: "Allow Any Command"
-
-nacelle does **not** maintain a binary allowlist for capsule commands.
-Any command specified in `capsule.toml` (`execution.entrypoint` /
-`execution.command`) is permitted to execute.
-
-**Rationale:** Allowing `npm` or `python` already means arbitrary code
-can run — `npm run dev` executes whatever is in `package.json`, and
-`python script.py` can do anything Python can do. A binary allowlist
-creates a false sense of security and breaks extensibility. The real
-security boundary is the OS sandbox.
+**Rationale:** allowing `npm` or `python` already means arbitrary code can
+run — `npm run dev` executes whatever `package.json` contains, and
+`python script.py` can do anything Python can do. A binary allowlist creates a
+false sense of security and breaks extensibility. The real boundary is the OS
+sandbox.
 
 Only basic portability checks are enforced:
 
-- No absolute paths (`/usr/bin/python` → use `python`)
-- No directory traversal (`../../../bin/sh`)
+- no absolute paths (`/usr/bin/python` → use `python`);
+- no directory traversal (`../../../bin/sh`).
 
-### Security Boundary: OS-level Sandbox
-
-The **sole security enforcement** is the OS-native process sandbox:
+### The boundary is the OS sandbox
 
 | Platform | Primary            | Supplementary |
 | -------- | ------------------ | ------------- |
 | macOS    | Seatbelt (SBPL)    | —             |
 | Linux    | Bubblewrap (bwrap) | Landlock LSM  |
 
-#### macOS (Seatbelt — dynamic SBPL via `sandbox_init`)
+#### macOS: Seatbelt with dynamic SBPL
 
-Phase 13a (2026-04-29, ADR-007) switched from predefined-profile fallbacks
-to **dynamic SBPL profiles applied via `sandbox_init(flags=0)`**. The
-profile is generated per call from `SandboxPolicy` and ingested as raw
-SBPL source by the kernel — the deprecated-but-supported entry point used
-by `sandbox-exec(1)` itself. The CLI tool `sandbox-exec` is **not** invoked.
+Profiles are generated per call from the target's isolation policy as SBPL and
+applied in one of two ways: the source launcher writes the profile to a per-run
+file under the runtime state directory and starts the workload with
+`sandbox-exec -f <profile>`; the supervisor path applies a policy in-process
+through `sandbox_init(flags = 0)`, which parses raw SBPL source in the kernel.
+`sandbox-exec` is only a wrapper for a generated profile, never a predefined
+profile name.
 
-**Strategy: "Deny Default, Allow Specific" (production)**
+The two profile generators are not identical, and the difference matters when
+reading a profile:
 
-- `(deny default)` — everything is denied unless explicitly allowed below.
-- `(allow process-exec / process-fork / signal (target self) / sysctl-read)` —
-  baseline operations every Unix workload needs.
-- `(allow mach-lookup / ipc-posix-shm)` — essential IPC primitives, but
-  Mach services for Keychain (`com.apple.secd`, `SecurityServer`,
-  `security.agent`, `authorizationd`) are explicitly **denied** so the
-  capsule cannot reach the Keychain even though `mach-lookup` is on.
-- `(allow file-read*  (subpath "..."))` for each entry in `read_only_paths`.
-- `(allow file-read* file-write* (subpath "..."))` for each `read_write_paths`.
-- `(allow network*)` only when `isolation.network.enabled = true`.
-- IPC sockets: emitted as both `file-read*/file-write*` (for stat/unlink on
-  the inode) **and** `network* (remote/local unix-socket (subpath ...))`
-  (for connect/bind on the AF_UNIX socket itself — Apple's Seatbelt
-  models AF_UNIX under network rules even though Linux Landlock gates
-  them via filesystem rules).
+| Path | Default | What constrains the workload |
+| --- | --- | --- |
+| Source launcher (`generate_seatbelt_profile`) | `(allow default)` | explicit `(deny file-read* file-write* (subpath ...))` rules for every path in `sensitive_paths()`, plus `(deny network*)` when network is not granted |
+| Supervisor policy (`generate_sbpl_profile`) | `(deny default)` | explicit allows for declared read-only and read-write paths, process and IPC primitives, and network only when granted; Mach services that gate the Keychain (`com.apple.secd`, `com.apple.SecurityServer`, `com.apple.security.agent`, `com.apple.authorizationd`) are explicitly denied |
 
-**Strategy: "Allow Default, Deny Sensitive" (development mode only)**
+In both, the sensitive-path deny list is what protects user secrets: in the
+supervisor profile it is one rule inside a default-deny policy, and in the
+launcher profile it carries the boundary. IPC sockets are emitted both as file
+operations (stat/unlink on the inode) and as `network*`
+`(remote/local unix-socket (subpath ...))` rules for connect/bind on the AF_UNIX
+socket.
 
-When `policy.development_mode = true`, the production profile is bypassed
-in favour of `(allow default)` + `(deny file-write* (subpath "/System") ...)`
-to keep iteration fast while still protecting critical system locations.
+#### Linux: Bubblewrap plus Landlock
 
-#### Linux (Bubblewrap + Landlock)
+1. **Bubblewrap** provides PID/mount/net namespace isolation: only
+   explicitly bind-mounted paths are visible, sensitive paths are hidden with
+   `--tmpfs` overlays, all capabilities are dropped (`--cap-drop ALL`), and
+   `--unshare-all` without `--share-net` leaves the child in a fresh network
+   namespace where outbound `connect()` fails. Production mode additionally
+   clears the environment (`--clearenv`) before re-adding a small allow-list.
+2. **Landlock** (kernel 5.13+) adds filesystem access control. It is applied to
+   the workload from inside the sandbox by the `nacelle sandbox-exec` shim,
+   after namespace setup, using an allow-list built from `capsule.toml` after
+   sensitive paths are filtered.
 
-**Strategy: "Namespace Isolation + Filesystem Allow-list"**
-
-1. **Bubblewrap** provides PID/mount/net namespace isolation:
-   - Only explicitly bind-mounted paths are visible.
-   - Sensitive paths are hidden with `--tmpfs` overlays.
-   - `--unshare-all` without `--share-net` blocks network.
-2. **Landlock LSM** (kernel 5.13+) adds filesystem access control:
-   - Allow-list constructed from `capsule.toml` after filtering
-     sensitive paths.
-   - Applied as a supplementary layer inside the namespace.
-
-### Sensitive Paths (Default Deny List)
+### Sensitive paths: default deny list
 
 The following user directories are blocked by default across all platforms.
-Defined in `src/system/sandbox/mod.rs::sensitive_paths()`.
+They are defined in `src/system/sandbox/mod.rs::sensitive_paths()`.
 
-| Path                                              | Reason              |
-| ------------------------------------------------- | ------------------- |
-| `~/.ssh`                                          | SSH keys            |
-| `~/.gnupg`                                        | GPG keys            |
-| `~/.aws`                                          | AWS credentials     |
-| `~/.kube`                                         | Kubernetes config   |
-| `~/.config/gcloud`                                | GCP credentials     |
-| `~/.azure`                                        | Azure credentials   |
-| `~/.docker`                                       | Docker credentials  |
-| `~/.npmrc`                                        | npm tokens          |
-| `~/.pypirc`                                       | PyPI tokens         |
-| `~/.bash_history` / `~/.zsh_history`              | May contain secrets |
-| `~/Library/Keychains` _(macOS)_                   | System keychain     |
-| `~/Library/Cookies` _(macOS)_                     | Browser cookies     |
-| `~/Library/Application Support/Chrome` _(macOS)_  | Browser profile     |
-| `~/Library/Application Support/Firefox` _(macOS)_ | Browser profile     |
+| Path                                                    | Reason              |
+| ------------------------------------------------------- | ------------------- |
+| `~/.ssh`                                                | SSH keys            |
+| `~/.gnupg`                                              | GPG keys            |
+| `~/.aws`                                                | AWS credentials     |
+| `~/.kube`                                               | Kubernetes config   |
+| `~/.config/gcloud`                                      | GCP credentials     |
+| `~/.azure`                                              | Azure credentials   |
+| `~/.docker`                                             | Docker credentials  |
+| `~/.npmrc`                                              | npm tokens          |
+| `~/.pypirc`                                             | PyPI tokens         |
+| `~/.bash_history` / `~/.zsh_history`                    | May contain secrets |
+| `~/Library/Keychains` _(macOS)_                         | System keychain     |
+| `~/Library/Cookies` _(macOS)_                           | Browser cookies     |
+| `~/Library/Application Support/Google/Chrome` _(macOS)_ | Browser profile     |
+| `~/Library/Application Support/Firefox` _(macOS)_       | Browser profile     |
 
-**Behavior when user specifies a parent path:**
+**When a user declares a parent path:** if an `[isolation.filesystem]` entry
+names a directory that also contains a default-denied path (a home directory,
+for example), those sensitive sub-directories are removed from the allow-list;
+on macOS the Seatbelt `(deny ...)` rules override the parent `(allow ...)`, and
+on Linux `filter_sensitive_paths()` removes them before the Landlock rules and
+Bubblewrap overlays are built. A `WARN` log is emitted when paths are filtered.
 
-If `capsule.toml` contains `read_write = ["~"]` (home directory),
-the sandbox automatically excludes sensitive sub-directories:
+### Network egress control
 
-- **macOS:** Seatbelt `(deny ...)` rules override the parent `(allow ...)`.
-- **Linux:** `filter_sensitive_paths()` removes the home directory from
-  the Landlock allow-list; Bubblewrap applies `--tmpfs` overlays.
+| Input                                | Scope        | Linux                                                | macOS                                  |
+| ------------------------------------ | ------------ | ---------------------------------------------------- | -------------------------------------- |
+| `isolation.network.enabled = false`  | All traffic  | No host network namespace                            | `(deny network*)`                      |
+| `egress_allow` (domains)             | L7 domains   | `WARN`; delegated to the tsnet sidecar               | `WARN` plus profile comment; delegated |
+| `egress_id_allow` (CIDRs)            | L3 addresses | Launch refused without a tsnet sidecar (fail closed) | `WARN` plus profile comment only       |
 
-A `WARN` log is emitted when paths are filtered.
+Domain- and CIDR-level filtering cannot be enforced by the OS sandbox: Seatbelt
+supports only IP-based rules and Landlock has no network filtering at all. The
+two platforms are not equivalent for `egress_id_allow` — the Linux launcher
+refuses to start when the rule cannot be enforced, while the macOS path only
+warns, so a CIDR rule there is advisory. Treat any `egress_allow` /
+`egress_id_allow` restriction as requiring the sidecar to actually be running,
+not as an OS-enforced boundary.
 
-### Network Egress Control
+### Known limits
 
-| Mechanism                        | Scope            | Status      |
-| -------------------------------- | ---------------- | ----------- |
-| `isolation.network.enabled`      | All traffic      | ✅ Enforced |
-| `isolation.network.egress_allow` | Domain filtering | ⚠️ Sidecar  |
+- **Development mode is not a boundary.** With `development_mode`
+  (`dev_mode`), the macOS launcher runs the workload without Seatbelt and the
+  in-process sandbox application reports `not_enforced`; on Linux `dev_mode`
+  shares the host network namespace and skips the production environment
+  hardening. Use it for debugging only.
+- **Nacelle is not a container runtime or a VM.** It applies OS-native
+  mechanisms on the host and does not provide the same boundary as Docker or a
+  virtual machine; use Docker or a VM when you need stronger isolation (see the
+  [provider README](README.md#security-boundary)).
+- **No allowlist of executables.** Correctness of a declared command is the
+  author's responsibility; the sandbox, not the command name, constrains it.
+- **Denied paths are a fixed list.** A path outside the list that the user
+  explicitly grants is granted by design.
 
-Domain-level egress filtering (`egress_allow`) **cannot** be enforced
-at the OS sandbox level (Seatbelt supports only IP-based rules;
-Landlock has no network filtering). When `egress_allow` is configured:
+## Security-relevant development checks
 
-1. A `WARN` log is emitted: _"Domain-level egress filtering is not
-   enforceable via Seatbelt/Bubblewrap. Relies on Sidecar Proxy."_
-2. The Seatbelt profile includes a comment noting the delegation.
-3. Actual enforcement is performed by the **Sidecar Proxy (tsnet/SOCKS5)**.
+Nacelle is excluded from the root Cargo workspace and builds from its own
+manifest. Before a pull request that touches the sandbox, launcher or
+sensitive-path code, run from `extensions/providers/nacelle`:
 
----
-
-## Dependency Security
-
-### Regular Audits
-
-Nacelle dependencies are audited regularly for known vulnerabilities:
-
-```bash
-# Audit locally
-cargo audit
-
-# In CI (automated)
-# Runs on every PR and push to main
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-### Third-Party Dependencies
-
-Core dependencies include:
-
-- **Cryptography:** `ed25519-dalek`, `sha2`, `base64`
-- **Serialization:** `serde_json`, `toml`, `capnp`
-- **Async Runtime:** `tokio`, `hyper`
-- **gRPC:** `tonic`, `prost`
-- **Container:** `oci-spec-rs`, `oci-image`
-
-All are vetted for security and maintained actively.
-
----
-
-## Security Guidelines for Contributors
-
-### Before Submitting a PR
-
-1. Run security checks:
-
-   ```bash
-   cargo fmt --check
-   cargo clippy --all-targets -- -D warnings
-   cargo audit --deny warnings
-   cargo test --lib
-   ```
-
-2. Review the CONTRIBUTING.md for code style
-3. Add tests for security-sensitive changes
-4. Document security implications in commit message
-
-### Do's ✅
-
-- ✅ Use `Result<T, E>` for error handling (no `unwrap()` in prod code)
-- ✅ Validate all inputs
-- ✅ Use constant-time comparisons for cryptographic material
-- ✅ Document unsafe code blocks
-- ✅ Use security linters (clippy, `cargo-deny`)
-
-### Don'ts ❌
-
-- ❌ Hardcode secrets, API keys, or private keys
-- ❌ Use insecure random number generators
-- ❌ Ignore type safety (avoid `unsafe` unless necessary)
-- ❌ Disable security warnings
-- ❌ Use deprecated cryptographic functions
-
----
+Review sandbox-profile generation and allow-list filtering changes with their
+unit tests, and state in the pull request which boundary the change touches and
+what was not verified on a real host. If you change dependencies, run
+`cargo audit` locally when it is installed; this repository has no scheduled
+dependency-audit job, so do not assume a background scan covers a change.
 
 ## Acknowledgments
 
-Thank you to the security researchers who responsibly report vulnerabilities and help us improve Nacelle's security posture.
+Thank you to the security researchers who report vulnerabilities responsibly and
+help improve the provider's security posture.
 
----
+## Additional resources
 
-## Additional Resources
-
+- [Official Ato Security Policy](https://ato.run/legal/security/) and
+  [`security.txt`](https://ato.run/.well-known/security.txt)
+- [Ato repository README](../../../README.md) and
+  [contributing guide](../../../CONTRIBUTING.md)
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
 - [Rust Security Guidelines](https://anssi-fr.github.io/rust-guide/)
-- [eBPF Security](https://ebpf.io/what-is-ebpf/#security)
-- [Container Security Best Practices](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)
+- [Landlock](https://landlock.io/) and [Bubblewrap](https://github.com/containers/bubblewrap)
 
 ---
 
-**Last Updated:** February 2026  
-**Maintainers:** Nacelle Security Team
+Last updated: 2026-11-04. Maintained with the Ato repository.
