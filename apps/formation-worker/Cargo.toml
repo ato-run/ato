@@ -43,6 +43,9 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 
+[target.'cfg(unix)'.dependencies]
+ato-connected-realization-worker = { path = "../connected-realization-worker", version = "0.1.0" }
+
 [dev-dependencies]
 tar = "0.4"
 tempfile = "3"

@@ -44,8 +44,8 @@ use crate::authoring::{
     validate_tls_server_name,
 };
 use crate::native_surface::{
-    NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, TERMINAL_PORT_PROTOCOL,
-    terminal_size_in_bounds,
+    NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, PIXEL_PORT_PROTOCOL,
+    TERMINAL_PORT_PROTOCOL, terminal_size_in_bounds,
 };
 
 /// The file an author writes, at the root of the source they upload.
@@ -202,6 +202,14 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
         .get("derive")
         .and_then(Value::as_table)
         .is_some_and(|derive| derive.contains_key("native_surface"));
+    let native_pixel_port = table
+        .get("derive")
+        .and_then(Value::as_table)
+        .and_then(|derive| derive.get("native_surface"))
+        .and_then(Value::as_table)
+        .filter(|native| native.get("kind").and_then(Value::as_str) == Some("pixel_stream"))
+        .and_then(|native| native.get("port"))
+        .and_then(Value::as_str);
 
     for (key, value) in table {
         match key.as_str() {
@@ -213,7 +221,7 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
                 derivation.steps = steps;
                 derivation.native_surface = native_surface;
             }
-            "port" => derivation.ports = read_ports(value, native_declared)?,
+            "port" => derivation.ports = read_ports(value, native_declared, native_pixel_port)?,
             "state" => derivation.state = read_state(value)?,
             "contract" => {
                 let (identity, requirements) = read_contract(value)?;
@@ -356,6 +364,40 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
 fn render_native_surface(
     native: &NativeSurfaceAdapter,
 ) -> Result<serde_json::Value, CapsuleTomlError> {
+    if let NativePresentation::PixelStream {
+        port,
+        width,
+        height,
+    } = &native.surface
+    {
+        let [
+            NativeProbeOperation::PixelKeyFrame {
+                path,
+                keysyms,
+                max_frame_bytes,
+                timeout_ms,
+                settle_ms,
+            },
+        ] = native.operations.as_slice()
+        else {
+            return Err(malformed(
+                "derive.native_surface",
+                "this grammar represents exactly one pixel_key_frame operation",
+            )
+            .into());
+        };
+        let mut table = serde_json::json!({
+            "kind": native.surface.kind(), "profile": native.surface.profile(),
+            "width": width, "height": height, "port": port,
+            "probe_port": native.probe_port, "probe_path": path,
+            "probe_keysyms": keysyms, "probe_max_frame_bytes": max_frame_bytes,
+            "probe_timeout_ms": timeout_ms,
+        });
+        if *settle_ms != 0 {
+            table["probe_settle_ms"] = (*settle_ms).into();
+        }
+        return Ok(table);
+    }
     let NativePresentation::Terminal { port, cols, rows } = &native.surface else {
         return Err(malformed(
             "derive.native_surface",
@@ -545,15 +587,18 @@ fn read_platforms(value: &Value) -> Result<Vec<PlatformDraft>, AuthoringError> {
         .collect()
 }
 
-/// `[derive.native_surface]`: the one Terminal Adapter this grammar authors.
+/// `[derive.native_surface]`: one bounded Terminal or Pixel Adapter.
 ///
-/// The wire type is deliberately richer (Pixel, several probe operations), but
+/// The wire type is deliberately richer (several probe operations), but
 /// a key that promised what this frontend cannot render would be a decision the
 /// author only believed they made.
 fn read_native_surface(
     table: &toml::map::Map<String, Value>,
 ) -> Result<NativeSurfaceAdapter, AuthoringError> {
     const WHAT: &str = "derive.native_surface";
+    if required_str(table, "kind", WHAT)? == "pixel_stream" {
+        return read_pixel_surface(table);
+    }
     only(
         table,
         WHAT,
@@ -641,6 +686,91 @@ fn read_native_surface(
                 None => Vec::new(),
                 Some(_) => required_str(table, "probe_ready_output", WHAT)?.into_bytes(),
             },
+        }],
+    };
+    adapter
+        .validate_catalog()
+        .map_err(|error| malformed(WHAT, error))?;
+    Ok(adapter)
+}
+
+fn read_pixel_surface(
+    table: &toml::map::Map<String, Value>,
+) -> Result<NativeSurfaceAdapter, AuthoringError> {
+    const WHAT: &str = "derive.native_surface";
+    only(
+        table,
+        WHAT,
+        &[
+            "kind",
+            "profile",
+            "width",
+            "height",
+            "port",
+            "probe_port",
+            "probe_path",
+            "probe_keysyms",
+            "probe_max_frame_bytes",
+            "probe_timeout_ms",
+            "probe_settle_ms",
+        ],
+    )?;
+    let integer = |field: &str| {
+        table
+            .get(field)
+            .and_then(Value::as_integer)
+            .ok_or_else(|| malformed(format!("{WHAT}.{field}"), "expected an integer"))
+    };
+    let width =
+        u16::try_from(integer("width")?).map_err(|_| malformed(WHAT, "invalid pixel width"))?;
+    let height =
+        u16::try_from(integer("height")?).map_err(|_| malformed(WHAT, "invalid pixel height"))?;
+    let surface = NativePresentation::PixelStream {
+        port: required_str(table, "port", WHAT)?,
+        width,
+        height,
+    };
+    if required_str(table, "profile", WHAT)? != surface.profile() {
+        return Err(malformed(
+            format!("{WHAT}.profile"),
+            "invalid pixel Surface profile",
+        ));
+    }
+    let keysyms = table
+        .get("probe_keysyms")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed(format!("{WHAT}.probe_keysyms"), "expected an integer array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    malformed(
+                        format!("{WHAT}.probe_keysyms"),
+                        "expected unsigned integers",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let max_frame_bytes = u32::try_from(integer("probe_max_frame_bytes")?)
+        .map_err(|_| malformed(WHAT, "invalid frame bound"))?;
+    let timeout_ms = u64::try_from(integer("probe_timeout_ms")?)
+        .map_err(|_| malformed(WHAT, "invalid timeout"))?;
+    let settle_ms = match table.get("probe_settle_ms") {
+        None => 0,
+        Some(_) => u64::try_from(integer("probe_settle_ms")?)
+            .map_err(|_| malformed(WHAT, "invalid settle time"))?,
+    };
+    let adapter = NativeSurfaceAdapter {
+        surface,
+        probe_port: required_str(table, "probe_port", WHAT)?,
+        operations: vec![NativeProbeOperation::PixelKeyFrame {
+            path: required_str(table, "probe_path", WHAT)?,
+            keysyms,
+            max_frame_bytes,
+            timeout_ms,
+            settle_ms,
         }],
     };
     adapter
@@ -846,7 +976,11 @@ fn read_derive(
     Ok((steps, native_surface))
 }
 
-fn read_ports(value: &Value, native_declared: bool) -> Result<Vec<PortDraft>, AuthoringError> {
+fn read_ports(
+    value: &Value,
+    native_declared: bool,
+    native_pixel_port: Option<&str>,
+) -> Result<Vec<PortDraft>, AuthoringError> {
     array_of_tables(value, "port")?
         .into_iter()
         .map(|table| {
@@ -857,12 +991,14 @@ fn read_ports(value: &Value, native_declared: bool) -> Result<Vec<PortDraft>, Au
             // Every other Port this grammar exports is logical HTTP.
             if protocol != HTTP_PROTOCOL
                 && !(native_declared && protocol == TERMINAL_PORT_PROTOCOL)
+                && !(protocol == PIXEL_PORT_PROTOCOL && native_pixel_port == Some(id.as_str()))
             {
                 return Err(malformed(
                     format!("port.{id}.use"),
                     format!(
                         "{protocol:?} is not a port protocol this build exports; use \
-                         {HTTP_PROTOCOL}, or {TERMINAL_PORT_PROTOCOL} beside a declared native Surface"
+                         {HTTP_PROTOCOL}, {TERMINAL_PORT_PROTOCOL} beside a declared native Surface, \
+                         or {PIXEL_PORT_PROTOCOL} for the declared Pixel Surface Port"
                     ),
                 ));
             }
