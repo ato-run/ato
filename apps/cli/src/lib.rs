@@ -112,8 +112,8 @@ enum Commands {
     Encap(EncapArgs),
     /// Compile an ato.capsule/2 source directory into a portable Application.
     Pack(PackArgs),
-    /// Experimental: compile an ato.capsule/1 route that declares a Terminal
-    /// native Surface into a portable wire v3 `.capsule` bundle.
+    /// Experimental: compile an ato.capsule/1 route that declares a native
+    /// Terminal or Pixel Surface into a portable wire v3 `.capsule` bundle.
     #[command(name = "__native-bundle", hide = true)]
     NativeBundle(NativeBundleArgs),
     /// Experimental: compile an ato.capsule/1 route that declares a browser
@@ -769,13 +769,20 @@ fn source_oci_build(args: SourceOciBuildArgs) -> Result<()> {
     let materialized = source_oci_session_build(&prepared, &args)?;
     let provenance = serde_json::to_vec_pretty(&materialized.provenance)?;
     fs::write(args.out.join(PROVENANCE_FILE), &provenance)?;
-    let authored = args.out.join("authored");
-    fs::create_dir(&authored)?;
-    fs::write(authored.join("capsule.toml"), &materialized.capsule_toml)?;
-    fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+    let authored = if let Some(capsule_toml) = &materialized.capsule_toml {
+        let authored = args.out.join("authored");
+        fs::create_dir(&authored)?;
+        fs::write(authored.join("capsule.toml"), capsule_toml)?;
+        fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+        Some(authored)
+    } else {
+        None
+    };
     println!("image_reference={}", materialized.image_reference);
     println!("archive={}", materialized.archive.display());
-    println!("authored={}", authored.display());
+    if let Some(authored) = authored {
+        println!("authored={}", authored.display());
+    }
     Ok(())
 }
 
@@ -864,18 +871,15 @@ fn native_bundle(args: NativeBundleArgs) -> Result<()> {
         args.source
             .join(ato_formation::capsule_toml::CAPSULE_FILE_NAME)
     });
-    let (bytes, bundle) = ato_portable_application::build_native_terminal_bundle(
-        &args.source,
-        &manifest,
-        &args.title,
-    )
-    .with_context(|| {
-        format!(
-            "compile native bundle from {} and {}",
-            manifest.display(),
-            args.source.display()
-        )
-    })?;
+    let (bytes, bundle) =
+        ato_portable_application::build_native_bundle(&args.source, &manifest, &args.title)
+            .with_context(|| {
+                format!(
+                    "compile native bundle from {} and {}",
+                    manifest.display(),
+                    args.source.display()
+                )
+            })?;
     fs::write(&args.output, &bytes)
         .with_context(|| format!("write native bundle {}", args.output.display()))?;
     println!("Packed: {}", args.output.display());

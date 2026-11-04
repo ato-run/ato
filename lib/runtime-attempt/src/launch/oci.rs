@@ -726,7 +726,12 @@ fn wait_until_service_ready(
                 probe.probe(host_port, path)
             }
             EndpointExposureV2::Internal => {
-                let target = SocketAddr::new(handle.container_address(), endpoint.guest_port);
+                let target = SocketAddr::new(
+                    handle
+                        .container_address()
+                        .context("service has no network address")?,
+                    endpoint.guest_port,
+                );
                 TcpStream::connect_timeout(&target, INTERNAL_PROBE_TIMEOUT)
                     .map(drop)
                     .map_err(|error| error.to_string())

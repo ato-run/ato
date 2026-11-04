@@ -122,6 +122,10 @@ pub(crate) fn err(code: &'static str, detail: impl Into<String>) -> SourceOciErr
 }
 pub type Result<T> = std::result::Result<T, SourceOciError>;
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceOciRequest {
@@ -133,8 +137,12 @@ pub struct SourceOciRequest {
     pub platform: String,
     /// Every external image the build may use, frozen before the build.
     pub base_images: Vec<BaseImageInput>,
-    /// Explicit port binding; must equal the built image's single ExposedPort.
-    pub declared_transport_port: u16,
+    /// Explicit port binding for the HTTP route; must equal the single ExposedPort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_transport_port: Option<u16>,
+    /// Produce only a verified image, without asserting an HTTP Contract.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub image_only: bool,
     /// State slots explicitly authorized for the image's VOLUMEs; each must
     /// be exactly one VOLUME path of the built image and vice versa.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -304,8 +312,10 @@ impl SourceOciRequest {
         if !matches!(self.platform.as_str(), "linux/amd64" | "linux/arm64") {
             return bad("platform must be linux/amd64 or linux/arm64");
         }
-        if self.declared_transport_port == 0 {
-            return bad("declared transport port must be 1..=65535");
+        if (self.image_only && self.declared_transport_port.is_some())
+            || (!self.image_only && !matches!(self.declared_transport_port, Some(1..=u16::MAX)))
+        {
+            return bad("HTTP routes require a nonzero port; image-only builds must omit it");
         }
         if self.base_images.len() > MAX_BASE_IMAGES {
             return bad("too many base images");
@@ -960,7 +970,7 @@ pub const ARCHIVE_FILE: &str = "image.tar";
 #[derive(Debug, Clone, Serialize)]
 pub struct Materialized {
     pub provenance: Value,
-    pub capsule_toml: String,
+    pub capsule_toml: Option<String>,
     pub image_reference: String,
     pub archive: PathBuf,
 }
@@ -1319,20 +1329,27 @@ fn build_and_verify(
     }
     check_deadline()?;
     // 6. Explicit port binding against the artifact's own declaration.
-    let expected = format!("{}/tcp", request.declared_transport_port);
-    if facts.exposed_ports != [expected.clone()] {
+    if let Some(port) = request.declared_transport_port {
+        let expected = format!("{port}/tcp");
+        if facts.exposed_ports != [expected.clone()] {
+            return Err(err(
+                "source_oci_port_unmatched",
+                format!(
+                    "image declares {:?}; the explicit binding is {expected}",
+                    facts.exposed_ports
+                ),
+            ));
+        }
+    } else if !facts.exposed_ports.is_empty() {
         return Err(err(
             "source_oci_port_unmatched",
-            format!(
-                "image declares {:?}; the explicit binding is {expected}",
-                facts.exposed_ports
-            ),
+            "image-only builds cannot declare exposed ports",
         ));
     }
     // The portable OCI profile requires argv; copy the artifact's own Cmd
     // verbatim (OCI semantics; its ENTRYPOINT still applies). Never parse
     // Dockerfile text or translate it into a native process.
-    if facts.cmd.is_empty() {
+    if !request.image_only && facts.cmd.is_empty() {
         return Err(err(
             "source_oci_cmd_absent",
             "the image has no Cmd; the current OCI profile needs argv (profile design gap)",
@@ -1369,12 +1386,20 @@ fn build_and_verify(
             ),
         ));
     }
-    let capsule_toml = authored_route(request, &image_reference, &facts, working_dir.as_deref());
+    let capsule_toml = request.declared_transport_port.map(|port| {
+        authored_route(
+            request,
+            &image_reference,
+            &facts,
+            working_dir.as_deref(),
+            port,
+        )
+    });
     let package_inventory = builder.package_inventory(&image_id)?;
     let archive = out.join(ARCHIVE_FILE);
     std::fs::rename(&partial, &archive)
         .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
-    let provenance = json!({
+    let mut provenance = json!({
         "schema": SOURCE_OCI_PROVENANCE_SCHEMA,
         "inputs": {
             "source_archive_sha256": request.source_archive_sha256,
@@ -1405,7 +1430,7 @@ fn build_and_verify(
                 "volumes":facts.volumes,"user":facts.user},
         },
         "declared_transport_port": request.declared_transport_port,
-        "http_suitability": "unverified until the Runtime and Verifier observe it",
+        "http_suitability": if request.image_only { "not applicable: image only" } else { "unverified until the Runtime and Verifier observe it" },
         "working_dir": working_dir.as_deref().unwrap_or(PROFILE_WORKING_DIR),
         "authorized_state": request.authorized_state,
         "egress": {
@@ -1417,6 +1442,9 @@ fn build_and_verify(
         "build_elapsed_ms": elapsed_ms,
         "reproducibility": "not claimed; outputs are observed digests of this build",
     });
+    if request.image_only {
+        provenance["image_only"] = true.into();
+    }
     Ok(Materialized {
         provenance,
         capsule_toml,
@@ -1436,6 +1464,7 @@ fn authored_route(
     image: &str,
     facts: &ImageFacts,
     working_dir: Option<&str>,
+    port: u16,
 ) -> String {
     let p = &request.policy.runtime;
     let argv = facts
@@ -1492,7 +1521,7 @@ runtimes = {{ "oci.image" = {image}, "oci.platform" = {platform}, "oci.memory_by
 default = "pure"
 "#,
         title = toml_string(&request.title),
-        port = request.declared_transport_port,
+        port = port,
         image = toml_string(image),
         platform = toml_string(&request.platform),
         memory = p.memory_bytes,

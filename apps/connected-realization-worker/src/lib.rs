@@ -20,9 +20,45 @@ pub mod host_resources;
 #[cfg(all(test, target_os = "linux"))]
 mod managed_hosted_tests;
 mod native_pixel_config;
+pub use native_pixel_config::NativePixelConfig;
 mod process_run_verification;
 pub mod runtime_launch;
 mod slot_state;
+
+/// Preserve the existing semver when a build has no supplied source commit.
+/// A release build may embed the exact source commit as semver build metadata;
+/// the control plane exposes `agent_version` without changing precedence.
+fn runner_agent_version(
+    version: &str,
+    commit: Option<&str>,
+    build_id: Option<&str>,
+    clean: bool,
+) -> String {
+    if !clean {
+        return version.to_owned();
+    }
+    let Some(commit) = commit.filter(|value| {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) else {
+        return version.to_owned();
+    };
+    let separator = if version.contains('+') { "." } else { "+" };
+    let build_suffix = build_id
+        .filter(|id| {
+            !id.is_empty() && id.len() <= 10 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+        .map(|id| format!(".b.{id}"))
+        .unwrap_or_default();
+    let stamped = format!("{version}{separator}git.{commit}{build_suffix}");
+    if stamped.len() <= 64 {
+        stamped
+    } else {
+        version.to_owned()
+    }
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -264,6 +300,16 @@ fn with_native_pixel_control_capabilities(
     }
     if pixel_available && controls.framebuffer_resize {
         capabilities.push("runtime_feature=native_framebuffer_resize_v1");
+    }
+    capabilities
+}
+
+fn with_private_pixel_capability(
+    mut capabilities: Vec<&'static str>,
+    available: bool,
+) -> Vec<&'static str> {
+    if available {
+        capabilities.push(runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE);
     }
     capabilities
 }
@@ -2794,6 +2840,8 @@ impl ConnectedWorker {
                     } else {
                         None
                     },
+                    command.requires_private_isolation,
+                    self.config.native_pixel.app_archive.as_deref(),
                     &mut check_startup,
                 )
             }
@@ -3034,11 +3082,14 @@ impl ConnectedWorker {
         let execution_evidence = active.execution_evidence();
         let oci_port_mapping = active.launched.surface_container().and_then(|container| {
             let (container_ip, mappings) = container.port_mapping();
-            mappings.first().map(|mapping| OciPortMappingReport {
-                container_ip: container_ip.to_string(),
-                guest_port: mapping.guest_port,
-                runner_forward_port: mapping.host_port,
-            })
+            mappings
+                .first()
+                .zip(container_ip)
+                .map(|(mapping, container_ip)| OciPortMappingReport {
+                    container_ip: container_ip.to_string(),
+                    guest_port: mapping.guest_port,
+                    runner_forward_port: mapping.host_port,
+                })
         });
         // The public slot port is this worker's gate, not the workload: a
         // request is forwarded to the hidden loopback port only after it
@@ -3058,7 +3109,12 @@ impl ConnectedWorker {
                 for endpoint in &service.endpoints {
                     observation_targets.insert(
                         endpoint.name.clone(),
-                        SocketAddr::new(handle.container_address(), endpoint.guest_port),
+                        SocketAddr::new(
+                            handle
+                                .container_address()
+                                .context("observation service has no network address")?,
+                            endpoint.guest_port,
+                        ),
                     );
                 }
             }
@@ -3139,13 +3195,19 @@ impl ConnectedWorker {
                 self.fixed_tcp.activate(
                     &lease.run_id,
                     allocation,
-                    SocketAddr::new(container.container_address(), allocation.guest_port),
+                    SocketAddr::new(
+                        container
+                            .container_address()
+                            .context("fixed TCP service has no network address")?,
+                        allocation.guest_port,
+                    ),
                 )?;
             }
         }
         if let Some(container) = active.launched.surface_container() {
             let (container_ip, mappings) = container.port_mapping();
             for mapping in mappings {
+                let container_ip = container_ip.context("port mapping has no container address")?;
                 eprintln!(
                     "[runtime-launch-surface] {}",
                     serde_json::json!({
@@ -5503,7 +5565,7 @@ impl HttpRunnerApi {
             .native_pixel
             .available(&config.work_root, oci_available);
         let body = serde_json::json!({
-            "capabilities": with_explicit_runtime_placement_capability(advertised_capabilities(
+            "capabilities": with_explicit_runtime_placement_capability(with_private_pixel_capability(advertised_capabilities(
                 with_native_pixel_control_capabilities(
                     with_native_terminal_capability(runner_capabilities(
                         config.firecracker_configured(), oci_available, self.persistent_volumes,
@@ -5515,7 +5577,8 @@ impl HttpRunnerApi {
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
                 config.max_slots == 1 && ato_runtime_attempt::resource_boundary::verify_current().is_ok(),
-            ), config.require_explicit_runtime_placement),
+            ), pixel && config.max_slots == 1 && runtime_launch::host_boundary::active().is_none()
+                && config.native_pixel.private_boundary_available()), config.require_explicit_runtime_placement),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
             "public_base_url": config.public_base_url,
@@ -5523,7 +5586,7 @@ impl HttpRunnerApi {
             "arch": std::env::consts::ARCH,
             "max_slots": config.max_slots,
             "active_slots": active_slots,
-            "agent_version": env!("CARGO_PKG_VERSION"),
+            "agent_version": runner_agent_version(env!("CARGO_PKG_VERSION"), option_env!("ATO_BUILD_COMMIT"), option_env!("ATO_BUILD_ID"), option_env!("ATO_BUILD_DIRTY") == Some("clean")),
             // Observability, not scheduling truth: whether this slot finished
             // reconciling its previous incarnation's leftovers. An
             // unrecovered slot claims nothing, so the control plane can tell
@@ -6709,6 +6772,38 @@ mod tests {
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn runner_version_reports_only_a_valid_explicit_build_commit() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), None, true),
+            format!("0.1.0+git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0+ci.1", Some(commit), None, true),
+            format!("0.1.0+ci.1.git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), Some("12345678"), true),
+            format!("0.1.0+git.{commit}.b.12345678")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), Some("invalid!"), true),
+            format!("0.1.0+git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), None, false),
+            "0.1.0"
+        );
+        for invalid in [
+            None,
+            Some("dirty"),
+            Some("A123456789abcdef0123456789abcdef01234567"),
+        ] {
+            assert_eq!(runner_agent_version("0.1.0", invalid, None, true), "0.1.0");
+        }
+    }
 
     #[test]
     fn journal_entry_is_dropped_only_once_the_terminal_report_is_delivered() {
@@ -8005,6 +8100,19 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(
             !advertised_capabilities(base.clone(), false, false, false)
                 .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE)
+        );
+    }
+
+    #[test]
+    fn private_pixel_capability_is_only_advertised_after_its_separate_preflight() {
+        let base = vec![runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE];
+        assert!(
+            !with_private_pixel_capability(base.clone(), false)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE)
+        );
+        assert!(
+            with_private_pixel_capability(base, true)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE)
         );
     }
 

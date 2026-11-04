@@ -1,6 +1,7 @@
 //! Runner-owned Native startup and cleanup. Kept behind dispatch admission:
 //! transport readiness never authorizes publication or satisfies Contract K.
 mod dispatch;
+pub mod formation;
 pub mod pixel;
 mod pixel_controls;
 mod producer;

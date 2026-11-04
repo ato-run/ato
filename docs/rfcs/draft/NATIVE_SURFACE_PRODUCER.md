@@ -2,6 +2,62 @@
 
 Status: Draft. Adapter/runtime orchestration, outside Capsule identity.
 
+## Pixel authoring in capsule.toml
+
+The `ato.capsule/1` authoring grammar can represent one `pixel_stream`
+presentation with its existing `ato.pixel-stream.v1` profile and one bounded
+`pixel_key_frame` operation. Authors declare the surface Port, width, height,
+private probe Port and path, keysyms, frame byte bound, timeout and optional
+settling time. Only the declared Pixel Port can use `ato.tcp@1` in this
+grammar. The shared Native catalog and bound Port validation remain the
+authority for limits and ownership; unknown and inconsistent fields are
+rejected. Rendering must preserve the same declaration, and omission of the
+optional settle time remains zero in the wire catalog.
+
+This is authoring support only. It does not add a source builder, enable a
+Runner, run a native workload during Formation, or satisfy a Contract. The
+original K must independently declare the observation and verification
+continues to use measured output from the selected Run.
+
+The common attempt admission can recognize an exact native profile and D
+named by the trusted candidate realizer. Omission remains a refusal; it checks
+the canonical K and D refs, the realizer's selected D, and the Adapter/Port
+graph before launch. An attempt cannot substitute another effective K. This
+capability does not bypass effect, authority, host or platform checks. A
+realizer must still independently admit and own all physical resources; this
+gate alone does not provide a native executor or enable Formation.
+
+For the initial portable native OCI profile, the shared portable Runtime can
+project the validated bundle's selected D into `RuntimeLaunchSpecV1`. The
+projection recomputes the D reference, preserves its exact Adapter, Ports,
+image, platform, user, resource limits, argv and public environment, and
+refuses promised guest listeners. The first projection refuses declared state,
+Model Sets and Bindings rather than dropping them. Attempt identity and the
+materialized workspace reference are caller-supplied physical inputs. The
+projection neither authorizes launch nor claims K satisfaction.
+
+Portable Formation publication requires a finished attempt record, verified
+status and confirmed cleanup even when the observation receipt says K was
+satisfied. The receipt remains evidence if stopping or recording fails, but it
+does not by itself authorize publication.
+
+The dedicated native portable realizer uses the existing Runner-owned Pixel
+lease lifecycle within the common Formation attempt and passes its private
+probe Port to the shared Rust verifier. It requires an exact verified app
+archive and a pre-admitted helper; it never falls back to a registry pull. A
+slot lock and durable ownership journal precede container startup. The lock
+follows a handed-off candidate, and an unconfirmed stop retains the journal
+and scratch. Stale journal entries or labelled resources refuse the next
+attempt until they are recovered. This implementation does not, by itself,
+register the Formation worker or enable a staging Runner.
+
+The owned Native lease lifecycle also accepts an optional explicitly supplied
+application OCI archive for Pixel. It passes the archive to the existing
+adapter validation, which checks its digest, image reference and platform
+against the selected D before creating any container. The existing entry point
+continues to omit the archive; Terminal rejects it. This adds no control-plane
+transport or automatic publication of an archive.
+
 ## Trusted HostBoundary identity for GUI file exchange
 
 The accepted Materialization and Protocol Adapter contracts keep physical
@@ -232,13 +288,12 @@ as before. The Runner lease DTO can carry the existing typed
 `SessionSurfaceDescriptor` as optional `session_surface` metadata outside
 the launch-spec digest.
 
-This slice admits the native bundle format, not native execution. Existing
-local/Formation execution lowering and attempt admission refuse a native D.
-The Connected Runner rejects native `session_surface` before launch and
-continues to advertise Web only. Native probe implementation, producer
-attachment, capability matching, private endpoint resolution, authenticated
-publication, lease-owned cleanup and staging app acceptance require subsequent
-implementation and validation. No existing deployment flag is enabled here.
+The initial format-only slice admitted no native execution. Subsequent sections
+describe the native Runner and its independent rollout gates. Ordinary
+local/Formation lowering still refuses a native D; common attempt admission
+defaults to refusal unless a trusted realizer explicitly supplies the matching
+profile and independently passes physical admission. Format admission alone
+never enables a deployment flag.
 
 ### Runner-owned application observation probe
 
@@ -489,3 +544,13 @@ with the explicit `ato.pixel-stream.v1` / `rfb_websocket` typed intersection onl
 after these physical checks. Terminal and legacy Web opt-ins remain independent.
 The existing same-attempt Rust K/receipt and API viewer-access authority continue
 to gate acceptance; transport readiness never grants browser access on its own.
+
+The experimental native Formation realizer uses separate Docker `none` network
+namespaces for the application and the display helper, which communicate only
+over their explicitly mounted Unix sockets. It checks the actual container
+network mode and absence of addresses or gateways before continuing. Formation
+records that isolation, rather than the process sandbox. Private-isolated
+Formation additionally requires the worker and Docker's selected container
+parent to share a cgroup with the existing private resource ceilings, and
+checks that boundary before loading the application archive and again before
+realization. An unbounded or unrelated parent is refused.
