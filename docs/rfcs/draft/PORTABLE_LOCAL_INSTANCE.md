@@ -3,6 +3,29 @@
 Status: draft implementation contract  
 Date: 2026-09-17
 
+## Status of this draft
+
+This block records implementation and verification status; it does not change
+the draft status or the decisions below. The canonical per-path snapshot
+status table is [Snapshot materialization](../../snapshot.md); keep the two
+consistent and do not infer status from this page alone.
+
+Implemented in the current tree: the local Application and Instance records,
+the `ato app import|start|inspect|stop|export` lifecycle, token-fenced
+active-Run publication, and Instance-owned materialization of v4 snapshot
+bundles. The testing strategy below covers these paths.
+
+Not implemented yet: browser-driven saved-data capture, field-aware Asset
+alias resolution in opaque state, filesystem state mounts, portable Bindings,
+User Runner placement, automatic planning, Instance deletion, and production
+deployment. Hosted restore and runtime injection belong to the separate Hosted
+increment described in
+[Portable Instance Snapshot](PORTABLE_INSTANCE_SNAPSHOT.md).
+
+Tested versus deployed: the tests listed below are CLI-local. No staging or
+deployment acceptance is recorded for this lifecycle, so test coverage is not
+deployment verification.
+
 ## Context
 
 `ato run file.capsule` is intentionally ephemeral: it validates one transport,
