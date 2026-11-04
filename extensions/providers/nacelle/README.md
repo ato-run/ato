@@ -1,18 +1,21 @@
 # nacelle
 
-`nacelle` は **Capsule を実行するためのエンジン（internal runtime）**です。エンドユーザーが直接触る入口は `ato-cli` を想定し、`ato-cli` がプロセス境界（JSON over stdio）で `nacelle internal ...` を呼び出して実行します。
+`nacelle` is the **engine (internal runtime) for running Capsules**. End users
+are expected to use `ato-cli` as their entry point; `ato-cli` invokes
+`nacelle internal ...` across a process boundary (JSON over stdio) to execute a
+workload.
 
-## 役割
+## Role
 
-- **Mechanism（実行メカニズム）**
-  - バンドル/アーティファクトの展開
-  - OSネイティブ隔離（filesystem / network, macOS は Seatbelt ベース）
-  - プロセス起動・監視（Supervisor Mode）
-  - Socket Activation（FD継承）
+- **Mechanism (execution mechanism)**
+  - Unpacking bundles and artifacts
+  - OS-native isolation (filesystem and network; Seatbelt-based on macOS)
+  - Process launch and supervision (Supervisor Mode)
+  - Socket Activation (FD inheritance)
 
-- **非ゴール（原則ホスト側へ）**
-  - 署名検証・ポリシー決定・対話的UX（Smart Build, Dumb Runtime）
-  - OS API提供（Host Bridge Pattern はホスト側の責務）
+- **Non-goals (stay on the host side)**
+  - Signature verification, policy decisions and interactive UX (Smart Build, Dumb Runtime)
+  - Providing OS APIs (the Host Bridge Pattern is the host's responsibility)
 
 ## Performance
 
@@ -77,18 +80,16 @@ Nacelle is closest to a project execution launcher: it resolves runtimes,
 tools, and execution metadata for host-based source workloads without turning
 the project into a container image or a virtual machine.
 
-## ドキュメント
+## Documentation
 
-- Engine契約（CLI↔Engine）: [nacelle/docs/ENGINE_INTERFACE_CONTRACT.md](docs/ENGINE_INTERFACE_CONTRACT.md)
-- セキュリティポリシー: [nacelle/SECURITY.md](SECURITY.md)
-- 最新アーキテクチャ概要（repo全体）: [Ato architecture](../../../docs/architecture/README.md)
+- Engine contract (CLI ↔ engine): [nacelle/docs/ENGINE_INTERFACE_CONTRACT.md](docs/ENGINE_INTERFACE_CONTRACT.md)
+- Security policy: [nacelle/SECURITY.md](SECURITY.md)
+- Current architecture overview (whole repository): [Ato architecture](../../../docs/architecture/README.md)
 
-## 関連ADR
+## Related ADRs
 
-- `docs/adr/2026-01-06_000000_smart-build-dumb-runtime.md`
-- `docs/adr/2026-01-03_000000_supervisor-mode.md`
-- `docs/adr/2026-01-15_000001_socket-activation.md`
-- `docs/adr/2026-01-07_000000_system-abstraction.md`
+- [`docs/adr/0001-cli-entrypoint.md`](docs/adr/0001-cli-entrypoint.md): CLI entry point for `nacelle`
+- [`docs/adr/ADR-oci-local-ingress.md`](docs/adr/ADR-oci-local-ingress.md): local ingress for OCI service endpoints
 
 ## License
 
