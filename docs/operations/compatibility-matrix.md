@@ -52,6 +52,10 @@ switch procedure and the rollback copy of the slot drop-ins.
 
 ## CLI / API / PWA current pins (2026-10-28)
 
+Publication status: the latest published release is v0.8.0 (2026-07-28); the
+0.8.1 pin below is an unreleased release candidate on `main`, and its shell
+installer and Intel macOS artifacts are unpublished.
+
 | Component | Version / pin | Notes |
 | --- | --- | --- |
 | ato CLI | 0.8.1 | `dist plan --tag=v0.8.1` succeeds; cargo-dist requires tag == crate version |

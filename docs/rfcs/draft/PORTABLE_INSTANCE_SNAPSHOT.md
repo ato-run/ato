@@ -3,6 +3,38 @@
 Status: draft implementation contract  
 Date: 2026-09-17
 
+## Status of this draft
+
+This block records implementation and verification status; it does not change
+the draft status or the Contract requirements below. The canonical per-path
+snapshot status table is
+[Snapshot materialization](../../snapshot.md); keep the two consistent and do
+not infer status from this page alone.
+
+Implemented in the current tree:
+
+- the v4 wire object, K binding, semantic and closure validation;
+- snapshot replacement/pruning and durable local materialization with
+  Instance-local Asset IDs;
+- local saved-snapshot sealing and current-Instance export;
+- Hosted restore of browser state, JSON Data Resources and Assets before
+  launch, with the PWA requiring the exact restored snapshot observation (see
+  [Current implementation boundary](#current-implementation-boundary) below).
+
+Not implemented yet:
+
+- browser-state flush/capture from a live Hosted Instance;
+- PWA export UI;
+- field-aware Asset alias resolution inside saved JSON;
+- Process/OCI filesystem-state injection.
+
+Tested versus deployed: the Hosted path is covered by validator/API/PWA
+integration tests, not by a staging acceptance. No staging acceptance has yet
+proved the Hosted round-trip, so Hosted restore is implemented and
+test-covered but not verified in deployment. Nothing here establishes
+universal process, VM or distributed capture; see
+[State Continuity](../../concepts/state-continuity.md).
+
 ## Context
 
 A portable Application bundle describes an immutable Application, one Contract

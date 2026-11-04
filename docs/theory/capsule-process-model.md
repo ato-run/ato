@@ -81,10 +81,25 @@ that Computation's boundary and Protocols.
 ## 8. Materialization-independent realization
 
 The core hypothesis: `κ`'s logical identity is independent of the physical
-means used to reach it. Replay, a filesystem reconstruction, or (as future
-work) a process/VM checkpoint could all realize the same `κ`. Today only
-Replay is restore-capable; the others are model/future work, not
-interchangeable in the current implementation.
+means used to reach it. Replay, a filesystem reconstruction, or a process/VM
+checkpoint could all realize the same `κ` in principle. The implemented
+boundary is narrower than that hypothesis:
+
+- Replay is restore-capable through live Adapters and verified Record chains.
+- The workspace snapshot materializer captures and verifies filesystem
+  artifacts and remains verify-only.
+- The generic VM snapshot materializer reports restore support through an
+  injected backend and `RunnerCapabilities`. Actual restoration therefore
+  depends on that backend and a compatible host; it is not a general process
+  or VM checkpoint.
+- A portable Instance snapshot is a separate bounded wire v4 saved-state
+  closure over declared resources and Assets. It is not VM memory and not an
+  arbitrary filesystem capture.
+
+None of these paths establishes arbitrary cross-host resume or distributed
+capture. The canonical per-path status table, with code references, is
+[Snapshot materialization](../snapshot.md); do not infer a status from this
+theory draft.
 
 ## 9. Contract-indexed equivalence
 
@@ -164,6 +179,18 @@ is testing.
 
 For implemented behavior, use [Current implementation and specification boundaries](../specifications/README.md)
 and the [accepted RFCs](../rfcs/README.md), not this theory draft. In short:
-Computation identity, composition, and Replay-based Materialization are
-implemented; process/VM checkpoints, cross-host resume, contract-indexed
-equivalence, and persistent Port references are model/future work.
+
+- Computation identity, composition and Replay-based Materialization are
+  implemented.
+- The workspace snapshot materializer captures and verifies artifacts and
+  stays verify-only.
+- The VM snapshot materializer exposes a restore-capable interface behind an
+  injected backend and `RunnerCapabilities`; restore is backend- and
+  host-dependent, not a universal host or process checkpoint.
+- A portable Instance snapshot is a separate wire v4 saved-state closure over
+  bounded declared resources and Assets.
+
+Cross-host resume, general process/VM checkpointing, distributed capture,
+contract-indexed equivalence and persistent Port references remain model or
+future work. The per-path implementation status is recorded in the
+[Snapshot materialization](../snapshot.md) status table.
