@@ -240,18 +240,27 @@ fn actual_native_geany_job_publishes_the_original_contract_after_cleanup() {
         attempt_id: "geany_attempt".into(),
         attempt_fence: 1,
     };
-    let manifest =
-        include_str!("../../../docs/ops/fixtures/native-geany-source-linux-amd64-20261104.toml");
+    let manifest = match std::env::var_os("ATO_NATIVE_GEANY_MANIFEST") {
+        Some(path) => std::fs::read_to_string(path).expect("frozen Geany manifest"),
+        None => {
+            include_str!("../../../docs/ops/fixtures/native-geany-source-linux-amd64-20261104.toml")
+                .to_owned()
+        }
+    };
+    let mut job = json!({
+        "job_id": "geany_job", "source": {"kind":"git_hub", "owner":"geany", "repository":"Geany", "resolved_commit_sha":"0e02cc52a7634d1fed8511bd44730ea0ab791d9f", "subdirectory":""},
+        "requested_outputs":["portable_application"],
+        "target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},
+        "policy":{"policy_version":"formation-policy-v1","network":"denied","publish_enabled":false},
+        "authoring":{"manifest_toml":manifest}
+    });
+    if std::env::var("ATO_NATIVE_GEANY_PRIVATE").as_deref() == Ok("1") {
+        job["policy"]["private_isolated"] = json!(true);
+    }
     let result = run_claimed_job(
         &context,
         &attempt,
-        &json!({
-            "job_id": "geany_job", "source": {"kind":"git_hub", "owner":"geany", "repository":"Geany", "resolved_commit_sha":"0e02cc52a7634d1fed8511bd44730ea0ab791d9f", "subdirectory":""},
-            "requested_outputs":["portable_application"],
-            "target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},
-            "policy":{"policy_version":"formation-policy-v1","network":"denied"},
-            "authoring":{"manifest_toml":manifest}
-        }),
+        &job,
         "compute_geany",
         "revision_geany",
         false,
@@ -272,7 +281,9 @@ fn actual_native_geany_job_publishes_the_original_contract_after_cleanup() {
     );
     assert_eq!(
         result["derivation_ref"],
-        "sha256:84cc0aefc3e05d888e9ba7bed711e55f51f593ae135bd9f8ccfdfc82391caa3d"
+        std::env::var("ATO_NATIVE_GEANY_DERIVATION").unwrap_or_else(|_| {
+            "sha256:84cc0aefc3e05d888e9ba7bed711e55f51f593ae135bd9f8ccfdfc82391caa3d".into()
+        })
     );
     assert_eq!(result["verification_receipt"]["fully_satisfied"], true);
     assert_eq!(
