@@ -385,7 +385,7 @@ impl CandidateRealizer for NativePortableRealizer<'_> {
             }
             Ok(())
         };
-        let started = NativeLeaseRun::start_formation_with_archive(
+        let started = NativeLeaseRun::start_without_network(
             &self.spec,
             &self.selected,
             &descriptor,

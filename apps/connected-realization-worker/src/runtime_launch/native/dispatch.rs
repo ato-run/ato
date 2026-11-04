@@ -61,9 +61,9 @@ impl NativeLeaseRun {
         )
     }
 
-    /// Formation-only mode: neither container joins a host-reachable bridge.
+    /// Private mode: neither container joins a host-reachable bridge.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn start_formation_with_archive(
+    pub(crate) fn start_without_network(
         spec: &RuntimeLaunchSpecV1,
         selected_ref: &str,
         descriptor: &SessionSurfaceDescriptor,
