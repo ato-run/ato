@@ -1,0 +1,62 @@
+schema = "ato.capsule/1"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[[runtime]]
+name = "oci.image"
+version = "ato-source/116cc9ddb184@sha256:c45826486683df6e27159db11fc4ba9a5f08e4d9f6079cf881814b530ad7e03b"
+[[runtime]]
+name = "oci.platform"
+version = "linux/amd64"
+[[runtime]]
+name = "oci.memory_bytes"
+version = "134217728"
+[[runtime]]
+name = "oci.cpu_limit_millis"
+version = "500"
+[[runtime]]
+name = "oci.pids_limit"
+version = "64"
+[[runtime]]
+name = "oci.user"
+version = "65532:65532"
+[[runtime]]
+name = "oci.entrypoint"
+version = "/usr/local/bin/geany"
+[[runtime]]
+name = "oci.working_dir"
+version = "/app"
+[[derive.step]]
+id = "main"
+use = "ato.oci@1"
+op = "serve"
+argv = ["--new-instance", "--no-msgwin", "/app/main.py"]
+cwd = "."
+env = { HOME = "/tmp" }
+[derive.native_surface]
+kind = "pixel_stream"
+profile = "ato.pixel-stream.v1"
+width = 640
+height = 480
+port = "app.native"
+probe_port = "app.probe"
+probe_path = "/result"
+probe_keysyms = [103]
+probe_max_frame_bytes = 1228800
+probe_timeout_ms = 10000
+probe_settle_ms = 1000
+[[port]]
+id = "app.native"
+use = "ato.tcp@1"
+from = "main"
+[[port]]
+id = "app.probe"
+use = "ato.http@1"
+from = "main"
+[[contract.require]]
+id = "actual-result"
+use = "ato.contract.http@1"
+port = "app.probe"
+path = "/result"
+expect = { status = 200, body_digest = "sha256:7b8ab639863f5b895e7656b186a9665bb92c51f88df46d2a04570c19a12c37ce" }
