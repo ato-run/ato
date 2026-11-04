@@ -8,6 +8,8 @@ trying apps, the Library, CLI installation and the user-level concepts — is
 owned by the [ato.run documentation](https://ato.run/docs/); see the
 [documentation map](../README.md) ownership rules.
 
+- [Research tour](research-tour.md): the problem, model, two profiles, data
+  identity, verified evidence, independence, prior work and open questions.
 - [Getting started](getting-started.md): build the CLI, verify the supplied static bundle,
   inspect its receipt and package current authoring input.
 - [Formation](formation.md): choose authoring/formation input, preserve K and

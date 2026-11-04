@@ -9,19 +9,41 @@ trying, saving, and sharing runnable software. This repository contains the
 runtime, CLI, adapters, and supporting tools. [About Ato](https://ato.run/about/)
 · [日本語](README.ja.md)
 
-## Why Ato?
+## The problem
 
-Work is often tied to a process, machine, source tree, or particular
-snapshot. Moving it elsewhere can require reconstructing the environment and
-checking whether the result still behaves as intended. Ato explores an
-approach that identifies the work separately from the physical means used to
-realize it, such as a process, container, or snapshot.
+Someone you know made a small tool for their own use. You would like to use it
+with your data, change one thing about it, and still open it next week, on
+another machine, after the original author has moved on. Today software is
+usually shared as source, an image, or setup instructions, so the recipient
+reconstructs a point the author already reached; the data and services around
+that point have to be reconstructed too.
+
+Work is often tied to a process, machine, source tree, or particular snapshot.
+Moving it elsewhere can require rebuilding the environment and checking whether
+the result still behaves as intended. Ato explores an approach that identifies
+the work separately from the physical means used to realize it, such as a
+process, container, or snapshot.
 
 The design aims to support application sharing, continuing development work,
-and handing off long-running agent tasks through a common interface. These
-are use cases for the model, not a claim that every form of state or handoff
-is supported today. The example below shows the current static application
-verification path.
+and handing off long-running agent tasks through a common interface. These are
+use cases for the model, not a claim that every form of state or handoff is
+supported today.
+
+## What Ato is testing
+
+- A **persistent continuation independent of its realization**: a sealed
+  Capsule keeps its identity whether it is realized by Replay, a filesystem
+  reconstruction, a checkpoint, or a VM snapshot.
+- **Contract-indexed equivalence**: two realizations could count as the same
+  point when they satisfy the same declared Contract K, even if their bytes
+  differ. This is a hypothesis, not a behavior the implementation checks for
+  arbitrary artifacts.
+
+Neither is a claim of novelty; the open question is whether this combination is
+a workable unit for sharing and continuing software. The
+[research tour](docs/guides/research-tour.md) connects the model, the existing
+evidence, prior work and the questions we want reviewed. The
+[theory draft](docs/theory/capsule-process-model.md) is the deeper framing.
 
 ## Core concepts
 
@@ -34,23 +56,19 @@ verification path.
 
 For portable applications, a **Contract** describes observable requirements,
 a **Derivation** declares a way to realize them, and a verification **receipt**
-records the observations for a Run. See [Computation](docs/concepts/computation.md)
-and [application contracts](docs/concepts/application-contracts.md) for the
-model and its profiles.
+records the observations for a Run. There are two identity profiles
+(`ComputationRef` and `ContractRef`) that must not be reinterpreted as each
+other. See [Computation](docs/concepts/computation.md) and
+[application contracts](docs/concepts/application-contracts.md) for the model,
+the profile map, and the decisions that remain open.
 
 ## Quick start
 
-### Try ato.run
-
-Explore public software on [ato.run](https://ato.run/) or
-[try 2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)
-in your browser.
-
-### Try the CLI
+### Try the CLI locally (no account)
 
 Install the Rust toolchain declared in [rust-toolchain.toml](rust-toolchain.toml),
-then clone the repository, build the CLI, and run the supplied static application
-bundle:
+then clone the repository, build the CLI, and run the supplied static
+application bundle:
 
 ```sh
 git clone https://github.com/ato-run/ato.git
@@ -85,6 +103,13 @@ source-identity: satisfied
 This static example does not demonstrate general cross-host portability or
 restoration of process memory.
 
+### Try ato.run (optional)
+
+Explore public software on [ato.run](https://ato.run/) or
+[try 2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)
+in your browser. ato.run is a separate product surface; using it is not
+required for the local example above.
+
 ## Current status
 
 Ato is experimental. This repository includes computation objects, lifecycle
@@ -100,6 +125,17 @@ Docker and Nix. Matching a Contract alone does not guarantee state continuity
 or safe side effects. See [compatibility](docs/concepts/compatibility.md) and
 [state continuity](docs/concepts/state-continuity.md).
 
+## Research and evidence
+
+- [Research tour](docs/guides/research-tour.md): problem, model, profiles,
+  data identity, verified results, independence and open questions.
+- Archived experiments: [contract-preserving transformation v0](docs/archive/2026/ops/contract-preserving-transformation-v0.md)
+  and [stateful transformation v1](docs/archive/2026/ops/stateful-transformation-v1.md).
+  These are historical Linux evidence with recorded fixtures and limits; they
+  were not re-measured for this overview.
+- [Specifications](docs/specifications/README.md), including the accepted
+  computation-root RFCs and the portable-application implementation track.
+
 ## Roadmap and work tracking
 
 Work is tracked in [GitHub Issues](https://github.com/ato-run/ato/issues) (and
@@ -114,6 +150,7 @@ General user documentation is owned by the
 technical documentation for the runtime, CLI, specifications and operations
 ([documentation index](docs/README.md)).
 
+- [Research tour](docs/guides/research-tour.md) and the [theory draft](docs/theory/capsule-process-model.md)
 - [Getting started](docs/guides/getting-started.md) and [Formation guide](docs/guides/formation.md)
 - [Concepts](docs/concepts/computation.md), [application contracts](docs/concepts/application-contracts.md), and [glossary](docs/glossary-reference.md)
 - [Architecture](docs/architecture/README.md) and [specifications](docs/specifications/README.md)
@@ -134,6 +171,13 @@ and previously distributed versions. Previously granted licenses remain in effec
 This code license does not establish a new license for the Capsule Process
 Model's theoretical documents.
 
+| Material | Terms |
+|---|---|
+| Project-authored code | [MPL-2.0](LICENSE) |
+| CLI Apache text retained for WiX and previously distributed versions | [apps/cli/LICENSE-APACHE](apps/cli/LICENSE-APACHE) |
+| Third-party fixtures, templates, workflows and skills | their own notices, retained in place |
+| Theory draft and specification documents | no new license is established by the code license; the original terms apply |
+
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="main-use-cases"></a><a id="design-principle-everything-can-be-a-capsule"></a>
 <a id="core-model"></a><a id="capsule--run--replay--continue"></a>
@@ -141,3 +185,4 @@ Model's theoretical documents.
 <a id="the-computation-theory-behind-it"></a><a id="basic-lifecycle"></a>
 <a id="capsuletoml-example"></a><a id="project-scope"></a><a id="current-implementation-status"></a>
 <a id="capsule-run-replay-continue"></a><a id="core-kernel-and-adapter"></a>
+<a id="why-ato"></a><a id="try-atorun"></a>
