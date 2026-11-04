@@ -284,18 +284,6 @@ fn admit_native_policy(network: ato_runtime_attempt::build_sandbox::NetworkPolic
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::admit_native_policy;
-    use ato_runtime_attempt::build_sandbox::NetworkPolicy;
-
-    #[test]
-    fn native_formation_refuses_network_grants() {
-        assert!(admit_native_policy(NetworkPolicy::Denied).is_ok());
-        assert!(admit_native_policy(NetworkPolicy::DependencyResolution).is_err());
-    }
-}
-
 impl CandidateRealizer for NativePortableRealizer<'_> {
     fn native_surface_binding(&self) -> Option<(&str, &str)> {
         Some(("ato.pixel-stream.v1", &self.selected))
@@ -537,5 +525,17 @@ impl RunningCandidate for NativeCandidate {
     }
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admit_native_policy;
+    use ato_runtime_attempt::build_sandbox::NetworkPolicy;
+
+    #[test]
+    fn native_formation_refuses_network_grants() {
+        assert!(admit_native_policy(NetworkPolicy::Denied).is_ok());
+        assert!(admit_native_policy(NetworkPolicy::DependencyResolution).is_err());
     }
 }
