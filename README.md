@@ -15,8 +15,8 @@ Someone you know made a small tool for their own use. You would like to use it
 with your data, change one thing about it, and still open it next week, on
 another machine, after the original author has moved on. Today software is
 usually shared as source, an image, or setup instructions, so the recipient
-reconstructs a point the author already reached; the data and services around
-that point have to be reconstructed too.
+has to reconstruct both the point the author already reached and the data and
+services around it.
 
 Work is often tied to a process, machine, source tree, or particular snapshot.
 Moving it elsewhere can require rebuilding the environment and checking whether
@@ -43,7 +43,8 @@ Neither is a claim of novelty; the open question is whether this combination is
 a workable unit for sharing and continuing software. The
 [research tour](docs/guides/research-tour.md) connects the model, the existing
 evidence, prior work and the questions we want reviewed. The
-[theory draft](docs/theory/capsule-process-model.md) is the deeper framing.
+[theory draft](docs/theory/capsule-process-model.md) describes the deeper
+framing.
 
 ## Core concepts
 
