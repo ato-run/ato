@@ -1293,10 +1293,11 @@ pub fn start_native(
     config: super::native::NativeLeaseSurfaceConfig,
     pixel_helper: Option<super::native::pixel::PixelHelper>,
     private_isolated: bool,
+    app_archive_path: Option<&std::path::Path>,
     check_startup: &mut dyn FnMut() -> Result<()>,
 ) -> std::result::Result<ActiveRun, StartFailure> {
     let started = if private_isolated {
-        let boundary = (|| -> Result<()> {
+        let boundary = (|| -> Result<Option<ato_objects::PortableOciArchive>> {
             ensure!(
                 matches!(
                     descriptor,
@@ -1304,19 +1305,38 @@ pub fn start_native(
                 ),
                 "private native launch requires a Pixel surface"
             );
-            pixel_helper
+            let helper = pixel_helper
                 .as_ref()
-                .context("private Pixel requires a prepared display helper")?
-                .verify_private_formation_boundary()
+                .context("private Pixel requires a prepared display helper")?;
+            helper.verify_private_formation_boundary()?;
+            let Some(path) = app_archive_path else {
+                return Ok(None);
+            };
+            let file =
+                std::fs::File::open(path).context("open trusted Pixel application archive")?;
+            let size = file.metadata()?.len();
+            const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+            ensure!(
+                size <= MAX_ARCHIVE_BYTES,
+                "trusted Pixel application archive exceeds configuration bound"
+            );
+            helper.admit_archive_loading(size)?;
+            use std::io::Read;
+            let archive = serde_json::from_reader(file.take(MAX_ARCHIVE_BYTES + 1))
+                .context("invalid trusted Pixel application archive")?;
+            Ok(Some(archive))
         })();
-        if let Err(error) = boundary {
-            return Err(settle_failed_start(
-                state,
-                &resolved.prepared,
-                &StopOutcome::AlreadyExited { exit_code: 0 },
-                error,
-            ));
-        }
+        let application_archive = match boundary {
+            Ok(archive) => archive,
+            Err(error) => {
+                return Err(settle_failed_start(
+                    state,
+                    &resolved.prepared,
+                    &StopOutcome::AlreadyExited { exit_code: 0 },
+                    error,
+                ));
+            }
+        };
         super::native::NativeLeaseRun::start_without_network(
             spec,
             selected_ref,
@@ -1325,7 +1345,7 @@ pub fn start_native(
             owner,
             config,
             pixel_helper,
-            None,
+            application_archive,
             check_startup,
         )
     } else {

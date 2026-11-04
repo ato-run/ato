@@ -2841,6 +2841,7 @@ impl ConnectedWorker {
                         None
                     },
                     command.requires_private_isolation,
+                    self.config.native_pixel.app_archive.as_deref(),
                     &mut check_startup,
                 )
             }
