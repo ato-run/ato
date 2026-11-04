@@ -33,6 +33,8 @@ directory decides.
 | Current | Written against the repository today. It is not a guarantee of implementation, deployment or verification on any environment. | `docs/` root technical pages, `concepts/`, `guides/`, `operations/`, `architecture/`, `specifications/`, `rfcs/accepted/` |
 | Draft | Non-normative proposal or work in progress; not an implementation or deployment promise. | `rfcs/draft/` |
 | Archived | Historical evidence: past reports, plans, experiments or retired procedures. It does not certify current state. | `archive/`, plus the retained collections listed in [archive/2026/README.md](archive/2026/README.md) |
+| Working note | Internal planning, handoff or research material. It is not current documentation and is not maintained as a reference. | `internal/` |
+| Component documentation | Owned by the component directory and its build, test and security instructions. | `apps/`, `extensions/` |
 
 `Current` means "written against the current tree". Deployment state, feature
 flags and measurements are separate claims, and accepted RFCs remain the
@@ -43,6 +45,7 @@ authority for normative behavior.
 | Task | Read in order |
 |---|---|
 | Understand Ato | [Computation](concepts/computation.md) → [Capsule and Run](concepts/capsule.md) → [K, D and Source](concepts/application-contracts.md) → [glossary](glossary-reference.md) |
+| Survey the research case | [Research tour](guides/research-tour.md) → [Theory](theory/capsule-process-model.md) → [Detected mismatches](rfcs/draft/DOCUMENTATION_AUTHORITY_MISMATCHES.md) |
 | Build and verify an app | [Getting started](guides/getting-started.md) → [Formation](guides/formation.md) → [Runner / Hosting](guides/runner-hosting.md) |
 | Change the runtime | [Architecture](architecture/README.md) → [Specifications](specifications/README.md) → [Contributing](../CONTRIBUTING.md) |
 | Operate a service | [Operations](operations/README.md) → the relevant update/rollback/provisioning runbook |
@@ -78,6 +81,8 @@ not permission to rewrite either side during documentation maintenance.
   execution, Hosted Formation and Scenario verification.
 - [Capsule bundle overview](capsule.md) and [computation lifecycle](run.md).
 - [Snapshot materialization](snapshot.md) and [COOP](coop.md).
+- [Research tour](guides/research-tour.md): problem, model, profiles, data
+  identity, verified results, independence, prior work and open questions.
 - [Theory draft](theory/capsule-process-model.md): research background, not an
   implementation or deployment promise.
 
