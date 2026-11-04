@@ -138,9 +138,8 @@ Linux worker test inside a temporary systemd slice confirmed that a bounded
 common parent is accepted and the root or unrelated system slice is refused;
 the test slice and its temporary limits were removed afterward. Private native
 Formation now checks that common boundary before archive loading and before
-realization. No complete private Geany attempt has yet been demonstrated under
-the existing resource ceilings. These tests did not exercise Studio, staging
-or a browser.
+realization. The later bounded private attempt is recorded below. These tests did
+not exercise Studio, staging or a browser.
 
 The `actual_geany_owned_lease_uses_verified_application_archive` Linux test
 then exercised `NativeLeaseRun` itself with the same bundle and its projected
@@ -166,3 +165,31 @@ inspected. These are distinct from the successful direct Linux adapter probe.
 End-to-end work still requires a supported Studio authoring/build/verification
 route, independently reproducible observations, and an admitted, explicitly
 enabled staging Runner, followed by an actual browser operation and receipt.
+
+## Bounded private Formation, 2026-11-04
+
+A later complete `run_claimed_job` used private admission, the same pinned
+Geany GitHub source subtree and the same K fixed above. The Worker, Geany and
+display helper shared a temporary systemd cgroup parent limited to 1 GiB,
+256 MiB swap, 128 tasks and one CPU. Both containers used Docker network
+`none`. The separate image and resource limits were fixed before the attempt
+in [the private fixture](fixtures/native-geany-private-linux-amd64-20261104.toml).
+The image was built from the same Geany source, with debug symbols removed;
+the reduced root filesystem retains the GTK MIME database and the Adwaita
+cursor-theme link. Missing MIME data previously caused Geany to exit, while a
+missing cursor theme produced an honest fixed-contract digest mismatch. No
+measured value was substituted into K.
+
+The prebuilt app archive was
+`ato-source/116cc9ddb184@sha256:c45826486683df6e27159db11fc4ba9a5f08e4d9f6079cf881814b530ad7e03b`;
+the separate display helper was
+`ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037`.
+The resulting bundle SHA-256 was
+`sha256:c1a3f0a488cf9be1dde136069ca97e3c840ae3ad13da74a70b670fad49a9a2e0`,
+with K `sha256:dba72da3da110f31dd551a046a69cd8c50ae53bb2aba5b02f1bd00dd2b89e395`
+and D `sha256:730ea4f724a59530f698cad524977344b0bb0d674fcd9351b5b3d538b8f7304d`.
+The actual Worker published a receipt with `fully_satisfied=true` tied to the
+Formation attempt, after cleanup; the maximum reported slice memory was
+639.8 MiB. The temporary service and slice were inactive after the test. The
+actual result also passes the API's result validator. The API was a local test
+fixture: this is not a staging Runner, hosted receipt, or browser operation.
