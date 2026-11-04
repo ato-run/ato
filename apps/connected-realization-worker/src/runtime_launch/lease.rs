@@ -1322,8 +1322,9 @@ pub fn start_native(
             );
             helper.admit_archive_loading(size)?;
             use std::io::Read;
-            let archive = serde_json::from_reader(file.take(MAX_ARCHIVE_BYTES + 1))
-                .context("invalid trusted Pixel application archive")?;
+            let archive =
+                serde_json::from_reader(std::io::BufReader::new(file.take(MAX_ARCHIVE_BYTES + 1)))
+                    .context("invalid trusted Pixel application archive")?;
             Ok(Some(archive))
         })();
         let application_archive = match boundary {
