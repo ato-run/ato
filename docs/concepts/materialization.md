@@ -22,19 +22,24 @@ logical continuation
 physical realization
 ```
 
-Possible strategies (see [current implementation](#current-implementation)
-for which of these actually exist today):
+Possible strategies:
 
 ```text
 Capsule C42
-├─ Replay                     (implemented, restore-capable)
+├─ Replay
 ├─ filesystem reconstruction
 ├─ source reconstruction
-├─ process checkpoint         (model/future)
-├─ container checkpoint       (model/future)
-├─ VM snapshot                (backend-specific implementation)
-└─ remote live state          (model/future)
+├─ process checkpoint
+├─ container checkpoint
+├─ VM snapshot
+└─ remote live state
 ```
+
+This list sketches the space; it is not a status list. Which strategies
+exist, which stay verify-only and which are restore-capable is recorded in
+exactly one place, the
+[snapshot materialization status table](../snapshot.md). Treat that table as
+canonical and do not infer implementation status from this page.
 
 The Capsule identity and Materialization identity are separate. Adding,
 replacing, or removing a compatible Materialization does not create a new
@@ -65,14 +70,17 @@ type in the current codebase.
 ## Current implementation
 
 - Replay is restore-capable through live Adapters and verified Record chains.
-- Workspace snapshot materializers capture and verify artifacts; their restore
-  capability remains verify-only.
+- Workspace snapshot materializers capture and verify artifacts; they remain
+  verify-only.
 - The generic VM snapshot materializer reports restore support through an
-  injected backend and RunnerCapabilities. This does not prove arbitrary host,
-  process or distributed capture support.
-- Portable Instance snapshots use a separate bounded saved-data profile.
+  injected backend and `RunnerCapabilities`. That is an interface capability,
+  not proof of arbitrary host, process or distributed capture.
+- Portable Instance snapshots use a separate bounded wire v4 saved-data
+  profile. They are not VM memory and do not capture arbitrary filesystem or
+  process state.
 
-See [Snapshot materialization](../snapshot.md) for code references and current
-limits. The accepted [Materialization RFC](../rfcs/accepted/MATERIALIZATION.md)
-remains the computation-root authority; implementation-track VM/portable
-contracts are still drafts.
+[Snapshot materialization](../snapshot.md) holds the canonical per-path status
+table and the code references. The accepted
+[Materialization RFC](../rfcs/accepted/MATERIALIZATION.md) remains the
+computation-root authority; implementation-track VM/portable contracts are
+still drafts.
