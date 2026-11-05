@@ -43,6 +43,14 @@ if text extraction fails; it does not start or authenticate the Tika server.
 The negative case without a Tika server and the successful case above both
 passed on 2026-11-05. Only synthetic data was used.
 
+`patch_upstream.py` checks the hashes of the two exact upstream source files
+before adapting them: the Tika base URL becomes the JVM property
+`freeeed.tika.base`, and the engine's hard-coded temporary directory uses
+`java.io.tmpdir`. This is preparation for separately isolated services, not
+proof of a hosted service group. The patched engine rebuilt offline using the
+previously downloaded Maven dependencies and passed the same synthetic test;
+the configured Tika URL was also exercised against the local test server.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
