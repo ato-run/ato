@@ -12,10 +12,30 @@ recovery response; that is not an authenticated launch or a browser test.
 the previously prepared local aoiko site. It checks the exact set, sizes and
 SHA-256 digests of all 105 site files against `site-files.json`, rejects
 symlinks, additions and changes, and does not overwrite an existing output.
-The inventory identifies the local input bytes; it does **not** establish the
-upstream commit, a reproducible upstream build, or complete third-party
-license compliance. The site includes its locally prepared `source.tar.gz`,
-LICENSE and third-party notices, whose completeness still requires review.
+The inventory identifies the local input bytes. The site includes its locally
+prepared `source.tar.gz`, LICENSE and third-party notices. The source and build
+comparison below does not establish complete third-party license compliance.
+
+The source archive's 828 regular files and executable modes match the complete
+upstream Git tree `6437f8b86d1a35be07fbc9354bcfbc17272a3668`, verified against
+the non-truncated GitHub tree and independently reconstructed tree digest.
+The tree belongs to upstream commit `3c135266c87747ad86a29d72a038cbe5abff9205`;
+other upstream commits share the same tree, so the archive alone does not prove
+which commit produced the earlier local build. `verify_source.py` performs the
+comparison without extracting the archive and checks the archive SHA-256.
+
+The candidate's 103 generated files were also reproduced byte-for-byte from a
+clean checkout of that commit and its pinned `package-lock.json`, using the
+Node 22.23.2 / npm 10.9.8 image
+`node@sha256:43aeff40f4afc22e83f7589a2f37e111cff5ca84529571f1c8415bcc5fcc21b2`.
+`npm ci --ignore-scripts` fetched dependencies; the subsequent `npm run build`
+ran with no network, a read-only container root and a writable checkout only.
+The image has no Git, so `git_version_guard.sh` answered only the build's
+`git rev-parse --short HEAD` query after checking the exact detached HEAD.
+`verify_rebuild.py` checks the commit, tree, clean tracked files, lock digest,
+exact generated-file set and bytes, plus the upstream LICENSE. The source
+archive and LICENSE are the only two site files added outside the Vite build.
+This is evidence for this pinned build, not a security audit of its dependencies.
 
 On 2026-11-06 the candidate was packed as a new `ato.portable-application/1`
 Static Web Capsule with portable tree schema v2. It has its own ContractRef;
@@ -61,3 +81,27 @@ TMPDIR="$PWD/.tmp" scripts/ato-test-shell.sh target/debug/ato run .tmp/aoiko-sta
 
 `__static-bundle` is an experimental CLI surface. The output directory and
 bundle should be new paths; `prepare_static.py` refuses an existing directory.
+
+To independently repeat the source and build comparison, the commands below
+use new paths and require network access to GitHub and the npm registry. The
+build itself runs without network; the temporary container scratch directory is
+an isolated in-memory mount, not the host filesystem.
+
+```sh
+git clone --no-checkout --filter=blob:none https://github.com/Lonshaus/aoiko.git .tmp/aoiko-upstream-rebuild
+git -C .tmp/aoiko-upstream-rebuild checkout --detach 3c135266c87747ad86a29d72a038cbe5abff9205
+gh api 'repos/Lonshaus/aoiko/git/trees/6437f8b86d1a35be07fbc9354bcfbc17272a3668?recursive=1' > .tmp/aoiko-upstream-tree.json
+python3 samples/discover-oss/aoiko/verify_source.py .tmp/aoiko-candidate/site/source.tar.gz .tmp/aoiko-upstream-tree.json
+docker run --rm --platform linux/amd64 --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --user "$(id -u):$(id -g)" --memory 3g --cpus 2 --pids-limit 256 --tmpfs /scratch:rw,nosuid,size=768m \
+  --mount type=bind,src="$PWD/.tmp/aoiko-upstream-rebuild",dst=/src --workdir /src \
+  -e TMPDIR=/scratch -e npm_config_cache=/scratch/npm-cache \
+  node@sha256:43aeff40f4afc22e83f7589a2f37e111cff5ca84529571f1c8415bcc5fcc21b2 npm ci --ignore-scripts --no-audit --no-fund
+docker run --rm --platform linux/amd64 --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --user "$(id -u):$(id -g)" --memory 3g --cpus 2 --pids-limit 256 --tmpfs /scratch:rw,nosuid,size=768m \
+  --mount type=bind,src="$PWD/.tmp/aoiko-upstream-rebuild",dst=/src \
+  --mount type=bind,src="$PWD/samples/discover-oss/aoiko/git_version_guard.sh",dst=/usr/local/bin/git,readonly \
+  --workdir /src -e TMPDIR=/scratch -e npm_config_cache=/scratch/npm-cache \
+  node@sha256:43aeff40f4afc22e83f7589a2f37e111cff5ca84529571f1c8415bcc5fcc21b2 npm run build
+python3 samples/discover-oss/aoiko/verify_rebuild.py .tmp/aoiko-candidate/site .tmp/aoiko-upstream-rebuild
+```
