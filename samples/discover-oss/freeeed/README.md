@@ -156,6 +156,30 @@ dependency JARs by matching each entry's bytes. It found matching entries in
 134 artifacts; seven still lack POM license metadata. Byte matching is useful
 evidence but is not a complete binary/source provenance or license review.
 
+## Single-container text experiment
+
+`single-text.capsule.toml` and `start-single-text.sh` use the same trimmed
+FreeEed processing engine with `TextOnlyExtractor.java` in one container. The
+extractor listens only on loopback and implements just the two responses the
+engine needs for validated UTF-8 text; it is **not** Apache Tika and cannot
+process other document formats. The app says so, accepts only sample data,
+and remains incomplete as an eDiscovery tool. It avoids a second service to
+test a different hosted execution route; it does not establish the cause of
+the preceding service-group failure.
+
+On 2026-11-05, both the original Tika-backed preview and the text-only adapter
+passed the synthetic input, output, extractor failure, and cleanup test using
+`test_preview.py` (add `--text-only` for the adapter). The exact single-service
+workspace also passed a local isolated Docker test with a read-only root,
+non-root user, bounded resources, and no external network. It returned the
+original synthetic document and extracted text and removed the temporary job.
+The portable bundle SHA-256 is
+`71c80709d277646af8ffa0b3888921a153cecb88bdf86ccec634d771181aaf59`, its
+ContractRef is `e8614c1f6588857a76305ceb920703687e9ed52fef0635afeb72a414885fc819`,
+and its DerivationRef is `a3c4acc111c25526990233f87308e83800520f6a6df4c2a4a1530dd8cfd2bda7`.
+The third-party license/source review remains incomplete; do not publish this
+candidate as a finished FreeEed service.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
