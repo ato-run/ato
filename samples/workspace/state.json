@@ -1,0 +1,8 @@
+{
+  "schema": "example.workspace/1",
+  "title": "Restored demo workspace",
+  "notes": [
+    "Restored from the sealed bundle.",
+    "Add a note and reload this Run to see local storage keep it."
+  ]
+}
