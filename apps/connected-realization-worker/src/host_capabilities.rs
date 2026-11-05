@@ -39,104 +39,14 @@ const ALL_LEASE_KINDS: [&str; 4] = [
 /// The execution ABI that requires Docker access.
 pub const OCI_EXECUTION_CAPABILITY: &str = "execution_abi:oci";
 
-/// A stable, machine-readable cause. Ops scripts match on these strings, so a
-/// code is never reused for a different cause and never renamed silently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReasonCode {
-    PlatformUnsupported,
-    BwrapBinaryMissing,
-    BwrapProbeFailed,
-    ApparmorRestrictsUnprivilegedUserns,
-    UnprivilegedUsernsCloneDisabled,
-    ProcessEffectiveCapabilitiesPresent,
-    SlotNotRecovered,
-    RuntimeLaunchUnavailable,
-    StateVolumeRootUnconfigured,
-    StateVolumeStoreNotWritable,
-    StateVolumeStoreNotVerified,
-    ExplicitPlacementRestrictsLeaseKinds,
-    BrowserExecutorUnconfigured,
-    BrowserExecutorNotEvaluated,
-    DockerBinaryMissing,
-    DockerSocketAccessDenied,
-    DockerDaemonUnreachable,
-    DockerUnavailable,
-}
+// The reason vocabulary and capability statuses are owned by `ato-host-facts`
+// so the CLI, the adapters and this worker cannot drift apart. The worker's
+// lease-kind advertisement (below) stays here: which lease kinds this Runner
+// offers to the control plane is a Runner concern, not a host fact.
+pub use ato_host_facts::{CapabilityState, CapabilityStatus, Reason, ReasonCode};
 
-impl ReasonCode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PlatformUnsupported => "platform_unsupported",
-            Self::BwrapBinaryMissing => "bwrap_binary_missing",
-            Self::BwrapProbeFailed => "bwrap_probe_failed",
-            Self::ApparmorRestrictsUnprivilegedUserns => "apparmor_restricts_unprivileged_userns",
-            Self::UnprivilegedUsernsCloneDisabled => "unprivileged_userns_clone_disabled",
-            Self::ProcessEffectiveCapabilitiesPresent => "process_effective_capabilities_present",
-            Self::SlotNotRecovered => "slot_not_recovered",
-            Self::RuntimeLaunchUnavailable => "runtime_launch_unavailable",
-            Self::StateVolumeRootUnconfigured => "state_volume_root_unconfigured",
-            Self::StateVolumeStoreNotWritable => "state_volume_store_not_writable",
-            Self::StateVolumeStoreNotVerified => "state_volume_store_not_verified",
-            Self::ExplicitPlacementRestrictsLeaseKinds => {
-                "explicit_placement_restricts_lease_kinds"
-            }
-            Self::BrowserExecutorUnconfigured => "browser_executor_unconfigured",
-            Self::BrowserExecutorNotEvaluated => "browser_executor_not_evaluated",
-            Self::DockerBinaryMissing => "docker_binary_missing",
-            Self::DockerSocketAccessDenied => "docker_socket_access_denied",
-            Self::DockerDaemonUnreachable => "docker_daemon_unreachable",
-            Self::DockerUnavailable => "docker_unavailable",
-        }
-    }
-}
-
-impl Serialize for ReasonCode {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-/// One cause, with the sentence the operator needs to act on it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Reason {
-    pub code: ReasonCode,
-    pub message: String,
-}
-
-impl Reason {
-    fn new(code: ReasonCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-}
-
-/// Whether a capability reaches the control plane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityState {
-    /// Proven here and advertised by the heartbeat.
-    Advertised,
-    /// Proven impossible with this host/configuration.
-    Unavailable,
-    /// Not proven either way. Not advertised, and the reason says what is
-    /// missing: unknown is never reported as available.
-    Unverified,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CapabilityStatus {
-    /// The capability as it is named at the control-plane boundary, e.g.
-    /// "lease_kind:runtime_launch" or "execution_abi:oci".
-    pub capability: String,
-    pub state: CapabilityState,
-    /// Never empty unless state is Advertised.
-    pub reasons: Vec<Reason>,
-}
-
-/// Everything measured about this host, plus the operator configuration that
-/// changes what would be advertised.
+/// Everything this worker measured about its host, plus the operator
+/// configuration that changes what would be advertised.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostFacts {
     pub os: &'static str,
