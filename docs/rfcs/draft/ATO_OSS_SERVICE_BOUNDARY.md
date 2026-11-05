@@ -94,9 +94,14 @@ computation model.
 
 Before an OSS launch, the guarantees need explicit wording:
 
-- Nacelle applies OS-native isolation (Seatbelt on macOS, Bubblewrap with
-  Landlock on Linux). Development mode is not a security boundary and is not
-  equivalent to a container or VM.
+- The CLI, local runtime and connected worker apply OS-native process
+  isolation through the in-tree `ato-sandbox` implementation: Landlock on
+  Linux (kernel 5.13+) and Seatbelt on macOS, with Bubblewrap containment where
+  the launch path provides it. Development mode skips enforcement; it is not a
+  security boundary, and this is not equivalent to a container or VM.
+- Nacelle holds an earlier copy of this policy as donor code, but it is excluded
+  from the workspace and does not build in this tree. Do not describe Nacelle as
+  the component enforcing the current runner's isolation.
 - A matching Contract does not certify security, licence compliance or the
   safety of side effects.
 - Saved-data capture is bounded to declared resources. Restart persistence,

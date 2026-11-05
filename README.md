@@ -53,8 +53,10 @@ You may already have a computer capable of running the software you need.
 
 - **Use your own hardware.** Run on a local PC, home server, workstation or a
   remote machine you control.
-- **Keep control of your data.** Local runs and Instances write under the CLI
-  data directory (`ATO_HOME`). External connections are declared as Bindings.
+- **Keep control of your data.** Ato-managed local Instance metadata and saved
+  data are kept under the CLI data directory (`ATO_HOME`) by default. Explicit
+  outputs (for example a `--verification-receipt` path) and writes through
+  declared external Bindings are separate.
 - **Use existing tools.** Docker, Nix, plain processes and VM snapshots remain
   valid realizations. Ato does not replace them.
 - **Describe before realizing.** A Contract states what must hold; a Derivation
@@ -116,6 +118,12 @@ Resuming a Capsule starts a **Run**; the Run advances the computation, and its
 current point can be sealed again as a new Capsule. Starting several Runs from
 the same Capsule lets work branch without mutating the Capsule.
 
+This is the concept model. In the current CLI the resealing lifecycle
+(`init` / `resume` / `stop` / `encap`) is implemented in the computation-root
+profile. A portable-application `ato run` is an ephemeral Run, and a durable
+local Instance keeps its data through the Instance lifecycle rather than
+sealing a new Capsule.
+
 ```mermaid
 flowchart LR
     C["Computation C"] -->|"interaction"| C2["Computation C'"]
@@ -172,9 +180,11 @@ There is no ato.run-free remote management path in the current tree.
 
 ## Security and limitations
 
-- Nacelle applies OS-native isolation: Seatbelt on macOS, Bubblewrap with
-  Landlock on Linux. Development mode is not a security boundary, and this is
-  not equivalent to a container or VM boundary.
+- The `ato` CLI, local runtime and connected worker apply OS-native process
+  isolation through the in-tree `ato-sandbox` implementation: Landlock on
+  Linux (kernel 5.13+) and Seatbelt on macOS, with Bubblewrap containment where
+  the launch path provides it. Development mode skips enforcement and is not a
+  security boundary. This is not equivalent to a container or VM boundary.
 - Untrusted applications should run with the narrowest filesystem and network
   policy their manifest declares. Sensitive paths are denied by default, but a
   path outside that list that you explicitly grant is granted by design.
