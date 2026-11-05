@@ -44,9 +44,14 @@ dependencies. This is an advisory inventory, not proof that each issue is
 reachable in the built browser bundle. The lock completion does not update or
 remediate those dependencies; investigate and test fixes before deployment.
 
-The map view refers to external CDN assets and OpenStreetMap tiles. Actual
-use may make network requests and disclose map activity; it needs an explicit
-network and privacy design. A deployable instance also requires a compatible
+The map view refers to external CDN assets and OpenStreetMap tiles; the
+geocoding API sends entered queries to Nominatim. Actual use may disclose map
+activity or searches and needs an explicit network and privacy design. The
+whitelisted `record_product_movement` method obtains an order and saves it with
+`ignore_permissions=True` without an explicit permission check in that method.
+Its authorization must be checked against real Frappe roles before exposure;
+this source inspection alone is not an end-to-end exploit test. A deployable
+instance also requires a compatible
 Frappe/ERPNext stack, database, queue, scheduler, app installation, secret
 bootstrap, durable storage, backup and restore, source/notices, and end-to-end
 verification. None of those is established by the frontend build.
