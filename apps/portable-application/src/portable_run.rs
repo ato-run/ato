@@ -2660,6 +2660,17 @@ path = os.path.join(root, "counter")
 value = int(open(path).read()) + 1 if os.path.exists(path) else 1
 open(path, "w").write(str(value))
 
+class Server(ThreadingHTTPServer):
+    # http.server resolves the bind address with a reverse DNS lookup
+    # (`getfqdn`), which can block for the resolver's timeout on a CI host with
+    # slow DNS - before the socket is listening, and with no output. A test
+    # fixture does not need the FQDN.
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         body = json.dumps({"counter": value}).encode()
@@ -2670,7 +2681,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).serve_forever()
+Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).serve_forever()
 "#;
 
         let root = tempfile::tempdir().unwrap();
