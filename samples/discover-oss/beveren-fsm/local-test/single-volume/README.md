@@ -25,6 +25,13 @@ manually restarting the Frappe development server, the same login could read
 the request, order and attachment. `persist_probe.py` performs the upload and
 verification portions of that test. No real customer data was used.
 
+An additional isolated Gunicorn experiment used `wsgi_single.py` with two
+workers and two threads against that site. An administrator could sign in,
+list synthetic requests, load the scheduling HTML and its JavaScript, and read
+the saved attachment; an anonymous request for that private attachment
+returned HTTP 403. The wrapper relies on private Frappe module attributes and
+has not been validated as a supported or secure hosted entrypoint.
+
 This result does not establish a stg Runner-compatible package. The proof used
 an interactive development server, did not supervise its processes or exercise
 the scheduler and workers, and did not make Redis durable. It has no safe
