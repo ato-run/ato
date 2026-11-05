@@ -18,3 +18,19 @@ Runner receipt. `ato pack` accepted the manifest; a normal local `ato run`
 returned `execution_authority_required`. An attempt to import the bundle into
 staging returned `portable_runner_unavailable`. No hosted Run or receipt has
 been obtained.
+
+On 2026-11-05, the staging import was repeated with an explicitly selected
+owner-connected OCI Runner, rather than the managed pool. Instance
+`cinst_01M6NA516FCKMJG9ZVVAMQGQPR` reached the ready screen, which displayed
+its Contract as verified and the OCI surface as ready. Opening the owner URL
+showed PicPeak's first-run setup page. The one-time setup token is required;
+no owner-only token retrieval has yet been demonstrated. Do not publish this
+Instance as ready for general use or claim that authentication, galleries,
+uploads, persistence, restoration or other workflows have been verified.
+
+Attempting an owner export with saved data failed with
+`Checkpoint: failed (The Runner that stores this data is not available right now.)`.
+The current staging API source dispatches volume maintenance only through the
+operator-managed pool, while this Instance runs on a personal Runner. That is
+a concrete incompatibility, but the error alone does not establish whether
+other Runner capabilities or availability would also prevent a checkpoint.
