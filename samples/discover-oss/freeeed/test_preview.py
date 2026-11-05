@@ -45,6 +45,9 @@ def main() -> None:
         raise ValueError("unsupported test-root path")
     jobs = run / "jobs"
     jobs.mkdir()
+    source_zip = run / "source.zip"
+    with zipfile.ZipFile(source_zip, "w") as archive:
+        archive.writestr("source.txt", "synthetic source fixture")
     classes = run / "classes"
     classes.mkdir()
     source = Path(__file__).with_name("ProcessingPreview.java").resolve(strict=True)
@@ -79,7 +82,7 @@ def main() -> None:
         preview_process = subprocess.Popen(
             ["sandbox-exec", "-p", profile, "java", f"-Djava.io.tmpdir={run}",
              f"-Duser.home={run}", "-Djava.net.preferIPv4Stack=true", "-cp", str(classes),
-             "ProcessingPreview", str(engine), str(jobs), "127.0.0.1", str(web_port), tika_url],
+             "ProcessingPreview", str(engine), str(jobs), "127.0.0.1", str(web_port), tika_url, str(source_zip)],
             cwd=run, env=env, stdout=preview_log, stderr=subprocess.STDOUT,
         )
         deadline = time.monotonic() + 25
@@ -96,10 +99,19 @@ def main() -> None:
             time.sleep(0.25)
 
         content = b"Synthetic test document for FreeEed.\nReference: staging fixture only.\n"
+        status, source_data = request("/source")
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(source_data)) as archive:
+            assert archive.read("source.txt") == b"synthetic source fixture"
         status, _ = request("/process", data=content, headers={"Content-Type": "text/plain", "X-File-Extension": "txt"})
         assert status == 400
         status, _ = request("/process", data=content, headers={"Content-Type": "application/octet-stream"})
         assert status == 400
+        status, _ = request("/process", data=content, headers={"Content-Type": "application/octet-stream", "X-File-Extension": "pdf"})
+        assert status == 400
+        status, _ = request("/process", data=b"PK\x00\xff", headers={"Content-Type": "application/octet-stream", "X-File-Extension": "txt"})
+        assert status == 400
+        assert not list(jobs.iterdir())
         status, data = request("/process", data=content, headers={"Content-Type": "application/octet-stream", "X-File-Extension": "txt"})
         assert status == 200
         with zipfile.ZipFile(io.BytesIO(data)) as result:

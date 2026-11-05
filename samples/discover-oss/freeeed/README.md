@@ -62,7 +62,7 @@ previously downloaded Maven dependencies and passed the same synthetic test;
 the configured Tika URL was also exercised against the local test server.
 
 `ProcessingPreview.java` is an experimental, synthetic-data-only upload and
-download surface around that engine. It accepts one bounded file, uses a fresh
+download surface around that engine. It accepts one bounded UTF-8 text file, uses a fresh
 private job directory, and returns the metadata and native/text ZIP; it checks
 the engine output instead of accepting its exit code alone. It is not the
 upstream Review UI. `test_preview.py` starts isolated local engine and Tika
@@ -118,6 +118,31 @@ does not provide FreeEed Review, search, OCR, or a complete eDiscovery
 workflow. Do not treat this experiment as a safe place for real evidence or
 confidential documents. The large cached engine also makes saved-data and
 checkpoint behavior an explicit outstanding test.
+
+## Smaller text-only experiment
+
+`trim_text_preview.py` can produce a smaller engine for this preview. It checks
+the input JAR digests and deliberately removes libraries used by features the
+preview does not offer, including Hadoop, Solr, Stanford CoreNLP, AWS, PDFBox,
+Apache POI and non-target SQLite native binaries. The resulting JAR is not a
+full FreeEed distribution. The web surface accepts only valid UTF-8 `.txt`
+files and explicitly rejects other extensions and binary control bytes. The
+source ZIP includes the upstream processing sources, adapter, patch and
+trimming scripts, POMs, and the preliminary dependency inventory; dependency
+license texts and corresponding third-party sources are still incomplete.
+Do not publish it as fully compliant or as a replacement for FreeEed.
+
+The 2026-11-05 text-only candidate contains 50,949,340 bytes of workspace
+files and a 67,942,062-byte Capsule. Its bundle SHA-256 is
+`ce1fd2b9282970ddcea70cae922fea5b39d0c34cfe535d34d98516d4de8baac4`,
+ContractRef is `7ea9030861cc59692a70ac22d59cfea1cecc93991220aaf807a2ae1e402f157a`,
+and DerivationRef is `f6a4b87a075c2664c5b691943d34bc822d7183e83c3ce647c35dab2c5f7112ff`.
+The exact assembled workspace passed a local Docker test with the same
+non-root, read-only, isolated two-service setup described above. The test
+checked health, source download, synthetic text processing and job cleanup.
+The local native test additionally rejected binary and non-TXT inputs and
+verified failure when Tika was stopped. This remains an experiment, not a
+hosted verification or a complete license review.
 
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project

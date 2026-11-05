@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 import shutil
 import subprocess
+from zipfile import ZIP_DEFLATED, ZipFile
 
 
 UPSTREAM = "d268fac3c59beb91b3d9d77d7c386657d149ac4d"
@@ -17,6 +18,7 @@ def main() -> None:
     parser.add_argument("upstream", type=Path, help="pinned upstream Git checkout")
     parser.add_argument("build", type=Path, help="patched Maven source/build tree")
     parser.add_argument("output", type=Path, help="new directory beneath .tmp")
+    parser.add_argument("--engine", type=Path, help="explicit text-only preview JAR")
     args = parser.parse_args()
     upstream = args.upstream.resolve(strict=True)
     build = args.build.resolve(strict=True)
@@ -28,7 +30,8 @@ def main() -> None:
     if revision != UPSTREAM:
         raise ValueError("unexpected upstream revision")
     artifacts = build / "freeeed-processing/target"
-    jar = artifacts / "freeeed-processing-1.0-SNAPSHOT-jar-with-dependencies.jar"
+    jar = (args.engine.resolve(strict=True) if args.engine else
+           artifacts / "freeeed-processing-1.0-SNAPSHOT-jar-with-dependencies.jar")
     sources = artifacts / "freeeed-processing-1.0-SNAPSHOT-sources.jar"
     if not jar.is_file() or not sources.is_file():
         raise FileNotFoundError("build the patched engine and source JAR first")
@@ -56,7 +59,8 @@ def main() -> None:
     source.mkdir()
     shutil.copyfile(sources, source / "freeeed-processing-sources.jar")
     for name in ("ProcessingPreview.java", "patch_upstream.py", "assemble_candidate.py",
-                 "start.sh", "capsule.template.toml", "README.md"):
+                 "trim_text_preview.py", "make_dependency_inventory.py", "dependency-inventory.json",
+                 "synthetic_check.py", "test_preview.py", "start.sh", "capsule.template.toml", "README.md"):
         shutil.copyfile(local / name, source / name)
     for filename in ("LICENSE", "freeeed-processing/NOTICE", "pom.xml", "freeeed-processing/pom.xml"):
         target = source / filename
@@ -64,6 +68,10 @@ def main() -> None:
         with target.open("wb") as file:
             subprocess.run(["git", "-C", str(upstream), "show", f"{UPSTREAM}:{filename}"],
                            check=True, stdout=file)
+    with ZipFile(output / "source.zip", "x", compression=ZIP_DEFLATED) as archive:
+        for path in sorted(source.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(source).as_posix())
     print(f"Local candidate assembled at {output}; engine SHA-256 {digest.hexdigest()}")
 
 
