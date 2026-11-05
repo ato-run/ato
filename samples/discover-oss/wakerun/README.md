@@ -137,6 +137,14 @@ direct tab. This demonstrates only the direct trial origin in that browser;
 the Discover embedded flow remains broken, and the trial origin is not a
 durable shared-data service. No real accounting data was used.
 
+On another staging launch, using the app window's `…` menu and choosing
+`Open in new tab` while the embedded app was loading opened the same trial
+successfully; the synthetic expense was visible there. The current failure
+screen itself does not offer that action. Draft PWA PR
+https://github.com/ato-run/ato-pwa/pull/762 adds it for an authorized,
+unexpired Browser trial after a frame timeout. It is not yet deployed and does
+not fix or explain the embedded frame failure.
+
 A separate local browser test on the same assembled preview exercised two
 simultaneous synthetic expense writes in separate tabs, reloaded and observed
 both, downloaded a `.wakerun` backup, added a third expense, and restored the
