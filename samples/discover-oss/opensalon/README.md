@@ -32,4 +32,13 @@ Instance `cinst_01M6N99VM9QGG20VP5HQQY2EWW` runs schema
 `dapp_01M6N9JCPZGDHZEGZ8SWG434JA`. On stg, a sample booking survived a
 schema update and a reload on its appointment screen. The source ZIP
 downloaded from the owner Instance contained all 73 source files byte-for-byte.
-The public trial and a newly added copy remain unverified; the listing says so.
+The listing says the public trial and a newly added copy were unverified.
+
+On 2026-11-06, opening the Discover listing and using its `…` menu to open the
+trial in a separate tab reached the browser preview. A synthetic appointment
+was created and remained visible after reloading. A second synthetic booking
+for the same staff member and time displayed the existing appointment as a
+conflict and offered an explicit override. This checks the direct public
+trial in one browser, not multi-user sharing or backup. The Discover embedded
+frame stayed on its loading screen during this test; a completed embedded
+launch and a newly added copy remain unverified. Only synthetic data was used.
