@@ -887,15 +887,18 @@ impl PortableBundleExecutor<'_> {
         execution.container_id = surface.map(|handle| handle.container_id().to_owned());
         execution.image = surface.map(|handle| handle.image().to_owned());
         execution.platform = surface.map(|handle| handle.platform().to_owned());
-        execution.connector = Some(group.connector_kind().as_str().to_owned());
+        // Connector evidence exists only for the materialization that needs
+        // it. A direct Run's receipt is byte-for-byte the receipt stg already
+        // produced: no /4, no new fields, the same schema.
         if let Some(relay) = group.relay_evidence() {
+            execution.connector = Some(group.connector_kind().as_str().to_owned());
             execution.relay_image_digest = Some(relay.image_digest);
             execution.relay_container_id = Some(relay.container_id);
+            execution.platform_emulated = Some(matches!(
+                host.docker.platforms.get(platform.as_str()),
+                Some(ato_host_facts::PlatformSupport::Emulated { .. })
+            ));
         }
-        execution.platform_emulated = Some(matches!(
-            host.docker.platforms.get(platform.as_str()),
-            Some(ato_host_facts::PlatformSupport::Emulated { .. })
-        ));
         execution.services = group
             .services()
             .map(
