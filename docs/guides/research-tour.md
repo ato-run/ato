@@ -195,7 +195,45 @@ Questions we would most like reviewed:
    [theory draft](../theory/capsule-process-model.md), or the archived
    transformation evidence?
 
-## 10. What is not claimed
+## 10. State continuity: recorded evidence and the next experiment
+
+The [stateful transformation v1](../archive/2026/ops/stateful-transformation-v1.md)
+record is the closest measured result for state in this repository. Under one
+frozen K (an HTTP root plus an `ato.scenario/1` requirement), a candidate with
+different source code and a different internal database schema — in-memory JSON
+versus in-memory SQLite — satisfied the same eight-step CRUD, authorization and
+input-error scenario, with a matching scenario transcript digest and a new
+`fully_satisfied` receipt.
+
+That experiment isolates behavior under two realizations. Each Run starts a
+fresh process and keeps storage in process memory, so it says nothing about
+whether data survives a restart, an export, or a move to another host. The
+record itself excludes restart persistence.
+
+The current v4 [saved-data profile](../rfcs/draft/PORTABLE_INSTANCE_SNAPSHOT.md)
+is the separate path for that question. It binds a snapshot digest into a new
+K′ over declared browser state, JSON Data Resources and Assets, materializes it
+locally, and restores it on Hosted import before launch. Two gaps remain
+explicit in the draft: browser-state flush and capture from a live Hosted
+Instance, and a staging acceptance that proves the Hosted round-trip.
+
+A minimal next experiment — not run, and not recorded in this repository yet —
+would make the missing claim reviewable:
+
+1. Freeze K so that it includes one declared JSON resource, for example
+   `{"items":[...]}` with a content digest.
+2. Create and change data in a durable local Instance, then stop the Run.
+3. Export with saved data, import into a second account or host, and restore.
+4. Observe the restored document digest and the editable operations, then
+   repeat the check after a restart of the receiving Instance.
+
+Success would require K to stay unchanged, the declared data digest to be
+restored, and those observations to be satisfied. A digest mismatch, a missing
+Asset, or a Hosted path that cannot be verified would be a failure of that
+claim, not something to explain away. Until that experiment is recorded,
+state continuity across a restart or a migration remains unproven.
+
+## 11. What is not claimed
 
 - General cross-host portability, process-memory restoration, or that every
   application runs everywhere.

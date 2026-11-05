@@ -14,6 +14,18 @@ Atoは、多様なアプリケーション、データ、作業状態を一つ�
 
 **Computation** は、ある地点から継続できる計算です。ファイルやプロセスそのものではありません。その地点を封印すると、不変で参照可能な **Capsule** になり、再開すると進行中の**Run**になります。Runは分岐でき、次の地点を再びCapsuleとして保存できます。ファイル、アプリケーション、実行状態、操作履歴を、実現方法から独立した一つのライフサイクルで扱います。
 
+```mermaid
+flowchart LR
+    C["Computation C"] -->|"α"| C2["Computation C'"]
+    C -->|"seal"| CAP["Capsule κ<br/>不変・参照可能"]
+    CAP -->|"resume"| RUN["Run<br/>進行中の評価"]
+    K["Contract K<br/>満たすべき条件"] -.->|"照合"| RUN
+    D["Derivation D<br/>宣言済みの実現経路"] -->|"実現"| CAP
+    RUN -->|"観測"| REC["Receipt"]
+```
+
+これは概念図であり、内部データ構造ではありません。Capsuleの同一性は実現方法に依存せず、Kを満たすことはRunについての判定であって、2つの参照が同一であることの証明ではありません。
+
 ## 環境を保存しても、仕事の続きは残らない
 
 身近な人が自分のために作った小さな道具があるとします。その道具を自分のデータで使い、一か所だけ変更し、作者が離れた後も来週別のマシンで開きたい。引き継ぎたいのはソースだけではありません。振る舞い、データと作業状態、外部サービスとの接続、それまでの履歴、そして続きから作業できることが含まれます。ソフトウェアが継続的に生成・変更されるほど、何を変更してよく、何を維持すべきかという問いは、より早く、より頻繁に生じます。
@@ -59,6 +71,32 @@ Atoは、条件と実現手段を分離します。
 | Contract充足 | ある実現がKを満たすという判定 |
 
 Kを満たすことは、その実現が同じComputationであることや、Capsuleの参照が同一であることを主張しません。2つの参照ドメインは相互に読み替えられません。詳細は[アプリケーション契約](docs/concepts/application-contracts.md)のprofile対応表と未決事項を参照してください。
+
+## 記録済みの例：同じK、異なるソース
+
+アーカイブ済みの transformation v0 実験は、上記のルールを確かめる最小の具体例です。Linux CI で実行されたもので、すべてのプラットフォームで動くという意味ではなく、このREADMEのために再実行したものでもありません。
+
+前提：bubblewrap と Python 3.12.7（`/opt/ato/toolchains/python/3.12.7`、CIのfixture）を持つLinuxと、このリポジトリでビルドしたCLI。
+
+```sh
+cargo build -p ato-cli --bin ato --locked
+mkdir -p .tmp/transformation-v0
+target/debug/ato pack apps/cli/tests/fixtures/transformation-v0/source-a \
+  -o .tmp/transformation-v0/bundle-a.capsule
+target/debug/ato run .tmp/transformation-v0/bundle-a.capsule --no-open \
+  --verification-receipt .tmp/transformation-v0/receipt-a.json
+target/debug/ato reform .tmp/transformation-v0/bundle-a.capsule \
+  apps/cli/tests/fixtures/transformation-v0/source-b \
+  --out .tmp/transformation-v0/candidate
+```
+
+記録済みの証拠から期待される結果：
+
+- `.tmp/transformation-v0/candidate/report.json` は `k_preserved: true` と `fully_satisfied: true` を持ち、`frozen_contract_ref` はbaselineのreceiptの `contract_ref` と一致する。
+- `.tmp/transformation-v0/candidate/receipt.json` は異なる `derivation_ref` とsource closureを持ち、`fully_satisfied: true` である。
+- `candidate.capsule` はfrozen `ContractRef` をrootにし、transport hashは変わる。baselineのbundleとreceiptはbyte-identicalのまま残る。
+
+同じ記録には負例も含まれます。`source-b-broken` は `degraded` なbodyを返し、`reform` は `k_preserved: true`、`fully_satisfied: false` で拒否します（[証拠](docs/archive/2026/ops/contract-preserving-transformation-v0.md)）。これが示すのは、Kを凍結したままソースと実現方法を変えられたことです。再起動後の永続化、hosted実行、安全なロールアウトを示すものではありません。コマンド全体と非主張は[Derivation transformation](docs/guides/derivation-transformation.md)を参照してください。
 
 ## 異種Runnerでの実行と、宣言済みのDerivation
 
@@ -133,6 +171,7 @@ source-identity: satisfied
 
 - [研究ツアー](docs/guides/research-tour.md)：問題、モデル、同一性のprofile、データの同一性、検証済みの結果、独立性、未解決の問い。
 - アーカイブされた実験：[contract-preserving transformation v0](docs/archive/2026/ops/contract-preserving-transformation-v0.md)と[stateful transformation v1](docs/archive/2026/ops/stateful-transformation-v1.md)。Linuxローカルの証拠とfixture、限界を記録したもので、この概要のために再測定したものではありません。
+- [状態の継続性](docs/guides/research-tour.md#10-state-continuity-recorded-evidence-and-the-next-experiment)：記録済みのstatefulシナリオが示すことと、まだ未証明の再起動・export実験。
 - [仕様](docs/specifications/README.md)：acceptedのcomputation-root RFCと、portable applicationの実装トラック。
 
 ## ドキュメント
