@@ -22,6 +22,10 @@ create a portable static bundle with the `ato.portable-tree/2` schema (the
 older tree profile rejects some binary files). Do not commit generated
 dependency trees or output artifacts.
 
+The build uses webpack and moves Next's inline bootstrap scripts into local
+files. This accommodates the Instance gateway's versioned asset URLs and
+allows delivery under a CSP that forbids inline scripts.
+
 On 2026-11-05 the original and a cleanly rebuilt browser export completed a
 real Chrome test with all non-local network requests blocked: annual and
 monthly reports matched the upstream Python engine within numeric tolerance;
