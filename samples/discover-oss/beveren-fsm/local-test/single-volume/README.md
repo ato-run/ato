@@ -93,6 +93,16 @@ the temporary database user. This is not a user-facing binding implementation:
 it relies on a private Frappe API, uses the test database's privileged local
 socket user and does not provide crash-safe cleanup or a credential handoff.
 
+`bootstrap_binding.py` applies the same technique to a local candidate that
+reads `ATO_BINDING_INITIAL_ADMIN_PASSWORD` and removes it from its process
+environment before installation. On a synthetic amd64 site it installed all
+three apps and verified the administrator password without command-line
+credentials. Tests also rejected missing or short bindings and an existing
+site, and confirmed that no temporary setup user remained after normal exit.
+The candidate has not been connected to an Ato binding or tested on a Runner;
+its temporary privileged account and partially initialized site can survive
+an abrupt process termination, so a supervised recovery design is required.
+
 Using the separate Redis and a one-shot `bench worker --queue short --burst`,
 the `enqueue_probe.py` / `synthetic_job.py` fixture executed one synthetic job
 and wrote its marker under the site's private files. This exercises a worker,
@@ -104,13 +114,19 @@ site's job log. The periodic scheduler daemon itself was not exercised.
 The patched image also passed the scripted proof from an empty synthetic amd64
 volume, including setup, restart, private attachment, the restricted/shared
 roles and a scheduled appointment; the script then removed its test resources.
+In the latest run, the temporary setup account and the privileged `frappe`
+socket account were removed before the web server started. The app UID could
+not authenticate as `frappe` or `root`, while the site-scoped database account
+had no global privileges or grant option. The same restart and functional
+checks passed using that site account.
 
 This result does not establish a stg Runner-compatible package. The proof used
 an interactive development server for the restart test, did not supervise its
 processes or exercise the scheduler, and did not make Redis durable. It has no safe
 production initialization or credential handoff, no crash recovery or complete
-backup, and no portable Capsule or hosted receipt. The socket-authenticated
-database administrator shares a UID and process boundary with the app; that
-arrangement needs security review. The base image, dependency notices, source
-distribution and the remaining application permissions must also be reviewed
-before any exposure. Never use this experiment with real data.
+backup, and no portable Capsule or hosted receipt. Initialization still gives
+the app UID a privileged database socket account until setup finishes; failure
+handling and recovery for that window need security review. The base image,
+dependency notices, source distribution and the remaining application
+permissions must also be reviewed before any exposure. Never use this
+experiment with real data.
