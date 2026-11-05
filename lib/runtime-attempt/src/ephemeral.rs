@@ -977,6 +977,7 @@ mod tests {
             protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.into(),
             mount: "/data".into(),
             access: StateAccess::ReadWrite,
+            mount_required: None,
         }];
         let plan = ExecutionPlan {
             lane: ato_formation::intent::Lane::PythonProcess,
