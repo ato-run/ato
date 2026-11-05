@@ -21,12 +21,13 @@ are not included in K, D, transport identity or a verification receipt.
 Hosted import and wake must reject owner-supplied values for this protocol.
 They resolve the active Instance's own host slug from an owner-fenced database
 row and the configured app-proxy base host. Invalid or unavailable hosts fail
-closed, before a lease is made claimable. The origin is an HTTPS origin without
+closed for a required Binding, before a lease is made claimable; an optional
+Binding is omitted instead. The origin is an HTTPS origin without
 credentials, path, query or fragment. No external network, host ownership,
 public accessibility or traffic authorization is granted by this Binding.
 Every opted-in service receives the same resolved value for that Run. A copied,
-restored or newly created Instance recomputes its own value; it does not inherit
-the source Instance's origin.
+restored, newly created or anonymous trial Instance recomputes its own value;
+it does not inherit the source Instance's origin.
 
 Import metadata and Discover setup prompts must distinguish this managed value
 from a user-entered secret. Unknown Binding protocols remain unsupported by
@@ -38,7 +39,13 @@ the app started or that K is satisfied.
 
 Required validation covers absent and malformed hosts, ownership mismatch,
 caller override, multiple consumer ids, different Instances and restarts,
-user-entered secret coexistence, no disclosure in public metadata or receipts,
+user-entered secret coexistence, no Binding value in metadata or receipts,
 service-scoped projections, and actual hosted ingress and WebSocket behavior.
 This proposal does not grant outbound traffic, address DNS custom domains, or
 establish a publication-ready Fleetbase build.
+
+On 2026-11-06 the existing Rust CLI packed and validated an authoring fixture
+with two `ato.instance-origin@1` Bindings, each consumed by one OCI service.
+The resulting bundle contained the two declared ids and their distinct service
+assignments. This was an authoring and validation check only: the placeholder
+images were not run, and it is not a hosted verification receipt.
