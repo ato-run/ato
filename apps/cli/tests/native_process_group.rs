@@ -7,6 +7,13 @@
 //! back to runtime-admission rejection. Those cases are reported as skipped,
 //! never as a pass.
 
+// A native process group needs process groups and Unix sockets; the Run
+// itself refuses the route on a non-Unix host with "a native process service
+// group requires a Unix host". There is no Windows materialization to test, so
+// the acceptance is Unix-only rather than a Windows test that asserts a
+// refusal it cannot exercise.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
