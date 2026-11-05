@@ -24,10 +24,16 @@ corresponding source changes for onboarding, Ember Core and the vehicle model
 are in the adjacent patches; patches without context require `git apply
 --unidiff-zero`. The socket bundle substitution is recorded in `prepare.py`. Source, build provenance and notices for **all** included Fleetbase
 plugins and dependencies must be assembled and reviewed before distribution.
-The local nginx configuration trusts an incoming forwarded-proto header and is
-not suitable for hosted use without a verified trusted-proxy boundary. Upload
-limits, the forwarded-proto trust boundary and the generated instance origin
-also need hosted validation. The supervisor restricts the socket to the configured
+The console's entrypoint now requires the same canonical `ATO_BINDING_APP_ORIGIN`
+as the API supervisor. Nginx sets the upstream Host, scheme and port from the
+Binding and removes client-supplied forwarding headers. It accepts an internal
+Host so Ato's readiness and Contract observations can reach the application;
+the hosted ingress still needs to enforce its own public-host boundary.
+`console/run-proxy-proof.sh` verified this behavior with synthetic HTTP and HTTPS
+origins, forged headers and invalid origin values on an isolated Docker network.
+It deliberately does not forward the original client IP. Upload limits, the
+generated instance origin and trusted client IP handling need hosted validation.
+The supervisor restricts the socket to the configured
 application hostname and port, forces authenticated `enforce` mode, and disables
 upstream polling that could override those settings from the console. Browser
 origin filtering was tested locally; hosted proxy behavior remains unverified.
@@ -48,7 +54,9 @@ an actual hosted network grant works.
 To reproduce the local build, extract the pinned verifier from the matching
 upstream API image into `api/NotPwnedVerifier.php`, run
 `python3 api/patch_breach_verifier.py`, and build `api/Dockerfile` with that
-folder as context. Extract the original `index.html`, `assets/vendor.js` and
+folder as context. `api/Dockerfile.amd64` pins the corresponding x86_64 image
+digests and library paths; the other API Dockerfile targets arm64. Extract the
+original `index.html`, `assets/vendor.js` and
 `assets/console.js` from the pinned console image into `console/`, run
 `python3 console/prepare.py`, and build `console/Dockerfile` with that folder
 as context. These Dockerfiles pin the arm64 runtime images; console assets come

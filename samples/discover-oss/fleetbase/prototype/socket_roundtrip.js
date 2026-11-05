@@ -11,7 +11,6 @@ delete globalThis.WebSocket;
 const socketClusterClient = require('/opt/fleetbase-socket/node_modules/socketcluster-client');
 
 const origin = 'http://localhost:4200';
-const base = 'http://console:4200';
 const timeout = (promise, label, ms = 10000) => {
   let timer;
   return Promise.race([
@@ -21,22 +20,32 @@ const timeout = (promise, label, ms = 10000) => {
 };
 
 async function post(path, body, bearer) {
-  const response = await fetch(base + path, {
-    method: 'POST',
-    headers: {
+  const response = await request(path, 'POST', {
       'Content-Type': 'application/json',
       Accept: 'application/json',
-      Host: 'localhost:4200',
       'X-Forwarded-Proto': 'http',
       ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-  const json = await response.json();
-  if (!response.ok) {
+    }, JSON.stringify(body));
+  const json = JSON.parse(response.body);
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`${path}: HTTP ${response.status}; validation fields: ${Object.keys(json.errors || {}).join(',')}`);
   }
   return json;
+}
+
+function request(path, method, headers = {}, body = '') {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: 'console', port: 4200, path, method,
+      headers: { Host: 'localhost:4200', ...headers }, timeout: 3000 }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode,
+        body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('timeout', () => req.destroy(new Error('request timeout')));
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 function memoryAuthEngine(initial) {
@@ -52,7 +61,7 @@ function socket(token, socketOrigin = origin) {
   return socketClusterClient.create({
     hostname: 'console', port: 4200, path: '/socketcluster/', autoReconnect: false,
     ackTimeout: 5000, authEngine: memoryAuthEngine(token),
-    wsOptions: { headers: { Origin: socketOrigin } },
+    wsOptions: { headers: { Origin: socketOrigin, Host: 'localhost:4200' } },
   });
 }
 
@@ -70,7 +79,8 @@ function handshakeStatus(value) {
     const req = http.request({
       host: 'console', port: 4200, path: '/socketcluster/',
       headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
-        'Sec-WebSocket-Key': crypto.randomBytes(16).toString('base64'), Origin: value },
+        'Sec-WebSocket-Key': crypto.randomBytes(16).toString('base64'), Origin: value,
+        Host: 'localhost:4200' },
     });
     req.on('upgrade', (response, connection) => { connection.destroy(); resolve(response.statusCode); });
     req.on('response', response => { response.resume(); resolve(response.statusCode); });
@@ -86,11 +96,8 @@ async function main() {
     let ready = false;
     while (Date.now() < deadline) {
       try {
-        const response = await fetch(`${base}/int/v1/onboard/should-onboard`, {
-          headers: { Host: 'localhost:4200', 'X-Forwarded-Proto': 'http' },
-          signal: AbortSignal.timeout(3000),
-        });
-        if (response.ok) { ready = true; break; }
+        const response = await request('/int/v1/onboard/should-onboard', 'GET', { 'X-Forwarded-Proto': 'http' });
+        if (response.status >= 200 && response.status < 300) { ready = true; break; }
       } catch (_) { /* Initialization is still in progress. */ }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }

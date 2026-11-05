@@ -1,0 +1,30 @@
+FROM redis@sha256:be7c1cada5a6eb1656adfa2635b99296af725881301b21f84f35a71fac072c7f AS redis
+FROM fleetbase/fleetbase-socket@sha256:8c39c7fea626bd21ae5772ff42cbf6d8fd68fc58cb3b1d8af289427bdcf23b13 AS socket
+FROM mysql@sha256:62fb722c78b24245ddff1796a0fcee4a49cc5b87e0aaaf20c92d1da9e0a2497b AS mysql
+FROM fleetbase/fleetbase-api@sha256:2a6b1169d93b7b940d130b3974050bf57c4245941c1bb6780fdb58074bd9fd1c
+COPY --from=mysql /usr/sbin/mysqld /usr/sbin/mysqld
+COPY --from=mysql /usr/lib64/mysql /usr/lib64/mysql
+COPY --from=mysql /usr/share/mysql-8.0 /usr/share/mysql-8.0
+COPY --from=mysql /lib64/libaio.so.1.0.1 /usr/lib/x86_64-linux-gnu/libaio.so.1
+RUN ldd /usr/sbin/mysqld && /usr/sbin/mysqld --version
+RUN mkdir -p /opt/ato-seed && cp -a /fleetbase/api/storage /opt/ato-seed/storage && cp -a /fleetbase/api/bootstrap/cache /opt/ato-seed/cache && rm -rf /fleetbase/api/storage /fleetbase/api/bootstrap/cache && ln -s /data/fleetbase/storage /fleetbase/api/storage && ln -s /data/fleetbase/cache /fleetbase/api/bootstrap/cache && printf '%s\n' 'pdo_mysql.default_socket=/data/mysql.sock' > /usr/local/etc/php/conf.d/zz-ato-local-proof.ini
+RUN rm -rf /fleetbase/console && ln -s /data/fleetbase/console /fleetbase/console && ln -s /data/fleetbase/home/composer-auth.json /fleetbase/api/auth.json
+COPY ato_origin.py /opt/ato_origin.py
+COPY supervisor.py /opt/ato-supervisor.py
+ENTRYPOINT ["python3", "/opt/ato-supervisor.py"]
+
+COPY --from=socket /usr/src/app /opt/fleetbase-socket
+COPY --from=socket /usr/local/bin/node /opt/fleetbase-socket/node
+COPY --from=socket /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+COPY --from=socket /usr/lib/libstdc++.so.6 /opt/socket-libs/libstdc++.so.6
+COPY --from=socket /usr/lib/libgcc_s.so.1 /opt/socket-libs/libgcc_s.so.1
+
+RUN cp /fleetbase/api/vendor/laravel/octane/src/Commands/stubs/frankenphp-worker.php /fleetbase/api/public/frankenphp-worker.php
+RUN setcap -r /usr/local/bin/frankenphp && test -z "$(getcap /usr/local/bin/frankenphp)"
+COPY NotPwnedVerifier-ato.php /fleetbase/api/vendor/laravel/framework/src/Illuminate/Validation/NotPwnedVerifier.php
+RUN php -l /fleetbase/api/vendor/laravel/framework/src/Illuminate/Validation/NotPwnedVerifier.php
+
+COPY --from=redis /usr/local/bin/redis-server /opt/redis/redis-server
+COPY --from=redis /usr/lib/libzstd.so.1 /opt/redis-libs/libzstd.so.1
+COPY --from=redis /usr/lib/libssl.so.3 /opt/redis-libs/libssl.so.3
+COPY --from=redis /usr/lib/libcrypto.so.3 /opt/redis-libs/libcrypto.so.3
