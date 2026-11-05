@@ -192,6 +192,11 @@ enum Commands {
     },
     #[command(name = "__portable-sandbox-exec", hide = true)]
     PortableSandboxExec(PortableSandboxExecArgs),
+    /// Runtime-owned loopback shim for one declared peer edge of a native
+    /// process service group. Not a user surface.
+    #[cfg(unix)]
+    #[command(name = "__portable-peer-shim", hide = true)]
+    PortablePeerShim(PortablePeerShimArgs),
     #[command(name = "__portable-instance-worker", hide = true)]
     PortableInstanceWorker(PortableInstanceWorkerArgs),
     /// 6b-D2 experimental: build a frozen source's root Dockerfile with a
@@ -422,6 +427,20 @@ struct PortableSandboxExecArgs {
     policy: PathBuf,
     #[arg(last = true, required = true)]
     command: Vec<String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Args)]
+struct PortablePeerShimArgs {
+    /// Runtime-owned broker socket.
+    #[arg(long)]
+    broker: PathBuf,
+    /// The one declared edge this shim may relay to.
+    #[arg(long)]
+    token: String,
+    /// Loopback port to listen on; 0 lets the OS choose.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
 }
 
 #[derive(Debug, Args)]
@@ -752,6 +771,8 @@ pub fn run() -> Result<()> {
             DesktopCommands::Inspect { project } => desktop_inspect(&project),
         },
         Commands::PortableSandboxExec(args) => portable_sandbox_exec(args),
+        #[cfg(unix)]
+        Commands::PortablePeerShim(args) => portable_peer_shim(args),
         Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
         Commands::SourceOciBuild(args) => source_oci_build(args),
         Commands::SourceOciAcquireBase(args) => source_oci_acquire_base(args),
@@ -943,6 +964,11 @@ fn portable_sandbox_exec(args: PortableSandboxExecArgs) -> Result<()> {
         let _ = (program, arguments);
         bail!("portable process sandbox is unavailable on this platform")
     }
+}
+
+#[cfg(unix)]
+fn portable_peer_shim(args: PortablePeerShimArgs) -> Result<()> {
+    ato_runtime_attempt::peer_broker::run_shim(&args.broker, &args.token, args.port)
 }
 
 fn desktop_inspect(project: &str) -> Result<()> {
@@ -3148,6 +3174,7 @@ fn start_portable_attempt(
         PortableRealizationKind::LocalProcess => "local process",
         PortableRealizationKind::OciContainer => "OCI container",
         PortableRealizationKind::OciServiceGroup => "OCI service group",
+        PortableRealizationKind::ProcessServiceGroup => "native process group",
     };
     let base_url = live
         .endpoint()
@@ -3158,8 +3185,11 @@ fn start_portable_attempt(
             live,
             base_url,
             label,
-            stops_when_a_service_exits: validated.realization
-                == PortableRealizationKind::OciServiceGroup,
+            stops_when_a_service_exits: matches!(
+                validated.realization,
+                PortableRealizationKind::OciServiceGroup
+                    | PortableRealizationKind::ProcessServiceGroup
+            ),
         },
         receipt,
     })
