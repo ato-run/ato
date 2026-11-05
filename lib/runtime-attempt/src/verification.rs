@@ -280,6 +280,11 @@ pub fn verify_observed_candidate(
     }
     // Certificate evidence is the strongest statement a receipt can carry, so
     // a receipt that has it is /3 whatever else it also carries.
+    // Connector evidence names a materialization this Run chose; a receipt
+    // that carries it is /4, whatever else it also carries.
+    if execution.connector.is_some() {
+        receipt.schema = ato_formation::verify::CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4.to_owned();
+    }
     if receipt.observations.iter().any(|observation| {
         observation
             .evidence

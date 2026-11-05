@@ -783,6 +783,7 @@ impl SourceOciRealizer<'_> {
                     .into(),
             ),
             services: vec![],
+            ..Default::default()
         };
         Ok(Realized {
             candidate,
