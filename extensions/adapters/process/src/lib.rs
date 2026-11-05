@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
@@ -72,6 +73,87 @@ pub struct ProcessSpec {
     pub isolated_group: bool,
 }
 
+/// How long a stop may take, and where it gives up.
+#[derive(Debug, Clone, Copy)]
+pub struct StopBudget {
+    /// How long the group has to exit after the graceful signal.
+    pub grace: Duration,
+    /// How long the group has to disappear after `SIGKILL`.
+    pub reap: Duration,
+}
+
+impl Default for StopBudget {
+    fn default() -> Self {
+        Self {
+            grace: Duration::from_secs(2),
+            reap: Duration::from_secs(2),
+        }
+    }
+}
+
+/// Stop a child's whole process group and prove that the group is empty.
+///
+/// The leader having exited is not the question this answers. A workload that
+/// forked a worker before its main process exited leaves that worker in the
+/// same group, and `kill(-pgid, 0)` (see [`process_group_is_alive`]) is the
+/// only accepted proof that nothing is left. `EPERM` means a process exists
+/// that this caller may not signal, so it counts as alive.
+///
+/// The leader is reaped here as well: while it is a zombie it still counts as
+/// a group member, so waiting for the group before reaping it would always
+/// time out.
+pub fn stop_child_and_group(
+    child: &mut Child,
+    process_group: u32,
+    budget: StopBudget,
+) -> Result<(), ProcessError> {
+    let pid = child.id();
+    if process_group != 0 && pid != process_group {
+        return Err(ProcessError::UnownedProcessGroup);
+    }
+    if process_group == 0 {
+        let _ = child.kill();
+    } else if process_group_is_alive(process_group) {
+        // A group that is already gone is the outcome this call wants, so a
+        // refused signal is not reported on its own: emptiness is verified.
+        let _ = terminate_process_tree(pid, process_group);
+    }
+
+    if await_child_and_group(child, process_group, budget.grace)? {
+        return Ok(());
+    }
+    if process_group == 0 {
+        let _ = child.kill();
+    } else {
+        let _ = force_kill_process_tree(pid, process_group);
+    }
+    if await_child_and_group(child, process_group, budget.reap)? {
+        return Ok(());
+    }
+    Err(ProcessError::ProcessGroupSurvived(process_group))
+}
+
+/// Wait, bounded, for the leader to be reaped and for the group to be empty.
+fn await_child_and_group(
+    child: &mut Child,
+    process_group: u32,
+    timeout: Duration,
+) -> Result<bool, ProcessError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        // Reap first: a zombie leader is still a member of its group.
+        let leader_exited = child.try_wait()?.is_some();
+        let group_empty = process_group == 0 || !process_group_is_alive(process_group);
+        if leader_exited && group_empty {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 pub struct ProcessHandle {
     child: Child,
     process_group: u32,
@@ -103,20 +185,19 @@ impl ProcessHandle {
         }
     }
 
-    fn terminate_and_reap(&mut self) -> Result<(), ProcessError> {
-        if self.try_wait()?.is_some() {
-            return Ok(());
-        }
-        self.terminate()?;
-        for _ in 0..100 {
-            if self.try_wait()?.is_some() {
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        self.child.kill()?;
-        self.child.wait()?;
-        Ok(())
+    /// Stop this handle's whole process group and prove it is empty.
+    ///
+    /// Unlike [`ProcessHandle::terminate`], this returns an error when the
+    /// group cannot be shown to be gone. A supervisor that owns the workload
+    /// must use this: an exited leader says nothing about the children it
+    /// spawned, and reporting "stopped" while they still run is exactly the
+    /// failure this method exists to prevent.
+    pub fn stop_group(&mut self, budget: StopBudget) -> Result<(), ProcessError> {
+        self.stop_and_reap(budget)
+    }
+
+    fn stop_and_reap(&mut self, budget: StopBudget) -> Result<(), ProcessError> {
+        stop_child_and_group(&mut self.child, self.process_group, budget)
     }
 }
 
@@ -125,7 +206,13 @@ impl Drop for ProcessHandle {
         // Adapter attachment starts the application process. Any later error
         // (for example replay verification before Run activation) must not
         // orphan that process merely because normal detach was never reached.
-        let _ = self.terminate_and_reap();
+        //
+        // Drop cannot report, so a group that survives is logged instead of
+        // silently accepted. A caller that must know uses
+        // [`ProcessHandle::stop_group`], which returns the error.
+        if let Err(error) = self.stop_and_reap(StopBudget::default()) {
+            eprintln!("[ato] process group {:?}: {error}", self.process_group);
+        }
     }
 }
 
@@ -347,7 +434,9 @@ impl AttachedAdapter for ProcessSession {
     }
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
-        self.handle.terminate_and_reap().map_err(operation_error)
+        self.handle
+            .stop_group(StopBudget::default())
+            .map_err(operation_error)
     }
 
     fn wait(&mut self) -> Result<(), AdapterError> {
@@ -487,6 +576,8 @@ pub enum ProcessError {
     UnownedProcessGroup,
     #[error("process tree termination failed")]
     TerminationFailed,
+    #[error("process group {0} survived SIGKILL and a bounded wait")]
+    ProcessGroupSurvived(u32),
 }
 
 #[cfg(all(test, unix))]
@@ -575,6 +666,89 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    fn pid_is_alive(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn wait_for_pid_file(path: &Path) -> u32 {
+        for _ in 0..500 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{} was never written", path.display());
+    }
+
+    /// The leader exiting is not the workload stopping.
+    ///
+    /// A shell that backgrounds a worker and exits leaves the worker in the
+    /// same process group. Reporting "stopped" because the leader is gone is
+    /// the bug this test pins: the group is only reclaimed when it is empty.
+    #[test]
+    fn stop_reclaims_a_child_left_behind_by_an_exited_leader() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("worker.pid");
+        let adapter = ProcessAdapter::new(ProcessSpec {
+            id: "orphaning-leader".to_owned(),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!("sleep 30 & echo $! > {}; exit 0", pid_file.display()),
+            ],
+            cwd: PathBuf::from("."),
+            environment: BTreeMap::new(),
+            isolated_group: true,
+        })
+        .unwrap();
+        let mut handle = adapter.spawn(Path::new(".")).unwrap();
+        let group = handle.process_group();
+        let worker = wait_for_pid_file(&pid_file);
+
+        // The leader is on its way out; the worker it left keeps the group
+        // alive. Stop must not accept the leader's exit as the workload's.
+        handle.stop_group(StopBudget::default()).unwrap();
+
+        assert!(
+            !pid_is_alive(worker),
+            "the worker left by the exited leader survived stop"
+        );
+        assert!(
+            !process_group_is_alive(group),
+            "process group {group} was reported stopped but is still alive"
+        );
+    }
+
+    #[test]
+    fn stop_group_stops_the_running_leader_and_reports_the_group_empty() {
+        let adapter = ProcessAdapter::new(ProcessSpec {
+            id: "group-stop".to_owned(),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "sleep 30 & wait".to_owned(),
+            ],
+            cwd: PathBuf::from("."),
+            environment: BTreeMap::new(),
+            isolated_group: true,
+        })
+        .unwrap();
+        let mut handle = adapter.spawn(Path::new(".")).unwrap();
+        let group = handle.process_group();
+        assert!(process_group_is_alive(group));
+
+        handle.stop_group(StopBudget::default()).unwrap();
+
+        assert!(!process_group_is_alive(group));
     }
 
     #[test]
