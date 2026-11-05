@@ -73,8 +73,11 @@ restricted record despite the standard endpoint returning HTTP 403. The narrow
 `prepare_appointment_permission_fix.py` candidate made both endpoints reject
 the unshared user, while an administrator and a user explicitly granted read
 access could still retrieve it. These checks cover only those endpoints and do
-not prove all fields and linked objects are protected. Other whitelisted
-methods, including appointment invoice and scheduling APIs, still need
+not prove all fields and linked objects are protected. An unshared user could
+also retrieve a synthetic invoice through the original appointment invoice
+API. With the candidate checks, that user was refused; sharing the appointment
+alone did not grant invoice access, and sharing both did. An unrelated order
+parameter was rejected. Other whitelisted methods, including scheduling APIs, still need
 authorization and security review before exposure. The image itself contains
 the unpatched source unless these generated files are incorporated.
 
