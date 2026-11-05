@@ -268,7 +268,7 @@ Solr and dependencies, direct file-path handling, source/notices, state backup,
 resource bounds, and user authentication require review before deployment.
 The test did not use real customer data and did not publish this full workflow.
 
-`review/prepare_candidate.py` verifies the two affected source file digests,
+`review/prepare_candidate.py` verifies the four affected source file digests,
 then prepares a **local-only** candidate that creates per-request controller
 instances and permits automatic case creation only for a loopback POST carrying
 a per-instance internal token. Ordinary case access still requires the
@@ -280,9 +280,18 @@ exercises response and destination restrictions against a synthetic loopback
 server. The modified engine and review app locally rejected missing/wrong tokens
 and unauthorized case operations, and processed, indexed, registered and
 searched a new synthetic document with the correct token. A token-absent engine
-run did not create a review case. These changes **do not address** the default
-administrator or plaintext user storage and are not a complete security review.
-No token or user password is included in the source or build inputs.
+run did not create a review case. The local-only candidate additionally requires an initial administrator password
+from `ATO_BINDING_INITIAL_ADMIN_PASSWORD`, removes the prefilled password, and
+stores salted PBKDF2-HMAC-SHA256 verifiers with 600,000 iterations rather than
+plaintext. This iteration count follows the [OWASP password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
+The user store is written with owner-only permissions by atomic replacement;
+existing plaintext credentials are rejected without rewriting their store.
+Local tests checked default and incorrect credentials, successful login, a
+restart without the initial password, and a legacy store that remained unchanged
+after startup failed. A fresh synthetic document was processed and indexed,
+and authenticated review search returned it. These observations are not a
+complete security review. No token or user password is included in the source
+or build inputs.
 
 The two preparation commands accept an extracted pinned source tree and write
 a new destination; they refuse unexpected input hashes or an existing output:
@@ -298,4 +307,8 @@ loopback port 8090. A production or stg implementation would need a protected,
 per-Instance binding and lifecycle for that token, rather than putting it in a
 Capsule or logs. Test-only instrumentation confirmed that repeated requests
 were dispatched to different controller objects. Other shared objects and the
-full authentication and file-upload paths have not been audited.
+full authentication and file-upload paths have not been audited. In particular,
+rate limiting, CSRF, serialized user-store input, dependency vulnerabilities,
+legacy credential migration, and backup and recovery still require work. The
+prototype fails closed if an existing user store has no administrator; deleting
+that administrator therefore requires a recovery design before release.
