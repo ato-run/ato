@@ -1,0 +1,10 @@
+--- a/addon/adapters/application.js
++++ b/addon/adapters/application.js
+@@ -17 +17 @@
+-    config.API.host = `${window.location.protocol}//${window.location.hostname}`;
++    config.API.host = `${window.location.protocol}//${window.location.host}`;
+--- a/addon/services/fetch.js
++++ b/addon/services/fetch.js
+@@ -24 +24 @@
+-    config.API.host = `${window.location.protocol}//${window.location.hostname}`;
++    config.API.host = `${window.location.protocol}//${window.location.host}`;

@@ -1,0 +1,22 @@
+--- a/NotPwnedVerifier.php
++++ b/NotPwnedVerifier.php
+@@ -90 +90 @@
+-                'https://api.pwnedpasswords.com/range/'.$hashPrefix
++                'http://breachcheck:8081/range/'.$hashPrefix
+@@ -93 +93,4 @@
+-            report($e);
++            // Do not log the password hash prefix from an HTTP exception.
++            throw new \Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException(
++                60, 'Password safety check is unavailable. Please try again later.'
++            );
+@@ -96,3 +99,7 @@
+-        $body = (isset($response) && $response->successful())
+-            ? $response->body()
+-            : '';
++        if (! $response->successful()) {
++            throw new \Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException(
++                60, 'Password safety check is unavailable. Please try again later.'
++            );
++        }
++
++        $body = $response->body();

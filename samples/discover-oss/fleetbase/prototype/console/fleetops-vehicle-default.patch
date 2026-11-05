@@ -1,0 +1,11 @@
+--- a/addon/models/vehicle.js
++++ b/addon/models/vehicle.js
+@@ -149,7 +149,7 @@
+     @attr('string') notes;
+     @attr('string', { defaultValue: 'available' }) status;
+     @attr('string') slug;
+-    @attr('boolean') online;
++    @attr('boolean', { defaultValue: false }) online;
+     @attr('raw') vin_data;
+     @attr('raw') specs;
+     @attr('raw') telematics;
