@@ -192,7 +192,8 @@ Questions we would most like reviewed:
    layering, or a sign that one root should absorb the other? See M1–M4 in
    [Detected mismatches](../rfcs/draft/DOCUMENTATION_AUTHORITY_MISMATCHES.md).
 6. Which artifact is most useful to read first: this tour, the
-   [theory draft](../theory/capsule-process-model.md), or the archived
+   [theory draft](../theory/capsule-process-model.md), the
+   [format guide](contract-and-derivation-format.md), or the archived
    transformation evidence?
 
 ## 10. State continuity: recorded evidence and the next experiment
