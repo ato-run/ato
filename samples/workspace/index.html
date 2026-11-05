@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Workspace capsule</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 1.2rem; }
+  ul { padding-left: 1.2rem; }
+  li { margin: .3rem 0; }
+  form { display: flex; gap: .5rem; margin: 1rem 0; }
+  input[type=text] { flex: 1; padding: .4rem; }
+  button { padding: .4rem .7rem; }
+  .meta { color: #555; font-size: .85rem; }
+</style>
+<h1>Workspace</h1>
+<p class="meta">The notes below are restored from <code>state.json</code> in the sealed bundle.
+Edits are kept in this browser's local storage; "Restore bundled state" discards them.</p>
+<form id="add"><input id="text" placeholder="Add a note"><button>Add</button></form>
+<ul id="notes"></ul>
+<button id="reset">Restore bundled state</button>
+<script>
+const KEY = "ato-workspace-v1";
+let state = null;
+function render() {
+  const list = document.getElementById("notes");
+  list.innerHTML = "";
+  for (const note of state.notes) {
+    const li = document.createElement("li");
+    li.textContent = note;
+    list.appendChild(li);
+  }
+}
+function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+async function bundled() {
+  const response = await fetch("state.json", { cache: "no-store" });
+  return response.json();
+}
+(async () => {
+  const stored = localStorage.getItem(KEY);
+  state = stored ? JSON.parse(stored) : await bundled();
+  render();
+})();
+document.getElementById("add").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = document.getElementById("text");
+  if (!input.value.trim()) return;
+  state.notes.push(input.value.trim());
+  input.value = "";
+  save(); render();
+});
+document.getElementById("reset").addEventListener("click", async () => {
+  state = await bundled(); save(); render();
+});
+</script>
+</html>

@@ -1,58 +1,67 @@
 # Ato
 
-Ato is a computing interface for preserving, sharing, and continuing work from
-an addressable point. It combines a computation model with a runtime and CLI
-for working with Capsules.
+**A meta-runtime for running, preserving, and sharing your computing environment.**
 
-[ato.run](https://ato.run/) is the web service built on Ato for discovering,
-trying, saving, and sharing runnable software. This repository contains the
-runtime, CLI, adapters, and supporting tools. [About Ato](https://ato.run/about/)
-· [日本語](README.ja.md)
+Ato is an open-source computing interface for running, preserving and sharing
+software, data and work state on computers you control, and for carrying the
+work forward. You can use it on a desktop, home server, workstation or cloud
+VM. This repository provides the foundation libraries, the CLI, the Runner and
+the specifications of the computation model.
 
-## Why Ato?
+Ato's distinguishing feature is that it handles not only **execution** but the
+**preservation and continuation of computation itself**.
 
-Work is often tied to a process, machine, source tree, or particular
-snapshot. Moving it elsewhere can require reconstructing the environment and
-checking whether the result still behaves as intended. Ato explores an
-approach that identifies the work separately from the physical means used to
-realize it, such as a process, container, or snapshot.
+Normally, moving an application to another environment means rebuilding its
+source, dependencies and runtime, then restoring the necessary data and
+settings separately. Even when the same application starts, the previous work
+does not necessarily continue.
 
-The design aims to support application sharing, continuing development work,
-and handing off long-running agent tasks through a common interface. These
-are use cases for the model, not a claim that every form of state or handoff
-is supported today. The example below shows the current static application
-verification path.
+Ato treats these under one Computation model. By separating the conditions a
+realization must satisfy from the way those conditions are met, it aims at
+continuation that does not depend on a particular programming language,
+framework, hardware, VM or container technology.
 
-## Core concepts
+## Use cases
 
-- **Computation** is the work that can continue from its current point.
-- **Capsule** is a sealed, immutable, addressable continuation point. It can
-  be preserved and shared; the physical method used to realize it does not
-  define its identity.
-- **Run** resumes a Capsule and advances the computation. Runs can develop
-  different futures from the same Capsule.
+Ato is intended for everything from starting a single application to
+continuing work that combines several pieces of software and data.
 
-For portable applications, a **Contract** describes observable requirements,
-a **Derivation** declares a way to realize them, and a verification **receipt**
-records the observations for a Run. See [Computation](docs/concepts/computation.md)
-and [application contracts](docs/concepts/application-contracts.md) for the
-model and its profiles.
+- **Share a development environment** — hand over a development environment and
+  its work state so a teammate can continue on a different machine.
+- **Deploy an application** — package software with the state it needs and run
+  it locally or on a remote Runner.
+- **Hand off an AI-agent task** — preserve the software an agent used, the data
+  it produced and the state it was in, and continue on another environment or
+  agent.
+- **Restore data and work state** — reconstruct files, editing state and
+  operation history by whatever method fits each of them.
+- **Combine applications** — connect different software and data and run or
+  preserve them as one piece of work.
 
-## Quick start
+## Quick Start
 
-### Try ato.run
+The sample commands below run inside the cloned repository. If you are in its
+parent directory, keep the leading `cd ato`; if step 2 already left you in
+`ato/`, skip that line.
 
-Explore public software on [ato.run](https://ato.run/) or
-[try 2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)
-in your browser.
+You can try several samples with the Ato CLI. They aim not only to start an
+application but to **continue a computation from saved data or work state**.
 
-### Try the CLI
+### 1. Install
 
-Install the Rust toolchain declared in [rust-toolchain.toml](rust-toolchain.toml),
-then clone the repository, build the CLI, and run the supplied static application
-bundle:
+The Ato CLI is available through Cargo or from
+[GitHub Releases](https://github.com/ato-run/ato/releases).
 
-```sh
+```bash
+cargo install --git https://github.com/ato-run/ato.git ato-cli --locked
+```
+
+### 2. Verify the supplied static bundle
+
+First, check the current verification path without an account. Clone the
+repository and run the supplied bundle:
+
+```bash
 git clone https://github.com/ato-run/ato.git
 cd ato
 cargo build -p ato-cli --bin ato --locked
@@ -61,78 +70,101 @@ target/debug/ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 
-The CLI validates the bundle, realizes its declared route, checks the source
-identity and HTTP response against the Contract, and writes a receipt. On
-success, inspect `.tmp/getting-started/receipt.json` for the selected
-Derivation and observations; `fully_satisfied` is `true` when all required
-observations are satisfied. `--no-open` verifies and exits without opening a
-browser. See [Getting started](docs/guides/getting-started.md) for details,
-other routes, and failure boundaries. Published CLI artifacts are listed in
-[GitHub Releases](https://github.com/ato-run/ato/releases).
+`fully_satisfied: true` means the observations declared by this bundle were
+satisfied for this Run. It does not demonstrate general cross-host portability
+or state restoration.
 
-For example, inspect the receipt with Python 3:
+### 3. Resume a whiteboard
 
-```sh
-python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
+Resume a whiteboard that already contains placed shapes from a saved Capsule:
+
+```bash
+cd ato
+ato run samples/whiteboard.capsule
 ```
 
-```text
-fully_satisfied: True
-app-proof: satisfied
-source-identity: satisfied
+The whiteboard opens in a browser with the pre-placed shapes. The source in
+`samples/whiteboard/` and `samples/whiteboard.capsule` are both included.
+Edits are kept in the browser's local storage; persistence across Runs is
+outside this sample's scope.
+
+### 4. Restore a workspace
+
+`samples/workspace.capsule` loads a workspace from the bundled `state.json`
+and lets you continue editing it:
+
+```bash
+cd ato
+ato run samples/workspace.capsule
 ```
 
-This static example does not demonstrate general cross-host portability or
-restoration of process memory.
+Edits are kept in local storage, and "Restore bundled state" returns to the
+bundled data. Saving across Runs belongs to the durable Instance and snapshot
+path, not this static sample.
 
-## Current status
+### 5. Verify the same K with different implementations
 
-Ato is experimental. This repository includes computation objects, lifecycle
-commands, adapters, portable bundle handling, and the static verification
-example above. Python, OCI, GPU, state, and external services require their
-own declared routes and host admission; their presence in the code does not
-establish availability on ato.run production.
+`samples/contract-preserving/` contains two bundles built from different source
+trees. They share one K (the digest of `proof.txt`); only the Derivation
+differs:
 
-General recovery across different hosts, process-memory restoration, and
-autonomous AI Formation are research or development work. Ato does not
-promise that every application runs everywhere or replace tools such as
-Docker and Nix. Matching a Contract alone does not guarantee state continuity
-or safe side effects. See [compatibility](docs/concepts/compatibility.md) and
-[state continuity](docs/concepts/state-continuity.md).
+```bash
+cd ato
+bash samples/contract-preserving/check.sh
+```
 
-## Roadmap and work tracking
+`PASS` means the two receipts have the same `contract_ref` and different
+`derivation_ref` values.
 
-Work is tracked in [GitHub Issues](https://github.com/ato-run/ato/issues) (and
-GitHub Projects when a board is used). There is no Markdown roadmap in this
-repository; [the archived roadmap](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)
-is historical evidence and is not updated.
+### 6. Try more
+
+| Sample | What you can try |
+|---|---|
+| [Restore a Workspace](docs/guides/samples.md#restore-a-workspace) | Continue from a bundled workspace state. |
+| [Compose Applications](docs/guides/samples.md#compose-applications) | Run several applications and data sets together on Linux/amd64 with Docker. |
+| [Contract-preserving Derivation](docs/guides/samples.md#contract-preserving-derivation) | Keep the same K while verifying a different D. |
+
+The [sample guide](docs/guides/samples.md) describes the supported
+environment, commands and verifiable conditions for each sample.
+
+> **Development status:** the whiteboard, workspace and contract-preserving
+> samples run as static samples. Compose Applications requires Linux/amd64 and
+> Docker and was not verified in this environment.
+
+## Services built on Ato
+
+Ato is an open-source project intended to run locally and on computing
+resources you manage, without depending on a particular cloud service.
+
+[ato.run](https://ato.run/) is the official service under development on Ato.
+It provides Discover and managed Runners to make software discovery, sharing
+and execution easier.
+
+Using Ato does not require an ato.run account.
 
 ## Documentation
 
-General user documentation is owned by the
-[ato.run documentation](https://ato.run/docs/). This repository owns the
-technical documentation for the runtime, CLI, specifications and operations
-([documentation index](docs/README.md)).
+- [Getting Started](docs/guides/getting-started.md)
+- [Computation model](docs/concepts/computation.md)
+- [Runner and hosting](docs/guides/runner-hosting.md)
+- [Sample guide](docs/guides/samples.md)
+- [Technical specifications](docs/specifications/README.md)
+- [Documentation index](docs/README.md)
 
-- [Getting started](docs/guides/getting-started.md) and [Formation guide](docs/guides/formation.md)
-- [Concepts](docs/concepts/computation.md), [application contracts](docs/concepts/application-contracts.md), and [glossary](docs/glossary-reference.md)
-- [Architecture](docs/architecture/README.md) and [specifications](docs/specifications/README.md)
-- [Runner and hosting](docs/guides/runner-hosting.md), [operations](docs/operations/README.md), and the [documentation index](docs/README.md)
+## Contributing
 
-## Contributing and license
+Ato is an open-source project. Bug reports, feature proposals and
+implementation contributions are welcome.
 
-See [Contributing](CONTRIBUTING.md) and [GitHub issues](https://github.com/ato-run/ato/issues).
+- [GitHub Issues](https://github.com/ato-run/ato/issues)
+- [GitHub Discussions](https://github.com/ato-run/ato/discussions)
+- [Contributing Guide](CONTRIBUTING.md)
 
-Project-authored code is licensed under the [Mozilla Public License 2.0](LICENSE)
-(`MPL-2.0`). Third-party code, dependencies, patches containing upstream code,
-and materials with their own license notices retain their respective terms.
-For example, the CPython fixture, WiX templates, and release workflow retain
-their upstream licenses; the AODD skill retains its MIT license. The CLI's
-[Apache license text](apps/cli/LICENSE-APACHE) is retained for the WiX template
-and previously distributed versions. Previously granted licenses remain in effect.
+## License
 
-This code license does not establish a new license for the Capsule Process
-Model's theoretical documents.
+Ato project code is released under the
+[Mozilla Public License 2.0](LICENSE). Third-party code and materials with
+their own license terms remain under those terms.
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="main-use-cases"></a><a id="design-principle-everything-can-be-a-capsule"></a>
@@ -141,3 +173,4 @@ Model's theoretical documents.
 <a id="the-computation-theory-behind-it"></a><a id="basic-lifecycle"></a>
 <a id="capsuletoml-example"></a><a id="project-scope"></a><a id="current-implementation-status"></a>
 <a id="capsule-run-replay-continue"></a><a id="core-kernel-and-adapter"></a>
+<a id="why-ato"></a><a id="try-atorun"></a><a id="license"></a>
