@@ -43,6 +43,7 @@ use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry, ModelSetManifes
 use ato_runtime_attempt::launch::oci::{
     LaunchedOci, OciCandidate, ServiceStart, start_service_group,
 };
+use ato_runtime_attempt::launch::process_executor::state_path_env_name;
 use ato_runtime_attempt::realize::{CandidateRealizer, RealizeFailure, Realized, RunningCandidate};
 use ato_sandbox::SandboxPolicy;
 
@@ -185,6 +186,21 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     })
 }
 
+/// Whether this host delivers the route's state by path instead of by mount.
+///
+/// Only a route that says every slot can be found through
+/// `ATO_STATE_PATH_<ID>` (`mount_required = false`) qualifies, and only on a
+/// host whose process sandbox has no mount namespace: macOS Seatbelt. There
+/// the state working copy is handed to the workload as its real host path and
+/// only that path is made writable. Anything else keeps the pre-existing
+/// behaviour — a Linux bind mount, or refusal — because silently ignoring a
+/// declared mount would give the workload a path that does not exist.
+fn state_delivered_by_path(state: &[ato_formation::authoring::BoundState]) -> bool {
+    cfg!(target_os = "macos")
+        && !state.is_empty()
+        && state.iter().all(|slot| !slot.requires_fixed_mount())
+}
+
 impl CandidateRealizer for PortableBundleExecutor<'_> {
     fn delivers_model_sets(&self) -> bool {
         self.validated.realization == PortableRealizationKind::LocalProcess
@@ -208,11 +224,14 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         match self.validated.realization {
             PortableRealizationKind::StaticWeb => None,
             PortableRealizationKind::LocalProcess => {
-                if !self.validated.derivation.state.is_empty() && !cfg!(target_os = "linux") {
+                let state_is_runnable = cfg!(target_os = "linux")
+                    || state_delivered_by_path(&self.validated.derivation.state);
+                if !self.validated.derivation.state.is_empty() && !state_is_runnable {
                     return refused(
                         "state_needs_linux_sandbox",
                         "local process runtime admission failed: declared filesystem state \
-                         requires a Linux bubblewrap sandbox",
+                         requires a Linux bubblewrap sandbox, and this Derivation does not \
+                         say it can be found through ATO_STATE_PATH_<ID>",
                     );
                 }
                 None
@@ -411,16 +430,31 @@ impl PortableBundleExecutor<'_> {
             )));
         }
         let endpoint_name = endpoint_port_env_name(&route.derivation.ports[0].id);
+        // A host without a mount namespace has nowhere to put `mount`, so the
+        // declared path is the working copy on this filesystem and the
+        // workload is told where it is.
+        let state_by_path = state_delivered_by_path(&route.derivation.state);
         let mut environment = step.env.clone();
         environment.extend(self.binding_environment.clone());
         environment.insert(endpoint_name, host_port.clone());
         for state in state_mounts {
-            environment.insert(state_path_env_name(&state.id), state.guest_path.clone());
+            let delivered = if state_by_path {
+                state.host_path.clone()
+            } else {
+                PathBuf::from(&state.guest_path)
+            };
+            environment.insert(
+                state_path_env_name(&state.id),
+                delivered
+                    .to_str()
+                    .context("portable state path is not valid UTF-8")?
+                    .to_owned(),
+            );
         }
         for input in input_mounts {
             environment.insert(
                 input.env_name.clone(),
-                if state_mounts.is_empty() {
+                if state_mounts.is_empty() || state_by_path {
                     input
                         .host_path
                         .canonicalize()
@@ -443,7 +477,7 @@ impl PortableBundleExecutor<'_> {
         let process_home = process_runtime.join("home");
         fs::create_dir_all(&process_tmp).context("create the process tmp directory")?;
         fs::create_dir_all(&process_home).context("create the process home directory")?;
-        if state_mounts.is_empty() {
+        if state_mounts.is_empty() || state_by_path {
             environment.insert(
                 "ATO_RUNTIME_DIR".to_owned(),
                 process_runtime.display().to_string(),
@@ -482,6 +516,7 @@ impl PortableBundleExecutor<'_> {
             PortableProcessMounts {
                 state: state_mounts,
                 inputs: input_mounts,
+                state_by_path,
             },
             self.context.sandbox_shim,
             self.context.sandbox_subcommand,
@@ -1161,6 +1196,9 @@ struct PortableInputMount {
 struct PortableProcessMounts<'a> {
     state: &'a [PortableStateMount],
     inputs: &'a [PortableInputMount],
+    /// The host has no mount namespace: state and input paths are delivered as
+    /// real host paths and only those paths are made writable/readable.
+    state_by_path: bool,
 }
 
 fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
@@ -1360,9 +1398,14 @@ fn portable_process_sandbox_command(
         }
         #[cfg(not(target_os = "linux"))]
         {
-            bail!(
-                "local process runtime admission failed: declared filesystem state requires a Linux bubblewrap sandbox"
-            );
+            if !mounts.state_by_path {
+                // A route that declares a fixed mount but does not say it can
+                // be found by path cannot run where there is no mount
+                // namespace. Refusing is the point: `mount` is not ignored.
+                bail!(
+                    "local process runtime admission failed: declared filesystem state requires a Linux bubblewrap sandbox"
+                );
+            }
         }
     }
     let system_roots = [
@@ -1382,8 +1425,14 @@ fn portable_process_sandbox_command(
     .into_iter()
     .map(PathBuf::from)
     .filter(|path| path.exists());
+    // Without a mount namespace the slot is not mapped to `mount`; it lives
+    // where the Instance keeps it and only that directory is writable.
+    let mut read_write = vec![runtime_root.clone()];
+    if mounts.state_by_path {
+        read_write.extend(state_mounts.iter().map(|state| state.host_path.clone()));
+    }
     let policy = SandboxPolicy::new()
-        .allow_read_write([runtime_root.clone()])
+        .allow_read_write(read_write)
         .allow_read_only(
             [workspace, interpreter_root]
                 .into_iter()
@@ -1560,20 +1609,6 @@ fn endpoint_port_env_name(port_id: &str) -> String {
     )
 }
 
-fn state_path_env_name(state_id: &str) -> String {
-    format!(
-        "ATO_STATE_PATH_{}",
-        state_id
-            .chars()
-            .map(|character| if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    )
-}
-
 fn parse_runtime_limit(runtimes: &BTreeMap<String, String>, key: &str) -> Result<u64> {
     runtimes
         .get(key)
@@ -1722,4 +1757,376 @@ pub fn run_portable_bundle_attempt(
         stop,
         error,
     })
+}
+
+#[cfg(all(test, unix))]
+mod state_path_tests {
+    use super::*;
+    use ato_formation::authoring::{BoundState, StateAccess};
+
+    fn slot(mount_required: Option<bool>) -> BoundState {
+        BoundState {
+            id: "data".to_owned(),
+            protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
+            mount: "/data".to_owned(),
+            access: StateAccess::ReadWrite,
+            mount_required,
+        }
+    }
+
+    #[test]
+    fn only_a_slot_that_explicitly_needs_no_mount_may_be_delivered_by_path() {
+        // The declaration is necessary on every platform; the host decides
+        // whether it can use it. On Linux the bind mount still happens.
+        assert!(!state_delivered_by_path(&[]));
+        assert!(!state_delivered_by_path(&[slot(None)]));
+        assert_eq!(
+            state_delivered_by_path(&[slot(Some(false))]),
+            cfg!(target_os = "macos")
+        );
+        assert!(!state_delivered_by_path(&[slot(None), slot(Some(false))]));
+        assert!(!state_delivered_by_path(&[slot(Some(false)), slot(None)]));
+        if cfg!(target_os = "macos") {
+            assert!(state_delivered_by_path(&[slot(Some(false))]));
+            assert!(state_delivered_by_path(&[
+                slot(Some(false)),
+                slot(Some(false))
+            ]));
+        }
+    }
+
+    const AUTHORED_SOURCE: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Native state"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+MOUNT_REQUIRED
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "health"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+status = 200
+
+[[derivation]]
+id = "serve"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
+"#;
+
+    fn admission_of(source: &str) -> Option<AttemptFailure> {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("app.py"), "print('ok')\n").unwrap();
+        std::fs::write(root.path().join("capsule.toml"), source).unwrap();
+        let (_, bundle) = crate::build_authored_bundle_v2(root.path()).unwrap();
+        let route_ref = bundle.index.derivations[0].to_string();
+        let validated = crate::validate_bundle_for_derivation(&bundle, &route_ref).unwrap();
+        let context = PortableRunContext {
+            cache_root: root.path(),
+            sandbox_shim: Path::new("/usr/bin/true"),
+            sandbox_subcommand: "__portable-sandbox-exec",
+        };
+        let executor = PortableBundleExecutor {
+            bundle: &bundle,
+            validated: &validated,
+            runtime_root: root.path(),
+            static_state: None,
+            filesystem_state: None,
+            binding_environment: &BTreeMap::new(),
+            context: &context,
+        };
+        // Keep the source tree alive for the duration of the call.
+        let outcome = executor.admit(&RuntimeProfile::default());
+        drop(root);
+        outcome
+    }
+
+    #[test]
+    fn state_admission_uses_the_declaration_instead_of_ignoring_the_mount() {
+        let fixed = admission_of(&AUTHORED_SOURCE.replace("MOUNT_REQUIRED", ""));
+        let by_path =
+            admission_of(&AUTHORED_SOURCE.replace("MOUNT_REQUIRED", "mount_required = false"));
+        if cfg!(target_os = "macos") {
+            let refused = fixed.expect("a fixed-mount slot is still refused on macOS");
+            assert_eq!(refused.code, "state_needs_linux_sandbox");
+            assert!(
+                by_path.is_none(),
+                "a path-delivered slot is admitted without a Linux sandbox"
+            );
+        } else {
+            assert!(fixed.is_none());
+            assert!(by_path.is_none());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_path_delivered_slot_is_the_only_extra_writable_path_and_is_not_mounted() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let runtime = root.path().join("run");
+        let toolchain = root.path().join("toolchain/bin");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&toolchain).unwrap();
+        fs::write(toolchain.join("python3"), b"#!/bin/sh\n").unwrap();
+        let state = root.path().join("state/data");
+        fs::create_dir_all(&state).unwrap();
+        let state = state.canonicalize().unwrap();
+        let state_mounts = vec![PortableStateMount {
+            id: "data".to_owned(),
+            host_path: state.clone(),
+            guest_path: "/data".to_owned(),
+        }];
+        let command = portable_process_sandbox_command(
+            &workspace,
+            &runtime,
+            toolchain.join("python3").to_str().unwrap(),
+            &["python3".to_owned()],
+            8700,
+            ".",
+            PortableProcessMounts {
+                state: &state_mounts,
+                inputs: &[],
+                state_by_path: true,
+            },
+            Path::new("/usr/bin/true"),
+            "__portable-sandbox-exec",
+        )
+        .expect("a path-delivered slot builds a sandbox command on macOS");
+        assert_eq!(command[0], "/usr/bin/true");
+        assert!(
+            !command.iter().any(|argument| argument == "bwrap"),
+            "there is no mount namespace to build: {command:?}"
+        );
+        let policy: SandboxPolicy = serde_json::from_slice(
+            &fs::read(runtime.join("sandbox-policy.json")).expect("policy written"),
+        )
+        .unwrap();
+        assert!(
+            policy.read_write_paths.contains(&state),
+            "the slot's real host path is writable: {:?}",
+            policy.read_write_paths
+        );
+        assert!(
+            !policy.read_write_paths.contains(&PathBuf::from("/data")),
+            "the guest path is not a host path and must not be allowed"
+        );
+    }
+
+    /// A real process launch, twice, over the same Instance state directory.
+    ///
+    /// `sandbox_init` is unavailable when the test itself already runs inside
+    /// a macOS sandbox (the pre-existing stateless process route fails the
+    /// same way), so the shim here only forwards the workload. What the
+    /// sandbox *would* allow is asserted by
+    /// `a_path_delivered_slot_is_the_only_extra_writable_path_and_is_not_mounted`;
+    /// this test pins the delivery itself: the host path is in
+    /// `ATO_STATE_PATH_DATA`, and the second Run reads what the first wrote.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_restarted_process_finds_the_state_the_previous_run_wrote() {
+        const APP: &str = r#"
+import json, os, sys
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+root = os.environ["ATO_STATE_PATH_DATA"]
+path = os.path.join(root, "counter")
+value = int(open(path).read()) + 1 if os.path.exists(path) else 1
+open(path, "w").write(str(value))
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"counter": value}).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+
+ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).serve_forever()
+"#;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("app.py"), APP).unwrap();
+        std::fs::write(
+            source.join("capsule.toml"),
+            AUTHORED_SOURCE.replace("MOUNT_REQUIRED", "mount_required = false"),
+        )
+        .unwrap();
+        let (_, bundle) = crate::build_authored_bundle_v2(&source).unwrap();
+        let route_ref = bundle.index.derivations[0].to_string();
+        let validated = crate::validate_bundle_for_derivation(&bundle, &route_ref).unwrap();
+
+        // A shim that forwards the workload instead of applying a policy.
+        let shim = root.path().join("shim.sh");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The Instance owns this directory; neither runtime scratch above does.
+        let state = root.path().join("instance/state/data");
+        std::fs::create_dir_all(&state).unwrap();
+        let state = state.canonicalize().unwrap();
+        let state_mounts = vec![PortableStateMount {
+            id: "data".to_owned(),
+            host_path: state.clone(),
+            guest_path: "/data".to_owned(),
+        }];
+
+        let run = |name: &str| {
+            let runtime_root = root.path().join(name);
+            std::fs::create_dir_all(&runtime_root).unwrap();
+            let workspace = runtime_root.join("workspace");
+            std::fs::create_dir_all(&workspace).unwrap();
+            std::fs::copy(source.join("app.py"), workspace.join("app.py")).unwrap();
+            let context = PortableRunContext {
+                cache_root: root.path(),
+                sandbox_shim: &shim,
+                sandbox_subcommand: "__portable-sandbox-exec",
+            };
+            let executor = PortableBundleExecutor {
+                bundle: &bundle,
+                validated: &validated,
+                runtime_root: &runtime_root,
+                static_state: None,
+                filesystem_state: None,
+                binding_environment: &BTreeMap::new(),
+                context: &context,
+            };
+            let realized = match executor.start_process(workspace, &state_mounts, &[]) {
+                Ok(realized) => realized,
+                Err(RealizeFailure::Execution(error))
+                | Err(RealizeFailure::Launch { error, .. })
+                | Err(RealizeFailure::Stopped { error, .. })
+                | Err(RealizeFailure::Abandoned { error, .. }) => {
+                    panic!("the process should start: {error:#}")
+                }
+            };
+            let url = realized
+                .candidate
+                .endpoints()
+                .get("app.http")
+                .cloned()
+                .expect("the serving endpoint");
+            let counter = wait_for_counter(&url);
+            realized
+                .candidate
+                .stop()
+                .unwrap_or_else(|error| panic!("the process should stop: {error}"));
+            counter
+        };
+
+        assert_eq!(run("run-one"), 1, "the first Run starts from empty state");
+        assert_eq!(
+            run("run-two"),
+            2,
+            "the second Run opens the state the first Run left behind"
+        );
+    }
+
+    /// Poll the workload until it answers; stop is the caller's business.
+    #[cfg(target_os = "macos")]
+    fn wait_for_counter(base: &str) -> u64 {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let authority = base.strip_prefix("http://").expect("loopback URL");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let attempt = (|| -> std::io::Result<String> {
+                let mut stream = TcpStream::connect(authority)?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                write!(
+                    stream,
+                    "GET /counter HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+                )?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response)?;
+                Ok(response)
+            })();
+            if let Ok(response) = attempt
+                && let Some((_, body)) = response.split_once("\r\n\r\n")
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+            {
+                return value["counter"].as_u64().expect("counter value");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the workload never answered at {base}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_declared_fixed_mount_is_still_refused_where_there_is_no_mount_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let runtime = root.path().join("run");
+        let toolchain = root.path().join("toolchain/bin");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&toolchain).unwrap();
+        fs::write(toolchain.join("python3"), b"#!/bin/sh\n").unwrap();
+        let state = root.path().join("state/data");
+        fs::create_dir_all(&state).unwrap();
+        let state_mounts = vec![PortableStateMount {
+            id: "data".to_owned(),
+            host_path: state,
+            guest_path: "/data".to_owned(),
+        }];
+        let error = portable_process_sandbox_command(
+            &workspace,
+            &runtime,
+            toolchain.join("python3").to_str().unwrap(),
+            &["python3".to_owned()],
+            8700,
+            ".",
+            PortableProcessMounts {
+                state: &state_mounts,
+                inputs: &[],
+                state_by_path: false,
+            },
+            Path::new("/usr/bin/true"),
+            "__portable-sandbox-exec",
+        )
+        .expect_err("a plain state slot keeps the Linux-only refusal");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a Linux bubblewrap sandbox"),
+            "{error}"
+        );
+    }
 }
