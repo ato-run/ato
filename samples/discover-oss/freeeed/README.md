@@ -51,6 +51,26 @@ proof of a hosted service group. The patched engine rebuilt offline using the
 previously downloaded Maven dependencies and passed the same synthetic test;
 the configured Tika URL was also exercised against the local test server.
 
+`ProcessingPreview.java` is an experimental, synthetic-data-only upload and
+download surface around that engine. It accepts one bounded file, uses a fresh
+private job directory, and returns the metadata and native/text ZIP; it checks
+the engine output instead of accepting its exit code alone. It is not the
+upstream Review UI. `test_preview.py` starts isolated local engine and Tika
+processes, verifies a synthetic text-file round trip and job cleanup, rejects
+invalid requests, and verifies that an unavailable Tika produces an error:
+
+```sh
+python3 samples/discover-oss/freeeed/test_preview.py \
+  .tmp/freeeed-build/freeeed-processing/target/freeeed-processing-1.0-SNAPSHOT-jar-with-dependencies.jar \
+  .tmp/freeeed-tika/tika.jar .tmp/freeeed-run
+```
+
+That test passed on macOS on 2026-11-05. A local Chrome test also selected the
+synthetic file and downloaded a result. The preview has not been tested under
+the hosted Runner, reviewed for hostile files or concurrency, or published.
+The complete source and dependency notices, all supported formats, stronger
+failure reporting, and the upstream review/search workflow remain outstanding.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
