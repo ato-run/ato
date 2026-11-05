@@ -1122,6 +1122,7 @@ fn validated_routes(
                     }
                     PortableRealizationKind::OciContainer => "oci",
                     PortableRealizationKind::OciServiceGroup => "oci_service_group",
+                    PortableRealizationKind::ProcessServiceGroup => "process_service_group",
                 },
                 runtimes: route.derivation.runtimes.clone(),
                 argv: step.argv.clone(),

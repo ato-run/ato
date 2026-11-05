@@ -624,6 +624,13 @@ pub struct BoundStep {
     /// is visible to the one service that needs it and to no sibling.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<String>,
+    /// Ports served by an EARLIER step of this route that this step may
+    /// connect to. A native process service group's declared peer edges; the
+    /// Runtime grants exactly these and no others. Absent from every
+    /// Derivation formed before a route could hold native peer edges, so those
+    /// Derivations digest exactly as they did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_ports: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,6 +916,7 @@ pub fn bind_derivation(
             runtimes: BTreeMap::new(),
             state: Vec::new(),
             bindings: Vec::new(),
+            peer_ports: Vec::new(),
         });
     }
 
