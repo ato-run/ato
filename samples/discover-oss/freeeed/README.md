@@ -13,7 +13,17 @@ were built with Maven 3.9.11 and Java 17. The resulting 176 MiB JAR had SHA-256
 `a02e7af58bdf0164bbc2b5bfe4ddb8eddbd407bc1ade6b32180f925d5fd68b3d`.
 This is evidence for that local build, not a reproducibility guarantee: Maven
 dependencies and build plugins were resolved from a repository, and no complete
-dependency lock or license inventory was produced.
+dependency lock or license inventory was produced at that point.
+
+The later `dependency-inventory.json` records 217 resolved compile/runtime
+artifacts, including six classifier-specific artifacts, with their local JAR
+SHA-256 values and available POM license fields. Seven have no license field
+in the inspected POM/parent chain. For example, the Stanford CoreNLP 4.4.0 POM
+names GPL-3.0, and the AppleJavaExtensions 1.4 POM names an Apple license. This
+is a dependency-resolution inventory, not proof of which bytes are present in
+the assembly or of redistribution compliance; it does not supply the required
+license texts or corresponding source. `make_dependency_inventory.py` creates
+it from a Maven dependency tree and the exact local repository.
 
 The upstream engine's text extraction calls a Tika REST server at
 `localhost:9998`. With no Tika server, the engine logged a metadata extraction
