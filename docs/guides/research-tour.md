@@ -30,6 +30,13 @@ Two hypotheses matter for review:
    mutable Run. The Capsule's logical identity is separate from the physical
    means used to realize it (Replay, filesystem reconstruction, process
    checkpoint, VM snapshot).
+
+   Reference identity and Contract satisfaction are different notions. A
+   realization that satisfies K is not thereby the same Computation or the
+   same Capsule reference, and `ComputationRef` and `ContractRef` belong to
+   different profiles. The
+   [profile map](../concepts/application-contracts.md#profile-map) states the
+   boundary.
 2. **Contract-indexed equivalence.** Two realizations could count as the same
    point when they satisfy the same declared Contract K, even if their bytes
    differ. This is a hypothesis about how equivalence should be defined, not a
