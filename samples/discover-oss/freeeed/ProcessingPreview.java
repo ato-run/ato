@@ -8,6 +8,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -24,7 +26,7 @@ import java.util.zip.ZipOutputStream;
 public final class ProcessingPreview {
     private static final int MAX_INPUT = 10 * 1024 * 1024;
     private static final long MAX_OUTPUT = 48L * 1024 * 1024;
-    private static final Set<String> EXTENSIONS = Set.of("txt", "pdf", "docx", "eml");
+    private static final Set<String> EXTENSIONS = Set.of("txt");
     private static final Semaphore JOB = new Semaphore(1);
     private static final String PAGE = """
         <!doctype html><html lang="en"><meta charset="utf-8">
@@ -33,8 +35,9 @@ public final class ProcessingPreview {
         <main><h1>FreeEed processing preview</h1>
         <p>Experimental: synthetic files only. This preview does not include review,
         search, OCR, or a verified production workflow.</p>
-        <form><label>File (TXT, PDF, DOCX or EML; maximum 10 MiB)
-        <input type="file" required accept=".txt,.pdf,.docx,.eml"></label>
+        <p><a href="/source">Adapter and processing source</a> (dependency notices are incomplete).</p>
+        <form><label>Text file (TXT; maximum 10 MiB)
+        <input type="file" required accept=".txt"></label>
         <button>Process</button></form><p role="status" id="status"></p></main>
         <script>
         document.querySelector('form').addEventListener('submit',async e=>{
@@ -42,7 +45,7 @@ public final class ProcessingPreview {
           const status=document.querySelector('#status');
           if(!file || file.size>10485760){status.textContent='Choose a file up to 10 MiB.';return;}
           const ext=file.name.split('.').pop().toLowerCase();
-          if(!['txt','pdf','docx','eml'].includes(ext)){status.textContent='Unsupported file type.';return;}
+          if(ext!=='txt'){status.textContent='Unsupported file type.';return;}
           status.textContent='Processing…';
           try{const response=await fetch('/process',{method:'POST',headers:{
             'Content-Type':'application/octet-stream','X-File-Extension':ext},body:file});
@@ -56,20 +59,25 @@ public final class ProcessingPreview {
 
     private final Path jar;
     private final Path work;
+    private final Path sourceArchive;
     private final String tika;
 
-    private ProcessingPreview(Path jar, Path work, String tika) throws IOException {
+    private ProcessingPreview(Path jar, Path work, String tika, Path sourceArchive) throws IOException {
         this.jar = jar.toRealPath();
         this.work = work.toRealPath(LinkOption.NOFOLLOW_LINKS);
         this.tika = tika;
+        this.sourceArchive = sourceArchive == null ? null : sourceArchive.toRealPath();
         if (!Files.isRegularFile(this.jar) || !Files.isDirectory(this.work, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("invalid runtime paths");
         }
+        if (this.sourceArchive != null && (!Files.isRegularFile(this.sourceArchive)
+                || Files.size(this.sourceArchive) > 16L * 1024 * 1024)) throw new IOException("invalid source archive");
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 5) throw new IllegalArgumentException("jar work host port tika-url");
-        ProcessingPreview preview = new ProcessingPreview(Path.of(args[0]), Path.of(args[1]), args[4]);
+        if (args.length != 5 && args.length != 6) throw new IllegalArgumentException("jar work host port tika-url [source-zip]");
+        ProcessingPreview preview = new ProcessingPreview(Path.of(args[0]), Path.of(args[1]), args[4],
+                args.length == 6 ? Path.of(args[5]) : null);
         HttpServer server = HttpServer.create(new InetSocketAddress(args[2], Integer.parseInt(args[3])), 8);
         server.createContext("/", preview::handle);
         server.setExecutor(Executors.newFixedThreadPool(4));
@@ -85,6 +93,9 @@ public final class ProcessingPreview {
             } else if (path.equals("/health") && method.equals("GET")) {
                 boolean healthy = health();
                 send(exchange, healthy ? 200 : 503, "text/plain", (healthy ? "ok\n" : "unavailable\n").getBytes(StandardCharsets.UTF_8));
+            } else if (path.equals("/source") && method.equals("GET") && sourceArchive != null) {
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=freeeed-preview-source.zip");
+                send(exchange, 200, "application/zip", Files.readAllBytes(sourceArchive));
             } else if (path.equals("/process") && method.equals("POST")) {
                 process(exchange);
             } else {
@@ -126,10 +137,20 @@ public final class ProcessingPreview {
         Path job = null;
         byte[] resultBytes;
         try {
-            job = Files.createTempDirectory(work, "freeeed-job-");
-            Path input = Files.createDirectory(job.resolve("input"));
             byte[] bytes = exchange.getRequestBody().readNBytes((int) size + 1);
             if (bytes.length != size) throw new IOException("incomplete input");
+            try {
+                String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+                if (text.codePoints().anyMatch(c -> Character.isISOControl(c) && c != '\n' && c != '\r' && c != '\t')) {
+                    send(exchange, 400, "text/plain", "Invalid text.\n".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+            } catch (CharacterCodingException invalid) {
+                send(exchange, 400, "text/plain", "Invalid text.\n".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+            job = Files.createTempDirectory(work, "freeeed-job-");
+            Path input = Files.createDirectory(job.resolve("input"));
             Files.write(input.resolve("document." + extension), bytes);
             Path project = job.resolve("fixture.project");
             String properties = "project-name=File processing preview\nproject-code=job\ninput=" + input

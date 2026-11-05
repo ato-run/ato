@@ -21,4 +21,4 @@ else
   trap - EXIT HUP INT TERM
 fi
 exec java -Djava.io.tmpdir="$base/jobs" -Duser.home="$base/jobs" \
-  -cp /capsule/preview ProcessingPreview "$engine" "$base/jobs" 0.0.0.0 8080 http://tika:9998
+  -cp /capsule/preview ProcessingPreview "$engine" "$base/jobs" 0.0.0.0 8080 http://tika:9998 /capsule/source.zip
