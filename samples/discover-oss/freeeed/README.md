@@ -233,8 +233,12 @@ Using the same `freeeed-safe-text.capsule` and the owner's connected personal
 Runner, a new staging Instance `cinst_01M6P4CVS2MYZAPQHK5J3HZS48` reported
 the OCI Contract verified and its surface ready. The owner browser opened
 `https://cinst-o2g4qlqbxmigpigg.stg-app.ato.run/`, processed a synthetic TXT,
-and displayed "Results downloaded"; the downloaded bytes were not examined in
-that staging run. Discover publication was refused with the build-not-ready
+and displayed "Results downloaded". The downloaded ZIP and its nested native
+ZIP passed integrity checks. Both the extracted text and original native file
+matched the 54-byte synthetic input, and the metadata row recorded their MD5
+`8afd6b0f1099b49266db9448115296f7` without a processing exception. This is one
+synthetic text case, not evidence of other formats or a complete review flow.
+Discover publication was refused with the build-not-ready
 message even after this validator deployment, so the Instance remains private.
 The UI message alone does not identify the exact server-side refusal or prove
 whether ingress evidence was recorded. An earlier managed-Runner import was
