@@ -16,7 +16,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tar = "0.4"
-ato-host-facts = { path = "../../../lib/ato-host-facts", version = "0.1.0" }
 ato-oci-relay = { path = "../../../lib/ato-oci-relay", version = "0.1.0" }
 
 [target.'cfg(unix)'.dependencies]

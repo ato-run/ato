@@ -183,7 +183,6 @@ name = "ato-adapter-oci"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ato-host-facts",
  "ato-oci-relay",
  "rustix",
  "serde",

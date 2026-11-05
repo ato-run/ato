@@ -134,3 +134,27 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: cargo clippy --workspace --exclude guest-agent --exclude ato-firecracker-guest-image --all-targets --all-features --locked -- -D warnings
       - run: cargo run --locked -p arch-check
+
+  relay-binaries:
+    name: relay binaries (rebuilt from source)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          # Pinned: a different zig may link a different (equivalent) binary,
+          # and the point of this job is that the committed bytes are
+          # reproducible from this source.
+          version: 0.15.2
+      - name: Rebuild and compare with the committed binaries
+        run: |
+          committed="$RUNNER_TEMP/committed-SHA256SUMS"
+          cp extensions/adapters/oci/relay-bin/SHA256SUMS "$committed"
+          scripts/build-oci-relay.sh
+          echo "--- committed" && cat "$committed"
+          echo "--- rebuilt" && cat extensions/adapters/oci/relay-bin/SHA256SUMS
+          diff -u "$committed" extensions/adapters/oci/relay-bin/SHA256SUMS
+          git diff --exit-code -- extensions/adapters/oci/relay-bin
