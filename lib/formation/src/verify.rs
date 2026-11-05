@@ -51,6 +51,9 @@ pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2: &str = "ato.contract-verifica
 /// /3 adds structured TLS evidence to an observation: the certificate the run
 /// actually received, not just the fact that a handshake succeeded.
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3: &str = "ato.contract-verification-receipt/3";
+/// /4 adds the connector evidence a relayed Run produces: which connector
+/// reached the Ports, the relay image digest and the relay container id.
+pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4: &str = "ato.contract-verification-receipt/4";
 /// The trust anchor label a certificate observation must carry to satisfy K:
 /// the public root set, never a private or test anchor.
 pub const TLS_TRUST_ANCHOR_PUBLIC_ROOTS: &str = "public-roots";
@@ -321,7 +324,7 @@ pub struct ReceiptObservation {
 
 /// Receipt-safe facts about the concrete realization selected for this Run.
 /// These fields are evidence, never Contract identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationExecutionEvidence {
     pub realization: String,
@@ -357,6 +360,22 @@ pub struct VerificationExecutionEvidence {
     pub portability_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedded_oci_image_loaded: Option<String>,
+    /// How this Run reached its route's logical Ports: `direct` on a daemon
+    /// whose container network this process can reach, `relay` when it cannot.
+    /// A receipt that records it is schema /4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
+    /// The digest of the relay image the Run built and loaded, when it used one.
+    /// Evidence only: it is not part of K, D or the bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_image_digest: Option<String>,
+    /// The relay container the Run owned, when it used one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_container_id: Option<String>,
+    /// Whether the daemon ran this route's platform through emulation. True is
+    /// evidence of how it ran, never a warning that replaces a result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_emulated: Option<bool>,
     /// Every container of an OCI service group, in start order. Empty for
     /// every other realization, and then absent from the receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

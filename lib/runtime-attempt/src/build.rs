@@ -15,6 +15,12 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+// Process-group teardown only exists on unix; the Windows build has no
+// group to stop and no crate symbol to import.
+#[cfg(unix)]
+use ato_adapter_process::{
+    StopBudget as ProcessStopBudget, process_group_is_alive, stop_child_and_group,
+};
 #[cfg(unix)]
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::BuildStepV1;
@@ -578,9 +584,7 @@ fn run_step_with_variables(
     let pid = child.id();
     // From here on, every way out stops the whole group first.
     let abort = |child: &mut std::process::Child, reason: String| -> Result<Vec<u8>> {
-        terminate_group(pid);
-        let _ = child.wait();
-        if let Err(error) = ensure_group_gone(pid) {
+        if let Err(error) = stop_child_and_group(child, pid, ProcessStopBudget::default()) {
             bail!("{reason}; {error}")
         }
         bail!(reason)
@@ -630,16 +634,15 @@ fn run_step_with_variables(
         stderr.read_available();
 
         if let Some(denied) = step.network_phase.and_then(|phase| refusal?(phase)) {
-            terminate_group(pid);
-            let status = child.wait();
-            if let Err(error) = ensure_group_gone(pid) {
+            if let Err(error) = stop_child_and_group(&mut child, pid, ProcessStopBudget::default())
+            {
                 return Err(BuildStopUnconfirmed {
                     pid,
                     cleanup: error.to_string(),
                 }
                 .into());
             }
-            let status = status.map_err(|error| BuildStopUnconfirmed {
+            let status = child.wait().map_err(|error| BuildStopUnconfirmed {
                 pid,
                 cleanup: format!("cannot reap network-refused build step: {error}"),
             })?;
@@ -695,9 +698,11 @@ fn run_step_with_variables(
                 };
                 // Anything of the step still running is stopped now, before
                 // the workspace is handed on.
-                if group_alive(pid) {
-                    terminate_group(pid);
-                    ensure_group_gone(pid)?;
+                if process_group_is_alive(pid) {
+                    stop_child_and_group(&mut child, pid, ProcessStopBudget::default())
+                        .with_context(|| {
+                            format!("build step {:?}: its process group survived", step.name)
+                        })?;
                 }
                 // What the stopped descendants had written is still read, and
                 // still bounded.
@@ -782,17 +787,6 @@ fn leader_exited(pid: u32) -> std::io::Result<bool> {
     }
 }
 
-/// Does any process of the group still exist?
-///
-/// `EPERM` means a process exists that this worker may not signal: alive.
-/// Only `ESRCH` means gone; any other answer is not taken as gone either.
-#[cfg(unix)]
-fn group_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks existence.
-    let result = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
 #[cfg(not(unix))]
 fn run_step_with_variables(
     _step: &BuildStepV1,
@@ -837,28 +831,6 @@ fn typed_step_failure(output: &[u8]) -> Option<FormationFailure> {
         FailureStage::Build,
         reported.message,
     ))
-}
-
-#[cfg(unix)]
-fn terminate_group(pid: u32) {
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", "--", &format!("-{pid}")])
-        .status();
-    std::thread::sleep(Duration::from_millis(500));
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .status();
-}
-
-#[cfg(unix)]
-fn ensure_group_gone(pid: u32) -> Result<()> {
-    for _ in 0..50 {
-        if !group_alive(pid) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    bail!("build process group {pid} survived termination")
 }
 
 /// Whether an attempt is still the one allowed to publish.
