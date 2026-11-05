@@ -10,7 +10,7 @@ repository = "https://github.com/ato-run/ato"
 dist = false
 
 [package.metadata.ato-architecture]
-layer = "lib"
+layer = "adapter-api"
 
 [[bin]]
 name = "ato-oci-relay"

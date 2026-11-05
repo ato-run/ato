@@ -29,6 +29,17 @@ use crate::connector::{ConnectorKind, PortConnection, PortConnector, PortRead, P
 const RELAY_LINUX_ARM64: &[u8] = include_bytes!("../relay-bin/linux-arm64/ato-oci-relay");
 const RELAY_LINUX_AMD64: &[u8] = include_bytes!("../relay-bin/linux-amd64/ato-oci-relay");
 
+/// The sha256 of each committed relay binary, as produced by
+/// `scripts/build-oci-relay.sh`.
+///
+/// The binary is embedded in the CLI, so this file is the provenance record:
+/// the test below refuses a binary whose bytes differ from it, and CI rebuilds
+/// the binary from source and checks the same file. A binary that cannot be
+/// rebuilt, or a source change that was not reflected in the committed binary,
+/// therefore fails a gate instead of shipping silently.
+#[cfg_attr(not(test), allow(dead_code))]
+const RELAY_SHA256SUMS: &str = include_str!("../relay-bin/SHA256SUMS");
+
 /// How long one `connect` waits for the relay to accept or refuse.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the relay container gets to exit after its stream closes.
@@ -72,6 +83,19 @@ impl RelayDestination {
 struct RelayImage {
     reference: String,
     digest: String,
+}
+
+/// Docker's architecture spelling, normalised to the two relay builds.
+///
+/// The caller passes the daemon's architecture as it observed it; this is the
+/// adapter's own mapping, so the adapter does not depend on the host-facts
+/// crate (an adapter may only use adapter-api and below).
+fn normalize_architecture(architecture: &str) -> String {
+    match architecture.trim().to_lowercase().as_str() {
+        "aarch64" | "arm64" => "arm64".to_owned(),
+        "x86_64" | "amd64" | "x86-64" => "amd64".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 fn relay_binary(architecture: &str) -> Result<&'static [u8]> {
@@ -204,10 +228,8 @@ impl DaemonRelay {
             "a relay with no declared destination would proxy nothing"
         );
         let architecture = architecture
-            .map(ato_host_facts::docker::normalize_architecture)
-            .unwrap_or_else(|| {
-                ato_host_facts::docker::normalize_architecture(std::env::consts::ARCH)
-            });
+            .map(normalize_architecture)
+            .unwrap_or_else(|| normalize_architecture(std::env::consts::ARCH));
         let image = load_image(&client, &architecture)?;
 
         let container_name = format!(
@@ -1071,6 +1093,33 @@ mod tests {
             }
         }
         assert!(found, "the relay binary is missing from the layer");
+    }
+
+    #[test]
+    fn the_embedded_relay_binaries_match_their_recorded_hashes() {
+        // Parsed from the committed SHA256SUMS, which the CI rebuild job also
+        // verifies against a binary it produced from source.
+        let recorded: BTreeMap<&str, &str> = RELAY_SHA256SUMS
+            .lines()
+            .filter_map(|line| {
+                let (hash, path) = line.split_once("  ")?;
+                Some((path.trim(), hash.trim()))
+            })
+            .collect();
+        for (path, binary) in [
+            ("linux-arm64/ato-oci-relay", RELAY_LINUX_ARM64),
+            ("linux-amd64/ato-oci-relay", RELAY_LINUX_AMD64),
+        ] {
+            let expected = recorded
+                .get(path)
+                .unwrap_or_else(|| panic!("{path} is missing from SHA256SUMS"));
+            let observed = sha256_hex(binary);
+            assert_eq!(
+                &observed, expected,
+                "{path} does not match the hash recorded in relay-bin/SHA256SUMS;                  rebuild it with scripts/build-oci-relay.sh and update the file"
+            );
+        }
+        assert_eq!(recorded.len(), 2, "SHA256SUMS lists an unexpected entry");
     }
 
     #[test]
