@@ -22,7 +22,7 @@ for origin in '' 'http://outside.invalid' 'https://tenant.invalid:443' \
   'https://tenant.invalid//' 'https://-bad.invalid' 'https://tenant.invalid.' \
   'http://127.0.0.999' 'http://localhost:80' 'http://localhost:004200'; do
   output=$(docker run --rm --network none --read-only --user 65532:65532 \
-    -e "ATO_BINDING_APP_ORIGIN=$origin" "$console_image" 2>&1) && {
+    -e "ATO_BINDING_CONSOLE_ORIGIN=$origin" "$console_image" 2>&1) && {
       echo 'Invalid origin was accepted' >&2; exit 1;
     }
   case "$output" in *'Invalid or missing application origin'*) ;; *)
@@ -43,7 +43,7 @@ for kind in http https https-default; do
   docker run -d --name "$name" --network "$network" --network-alias "console-$kind" \
     --read-only --cap-drop ALL --security-opt no-new-privileges --user 65532:65532 \
     --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-    -e "ATO_BINDING_APP_ORIGIN=$origin" "$console_image" >/dev/null
+    -e "ATO_BINDING_CONSOLE_ORIGIN=$origin" "$console_image" >/dev/null
 done
 docker run --rm --network "$network" --read-only --cap-drop ALL \
   --security-opt no-new-privileges --user 65532:65532 \

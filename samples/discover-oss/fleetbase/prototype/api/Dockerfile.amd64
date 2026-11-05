@@ -28,3 +28,8 @@ COPY --from=redis /usr/local/bin/redis-server /opt/redis/redis-server
 COPY --from=redis /usr/lib/libzstd.so.1 /opt/redis-libs/libzstd.so.1
 COPY --from=redis /usr/lib/libssl.so.3 /opt/redis-libs/libssl.so.3
 COPY --from=redis /usr/lib/libcrypto.so.3 /opt/redis-libs/libcrypto.so.3
+
+# The upstream image probes a Caddy admin endpoint which this supervisor does
+# not run. Probe the actual API and database instead; Ato's own readiness and
+# Contract observations remain separate and must still pass.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=3 CMD curl --fail --silent --max-time 3 http://127.0.0.1:8000/int/v1/onboard/should-onboard >/dev/null || exit 1

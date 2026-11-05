@@ -24,8 +24,13 @@ corresponding source changes for onboarding, Ember Core and the vehicle model
 are in the adjacent patches; patches without context require `git apply
 --unidiff-zero`. The socket bundle substitution is recorded in `prepare.py`. Source, build provenance and notices for **all** included Fleetbase
 plugins and dependencies must be assembled and reviewed before distribution.
-The console's entrypoint now requires the same canonical `ATO_BINDING_APP_ORIGIN`
-as the API supervisor. Nginx sets the upstream Host, scheme and port from the
+The console's entrypoint requires `ATO_BINDING_CONSOLE_ORIGIN`; the API
+supervisor separately requires `ATO_BINDING_APP_ORIGIN`. Both must contain the
+same canonical origin. A service-group Binding may be delivered to only one
+service, so one shared Binding cannot supply both values. Automatic, consistent
+delivery of the hosted Instance's actual origin is not yet implemented or
+verified; a deployable candidate must solve that without embedding a physical
+origin in the Contract or Derivation. Nginx sets the upstream Host, scheme and port from the
 Binding and removes client-supplied forwarding headers. It accepts an internal
 Host so Ato's readiness and Contract observations can reach the application;
 the hosted ingress still needs to enforce its own public-host boundary.
@@ -97,6 +102,12 @@ uses `volume-nocopy`: Docker's default volume population copies the image's
 `/data/caddy` into an otherwise new volume, causing the supervisor to reject
 the nonempty state as designed. The proof removes its own containers, network
 and synthetic volume on exit.
+
+The API image's Docker health check now probes the running onboarding-status
+API instead of the upstream image's unused Caddy admin port. After the full
+synthetic workflow, Docker reported the API container healthy on both arm64
+and x86_64. Docker health is only an operational signal: it does not replace
+the Ato Runner's readiness check or Contract receipt.
 
 The proxy and socket round-trip proofs were also built and passed on native
 Linux x86_64 on 2026-11-06 using the amd64 Dockerfiles. Their transferred build
