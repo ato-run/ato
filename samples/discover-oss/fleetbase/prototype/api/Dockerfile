@@ -10,6 +10,7 @@ RUN ldd /usr/sbin/mysqld && /usr/sbin/mysqld --version
 RUN mkdir -p /opt/ato-seed && cp -a /fleetbase/api/storage /opt/ato-seed/storage && cp -a /fleetbase/api/bootstrap/cache /opt/ato-seed/cache && rm -rf /fleetbase/api/storage /fleetbase/api/bootstrap/cache && ln -s /data/fleetbase/storage /fleetbase/api/storage && ln -s /data/fleetbase/cache /fleetbase/api/bootstrap/cache && printf '%s\n' 'pdo_mysql.default_socket=/data/mysql.sock' > /usr/local/etc/php/conf.d/zz-ato-local-proof.ini
 RUN rm -rf /fleetbase/console && ln -s /data/fleetbase/console /fleetbase/console && ln -s /data/fleetbase/home/composer-auth.json /fleetbase/api/auth.json
 COPY ato_origin.py /opt/ato_origin.py
+COPY state_lock.py /opt/state_lock.py
 COPY supervisor.py /opt/ato-supervisor.py
 ENTRYPOINT ["python3", "/opt/ato-supervisor.py"]
 

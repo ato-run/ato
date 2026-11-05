@@ -9,7 +9,7 @@ volume="fleetbase-socket-proof-data-$tag"
 app="fleetbase-socket-proof-app-$tag"
 console="fleetbase-socket-proof-console-$tag"
 mock="fleetbase-socket-proof-mock-$tag"
-app_image=${FLEETBASE_SOCKET_PROOF_APP_IMAGE:-ato-local-proof/fleetbase-combined:socket-roundtrip}
+app_image=${FLEETBASE_SOCKET_PROOF_APP_IMAGE:-ato-local-proof/fleetbase-combined:state-lock}
 console_image=${FLEETBASE_SOCKET_PROOF_CONSOLE_IMAGE:-ato-local-proof/fleetbase-console:origin-bound-arm64}
 mock_image=${FLEETBASE_SOCKET_PROOF_MOCK_IMAGE:-ato-local-proof/fleetbase-breach-proxy:arm64-v2}
 
@@ -66,3 +66,36 @@ while :; do
   sleep 1
 done
 echo 'PASS: application Docker health checks the live API'
+
+# A second supervisor mounted on the same volume must refuse before it opens
+# the state, even when it runs in a separate container.
+set +e
+lock_output=$(docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+  --mount "type=volume,src=$volume,dst=/data,volume-nocopy" \
+  -e ATO_BINDING_APP_ORIGIN=http://localhost:4200 "$app_image" 2>&1)
+lock_status=$?
+set -e
+if [ "$lock_status" -eq 0 ]; then
+  echo 'Second supervisor unexpectedly started' >&2
+  exit 1
+fi
+case "$lock_output" in
+  *'Persistent state is locked or invalid; refusing to start.'*) ;;
+  *) echo 'Second supervisor failed for an unexpected reason' >&2; exit 1 ;;
+esac
+echo 'PASS: second container cannot open the active state volume'
+
+# A graceful stop must release the lock and permit the same container to run
+# again. This verifies startup, not backup or crash recovery.
+docker stop --timeout 45 "$app" >/dev/null
+docker start "$app" >/dev/null
+i=0
+while :; do
+  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$app")
+  case "$health" in healthy) break ;; unhealthy|missing) echo "Unexpected restart health: $health" >&2; exit 1 ;; esac
+  i=$((i + 1))
+  [ "$i" -lt 120 ] || { echo 'Restart health did not become ready' >&2; exit 1; }
+  sleep 1
+done
+echo 'PASS: graceful stop releases the volume lock for restart'
