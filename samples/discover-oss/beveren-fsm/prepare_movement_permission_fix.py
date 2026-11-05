@@ -53,6 +53,14 @@ def main():
                  + '\t\tfrappe.throw("Not permitted to create target document", frappe.PermissionError)\n')
         if section.count(before) != 1:
             raise ValueError(f"Unexpected {method} function structure")
+        if method in ("make_purchase_order", "make_purchase_invoice"):
+            request_line = '\t\t\tservice_request = frappe.get_doc("Service Request", order.service_request)\n'
+            guarded_request = (request_line
+                + '\t\t\tif not frappe.has_permission("Service Request", "read", doc=service_request):\n'
+                + '\t\t\t\tservice_request = None\n')
+            if section.count(request_line) != 1:
+                raise ValueError(f"Unexpected linked request structure in {method}")
+            section = section.replace(request_line, guarded_request, 1)
         updated = updated[:start] + section.replace(before, after, 1) + updated[end:]
     compile(updated, args.upstream.name, "exec")
     result = updated.encode("utf-8")

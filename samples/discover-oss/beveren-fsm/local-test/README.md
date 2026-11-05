@@ -18,7 +18,7 @@ passwords in a private environment file. The `init` service creates a new
 site; it is not safe to rerun against an existing database. The scripts run in
 the `init` image and communicate with `web` on the internal network. Run
 `setup_synthetic.py`, then `workflow.py`, followed by `authz_probe.py`,
-`shared_order_probe.py`, `appointment_probe.py`, `order_mapping_probe.py`,
+`shared_order_probe.py`, `appointment_probe.py`, `order_mapping_probe.py`, `linked_request_probe.py`,
 `schedule_probe.py`, and `schedule_workflow_probe.py`; `smoke.py` checks the
 login page and built scheduling assets. The probes create synthetic records
 and users and assume the first test order and request use the IDs shown in the
