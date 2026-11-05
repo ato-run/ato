@@ -20,6 +20,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// The native process group (and its peer broker) is a Unix-only
+// materialization: it needs process groups and Unix sockets, and it refuses
+// the whole route on other hosts. The import follows the code it belongs to.
+#[cfg(unix)]
 use crate::process_group::{HelperProcess, ProcessServiceGroup, ServiceSpec};
 use crate::{
     OCI_CPU_MILLIS_RUNTIME, OCI_ENTRYPOINT_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME,
