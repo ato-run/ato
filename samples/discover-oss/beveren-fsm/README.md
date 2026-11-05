@@ -53,9 +53,12 @@ Linux tmpfs because the macOS shared filesystem caused a case-sensitivity
 failure; this test does **not** establish durable storage or restart recovery.
 An SQL dump of the synthetic site was imported into a separate database on the
 same server; both databases contained 729 tables, one service request and one
-service order. This checks database dump and import, not complete application
-recovery: site configuration, encryption key, uploaded files and runtime have
-not been restored and exercised together.
+service order. A second local Frappe process using the restored database and a
+copy of the synthetic site directory accepted the synthetic administrator
+login and returned the restored request and order. This is not a disaster
+recovery test: the database server, host, Redis and app image were shared, the
+site directory copy was not captured atomically with the dump, and uploaded
+files, encryption-dependent data and scheduler recovery were not exercised.
 
 The original source also failed two actual role checks. A synthetic Website
 User without Service Request or Service Order access received HTTP 200 and
