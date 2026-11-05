@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::process_group::{HelperProcess, ProcessServiceGroup, ServiceSpec};
 use crate::{
     OCI_CPU_MILLIS_RUNTIME, OCI_ENTRYPOINT_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME,
     OCI_PIDS_LIMIT_RUNTIME, OCI_PLATFORM_RUNTIME, OCI_USER_RUNTIME, OCI_WORKING_DIR_RUNTIME,
@@ -30,7 +31,9 @@ use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
 };
-use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
+use ato_adapter_process::{
+    ProcessAdapter, ProcessHandle, ProcessSpec, StopBudget as ProcessStopBudget,
+};
 use ato_formation::request::{AttemptFailure, AttemptOutcomes, RuntimeProfile};
 use ato_formation::verify::{
     ContractVerification, ContractVerificationReceipt, VerificationExecutionEvidence,
@@ -44,6 +47,8 @@ use ato_runtime_attempt::launch::oci::{
     LaunchedOci, OciCandidate, ServiceStart, start_service_group,
 };
 use ato_runtime_attempt::launch::process_executor::state_path_env_name;
+#[cfg(unix)]
+use ato_runtime_attempt::peer_broker::PeerBroker;
 use ato_runtime_attempt::realize::{CandidateRealizer, RealizeFailure, Realized, RunningCandidate};
 use ato_sandbox::SandboxPolicy;
 
@@ -60,6 +65,11 @@ pub struct PortableRunContext<'a> {
     pub sandbox_shim: &'a Path,
     /// The subcommand that applies a portable sandbox policy.
     pub sandbox_subcommand: &'a str,
+    /// What this host can do, measured once by the caller. `None` means the
+    /// executor probes for itself at admission time; a caller that already
+    /// probed (the CLI) passes its own so `ato pack` and `ato run` cannot
+    /// disagree.
+    pub host: Option<&'a ato_host_facts::HostFacts>,
 }
 
 /// Project a validated native OCI route into the existing Runner wire contract.
@@ -178,6 +188,71 @@ pub struct PortableBundleExecutor<'a> {
     pub context: &'a PortableRunContext<'a>,
 }
 
+impl PortableBundleExecutor<'_> {
+    /// This host's facts: the caller's, or one probe of the selected route's
+    /// requirements when the caller did not measure it.
+    fn host_facts(&self) -> ato_host_facts::HostFacts {
+        match self.context.host {
+            Some(host) => host.clone(),
+            None => ato_host_facts::HostFacts::probe(std::slice::from_ref(
+                &self.execution_requirements(),
+            )),
+        }
+    }
+
+    /// What this route needs from the host, read from the selected Derivation.
+    pub fn execution_requirements(&self) -> ato_host_facts::ExecutionRequirements {
+        execution_requirements_for(self.validated, self.runtime_root)
+    }
+}
+
+/// What a validated route needs from this host.
+///
+/// Read from the D that was selected: the platform the route's images are
+/// pinned to, whether it declares filesystem state, and the one path this Run
+/// will hand the daemon. Nothing here is derived from argv.
+pub fn execution_requirements_for(
+    validated: &ValidatedPortableApplication,
+    runtime_root: &Path,
+) -> ato_host_facts::ExecutionRequirements {
+    let derivation = &validated.derivation;
+    let mut requirements = match validated.realization {
+        PortableRealizationKind::StaticWeb => ato_host_facts::ExecutionRequirements::default(),
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup => {
+            ato_host_facts::ExecutionRequirements::process()
+        }
+        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+            ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
+        }
+    };
+    // A state slot that declares it can be found through
+    // `ATO_STATE_PATH_<ID>` does not need the Linux sandbox's mount namespace,
+    // so it is not a state requirement for admission. Linux still bind-mounts
+    // it; the host facts decide only what the host must provide.
+    if !derivation.state.is_empty() && !declares_path_delivery(&derivation.state) {
+        requirements = requirements.with_state();
+    }
+    requirements.binding(runtime_root)
+}
+
+/// The `os/arch` platform this route's containers are pinned to.
+///
+/// A service group states it on the Derivation; a single service states it on
+/// its serving step. A route that states none returns `None`, and a platform
+/// that was not declared is not guessed.
+fn route_platform(derivation: &ato_formation::authoring::BoundDerivation) -> Option<String> {
+    derivation
+        .runtimes
+        .get(OCI_PLATFORM_RUNTIME)
+        .cloned()
+        .or_else(|| {
+            derivation
+                .steps
+                .iter()
+                .find_map(|step| step.runtimes.get(OCI_PLATFORM_RUNTIME).cloned())
+        })
+}
+
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     Some(AttemptFailure {
         code: code.to_owned(),
@@ -195,10 +270,17 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
 /// only that path is made writable. Anything else keeps the pre-existing
 /// behaviour — a Linux bind mount, or refusal — because silently ignoring a
 /// declared mount would give the workload a path that does not exist.
+/// Whether every declared state slot says it can be found by path.
+///
+/// Platform-independent: it is a property of the Derivation. Whether a host
+/// can use it is decided by the host facts and by `state_delivered_by_path`
+/// below (which needs a place to put the path).
+fn declares_path_delivery(state: &[ato_formation::authoring::BoundState]) -> bool {
+    !state.is_empty() && state.iter().all(|slot| !slot.requires_fixed_mount())
+}
+
 fn state_delivered_by_path(state: &[ato_formation::authoring::BoundState]) -> bool {
-    cfg!(target_os = "macos")
-        && !state.is_empty()
-        && state.iter().all(|slot| !slot.requires_fixed_mount())
+    cfg!(target_os = "macos") && declares_path_delivery(state)
 }
 
 impl CandidateRealizer for PortableBundleExecutor<'_> {
@@ -221,38 +303,62 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 );
             }
         }
-        match self.validated.realization {
-            PortableRealizationKind::StaticWeb => None,
-            PortableRealizationKind::LocalProcess => {
-                let state_is_runnable = cfg!(target_os = "linux")
-                    || state_delivered_by_path(&self.validated.derivation.state);
-                if !self.validated.derivation.state.is_empty() && !state_is_runnable {
-                    return refused(
-                        "state_needs_linux_sandbox",
-                        "local process runtime admission failed: declared filesystem state \
-                         requires a Linux bubblewrap sandbox, and this Derivation does not \
-                         say it can be found through ATO_STATE_PATH_<ID>",
-                    );
-                }
-                None
+        // The capability question is answered from observed host facts, not
+        // from the OS this binary was compiled for: a container route can run
+        // on a VM-backed or rootless daemon through the Run's connector, and
+        // the facts are what decide which connector that is.
+        let requirements = self.execution_requirements();
+        let probed;
+        let host = match self.context.host {
+            Some(host) => host,
+            None => {
+                probed = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
+                &probed
             }
-            // The adapter forwards a container's Port from its internal
-            // bridge, which Docker Desktop keeps inside its VM.
-            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup
-                if !cfg!(target_os = "linux") =>
-            {
-                refused(
-                    "oci_needs_native_linux",
-                    format!(
-                        "{} routes require a native Linux Docker host",
-                        self.validated.realization.label()
-                    ),
-                )
-            }
-            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
-                None
-            }
+        };
+        let status = ato_host_facts::execution_status(host, &requirements);
+        if status.state != ato_host_facts::CapabilityState::Advertised {
+            let reason = status
+                .reasons
+                .iter()
+                .find(|reason| !reason.code.is_warning())
+                .or_else(|| status.reasons.first());
+            let (code, detail) = match reason {
+                Some(reason) => (reason.code.as_str(), reason.message.clone()),
+                None => ("execution_unavailable", status.describe()),
+            };
+            return refused(
+                code,
+                format!(
+                    "{} runtime admission failed on this host: {detail}",
+                    self.validated.realization.label()
+                ),
+            );
         }
+        if self.validated.realization == PortableRealizationKind::OciContainer
+            && host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay)
+        {
+            // A single container has no group network for a relay to join, so
+            // this Run has no materialization for it. Refusing here is honest;
+            // silently trying the bridge would fail later, less clearly.
+            return refused(
+                "oci_container_relay_unsupported",
+                "this OCI container route needs a relay on this host (a VM-backed or rootless \
+                 daemon), which this Run does not implement for a single container; a service \
+                 group route runs through the relay, and a native Linux daemon runs directly",
+            );
+        }
+        if requirements.needs_container && host.connector_choice().is_none() {
+            return refused(
+                "oci_connector_unavailable",
+                format!(
+                    "{} runtime admission failed: no connector reaches this daemon \
+                     (a remote daemon cannot receive this Run's workspace)",
+                    self.validated.realization.label()
+                ),
+            );
+        }
+        None
     }
 
     fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
@@ -273,6 +379,9 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         for reference in &dependency_fetches {
             eprintln!("dependency fetched and verified: {reference}");
         }
+        // One measurement of this host, used for both the connector choice and
+        // the evidence that records it.
+        let host = self.host_facts();
         let state_mounts =
             resolve_portable_state_mounts(route, self.runtime_root, self.filesystem_state)?;
         let input_mounts = if route.model_sets.is_empty() {
@@ -293,10 +402,13 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 self.start_process(workspace, &state_mounts, &input_mounts)?
             }
             PortableRealizationKind::OciContainer => {
-                self.start_container(&hydrated, workspace, &state_mounts)?
+                self.start_container(&hydrated, workspace, &state_mounts, &host)?
             }
             PortableRealizationKind::OciServiceGroup => {
-                self.start_service_group(&hydrated, workspace, &state_mounts)?
+                self.start_service_group(&hydrated, workspace, &state_mounts, &host)?
+            }
+            PortableRealizationKind::ProcessServiceGroup => {
+                self.start_process_group(workspace, &state_mounts, &input_mounts)?
             }
         };
         realized.execution.dependency_fetches = dependency_fetches;
@@ -558,8 +670,22 @@ impl PortableBundleExecutor<'_> {
         hydrated: &ato_objects::PortableApplicationBundle,
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
+        host: &ato_host_facts::HostFacts,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
+        // A single container has no group network to join, so the relay
+        // materialization is not implemented for it. Admission refuses that
+        // combination first; this is the same decision, stated where the
+        // container would have been started.
+        if host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay) {
+            return Err(launch(
+                anyhow::anyhow!(
+                    "a single OCI container route needs a relay on this host, which this Run does \
+                     not implement; use a service group route or a native Linux daemon"
+                ),
+                &workspace,
+            ));
+        }
         let step = &route.derivation.steps[0];
         let port = &route.derivation.ports[0];
         let guest_port = port.guest_port.context("OCI route omitted guest_port")?;
@@ -647,6 +773,7 @@ impl PortableBundleExecutor<'_> {
         hydrated: &ato_objects::PortableApplicationBundle,
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
+        host: &ato_host_facts::HostFacts,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let derivation = &route.derivation;
@@ -726,13 +853,38 @@ impl PortableBundleExecutor<'_> {
                 guards: Vec::new(),
             });
         }
-        let group = OciNetwork::create(&route.derivation_ref.to_string(), &BTreeMap::new())
+        // Which materialization reaches the Ports is a fact about the daemon,
+        // recorded in this Run's evidence. A native Linux daemon keeps the
+        // direct bridge; a VM-backed or rootless one needs the Run's relay.
+        let connector_choice = host.connector_choice();
+        let relay = match connector_choice {
+            Some(ato_host_facts::ConnectorChoice::Relay) => {
+                let destinations = derivation
+                    .ports
+                    .iter()
+                    .filter_map(|port| {
+                        port.guest_port
+                            .map(|guest_port| (port.from.clone(), guest_port))
+                    })
+                    .collect::<Vec<_>>();
+                Some(ato_runtime_attempt::launch::oci::RelayStart {
+                    destinations,
+                    architecture: host.docker.architecture.clone(),
+                    // The Run's own scratch, not just the route: two Runs of
+                    // the same bundle are two relays.
+                    label: self.runtime_root.display().to_string(),
+                })
+            }
+            _ => None,
+        };
+        let mut group = OciNetwork::create(&route.derivation_ref.to_string(), &BTreeMap::new())
             .and_then(|network| {
                 start_service_group(
                     network,
                     &workspace,
                     services,
                     StopBudget::DEFAULT,
+                    relay,
                     &mut |name, group| wait_until_service_accepts_tcp(route, name, group),
                 )
             })
@@ -761,17 +913,15 @@ impl PortableBundleExecutor<'_> {
                 .iter()
                 .find(|port| port.id == port_id)
                 .context("observation names undeclared service Port")?;
-            let (_, handle) = group
-                .services()
-                .find(|(name, _)| *name == port.from)
-                .context("observation service was not started")?;
-            let address = std::net::SocketAddr::new(
-                handle
-                    .container_address()
-                    .context("observation service has no network address")?,
-                port.guest_port
-                    .context("observation Port omitted guest port")?,
-            );
+            let guest_port = port
+                .guest_port
+                .context("observation Port omitted guest port")?;
+            // The observation reaches the Port the way this Run reaches any
+            // Port: the group's connector decides, and hands back an address
+            // the observation path can dial.
+            let address = group
+                .expose(port.from.as_str(), guest_port)
+                .context("expose the observation's service Port")?;
             observation_endpoints.insert(port.id.clone(), format!("http://{address}"));
         }
         let surface = group
@@ -788,6 +938,18 @@ impl PortableBundleExecutor<'_> {
         execution.container_id = surface.map(|handle| handle.container_id().to_owned());
         execution.image = surface.map(|handle| handle.image().to_owned());
         execution.platform = surface.map(|handle| handle.platform().to_owned());
+        // Connector evidence exists only for the materialization that needs
+        // it. A direct Run's receipt is byte-for-byte the receipt stg already
+        // produced: no /4, no new fields, the same schema.
+        if let Some(relay) = group.relay_evidence() {
+            execution.connector = Some(group.connector_kind().as_str().to_owned());
+            execution.relay_image_digest = Some(relay.image_digest);
+            execution.relay_container_id = Some(relay.container_id);
+            execution.platform_emulated = Some(matches!(
+                host.docker.platforms.get(platform.as_str()),
+                Some(ato_host_facts::PlatformSupport::Emulated { .. })
+            ));
+        }
         execution.services = group
             .services()
             .map(
@@ -811,6 +973,325 @@ impl PortableBundleExecutor<'_> {
         })
     }
 
+    /// The route's native process group: one service at a time, each started
+    /// only after the previous one accepts TCP, and each receiving only its
+    /// own Ports, Bindings, and declared peer edges.
+    ///
+    /// A service's Port is bound from `ATO_ENDPOINT_<PORT_ID>_PORT`; this path
+    /// never rewrites an argv element, so a hardcoded guest port fails in the
+    /// sandbox instead of being silently replaced. A declared peer edge is
+    /// reached through a runtime-owned loopback shim and Unix-socket broker,
+    /// never through the peer's real host port.
+    #[cfg(unix)]
+    fn start_process_group(
+        &self,
+        workspace: PathBuf,
+        state_mounts: &[PortableStateMount],
+        input_mounts: &[PortableInputMount],
+    ) -> Result<Realized, RealizeFailure> {
+        let route = self.validated;
+        let derivation = &route.derivation;
+        // Admission refuses both; this is the last check of what this launch
+        // would actually do, not a second policy.
+        if !state_mounts.is_empty() || !input_mounts.is_empty() {
+            return Err(launch(
+                anyhow::anyhow!(
+                    "a native process service group does not model state or Model Set mounts"
+                ),
+                &workspace,
+            ));
+        }
+        let process_runtime = self.runtime_root.join("process");
+        let peer_root = self.runtime_root.join("peer");
+        fs::create_dir_all(&process_runtime)
+            .and_then(|()| fs::create_dir_all(&peer_root))
+            .with_context(|| format!("create {}", process_runtime.display()))
+            .map_err(|error| launch(error, &workspace))?;
+
+        // Allocate one loopback host port per declared Port before anything
+        // starts, so the env the service reads, the sandbox rule that permits
+        // the bind, and readiness all name the same port.
+        let mut host_ports = BTreeMap::new();
+        for port in &derivation.ports {
+            host_ports.insert(
+                port.id.as_str(),
+                free_loopback_port().map_err(|error| launch(error, &workspace))?,
+            );
+        }
+
+        // One token per declared edge. The broker table is the authority: a
+        // token that is not here cannot name any target.
+        struct Edge<'a> {
+            consumer: &'a str,
+            peer: &'a str,
+            token: String,
+            shim_port: u16,
+        }
+        let mut edges = Vec::new();
+        let mut broker_routes = BTreeMap::new();
+        for (index, step) in derivation.steps.iter().enumerate() {
+            for peer in &step.peer_ports {
+                let host_port = *host_ports
+                    .get(peer.as_str())
+                    .expect("validated peer Port has an allocated port");
+                let token = format!("{index}-{}-{peer}", step.id);
+                broker_routes.insert(
+                    token.clone(),
+                    std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, host_port)),
+                );
+                edges.push(Edge {
+                    consumer: step.id.as_str(),
+                    peer: peer.as_str(),
+                    token,
+                    shim_port: free_loopback_port().map_err(|error| launch(error, &workspace))?,
+                });
+            }
+        }
+        let broker = if broker_routes.is_empty() {
+            None
+        } else {
+            Some(
+                PeerBroker::start(&peer_root, broker_routes)
+                    .map_err(|error| launch(error.context("start the peer broker"), &workspace))?,
+            )
+        };
+        let broker_socket = broker
+            .as_ref()
+            .map(|broker| broker.socket_path().to_path_buf());
+
+        let mut services = Vec::with_capacity(derivation.steps.len());
+        let mut endpoints = BTreeMap::new();
+        let mut runtime_identity = BTreeMap::new();
+        for step in &derivation.steps {
+            let service_runtime = process_runtime.join(&step.id);
+            fs::create_dir_all(&service_runtime)
+                .map_err(|error| launch(error.into(), &workspace))?;
+            let process_tmp = service_runtime.join("tmp");
+            let process_home = service_runtime.join("home");
+            fs::create_dir_all(&process_tmp)
+                .and_then(|()| fs::create_dir_all(&process_home))
+                .map_err(|error| launch(error.into(), &workspace))?;
+
+            let mut environment = step.env.clone();
+            for binding in &step.bindings {
+                let name = crate::binding_environment_name(binding);
+                if let Some(value) = self.binding_environment.get(&name) {
+                    environment.insert(name, value.clone());
+                }
+            }
+            for port in derivation.ports.iter().filter(|port| port.from == step.id) {
+                environment.insert(
+                    endpoint_port_env_name(&port.id),
+                    host_ports[port.id.as_str()].to_string(),
+                );
+            }
+            let step_edges = edges
+                .iter()
+                .filter(|edge| edge.consumer == step.id)
+                .collect::<Vec<_>>();
+            for edge in &step_edges {
+                environment.insert(
+                    endpoint_port_env_name(edge.peer),
+                    edge.shim_port.to_string(),
+                );
+            }
+            environment.insert(
+                "ATO_RUNTIME_DIR".to_owned(),
+                service_runtime.display().to_string(),
+            );
+            for name in ["TMPDIR", "TMP", "TEMP"] {
+                environment.insert(name.to_owned(), process_tmp.display().to_string());
+            }
+            environment.insert("HOME".to_owned(), process_home.display().to_string());
+            environment.insert(
+                "XDG_CACHE_HOME".to_owned(),
+                process_home.join(".cache").display().to_string(),
+            );
+
+            let python_version = step
+                .runtimes
+                .get(PYTHON_RUNTIME)
+                .context("native process service omitted python")
+                .map_err(|error| launch(error, &workspace))?;
+            let mut command = step.argv.clone();
+            if !matches!(command[0].as_str(), "python" | "python3") {
+                return Err(RealizeFailure::Execution(anyhow::anyhow!(
+                    "Python process service `{}` must use a logical python executable in argv[0]",
+                    step.id
+                )));
+            }
+            let (executable, version) =
+                resolve_pinned_python(python_version).map_err(|error| launch(error, &workspace))?;
+            command[0] = executable.clone();
+            // No argv port rewrite: the new path binds explicitly through the
+            // environment and refuses a hardcoded guest port.
+
+            ato_runtime_attempt::launch::executable_gate::validate_derivation_executable(
+                &step.argv[0],
+                &workspace.join(&step.cwd),
+                &environment,
+                derivation,
+            )
+            .context(ato_runtime_attempt::launch::executable_gate::context_for_launch())
+            .map_err(|error| launch(error, &workspace))?;
+
+            // Start this service's peer shims before the service itself. The
+            // shim is runtime-owned; its target and token come from D's
+            // declared edges, never from the workload.
+            let mut helpers = Vec::with_capacity(step_edges.len());
+            for edge in &step_edges {
+                let socket = broker_socket
+                    .as_deref()
+                    .expect("a declared edge implies a broker");
+                let policy_path =
+                    service_runtime.join(format!("peer-{}.json", edge.peer.replace('.', "_")));
+                let shim_command = portable_peer_shim_command(
+                    &workspace,
+                    &service_runtime,
+                    socket,
+                    edge.shim_port,
+                    &edge.token,
+                    self.context.sandbox_shim,
+                    self.context.sandbox_subcommand,
+                    &policy_path,
+                )
+                .map_err(|error| launch(error, &workspace))?;
+                let adapter = ProcessAdapter::new(ProcessSpec {
+                    id: format!("{}-peer-{}", step.id, edge.peer),
+                    command: shim_command,
+                    cwd: PathBuf::from("."),
+                    environment: BTreeMap::new(),
+                    isolated_group: true,
+                })
+                .map_err(|error| launch(error.into(), &workspace))?;
+                let mut handle = adapter
+                    .spawn(&workspace)
+                    .map_err(|error| launch(error.into(), &workspace))?;
+                wait_for_loopback(
+                    std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, edge.shim_port)),
+                    &mut handle,
+                    &format!("{} peer {}", step.id, edge.peer),
+                )
+                .map_err(|error| launch(error, &workspace))?;
+                helpers.push(HelperProcess {
+                    name: format!("{} peer {}", step.id, edge.peer),
+                    handle,
+                });
+            }
+
+            let bind_ports = derivation
+                .ports
+                .iter()
+                .filter(|port| port.from == step.id)
+                .map(|port| host_ports[port.id.as_str()])
+                .collect::<Vec<_>>();
+            let connect_ports = step_edges
+                .iter()
+                .map(|edge| edge.shim_port)
+                .collect::<Vec<_>>();
+            let policy_path = service_runtime.join("sandbox-policy.json");
+            let command = portable_process_group_sandbox_command(
+                &workspace,
+                &service_runtime,
+                &executable,
+                &command,
+                &bind_ports,
+                &connect_ports,
+                broker_socket.as_deref(),
+                self.context.sandbox_shim,
+                self.context.sandbox_subcommand,
+                &policy_path,
+            )
+            .map_err(|error| launch(error, &workspace))?;
+
+            let first_port = derivation
+                .ports
+                .iter()
+                .find(|port| port.from == step.id)
+                .context("service serves no Port")
+                .map_err(|error| launch(error, &workspace))?;
+            let readiness = std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                host_ports[first_port.id.as_str()],
+            ));
+            for port in derivation.ports.iter().filter(|port| port.from == step.id) {
+                endpoints.insert(
+                    port.id.clone(),
+                    format!("http://127.0.0.1:{}", host_ports[port.id.as_str()]),
+                );
+            }
+            runtime_identity.insert(step.id.clone(), (executable, version));
+            services.push(ServiceSpec {
+                name: step.id.clone(),
+                command,
+                cwd: PathBuf::from(&step.cwd),
+                environment,
+                readiness,
+                helpers,
+            });
+        }
+
+        let group = ProcessServiceGroup::start(&workspace, services)
+            .map_err(|error| launch(error, &workspace))?;
+        let surface_port = derivation
+            .ports
+            .iter()
+            .find(|port| port.protocol == ato_formation::authoring::HTTP_PROTOCOL)
+            .context("native process group omitted its Surface Port")
+            .map_err(|error| launch(error, &workspace))?;
+        let surface_step = derivation
+            .steps
+            .iter()
+            .find(|step| step.id == surface_port.from)
+            .context("Surface Port has no serving step")
+            .map_err(|error| launch(error, &workspace))?;
+        let (executable, version) = runtime_identity
+            .get(&surface_step.id)
+            .cloned()
+            .expect("every service resolved its runtime");
+        let pid = group
+            .pids()
+            .into_iter()
+            .find(|(name, _)| name == &surface_step.id)
+            .map(|(_, pid)| pid);
+        let base = endpoints
+            .get(&surface_port.id)
+            .cloned()
+            .expect("the Surface Port has an endpoint");
+        let mut execution = evidence(
+            "process_service_group",
+            Some(executable),
+            Some(version),
+            pid,
+            &base,
+        );
+        execution.endpoint = Some(base.clone());
+        Ok(Realized {
+            candidate: Box::new(ProcessServiceGroupCandidate {
+                group: Some(group),
+                broker,
+                endpoints,
+                owned: vec![workspace, process_runtime, peer_root],
+            }),
+            evidence: None,
+            execution,
+            kept: None,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn start_process_group(
+        &self,
+        workspace: PathBuf,
+        _state_mounts: &[PortableStateMount],
+        _input_mounts: &[PortableInputMount],
+    ) -> Result<Realized, RealizeFailure> {
+        Err(launch(
+            anyhow::anyhow!("a native process service group requires a Unix host"),
+            &workspace,
+        ))
+    }
+
     fn offline(&self) -> bool {
         self.bundle
             .portability
@@ -826,11 +1307,6 @@ fn wait_until_service_accepts_tcp(
     name: &str,
     group: &ato_adapter_oci::OciServiceGroup,
 ) -> Result<()> {
-    let address = group
-        .services()
-        .find(|(service, _)| *service == name)
-        .and_then(|(_, handle)| handle.container_address())
-        .context("service was not started")?;
     let guest_port = route
         .derivation
         .ports
@@ -843,10 +1319,9 @@ fn wait_until_service_accepts_tcp(
         if let Some((service, code)) = group.exited_service()? {
             bail!("OCI service `{service}` exited before the group was ready: {code}");
         }
-        let target = std::net::SocketAddr::new(address, guest_port);
-        if std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_millis(500))
-            .is_ok()
-        {
+        // Readiness is a connection to the logical Port through the Run's
+        // connector, not a dial to a container address.
+        if group.connect(name, guest_port).is_ok() {
             return Ok(());
         }
         anyhow::ensure!(
@@ -956,6 +1431,7 @@ fn evidence(
         portability_profile: None,
         embedded_oci_image_loaded: None,
         services: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -999,17 +1475,14 @@ impl RunningCandidate for PortableProcessCandidate {
     }
 
     fn stop(mut self: Box<Self>) -> Result<()> {
-        if let Some(mut handle) = self.handle.take()
-            && handle.try_wait()?.is_none()
-        {
-            handle.terminate()?;
-            for _ in 0..200 {
-                if handle.try_wait()?.is_some() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            // Still running: dropping the handle kills the group and reaps.
+        if let Some(mut handle) = self.handle.take() {
+            // The leader's exit is not the question: a workload that left a
+            // child behind is still running in the same group. The group is
+            // stopped and shown empty, and a group that survives is an error
+            // this Run reports instead of a cleanup the Drop path hides.
+            handle
+                .stop_group(ProcessStopBudget::default())
+                .context("stopping the selected process group")?;
         }
         remove_owned(&self.owned)
     }
@@ -1023,6 +1496,55 @@ impl Drop for PortableProcessCandidate {
     fn drop(&mut self) {
         // The handle's own Drop terminates and reaps the group first.
         drop(self.handle.take());
+        if let Err(error) = remove_owned(&self.owned) {
+            eprintln!("[ato run] {error:#}");
+        }
+    }
+}
+
+/// A Run's native process service group: every service and peer shim, the
+/// broker that authorizes declared edges, and the directories it owns.
+#[cfg(unix)]
+pub struct ProcessServiceGroupCandidate {
+    group: Option<ProcessServiceGroup>,
+    broker: Option<PeerBroker>,
+    endpoints: BTreeMap<String, String>,
+    owned: Vec<PathBuf>,
+}
+
+#[cfg(unix)]
+impl RunningCandidate for ProcessServiceGroupCandidate {
+    fn endpoints(&self) -> &BTreeMap<String, String> {
+        &self.endpoints
+    }
+
+    fn exited(&mut self) -> Result<Option<String>> {
+        match self.group.as_mut() {
+            Some(group) => group.exited(),
+            None => Ok(Some("stopped".to_owned())),
+        }
+    }
+
+    fn stop(mut self: Box<Self>) -> Result<()> {
+        if let Some(group) = self.group.take() {
+            group.stop()?;
+        }
+        // The broker goes after every consumer and shim is gone, so no live
+        // connection is left pointing at a removed socket.
+        drop(self.broker.take());
+        remove_owned(&self.owned)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessServiceGroupCandidate {
+    fn drop(&mut self) {
+        drop(self.group.take());
+        drop(self.broker.take());
         if let Err(error) = remove_owned(&self.owned) {
             eprintln!("[ato run] {error:#}");
         }
@@ -1073,6 +1595,166 @@ impl Drop for PortableStaticCandidate {
             eprintln!("[ato run] {error:#}");
         }
     }
+}
+
+/// Wait until a runtime-owned helper accepts TCP on its loopback port.
+///
+/// A helper that exits before listening is a launch failure with its own
+/// message: the shim's own stderr already says why (for example, the host
+/// refused to apply its sandbox).
+#[cfg(unix)]
+fn wait_for_loopback(
+    address: std::net::SocketAddr,
+    helper: &mut ProcessHandle,
+    name: &str,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = helper.try_wait()? {
+            bail!("{name} exited before it listened on {address}: {status}");
+        }
+        if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200))
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("{name} did not accept TCP on {address} within 10s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Host paths a contained workload may read: its own runtime and the system
+/// libraries it needs, never the host's home or a sibling Run.
+#[cfg(unix)]
+fn portable_system_roots() -> Vec<PathBuf> {
+    [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/etc",
+        "/dev",
+        "/proc",
+        "/System",
+        "/Library",
+        "/private/var/db",
+        "/opt",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .filter(|path| path.exists())
+    .collect()
+}
+
+/// The sandbox wrapper for one service of a native process group.
+///
+/// `bind_ports` are the host ports this service may bind; `connect_ports` are
+/// the loopback shim ports of the edges its D declares. No other TCP is
+/// reachable. `broker_socket` is the single Unix socket a shim may open.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn portable_process_group_sandbox_command(
+    workspace: &Path,
+    runtime_root: &Path,
+    executable: &str,
+    workload: &[String],
+    bind_ports: &[u16],
+    connect_ports: &[u16],
+    broker_socket: Option<&Path>,
+    sandbox_shim: &Path,
+    sandbox_subcommand: &str,
+    policy_path: &Path,
+) -> Result<Vec<String>> {
+    let workspace = workspace
+        .canonicalize()
+        .context("canonicalize portable workspace")?;
+    let runtime_root = runtime_root
+        .canonicalize()
+        .context("canonicalize portable service runtime")?;
+    let executable = PathBuf::from(executable)
+        .canonicalize()
+        .with_context(|| format!("canonicalize portable runtime {executable}"))?;
+    let interpreter_root = executable
+        .parent()
+        .and_then(Path::parent)
+        .context("portable runtime has no readable installation root")?
+        .to_path_buf();
+    let mut policy = SandboxPolicy::new()
+        .allow_read_write([runtime_root.clone()])
+        .allow_read_only(
+            [workspace, interpreter_root, sandbox_shim.to_path_buf()]
+                .into_iter()
+                .chain(portable_system_roots()),
+        )
+        .with_network(false)
+        .allow_tcp_bind(bind_ports.iter().copied())
+        .allow_tcp_connect(connect_ports.iter().copied());
+    if let Some(socket) = broker_socket {
+        policy = policy.with_ipc_socket_paths([socket.to_path_buf()]);
+    }
+    fs::write(policy_path, serde_json::to_vec_pretty(&policy)?)
+        .with_context(|| format!("write service sandbox policy {}", policy_path.display()))?;
+    let mut command = vec![
+        sandbox_shim.display().to_string(),
+        sandbox_subcommand.to_owned(),
+        "--policy".to_owned(),
+        policy_path.display().to_string(),
+        "--".to_owned(),
+    ];
+    command.extend(workload.iter().cloned());
+    Ok(command)
+}
+
+/// The sandbox wrapper for one peer shim. It may bind only its own loopback
+/// port and open only the broker socket.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn portable_peer_shim_command(
+    workspace: &Path,
+    runtime_root: &Path,
+    broker_socket: &Path,
+    shim_port: u16,
+    token: &str,
+    sandbox_shim: &Path,
+    sandbox_subcommand: &str,
+    policy_path: &Path,
+) -> Result<Vec<String>> {
+    let workspace = workspace
+        .canonicalize()
+        .context("canonicalize portable workspace")?;
+    let runtime_root = runtime_root
+        .canonicalize()
+        .context("canonicalize portable service runtime")?;
+    let policy = SandboxPolicy::new()
+        .allow_read_write([runtime_root.clone()])
+        .allow_read_only(
+            [workspace, sandbox_shim.to_path_buf()]
+                .into_iter()
+                .chain(portable_system_roots()),
+        )
+        .with_network(false)
+        .allow_tcp_bind([shim_port])
+        .with_ipc_socket_paths([broker_socket.to_path_buf()]);
+    fs::write(policy_path, serde_json::to_vec_pretty(&policy)?)
+        .with_context(|| format!("write peer shim policy {}", policy_path.display()))?;
+    Ok(vec![
+        sandbox_shim.display().to_string(),
+        sandbox_subcommand.to_owned(),
+        "--policy".to_owned(),
+        policy_path.display().to_string(),
+        "--".to_owned(),
+        sandbox_shim.display().to_string(),
+        "__portable-peer-shim".to_owned(),
+        "--broker".to_owned(),
+        broker_socket.display().to_string(),
+        "--token".to_owned(),
+        token.to_owned(),
+        "--port".to_owned(),
+        shim_port.to_string(),
+    ])
 }
 
 #[cfg(all(test, unix))]
@@ -1670,6 +2352,10 @@ pub struct PortableBundleAttempt<'a> {
     pub run_id: Option<&'a str>,
     pub binding_environment: &'a BTreeMap<String, String>,
     pub interrupt: Option<&'a std::sync::atomic::AtomicBool>,
+    /// What the caller already measured about this host. `None` probes at
+    /// admission time; a caller that probed passes its answer so one Run
+    /// cannot report two different capabilities.
+    pub host: Option<&'a ato_host_facts::HostFacts>,
 }
 
 /// Run one already-built portable bundle through the Runtime's common attempt:
@@ -1703,6 +2389,7 @@ pub fn run_portable_bundle_attempt(
         cache_root: request.cache_root,
         sandbox_shim: request.sandbox_shim,
         sandbox_subcommand: request.sandbox_subcommand,
+        host: request.host,
     };
     let executor = PortableBundleExecutor {
         bundle: request.bundle,
@@ -1847,6 +2534,7 @@ default = "pure"
             cache_root: root.path(),
             sandbox_shim: Path::new("/usr/bin/true"),
             sandbox_subcommand: "__portable-sandbox-exec",
+            host: None,
         };
         let executor = PortableBundleExecutor {
             bundle: &bundle,
@@ -2014,6 +2702,7 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"]))
                 cache_root: root.path(),
                 sandbox_shim: &shim,
                 sandbox_subcommand: "__portable-sandbox-exec",
+                host: None,
             };
             let executor = PortableBundleExecutor {
                 bundle: &bundle,
@@ -2128,5 +2817,85 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"]))
                 .contains("requires a Linux bubblewrap sandbox"),
             "{error}"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_group_policy_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let runtime = root.path().join("runtime");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        let shim = root.path().join("ato");
+        fs::write(&shim, b"shim").unwrap();
+        let broker = root.path().join("peer").join("broker.sock");
+        (root, workspace, runtime, shim, broker)
+    }
+
+    fn policy(path: &Path) -> SandboxPolicy {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_service_policy_grants_only_its_ports_and_its_declared_peer_shims() {
+        let (_root, workspace, runtime, shim, broker) = fixture();
+        let policy_path = runtime.join("policy.json");
+        let command = portable_process_group_sandbox_command(
+            &workspace,
+            &runtime,
+            "/bin/sh",
+            &[
+                "python3".to_owned(),
+                "proxy.py".to_owned(),
+                "8080".to_owned(),
+            ],
+            &[43101],
+            &[43102],
+            Some(&broker),
+            &shim,
+            "__portable-sandbox-exec",
+            &policy_path,
+        )
+        .unwrap();
+        // The workload argv crosses unchanged: this path never infers or
+        // rewrites a Port from it.
+        assert_eq!(
+            &command[command.len() - 3..],
+            ["python3", "proxy.py", "8080"]
+        );
+        let policy = policy(&policy_path);
+        assert_eq!(policy.allowed_bind_tcp_ports, [43101]);
+        assert_eq!(policy.allowed_connect_tcp_ports, [43102]);
+        assert!(!policy.allow_network);
+        assert_eq!(policy.ipc_socket_paths, [broker]);
+        // A peer's real host port never appears in a consumer's authority.
+        assert!(!policy.allowed_connect_tcp_ports.contains(&43199));
+    }
+
+    #[test]
+    fn a_shim_policy_binds_its_loopback_port_and_opens_only_the_broker() {
+        let (_root, workspace, runtime, shim, broker) = fixture();
+        let policy_path = runtime.join("shim.json");
+        let command = portable_peer_shim_command(
+            &workspace,
+            &runtime,
+            &broker,
+            43102,
+            "0-web-backend.http",
+            &shim,
+            "__portable-sandbox-exec",
+            &policy_path,
+        )
+        .unwrap();
+        assert!(command.iter().any(|arg| arg == "__portable-peer-shim"));
+        let policy = policy(&policy_path);
+        assert_eq!(policy.allowed_bind_tcp_ports, [43102]);
+        assert!(policy.allowed_connect_tcp_ports.is_empty());
+        assert_eq!(policy.ipc_socket_paths, [broker]);
+        assert!(!policy.allow_network);
     }
 }

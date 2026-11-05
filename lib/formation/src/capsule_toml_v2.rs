@@ -118,6 +118,10 @@ pub enum PortableDerivationKindV2 {
     Oci,
     /// Several `ato.oci@1` serving steps realized together on one Runner.
     OciServiceGroup,
+    /// Several `ato.process@1` serving steps realized together by one
+    /// supervisor. Authoring-only classification: the bound route is the same
+    /// `BoundStep`/`BoundPort` shape, plus each consumer step's `peer_ports`.
+    ProcessServiceGroup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,9 +142,9 @@ pub struct PortableDerivationDraftV2 {
     pub startup: Option<crate::requirements::StartupRequirement>,
 }
 
-/// One serving step of an OCI service group. Authoring shorthand only: it
-/// compiles to one `BoundStep` plus the `BoundPort`s it serves, never to a
-/// Service object of its own.
+/// One serving step of a service group (OCI or native process). Authoring
+/// shorthand only: it compiles to one `BoundStep` plus the `BoundPort`s it
+/// serves, never to a Service object of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortableServiceDraftV2 {
     pub id: String,
@@ -151,6 +155,9 @@ pub struct PortableServiceDraftV2 {
     pub ports: Vec<PortableServicePortDraftV2>,
     pub state: Vec<String>,
     pub bindings: Vec<String>,
+    /// Port ids of other services of the same route this service may reach.
+    /// Compiled to `BoundStep.peer_ports`; empty for an OCI service group.
+    pub connect: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +315,10 @@ struct Service {
     state: Vec<String>,
     #[serde(default)]
     bindings: Vec<String>,
+    /// Native process service groups only: Port ids of other services this
+    /// service may connect to. Refused on an OCI service group.
+    #[serde(default)]
+    connect: Vec<String>,
     /// Authoring shorthand only. Resolved into the existing serving-step
     /// sequence; no dependency graph is added to canonical D or the Kernel.
     #[serde(default)]
@@ -825,7 +836,7 @@ fn parse_capsule_toml_v2_impl(
                 if !derivation.service.is_empty() {
                     return Err(invalid(
                         "derivation.startup",
-                        "startup is not supported on an OCI service group",
+                        "startup is not supported on a service group",
                     ));
                 }
                 if !matches!(
@@ -1034,9 +1045,19 @@ fn order_services(services: Vec<Service>) -> Result<Vec<Service>, CapsuleTomlV2E
     Ok(ordered)
 }
 
-/// Grammar and reference integrity of an OCI service group. Resource budgets
-/// and the Surface/Port exposure rules are the portable profile's to judge:
-/// they are checked where the bound Derivation is validated, so a bundle
+/// Which Adapter a service group selects. Grammar and reference integrity are
+/// shared; the runtime facts a service may declare are the Adapter's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServiceGroupAdapter {
+    Oci,
+    Process,
+}
+
+/// Compile a service group of either Adapter. The shared part is the shape and
+/// the reference graph: unique DNS-label ids, each service's Ports, exactly-one
+/// reader visibility for every state slot and Binding, and the `app.http`
+/// Surface Port. Resource budgets and Surface exposure are the portable
+/// profile's to judge where the bound Derivation is validated, so a bundle
 /// built by any frontend meets the same bar.
 fn parse_service_group(
     derivation: Derivation,
@@ -1053,28 +1074,66 @@ fn parse_service_group(
             "argv, cwd, env and guest_port belong to each service when `service` is declared",
         ));
     }
-    if derivation.protocol != OCI_PROTOCOL {
-        return Err(invalid(
-            "derivation.use",
-            format!("services require {OCI_PROTOCOL:?}"),
-        ));
-    }
-    if derivation.runtimes.len() != 1 {
+    let protocol = derivation.protocol.clone();
+    let adapter = match protocol.as_str() {
+        OCI_PROTOCOL => ServiceGroupAdapter::Oci,
+        PROCESS_PROTOCOL => ServiceGroupAdapter::Process,
+        other => {
+            return Err(invalid(
+                "derivation.use",
+                format!(
+                    "services require {OCI_PROTOCOL:?} or {PROCESS_PROTOCOL:?}; {other:?} is unsupported"
+                ),
+            ));
+        }
+    };
+    if adapter == ServiceGroupAdapter::Oci {
+        if derivation.runtimes.len() != 1 {
+            return Err(invalid(
+                "derivation.runtimes",
+                "an OCI service group declares only the shared oci.platform",
+            ));
+        }
+        validate_oci_platform(
+            "derivation.runtimes",
+            derivation.runtimes.get("oci.platform"),
+        )?;
+    } else if !derivation.runtimes.is_empty() {
         return Err(invalid(
             "derivation.runtimes",
-            "a service group declares only the shared oci.platform",
+            "a native process service group declares every runtime per service",
         ));
     }
-    validate_oci_platform(
-        "derivation.runtimes",
-        derivation.runtimes.get("oci.platform"),
-    )?;
+    let services = compile_services(derivation.service, state_ids, binding_ids, adapter)?;
+    Ok(PortableDerivationDraftV2 {
+        label: derivation.id,
+        kind: match adapter {
+            ServiceGroupAdapter::Oci => PortableDerivationKindV2::OciServiceGroup,
+            ServiceGroupAdapter::Process => PortableDerivationKindV2::ProcessServiceGroup,
+        },
+        runtimes: derivation.runtimes,
+        argv: Vec::new(),
+        cwd: String::new(),
+        env: BTreeMap::new(),
+        guest_port: 0,
+        services,
+        host: None,
+        startup: None,
+    })
+}
 
+fn compile_services(
+    services: Vec<Service>,
+    state_ids: &BTreeSet<String>,
+    binding_ids: &BTreeSet<String>,
+    adapter: ServiceGroupAdapter,
+) -> Result<Vec<PortableServiceDraftV2>, CapsuleTomlV2Error> {
     let mut service_ids = BTreeSet::new();
     let mut port_ids = BTreeSet::new();
+    let mut port_owners = BTreeMap::<String, String>::new();
     let mut state_users = BTreeMap::<String, usize>::new();
     let mut binding_users = BTreeMap::<String, usize>::new();
-    let services = order_services(derivation.service)?
+    let compiled = order_services(services)?
         .into_iter()
         .map(|service| {
             validate_id("derivation.service.id", &service.id)?;
@@ -1087,15 +1146,43 @@ fn parse_service_group(
             validate_argv("derivation.service.argv", &service.argv)?;
             validate_relative(&service.cwd, "derivation.service.cwd")?;
             validate_env("derivation.service.env", &service.env)?;
-            validate_oci_image(
-                "derivation.service.runtimes",
-                service.runtimes.get("oci.image"),
-            )?;
-            if service.runtimes.contains_key("oci.platform") {
-                return Err(invalid(
-                    "derivation.service.runtimes",
-                    "oci.platform is shared and belongs to the derivation",
-                ));
+            match adapter {
+                ServiceGroupAdapter::Oci => {
+                    validate_oci_image(
+                        "derivation.service.runtimes",
+                        service.runtimes.get("oci.image"),
+                    )?;
+                    if service.runtimes.contains_key("oci.platform") {
+                        return Err(invalid(
+                            "derivation.service.runtimes",
+                            "oci.platform is shared and belongs to the derivation",
+                        ));
+                    }
+                    if !service.connect.is_empty() {
+                        return Err(invalid(
+                            "derivation.service.connect",
+                            "connections are not modelled by an OCI service group",
+                        ));
+                    }
+                }
+                ServiceGroupAdapter::Process => {
+                    let python = service
+                        .runtimes
+                        .get("python")
+                        .filter(|value| !value.trim().is_empty());
+                    if python.is_none() {
+                        return Err(invalid(
+                            "derivation.service.runtimes",
+                            "a native process service requires a declared python runtime",
+                        ));
+                    }
+                    if service.runtimes.len() != 1 {
+                        return Err(invalid(
+                            "derivation.service.runtimes",
+                            "a native process service declares only its python runtime",
+                        ));
+                    }
+                }
             }
             if service.ports.is_empty() {
                 return Err(invalid(
@@ -1120,6 +1207,7 @@ fn parse_service_group(
                             "must be between 1 and 65535",
                         ));
                     }
+                    port_owners.insert(port.id.clone(), service.id.clone());
                     Ok(PortableServicePortDraftV2 {
                         id: port.id,
                         guest_port: port.guest_port,
@@ -1161,6 +1249,7 @@ fn parse_service_group(
                 ports,
                 state: service.state,
                 bindings: service.bindings,
+                connect: service.connect,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1184,18 +1273,44 @@ fn parse_service_group(
             "exactly one service must serve the app.http Surface Port",
         ));
     }
-    Ok(PortableDerivationDraftV2 {
-        label: derivation.id,
-        kind: PortableDerivationKindV2::OciServiceGroup,
-        runtimes: derivation.runtimes,
-        argv: Vec::new(),
-        cwd: String::new(),
-        env: BTreeMap::new(),
-        guest_port: 0,
-        services,
-        host: None,
-        startup: None,
-    })
+    // A peer edge is an authority grant, so its target must already be running:
+    // the consumer may only name a Port served by an earlier service of the
+    // same route. References are Port ids, not service ids, because that is
+    // what the runtime exports and what the supervisor can prove started.
+    for (index, service) in compiled.iter().enumerate() {
+        let mut seen = BTreeSet::new();
+        for peer in &service.connect {
+            if !seen.insert(peer.as_str()) {
+                return Err(invalid(
+                    "derivation.service.connect",
+                    format!("Port {:?} is repeated", peer),
+                ));
+            }
+            let Some(owner) = port_owners.get(peer) else {
+                return Err(invalid(
+                    "derivation.service.connect",
+                    format!("Port {peer:?} is not declared by this route"),
+                ));
+            };
+            if owner == &service.id {
+                return Err(invalid(
+                    "derivation.service.connect",
+                    format!("service {:?} cannot connect to its own Port", service.id),
+                ));
+            }
+            let owner_index = compiled
+                .iter()
+                .position(|candidate| &candidate.id == owner)
+                .expect("every Port owner is a compiled service");
+            if owner_index >= index {
+                return Err(invalid(
+                    "derivation.service.connect",
+                    format!("Port {peer:?} is served by a later service; peers must start first"),
+                ));
+            }
+        }
+    }
+    Ok(compiled)
 }
 
 fn is_sha256_ref(value: &str) -> bool {
@@ -1417,6 +1532,130 @@ default = "pure"
         assert_eq!(route.services[0].cwd, ".");
         assert_eq!(route.services[1].ports[0].id, "app.http");
         assert_eq!(draft.effects, EffectClass::Pure);
+    }
+
+    const PROCESS_SERVICE_GROUP: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Native group"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "native-group"
+use = "ato.process@1"
+runtimes = {}
+
+[[derivation.service]]
+id = "backend"
+argv = ["python3", "backend.py"]
+cwd = "."
+runtimes = { python = "3.12" }
+ports = [{ id = "backend.http", guest_port = 8081 }]
+
+[[derivation.service]]
+id = "web"
+argv = ["python3", "proxy.py"]
+cwd = "."
+runtimes = { python = "3.12" }
+ports = [{ id = "app.http", guest_port = 8080 }]
+connect = ["backend.http"]
+
+[effects]
+default = "pure"
+"#;
+
+    #[test]
+    fn parses_a_native_process_service_group_with_declared_peer_edges() {
+        let draft = parse_capsule_toml_v2(PROCESS_SERVICE_GROUP).unwrap();
+        let [route] = draft.derivations.as_slice() else {
+            panic!("one route");
+        };
+        assert_eq!(route.kind, PortableDerivationKindV2::ProcessServiceGroup);
+        assert_eq!(route.guest_port, 0);
+        assert!(route.argv.is_empty());
+        assert!(route.runtimes.is_empty());
+        assert_eq!(route.services[0].runtimes["python"], "3.12");
+        assert_eq!(route.services[1].connect, ["backend.http"]);
+        assert!(route.services[0].connect.is_empty());
+        // The OCI fixture is unaffected by the process grammar.
+        assert_eq!(
+            parse_capsule_toml_v2(SERVICE_GROUP).unwrap().derivations[0].kind,
+            PortableDerivationKindV2::OciServiceGroup
+        );
+    }
+
+    #[test]
+    fn a_process_group_requires_a_runtime_per_service_and_earlier_peers() {
+        let refused = [
+            (
+                "route runtime",
+                PROCESS_SERVICE_GROUP.replace(
+                    "runtimes = {}",
+                    "runtimes = { python = \"3.12\" }",
+                ),
+            ),
+            (
+                "missing python",
+                PROCESS_SERVICE_GROUP.replace(
+                    "id = \"web\"\nargv = [\"python3\", \"proxy.py\"]\ncwd = \".\"\nruntimes = { python = \"3.12\" }",
+                    "id = \"web\"\nargv = [\"python3\", \"proxy.py\"]\ncwd = \".\"\nruntimes = {}",
+                ),
+            ),
+            (
+                "extra runtime",
+                PROCESS_SERVICE_GROUP.replace(
+                    "id = \"web\"\nargv = [\"python3\", \"proxy.py\"]\ncwd = \".\"\nruntimes = { python = \"3.12\" }",
+                    "id = \"web\"\nargv = [\"python3\", \"proxy.py\"]\ncwd = \".\"\nruntimes = { python = \"3.12\", node = \"22\" }",
+                ),
+            ),
+            (
+                "undeclared peer",
+                PROCESS_SERVICE_GROUP.replace("connect = [\"backend.http\"]", "connect = [\"missing.http\"]"),
+            ),
+            (
+                "later peer",
+                PROCESS_SERVICE_GROUP.replace("connect = [\"backend.http\"]", "connect = [\"app.http\"]"),
+            ),
+            (
+                "repeated peer",
+                PROCESS_SERVICE_GROUP.replace(
+                    "connect = [\"backend.http\"]",
+                    "connect = [\"backend.http\", \"backend.http\"]",
+                ),
+            ),
+            (
+                "self peer",
+                PROCESS_SERVICE_GROUP.replace(
+                    "ports = [{ id = \"backend.http\", guest_port = 8081 }]",
+                    "ports = [{ id = \"backend.http\", guest_port = 8081 }, { id = \"backend.admin\", guest_port = 9000 }]\nconnect = [\"backend.admin\"]",
+                ),
+            ),
+        ];
+        for (what, text) in refused {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
+        }
+        // An OCI group still refuses a connection declaration: its containers
+        // share one internal network and its profile is unchanged.
+        assert!(
+            parse_capsule_toml_v2(&SERVICE_GROUP.replace(
+                "ports = [{ id = \"app.http\", guest_port = 8080 }]",
+                "ports = [{ id = \"app.http\", guest_port = 8080 }]\nconnect = [\"backend.http\"]",
+            ))
+            .is_err()
+        );
     }
 
     #[test]
