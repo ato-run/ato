@@ -38,6 +38,12 @@ synthetic Bench configuration; all five resulting files matched byte-for-byte.
 The generated `index.html` still contains Frappe template substitutions;
 neither the frontend nor Frappe was run or tested on staging.
 
+On 2026-11-06, `npm audit --omit=dev` against the completed lock reported 23
+affected dependency entries: 14 high and 9 moderate, including transitive
+dependencies. This is an advisory inventory, not proof that each issue is
+reachable in the built browser bundle. The lock completion does not update or
+remediate those dependencies; investigate and test fixes before deployment.
+
 The map view refers to external CDN assets and OpenStreetMap tiles. Actual
 use may make network requests and disclose map activity; it needs an explicit
 network and privacy design. A deployable instance also requires a compatible
