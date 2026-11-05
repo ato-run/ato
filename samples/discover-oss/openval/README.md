@@ -88,3 +88,12 @@ non-root process, it served the page and passed a sample workbook parse,
 cashflow calculation, export and reimport, and invalid-input rejection.
 This is local evidence only; no staging import or browser workflow has been
 verified for this candidate. The upstream audit findings above still apply.
+
+On 2026-11-05 this compact bundle was uploaded through the staging UI with
+the owner's explicitly selected Connected Runner. The first attempt reported
+`user_runner_no_capacity`. After stopping this task's PicPeak test instance,
+a new attempt progressed past that check but ended in
+`hosted_contract_failed`; the UI did not expose the failed observation or a
+runtime log, and no OpenVal instance appeared in the library. The cause of
+the Contract failure and whether the application process actually started
+remain unverified. Do not infer a successful hosted Run from the upload.
