@@ -1,32 +1,53 @@
 # Ato
 
-Atoは、参照可能な地点から作業を保存・共有・継続するためのコンピューティングインターフェースです。計算モデルと、Capsuleを扱うランタイム・CLIを組み合わせています。
+**選んだインフラ上で、計算を実行し、保存し、共有する。**
 
-[ato.run](https://ato.run/)は、動作するソフトウェアの発見、試用、保存、共有のためにAto上に構築されたWebサービスです。このリポジトリにはランタイム、CLI、Adapter、関連ツールが含まれます。[About Ato](https://ato.run/about/) · [English](README.md)
+Atoは、自分が管理するハードウェア（デスクトップ、自宅サーバー、ワークステーション、クラウドVM）でソフトウェアを動かし、その作業を封印された参照可能な地点として引き継ぐためのオープンソースのコンピューティングインターフェースです。計算モデルと、ランタイム・CLI・Adapterを組み合わせています。
 
-## なぜAtoなのか
+このリポジトリはオープンソースの中核です。[ato.run](https://ato.run/) は同じモデルの上に構築された公式マネージドサービスで、ソフトウェアの発見、capsuleの共有、自分のハードウェアまたは公式のハードウェアでの実行を提供します。[About Ato](https://ato.run/about/) · [English](README.md) · [技術ドキュメント](docs/README.md)
 
-作業は多くの場合、プロセス、マシン、ソースツリー、特定のスナップショットに結び付いています。別の場所に移すには、環境を再構築し、結果が期待どおりに動くか確認しなければならないことがあります。Atoは、作業の同一性と、それを実現するプロセス・コンテナ・スナップショットなどの物理的な手段を分けるアプローチを探究しています。
+## 2つの層
 
-アプリケーションの共有、開発作業の継続、長時間のエージェントタスクの引き継ぎを、共通のインターフェースで扱うことを目指しています。これらはモデルのユースケースであり、すべての状態や引き継ぎが現在サポートされているという意味ではありません。以下の例では、現在の静的アプリケーションの検証経路を試せます。
+Atoとato.runは責務が異なります。オープンソースの中核がサービスなしで使えることを前提に、境界を引いています。
 
-## 基本概念
+| | **Ato**（このリポジトリ、OSS） | **ato.run**（公式マネージドサービス） |
+|---|---|---|
+| 計算モデル | Computation、Capsule、Contract K、Derivation D を定義 | モデルを利用 |
+| CLI・Runner | `ato` CLIとローカルランタイムを提供 | 公式Runnerを運用 |
+| セルフホスト | 対応 | 接続・管理を任意で支援 |
+| Capsuleレジストリ | プロトコルとサーバーは**未実装** | 公式レジストリ面 |
+| Capsuleの配布 | `.capsule` ファイル。プロトコル実装後は任意のレジストリ | `ato.run/capsules` |
+| アプリの発見 | 必須ではない | Discoverを提供 |
+| 実行 | ユーザー所有のハードウェア | マネージドクラウドも提供 |
+| 課金 | なし | 計算資源・保管・管理サービス |
 
-- **Computation**：現在地点から継続可能な計算・作業。
-- **Capsule**：封印された、不変で参照可能な継続地点。保存・共有でき、実現する物理的な方法はその同一性を定義しません。
-- **Run**：Capsuleを再開して計算を進める実行。同じCapsuleから複数のRunを始め、それぞれ異なる未来へ進められます。
+ローカル実行とローカルInstanceにato.runのアカウントは不要です。レジストリ、発見、マネージド実行は利便性の層であり、モデルの要件ではありません。この表は意図と現状を示すもので、OSSレジストリやato.runなしのリモート経路が実装済みという主張ではありません。境界は[OSS/サービス境界のドラフト](docs/rfcs/draft/ATO_OSS_SERVICE_BOUNDARY.md)に記録しています。
 
-ポータブルアプリケーションでは、**Contract**が観測可能な要件を記述し、**Derivation**がその実現方法を宣言します。検証**receipt**は、Runで得られた観測結果を記録します。詳細は[Computation](docs/concepts/computation.md)と[アプリケーション契約](docs/concepts/application-contracts.md)を参照してください。
+## 実行し、保存し、共有する
+
+- **実行する。** 自分のマシンで `.capsule` bundleを実行します。現行ツリーは静的Webアプリケーション、固定されたPythonプロセス、OCIコンテナを実現できます。
+- **保存する。** Capsuleは封印された、不変で参照可能な継続地点です。durableなローカルInstanceはアプリケーションと保存データをRun間で保持できます。ホスト間の一般的な状態復元は提供していません。
+- **共有する。** `.capsule` ファイルはbundleのtransportです。現状はファイルの受け渡しが可能で、レジストリのプロトコルと `ato.run/capsules` での公式配備は今後の作業です。
+
+## なぜセルフホストか
+
+必要なソフトウェアを動かせる計算機を、すでに持っているかもしれません。
+
+- **自分のハードウェアを使う。** ローカルPC、自宅サーバー、ワークステーション、管理下のリモートマシンで動かせます。
+- **データの管理を保つ。** ローカル実行とInstanceはCLIのデータディレクトリ（`ATO_HOME`）配下に書き込みます。外部接続はBindingとして宣言します。
+- **既存のツールを使う。** Docker、Nix、通常のプロセス、VMスナップショットは有効な実現手段です。Atoはそれらを置き換えません。
+- **実現の前に条件を記述する。** Contractが満たすべき条件を宣言し、Derivationがその実現方法を宣言します。1つのbundleに複数のDerivationを宣言できます。
+- **動いたことを検証する。** 検証器は観測結果をreceiptに記録し、`fully_satisfied` は宣言した全観測が満たされた場合だけtrueになります。
+
+## 何を動かせるか
+
+現在は、少なくとも1つのDerivationを宣言した `.capsule` bundleを実行できます。現行ツリーで実現できるのは、封印されたworkspaceから配信する静的Webアプリケーション、固定されたPythonプロセス、digestで固定したimage・platform・リソース上限を持つOCIコンテナです。サンプルにはDatasetteやローカルLLMのデモがあります。
+
+すべての経路がすべてのホストで動くわけではありません。ランタイム、platform、権限、依存関係はadmissionの判定対象です。同梱のアプリカタログはなく、発見はato.runの機能です。ソースが現行のauthoring schemaに合う場合は `ato pack` でbundleを作成できます。
 
 ## クイックスタート
 
-### ato.runを試す
-
-ブラウザで[ato.run](https://ato.run/)の公開ソフトウェアを探すか、[2048を試せます](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)。
-
-### CLIを試す
-
-[rust-toolchain.toml](rust-toolchain.toml)で指定されたRustツールチェーンをインストールし、リポジトリをcloneしてCLIをビルドし、同梱の静的アプリケーションbundleを実行します。
+アカウントは不要です。[rust-toolchain.toml](rust-toolchain.toml) のRustツールチェーンを用意し、リポジトリをcloneしてCLIをビルドし、同梱の静的bundleを実行します。
 
 ```sh
 git clone https://github.com/ato-run/ato.git
@@ -37,9 +58,7 @@ target/debug/ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 
-CLIはbundleを検証し、宣言された実行経路で実現して、ソースの同一性とHTTP応答をContractに照らし合わせ、receiptを書き出します。成功後、`.tmp/getting-started/receipt.json`で選択されたDerivationと観測結果を確認できます。必要な観測がすべて満たされると`fully_satisfied`は`true`になります。`--no-open`はブラウザを開かずに検証して終了します。詳細、他の経路、失敗時の境界は[Getting started](docs/guides/getting-started.md)を参照してください。公開済みのCLI成果物は[GitHub Releases](https://github.com/ato-run/ato/releases)にあります。
-
-例えば、Python 3でreceiptを確認できます。成功時の出力例は次のとおりです。
+このコマンドはbundleの宣言された経路と、取得済みのHTTP観測をこのホスト上で検証し、receiptを書き出します。Python 3で確認できます。
 
 ```sh
 python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
@@ -51,34 +70,63 @@ app-proof: satisfied
 source-identity: satisfied
 ```
 
-この静的な例は、一般的なホスト間移植性やプロセスメモリの復元を実証するものではありません。
+`fully_satisfied` は、このContractがこのRunに対して宣言した観測を満たしたことを意味します。一般的なホスト間移植性やプロセスメモリの復元を実証するものではありません。期待される出力、他の経路、失敗時の境界は[Getting started](docs/guides/getting-started.md)を参照してください。公開済みのCLI成果物は[GitHub Releases](https://github.com/ato-run/ato/releases)にあります。
 
-## 現在の状況
+## 仕組み
 
-Atoは実験的なプロジェクトです。このリポジトリには計算オブジェクト、ライフサイクルコマンド、Adapter、ポータブルbundleの処理、上記の静的な検証例が含まれます。Python、OCI、GPU、状態、外部サービスには、それぞれ宣言された経路とホストでの実行許可が必要です。コードの存在はato.run本番での利用可能性を意味しません。
+**Computation** は、ある地点から継続できる計算であり、ファイルやプロセスそのものではありません。**Capsule** は、封印された、不変で参照可能な継続地点です。Capsuleを再開すると**Run**が開始され、計算を進められます。Runの現在地点は再び新しいCapsuleとして封印でき、同じCapsuleから複数のRunを開始すれば、Capsuleを変更せずに分岐できます。
 
-異なるホスト間の汎用的な復元、プロセスメモリの復元、AIによる自律的なFormationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixなどのツールの代替を目的とするものではありません。Contractの一致だけでは、状態の継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[状態の継続性](docs/concepts/state-continuity.md)を参照してください。
+```mermaid
+flowchart LR
+    C["Computation C"] -->|"interaction"| C2["Computation C'"]
+    C -->|"seal"| CAP["Capsule κ"]
+    CAP -->|"resume"| RUN["Run"]
+    RUN -->|"seal current point"| CAP2["Capsule κ'"]
+    CAP -->|"resume"| RUN2["Run（別の未来）"]
+```
 
-## ロードマップと作業管理
+- **Contract K** は、実現が満たすべき観測を宣言します。HTTPのstatusやbody digest、source closureのdigest、上限付きHTTPシナリオ、TLS観測、保存データのsnapshotなどです。
+- **Derivation D** は、Kを実現する一つの方法を宣言します。入力、ランタイム、Port、ステップ、effectsを含みます。呼び出し側が宣言済みDを明示的に選び、「最適なD」の自動選択や暗黙のフォールバックはありません。
+- **Receipt** は、選択されたDと各観測を satisfied / deferred / failed として記録します。`fully_satisfied` は、要求された全観測が満たされた場合だけtrueになります。
 
-作業は[GitHub Issues](https://github.com/ato-run/ato/issues)（ボードを使う場合はGitHub Projects）で管理します。このリポジトリにMarkdownのロードマップは置きません。[アーカイブ済みのロードマップ](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)は履歴として残した資料で、更新しません。
+Kを満たすことは、Runから得られた観測についての判定です。その実現が同じComputationであることや、Capsuleの参照が同一であることを意味しません。computation-rootとportable applicationのprofileは異なる参照root（`ComputationRef` と `ContractRef`）を使い、相互に読み替えられません。詳細は[アプリケーション契約](docs/concepts/application-contracts.md)のprofile対応表と未決事項を参照してください。
+
+## Atoとato.runの境界
+
+標準とサービスは分離します。
+
+- Atoの形式やwire文書は、ato.runのアカウント、tenant ID、サービスURLを要求しません。
+- レジストリの場所は配備の選択です。公式レジストリだけが唯一のレジストリではなく、モデルは `ato.run` を権威として埋め込みません。
+- セルフホストのRunnerは、ローカル作業の実行にato.runの資格情報を要求しません。Connected Runnerの登録経路は任意の橋渡しです。
+- 課金、Discoverの審査、モデレーションはサービスの関心事であり、計算モデルには含めません。
+- ato.runがなくなっても、既存のcapsuleとこのリポジトリは使える状態を保ちます。
+
+これらは現状の説明であると同時に、今後の作業への制約です。[OSS/サービス境界のドラフト](docs/rfcs/draft/ATO_OSS_SERVICE_BOUNDARY.md)を参照してください。
+
+## ato.runへの接続（任意）
+
+ato.runは発見・共有・Runner接続を提供します。ユーザー所有のConnected Runnerは、ato.runのSettingsで発行したコードで登録し、`ato-connected-realization-worker` を実行します。この経路にはato.runのアカウントが必要で、ローカル実行には不要です。公開originは任意で、別途認証が必要です。制御面へのoutbound接続だけではリモートWeb UIアクセスは提供されません。現在のツリーに、ato.runを使わないリモート管理の経路はありません。
+
+## セキュリティと制限
+
+- NacelleはOSネイティブの隔離を適用します：macOSはSeatbelt、LinuxはBubblewrapとLandlockです。開発モードはセキュリティ境界ではなく、コンテナやVMと同等の境界でもありません。
+- 未信頼のアプリケーションは、manifestが宣言する最小のfilesystem/networkポリシーで実行してください。機密パスは既定で拒否されますが、明示的に許可した一覧外のパスは設計上許可されます。
+- ホスト間の一般的な状態復元、任意のプロセスメモリ復元、Hosted saved-dataのround-trip証明は現在提供していません。
+- Contractの一致は、セキュリティ、ライセンス遵守、副作用の安全性を保証しません。
+- Atoは実験的です。すべてのアプリケーションがすべてのホストで動くわけではありません。
 
 ## ドキュメント
 
-一般的な利用者向けドキュメントは[ato.runのドキュメント](https://ato.run/docs/)が所有します。このリポジトリはランタイム、CLI、仕様、運用の技術ドキュメントを所有します（[ドキュメント目次](docs/README.md)）。
-
-- [Getting started](docs/guides/getting-started.md)・[Formationガイド](docs/guides/formation.md)
-- [基本概念](docs/concepts/computation.md)・[アプリケーション契約](docs/concepts/application-contracts.md)・[用語集](docs/glossary-reference.md)
-- [アーキテクチャ](docs/architecture/README.md)・[仕様](docs/specifications/README.md)
-- [Runnerとホスティング](docs/guides/runner-hosting.md)・[運用](docs/operations/README.md)・[ドキュメント目次](docs/README.md)
+- [Getting started](docs/guides/getting-started.md)と[Formation](docs/guides/formation.md)
+- [Computation](docs/concepts/computation.md)、[アプリケーション契約](docs/concepts/application-contracts.md)、[状態の継続性](docs/concepts/state-continuity.md)
+- [Runnerとホスティング](docs/guides/runner-hosting.md)と[ユーザー所有Runnerの接続](docs/guides/connected-runner-self-host.md)
+- [仕様](docs/specifications/README.md)、[理論ドラフト](docs/theory/capsule-process-model.md)、[ドキュメント目次](docs/README.md)
 
 ## 貢献とライセンス
 
-[貢献方法](CONTRIBUTING.md)と[GitHub issues](https://github.com/ato-run/ato/issues)を参照してください。
+作業は[GitHub Issues](https://github.com/ato-run/ato/issues)で管理し、設計上の質問は[GitHub Discussions](https://github.com/ato-run/ato/discussions)で受け付けます。ブランチ方針、検証、PRの期待は[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
 
-プロジェクトが作成したコードは[Mozilla Public License 2.0](LICENSE)（`MPL-2.0`）で提供します。第三者のコード、依存ライブラリ、上流コードを含むパッチ、独自のライセンス表示がある資料には、それぞれの条件が引き続き適用されます。例えば、CPythonのfixture、WiXテンプレート、リリースワークフローは上流のライセンスを、AODDスキルはMITライセンスを維持します。CLIの[Apacheライセンス本文](apps/cli/LICENSE-APACHE)はWiXテンプレートおよび過去に配布されたバージョンのために保持しています。過去に付与されたライセンスは引き続き有効です。
-
-このコードのライセンスは、Capsule Process Modelの理論文書に新たなライセンスを付与するものではありません。
+プロジェクトが作成したコードは[Mozilla Public License 2.0](LICENSE)（`MPL-2.0`）で提供します。CLIの[Apache-2.0本文](apps/cli/LICENSE-APACHE)はWiXテンプレートおよび過去に配布されたビルドのために保持します。第三者のコード、fixture、テンプレートにはそれぞれの条件が適用されます。コードのライセンスは、理論文書と仕様文書に新たなライセンスを付与するものではありません。
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="ato"></a>
@@ -96,3 +144,5 @@ Atoは実験的なプロジェクトです。このリポジトリには計算�
 <a id="capsule-run-replay-continue"></a>
 <a id="core-kernel-と-adapter"></a>
 <a id="設計原則：everything-can-be-a-capsule"></a>
+<a id="why-ato"></a>
+<a id="license"></a>
