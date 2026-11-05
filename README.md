@@ -40,6 +40,10 @@ continuing work that combines several pieces of software and data.
 
 ## Quick Start
 
+The sample commands below run inside the cloned repository. If you are in its
+parent directory, keep the leading `cd ato`; if step 2 already left you in
+`ato/`, skip that line.
+
 You can try several samples with the Ato CLI. They aim not only to start an
 application but to **continue a computation from saved data or work state**.
 
@@ -75,6 +79,7 @@ or state restoration.
 Resume a whiteboard that already contains placed shapes from a saved Capsule:
 
 ```bash
+cd ato
 ato run samples/whiteboard.capsule
 ```
 
@@ -89,6 +94,7 @@ outside this sample's scope.
 and lets you continue editing it:
 
 ```bash
+cd ato
 ato run samples/workspace.capsule
 ```
 
@@ -103,6 +109,7 @@ trees. They share one K (the digest of `proof.txt`); only the Derivation
 differs:
 
 ```bash
+cd ato
 bash samples/contract-preserving/check.sh
 ```
 

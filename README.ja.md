@@ -24,6 +24,8 @@ Atoは、単純なアプリケーションの起動から、複数のソフト�
 
 ## Quick Start
 
+以下のサンプルコマンドは、cloneしたリポジトリ内で実行します。親ディレクトリから実行する場合は先頭の `cd ato` を使い、手順2で既に `ato/` 内にいる場合は読み飛ばしてください。
+
 Ato CLIを使って、いくつかのサンプルを実行できます。
 
 これらのサンプルでは、単にアプリケーションを起動するだけでなく、**保存されたデータや作業状態から計算を継続すること**を目指しています。
@@ -56,6 +58,7 @@ target/debug/ato run samples/interop-static.capsule --no-open \
 保存されたCapsuleから、操作済みのホワイトボードを再開します。
 
 ```bash
+cd ato
 ato run samples/whiteboard.capsule
 ```
 
@@ -66,6 +69,7 @@ ato run samples/whiteboard.capsule
 `samples/workspace.capsule` は、bundleに同梱した `state.json` からワークスペースを読み込み、編集を続けられる静的サンプルです。
 
 ```bash
+cd ato
 ato run samples/workspace.capsule
 ```
 
@@ -76,6 +80,7 @@ ato run samples/workspace.capsule
 `samples/contract-preserving/` には、異なるソースから作った2つのbundleがあります。同じK（proof.txtのdigest）を共有し、Derivationだけが異なることを確認します。
 
 ```bash
+cd ato
 bash samples/contract-preserving/check.sh
 ```
 
