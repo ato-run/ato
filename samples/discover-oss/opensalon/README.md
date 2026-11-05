@@ -26,4 +26,10 @@ The source manifest intentionally omits itself because it is generated.
 On 2026-11-05, the 46 upstream tests passed against the modified routes. In a
 local Chrome preview, a sample booking survived reload and an overlapping
 booking showed the conflict. `pnpm audit --prod` reported no known
-vulnerabilities. A separate clean checkout rebuilt the final `dist` byte-for-byte. Staging deployment and public trial remain unverified.
+vulnerabilities. A separate clean checkout rebuilt the final `dist` byte-for-byte. The owner
+Instance `cinst_01M6N99VM9QGG20VP5HQQY2EWW` runs schema
+`csch_01M6N9EC6JZ3GQ36T6M8A79VBS` and is published as Discover listing
+`dapp_01M6N9JCPZGDHZEGZ8SWG434JA`. On stg, a sample booking survived a
+schema update and a reload on its appointment screen. The source ZIP
+downloaded from the owner Instance contained all 73 source files byte-for-byte.
+The public trial and a newly added copy remain unverified; the listing says so.
