@@ -108,3 +108,24 @@ docker run --rm --network none --read-only --user 65532:65532 \
 cmp .tmp/fleetbase-composer-inventory.json samples/discover-oss/fleetbase/prototype/provenance/composer-inventory.json
 PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.tmp" python3 -m unittest discover -s samples/discover-oss/fleetbase/prototype/provenance -p 'test_*.py' -v
 ```
+
+`provenance/verify_console_packages.py` additionally checks the pinned console
+`pnpm-lock.yaml` and the archive SHA-256 and lockfile SHA-512 integrity values
+for `@fleetbase/ember-core` 0.3.26, `@fleetbase/fleetops-data` 0.2.3 and
+`@fleetbase/fleetops-engine` 0.6.75. It checks the package identities and
+license-file hashes without extracting the archives; `console-packages.json`
+records those results. All three archives declare AGPL-3.0-or-later and include
+source-like files and a license file. This establishes the identity of these
+three archives against the pinned source lock, not that the released console
+image was reproducibly built from them. It does not cover the console's other
+JavaScript dependencies or establish a complete corresponding-source bundle.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 samples/discover-oss/fleetbase/prototype/provenance/verify_console_packages.py \
+  .tmp/fleetbase-upstream/console/pnpm-lock.yaml \
+  .tmp/fleetbase-ember/fleetbase-ember-core-0.3.26.tgz \
+  .tmp/fleetbase-fleetops/fleetbase-fleetops-data-0.2.3.tgz \
+  .tmp/fleetbase-fleetops/fleetbase-fleetops-engine-0.6.75.tgz \
+  > .tmp/fleetbase-console-packages.json
+cmp .tmp/fleetbase-console-packages.json samples/discover-oss/fleetbase/prototype/provenance/console-packages.json
+```
