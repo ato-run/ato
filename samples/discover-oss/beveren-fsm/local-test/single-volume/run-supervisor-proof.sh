@@ -35,7 +35,7 @@ with open(sys.argv[1],'w') as f:
 PYSECRET
 docker volume create "$volume" >/dev/null
 docker run --rm --platform linux/amd64 --network none --read-only --user root --mount "type=volume,src=$volume,dst=/data" --entrypoint sh "$image" -c 'chown 1000:1000 /data && chmod 700 /data'
-docker run -d --platform linux/amd64 --name "$server" --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 --mount "type=volume,src=$volume,dst=/data" --mount "type=bind,src=$workspace,dst=/ato/workspace,readonly" --env-file "$secret_file" -e CI=1 --entrypoint /home/frappe/frappe-bench/env/bin/python "$image" /ato/workspace/supervisor.py >/dev/null
+docker run -d --platform linux/amd64 --name "$server" --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 2g --cpus 2 --pids-limit 256 --user 1000:1000 --mount "type=volume,src=$volume,dst=/data" --mount "type=bind,src=$workspace,dst=/ato/workspace,readonly" --env-file "$secret_file" -e CI=1 --entrypoint /home/frappe/frappe-bench/env/bin/python "$image" /ato/workspace/supervisor.py >/dev/null
 wait_ready() {
     docker exec -e TMPDIR=/data/tmp "$server" sh -c 'i=0; until /home/frappe/frappe-bench/env/bin/python -c "import requests;requests.get(\"http://127.0.0.1:8000/login\",timeout=3).raise_for_status()" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 240 ] || exit 1; sleep 1; done'
 }
@@ -60,7 +60,7 @@ docker stop --timeout 60 "$server" >/dev/null
 test "$(docker inspect --format '{{.State.ExitCode}}' "$server")" -eq 0
 docker run --rm --platform linux/amd64 --network none --read-only --user 1000:1000 --mount "type=volume,src=$volume,dst=/data" --entrypoint sh "$image" -c 'test -f /data/private/initialized && test ! -e /data/private/running && test ! -e /data/private/initializing'
 docker rm -v "$server" >/dev/null
-docker run -d --platform linux/amd64 --name "$server" --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 --mount "type=volume,src=$volume,dst=/data" --mount "type=bind,src=$workspace,dst=/ato/workspace,readonly" -e CI=1 --entrypoint /home/frappe/frappe-bench/env/bin/python "$image" /ato/workspace/supervisor.py >/dev/null
+docker run -d --platform linux/amd64 --name "$server" --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 2g --cpus 2 --pids-limit 256 --user 1000:1000 --mount "type=volume,src=$volume,dst=/data" --mount "type=bind,src=$workspace,dst=/ato/workspace,readonly" -e CI=1 --entrypoint /home/frappe/frappe-bench/env/bin/python "$image" /ato/workspace/supervisor.py >/dev/null
 wait_ready
 docker exec -e BEVEREN_ADMIN_PASSWORD -e TMPDIR=/data/tmp "$server" /data/bench/env/bin/python /ato/workspace/persist_probe.py verify
 docker exec -e TMPDIR=/data/tmp "$server" /data/bench/env/bin/python /ato/workspace/redis_probe.py verify
