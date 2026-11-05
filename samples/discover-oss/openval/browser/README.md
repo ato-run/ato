@@ -33,3 +33,17 @@ the default workbook was exported and reimported; the upstream sample workbook
 was uploaded; a workbook was downloaded; and the page reloaded successfully.
 The clean `npm ci` audit reported zero known vulnerabilities. These checks
 do not establish correctness for all inputs or production financial use.
+
+The first staging candidate used Turbopack: its Contract was satisfied but its
+UI did not hydrate after the Instance gateway rewrote asset URLs. The webpack
+candidate fixed that observed failure. On 2026-11-05 the gateway URL rewrite
+and a restrictive CSP were reproduced locally, and the same browser workflow
+passed on both the candidate and a clean rebuild. The webpack candidate's
+bundle SHA-256 is `0ae5173cd9e95f5a28280b5f7fb238cc6926f39053d46853e0f7467e68072c6c`.
+Its staging Instance `cinst_01M6NMDD9MHHNRMENM9R78FFYE` showed a confirmed
+Static Web Contract. In the owner's browser, the seed report loaded and the
+upstream synthetic workbook produced its report. A browser download event
+was not observed in the staging automation, so the staging export path is not
+claimed as verified; the local browser round-trip passed. Discover listing:
+https://stg-app.ato.run/?view=discover&detail=discover%3Adapp_01M6NMJAYJBYV9SW46VWXVMMZ9
+The public trial path has not been verified.
