@@ -329,6 +329,7 @@ impl ValidatorAgent {
                     portability_profile: None,
                     embedded_oci_image_loaded: None,
                     services: Vec::new(),
+                    ..Default::default()
                 });
         execution.endpoint = job.endpoint.clone();
         execution.lease_id = job.lease_id.clone();

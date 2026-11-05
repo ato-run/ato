@@ -31,7 +31,9 @@ use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
 };
-use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
+use ato_adapter_process::{
+    ProcessAdapter, ProcessHandle, ProcessSpec, StopBudget as ProcessStopBudget,
+};
 use ato_formation::request::{AttemptFailure, AttemptOutcomes, RuntimeProfile};
 use ato_formation::verify::{
     ContractVerification, ContractVerificationReceipt, VerificationExecutionEvidence,
@@ -62,6 +64,11 @@ pub struct PortableRunContext<'a> {
     pub sandbox_shim: &'a Path,
     /// The subcommand that applies a portable sandbox policy.
     pub sandbox_subcommand: &'a str,
+    /// What this host can do, measured once by the caller. `None` means the
+    /// executor probes for itself at admission time; a caller that already
+    /// probed (the CLI) passes its own so `ato pack` and `ato run` cannot
+    /// disagree.
+    pub host: Option<&'a ato_host_facts::HostFacts>,
 }
 
 /// Project a validated native OCI route into the existing Runner wire contract.
@@ -180,6 +187,68 @@ pub struct PortableBundleExecutor<'a> {
     pub context: &'a PortableRunContext<'a>,
 }
 
+impl PortableBundleExecutor<'_> {
+    /// This host's facts: the caller's, or one probe of the selected route's
+    /// requirements when the caller did not measure it.
+    fn host_facts(&self) -> ato_host_facts::HostFacts {
+        match self.context.host {
+            Some(host) => host.clone(),
+            None => ato_host_facts::HostFacts::probe(std::slice::from_ref(
+                &self.execution_requirements(),
+            )),
+        }
+    }
+
+    /// What this route needs from the host, read from the selected Derivation.
+    pub fn execution_requirements(&self) -> ato_host_facts::ExecutionRequirements {
+        execution_requirements_for(self.validated, self.runtime_root)
+    }
+}
+
+/// What a validated route needs from this host.
+///
+/// Read from the D that was selected: the platform the route's images are
+/// pinned to, whether it declares filesystem state, and the one path this Run
+/// will hand the daemon. Nothing here is derived from argv.
+pub fn execution_requirements_for(
+    validated: &ValidatedPortableApplication,
+    runtime_root: &Path,
+) -> ato_host_facts::ExecutionRequirements {
+    let derivation = &validated.derivation;
+    let mut requirements = match validated.realization {
+        PortableRealizationKind::StaticWeb => ato_host_facts::ExecutionRequirements::default(),
+        PortableRealizationKind::LocalProcess
+        | PortableRealizationKind::ProcessServiceGroup => {
+            ato_host_facts::ExecutionRequirements::process()
+        }
+        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+            ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
+        }
+    };
+    if !derivation.state.is_empty() {
+        requirements = requirements.with_state();
+    }
+    requirements.binding(runtime_root)
+}
+
+/// The `os/arch` platform this route's containers are pinned to.
+///
+/// A service group states it on the Derivation; a single service states it on
+/// its serving step. A route that states none returns `None`, and a platform
+/// that was not declared is not guessed.
+fn route_platform(derivation: &ato_formation::authoring::BoundDerivation) -> Option<String> {
+    derivation
+        .runtimes
+        .get(OCI_PLATFORM_RUNTIME)
+        .cloned()
+        .or_else(|| {
+            derivation
+                .steps
+                .iter()
+                .find_map(|step| step.runtimes.get(OCI_PLATFORM_RUNTIME).cloned())
+        })
+}
+
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     Some(AttemptFailure {
         code: code.to_owned(),
@@ -208,36 +277,62 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 );
             }
         }
-        match self.validated.realization {
-            PortableRealizationKind::StaticWeb => None,
-            PortableRealizationKind::LocalProcess
-            | PortableRealizationKind::ProcessServiceGroup => {
-                if !self.validated.derivation.state.is_empty() && !cfg!(target_os = "linux") {
-                    return refused(
-                        "state_needs_linux_sandbox",
-                        "local process runtime admission failed: declared filesystem state \
-                         requires a Linux bubblewrap sandbox",
-                    );
-                }
-                None
+        // The capability question is answered from observed host facts, not
+        // from the OS this binary was compiled for: a container route can run
+        // on a VM-backed or rootless daemon through the Run's connector, and
+        // the facts are what decide which connector that is.
+        let requirements = self.execution_requirements();
+        let probed;
+        let host = match self.context.host {
+            Some(host) => host,
+            None => {
+                probed = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
+                &probed
             }
-            // The adapter forwards a container's Port from its internal
-            // bridge, which Docker Desktop keeps inside its VM.
-            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup
-                if !cfg!(target_os = "linux") =>
-            {
-                refused(
-                    "oci_needs_native_linux",
-                    format!(
-                        "{} routes require a native Linux Docker host",
-                        self.validated.realization.label()
-                    ),
-                )
-            }
-            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
-                None
-            }
+        };
+        let status = ato_host_facts::execution_status(host, &requirements);
+        if status.state != ato_host_facts::CapabilityState::Advertised {
+            let reason = status
+                .reasons
+                .iter()
+                .find(|reason| !reason.code.is_warning())
+                .or_else(|| status.reasons.first());
+            let (code, detail) = match reason {
+                Some(reason) => (reason.code.as_str(), reason.message.clone()),
+                None => ("execution_unavailable", status.describe()),
+            };
+            return refused(
+                code,
+                format!(
+                    "{} runtime admission failed on this host: {detail}",
+                    self.validated.realization.label()
+                ),
+            );
         }
+        if self.validated.realization == PortableRealizationKind::OciContainer
+            && host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay)
+        {
+            // A single container has no group network for a relay to join, so
+            // this Run has no materialization for it. Refusing here is honest;
+            // silently trying the bridge would fail later, less clearly.
+            return refused(
+                "oci_container_relay_unsupported",
+                "this OCI container route needs a relay on this host (a VM-backed or rootless \
+                 daemon), which this Run does not implement for a single container; a service \
+                 group route runs through the relay, and a native Linux daemon runs directly",
+            );
+        }
+        if requirements.needs_container && host.connector_choice().is_none() {
+            return refused(
+                "oci_connector_unavailable",
+                format!(
+                    "{} runtime admission failed: no connector reaches this daemon \
+                     (a remote daemon cannot receive this Run's workspace)",
+                    self.validated.realization.label()
+                ),
+            );
+        }
+        None
     }
 
     fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
@@ -258,6 +353,9 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         for reference in &dependency_fetches {
             eprintln!("dependency fetched and verified: {reference}");
         }
+        // One measurement of this host, used for both the connector choice and
+        // the evidence that records it.
+        let host = self.host_facts();
         let state_mounts =
             resolve_portable_state_mounts(route, self.runtime_root, self.filesystem_state)?;
         let input_mounts = if route.model_sets.is_empty() {
@@ -278,10 +376,10 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 self.start_process(workspace, &state_mounts, &input_mounts)?
             }
             PortableRealizationKind::OciContainer => {
-                self.start_container(&hydrated, workspace, &state_mounts)?
+                self.start_container(&hydrated, workspace, &state_mounts, &host)?
             }
             PortableRealizationKind::OciServiceGroup => {
-                self.start_service_group(&hydrated, workspace, &state_mounts)?
+                self.start_service_group(&hydrated, workspace, &state_mounts, &host)?
             }
             PortableRealizationKind::ProcessServiceGroup => {
                 self.start_process_group(workspace, &state_mounts, &input_mounts)?
@@ -530,8 +628,22 @@ impl PortableBundleExecutor<'_> {
         hydrated: &ato_objects::PortableApplicationBundle,
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
+        host: &ato_host_facts::HostFacts,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
+        // A single container has no group network to join, so the relay
+        // materialization is not implemented for it. Admission refuses that
+        // combination first; this is the same decision, stated where the
+        // container would have been started.
+        if host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay) {
+            return Err(launch(
+                anyhow::anyhow!(
+                    "a single OCI container route needs a relay on this host, which this Run does \
+                     not implement; use a service group route or a native Linux daemon"
+                ),
+                &workspace,
+            ));
+        }
         let step = &route.derivation.steps[0];
         let port = &route.derivation.ports[0];
         let guest_port = port.guest_port.context("OCI route omitted guest_port")?;
@@ -619,6 +731,7 @@ impl PortableBundleExecutor<'_> {
         hydrated: &ato_objects::PortableApplicationBundle,
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
+        host: &ato_host_facts::HostFacts,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let derivation = &route.derivation;
@@ -698,13 +811,38 @@ impl PortableBundleExecutor<'_> {
                 guards: Vec::new(),
             });
         }
-        let group = OciNetwork::create(&route.derivation_ref.to_string(), &BTreeMap::new())
+        // Which materialization reaches the Ports is a fact about the daemon,
+        // recorded in this Run's evidence. A native Linux daemon keeps the
+        // direct bridge; a VM-backed or rootless one needs the Run's relay.
+        let connector_choice = host.connector_choice();
+        let relay = match connector_choice {
+            Some(ato_host_facts::ConnectorChoice::Relay) => {
+                let destinations = derivation
+                    .ports
+                    .iter()
+                    .filter_map(|port| {
+                        port.guest_port
+                            .map(|guest_port| (port.from.clone(), guest_port))
+                    })
+                    .collect::<Vec<_>>();
+                Some(ato_runtime_attempt::launch::oci::RelayStart {
+                    destinations,
+                    architecture: host.docker.architecture.clone(),
+                    // The Run's own scratch, not just the route: two Runs of
+                    // the same bundle are two relays.
+                    label: self.runtime_root.display().to_string(),
+                })
+            }
+            _ => None,
+        };
+        let mut group = OciNetwork::create(&route.derivation_ref.to_string(), &BTreeMap::new())
             .and_then(|network| {
                 start_service_group(
                     network,
                     &workspace,
                     services,
                     StopBudget::DEFAULT,
+                    relay,
                     &mut |name, group| wait_until_service_accepts_tcp(route, name, group),
                 )
             })
@@ -733,17 +871,15 @@ impl PortableBundleExecutor<'_> {
                 .iter()
                 .find(|port| port.id == port_id)
                 .context("observation names undeclared service Port")?;
-            let (_, handle) = group
-                .services()
-                .find(|(name, _)| *name == port.from)
-                .context("observation service was not started")?;
-            let address = std::net::SocketAddr::new(
-                handle
-                    .container_address()
-                    .context("observation service has no network address")?,
-                port.guest_port
-                    .context("observation Port omitted guest port")?,
-            );
+            let guest_port = port
+                .guest_port
+                .context("observation Port omitted guest port")?;
+            // The observation reaches the Port the way this Run reaches any
+            // Port: the group's connector decides, and hands back an address
+            // the observation path can dial.
+            let address = group
+                .expose(port.from.as_str(), guest_port)
+                .context("expose the observation's service Port")?;
             observation_endpoints.insert(port.id.clone(), format!("http://{address}"));
         }
         let surface = group
@@ -760,6 +896,18 @@ impl PortableBundleExecutor<'_> {
         execution.container_id = surface.map(|handle| handle.container_id().to_owned());
         execution.image = surface.map(|handle| handle.image().to_owned());
         execution.platform = surface.map(|handle| handle.platform().to_owned());
+        // Connector evidence exists only for the materialization that needs
+        // it. A direct Run's receipt is byte-for-byte the receipt stg already
+        // produced: no /4, no new fields, the same schema.
+        if let Some(relay) = group.relay_evidence() {
+            execution.connector = Some(group.connector_kind().as_str().to_owned());
+            execution.relay_image_digest = Some(relay.image_digest);
+            execution.relay_container_id = Some(relay.container_id);
+            execution.platform_emulated = Some(matches!(
+                host.docker.platforms.get(platform.as_str()),
+                Some(ato_host_facts::PlatformSupport::Emulated { .. })
+            ));
+        }
         execution.services = group
             .services()
             .map(
@@ -1117,11 +1265,6 @@ fn wait_until_service_accepts_tcp(
     name: &str,
     group: &ato_adapter_oci::OciServiceGroup,
 ) -> Result<()> {
-    let address = group
-        .services()
-        .find(|(service, _)| *service == name)
-        .and_then(|(_, handle)| handle.container_address())
-        .context("service was not started")?;
     let guest_port = route
         .derivation
         .ports
@@ -1134,10 +1277,9 @@ fn wait_until_service_accepts_tcp(
         if let Some((service, code)) = group.exited_service()? {
             bail!("OCI service `{service}` exited before the group was ready: {code}");
         }
-        let target = std::net::SocketAddr::new(address, guest_port);
-        if std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_millis(500))
-            .is_ok()
-        {
+        // Readiness is a connection to the logical Port through the Run's
+        // connector, not a dial to a container address.
+        if group.connect(name, guest_port).is_ok() {
             return Ok(());
         }
         anyhow::ensure!(
@@ -1247,6 +1389,7 @@ fn evidence(
         portability_profile: None,
         embedded_oci_image_loaded: None,
         services: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -1290,17 +1433,14 @@ impl RunningCandidate for PortableProcessCandidate {
     }
 
     fn stop(mut self: Box<Self>) -> Result<()> {
-        if let Some(mut handle) = self.handle.take()
-            && handle.try_wait()?.is_none()
-        {
-            handle.terminate()?;
-            for _ in 0..200 {
-                if handle.try_wait()?.is_some() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            // Still running: dropping the handle kills the group and reaps.
+        if let Some(mut handle) = self.handle.take() {
+            // The leader's exit is not the question: a workload that left a
+            // child behind is still running in the same group. The group is
+            // stopped and shown empty, and a group that survives is an error
+            // this Run reports instead of a cleanup the Drop path hides.
+            handle
+                .stop_group(ProcessStopBudget::default())
+                .context("stopping the selected process group")?;
         }
         remove_owned(&self.owned)
     }
@@ -2170,6 +2310,10 @@ pub struct PortableBundleAttempt<'a> {
     pub run_id: Option<&'a str>,
     pub binding_environment: &'a BTreeMap<String, String>,
     pub interrupt: Option<&'a std::sync::atomic::AtomicBool>,
+    /// What the caller already measured about this host. `None` probes at
+    /// admission time; a caller that probed passes its answer so one Run
+    /// cannot report two different capabilities.
+    pub host: Option<&'a ato_host_facts::HostFacts>,
 }
 
 /// Run one already-built portable bundle through the Runtime's common attempt:
@@ -2203,6 +2347,7 @@ pub fn run_portable_bundle_attempt(
         cache_root: request.cache_root,
         sandbox_shim: request.sandbox_shim,
         sandbox_subcommand: request.sandbox_subcommand,
+        host: request.host,
     };
     let executor = PortableBundleExecutor {
         bundle: request.bundle,

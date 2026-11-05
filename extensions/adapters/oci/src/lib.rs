@@ -17,6 +17,12 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+mod connector;
+mod relay;
+
+pub use connector::{ConnectorKind, DirectBridge, PortConnection, PortConnector, SharedConnector};
+pub use relay::{DaemonRelay, RelayDestination, RelayEvidence};
+
 use anyhow::{Context, Result, bail, ensure};
 
 pub mod command_control;
@@ -343,6 +349,10 @@ pub struct DockerOciAdapter {
     offline_image: Option<OfflineImage>,
     attached_terminal: bool,
     cgroup_parent: Option<String>,
+    /// How this route's logical Ports are reached. `None` means the container's
+    /// own address (the native Linux behaviour); a relay is injected by the
+    /// caller that observed the daemon cannot be reached directly.
+    connector: Option<SharedConnector>,
 }
 
 struct OfflineImage {
@@ -351,6 +361,42 @@ struct OfflineImage {
 }
 
 impl DockerOciAdapter {
+    /// Reach this container's logical Ports through `connector` instead of its
+    /// own address. Used for a Run whose daemon keeps the container network
+    /// out of reach; the connector is the Run's, and the Run records it.
+    pub fn with_connector(mut self, connector: SharedConnector) -> Self {
+        self.attach_connector(connector);
+        self
+    }
+
+    /// Same, for an adapter that is already owned by a caller's service list.
+    pub fn attach_connector(&mut self, connector: SharedConnector) {
+        self.connector = Some(connector);
+    }
+
+    /// Whether this adapter has a connector for its Ports.
+    pub fn has_connector(&self) -> bool {
+        self.connector.is_some()
+    }
+
+    /// Start the relay for this Run's network, from inside this adapter so the
+    /// Docker client stays private to it.
+    pub fn start_relay(
+        &self,
+        network: &str,
+        destinations: &[RelayDestination],
+        architecture: Option<&str>,
+        run_label: &str,
+    ) -> Result<std::sync::Arc<DaemonRelay>> {
+        DaemonRelay::start(
+            self.docker.clone(),
+            network,
+            destinations,
+            architecture,
+            run_label,
+        )
+    }
+
     /// Trusted physical placement, independent of the application's identity.
     /// The caller measures this exact existing parent before creating either
     /// member of an auxiliary group. Never inferred from dockerd's cgroup.
@@ -408,10 +454,6 @@ impl DockerOciAdapter {
             executable.is_absolute() && executable.is_file(),
             "OCI owner client is not an absolute executable file"
         );
-        ensure!(
-            cfg!(target_os = "linux") || spec.endpoints.is_empty(),
-            "OCI runtime admission failed: isolated HTTP endpoints currently require a native Linux host; Docker Desktop keeps the internal bridge inside its VM"
-        );
         let docker = DockerClient::ambient(executable);
         Ok(Self {
             docker,
@@ -419,6 +461,7 @@ impl DockerOciAdapter {
             offline_image: None,
             attached_terminal: false,
             cgroup_parent: None,
+            connector: None,
         })
     }
 
@@ -637,6 +680,7 @@ impl DockerOciAdapter {
                 "OCI network alias is not a DNS label"
             );
         }
+        ensure_ports_reachable(&self.spec, self.connector.is_some())?;
         fs::create_dir_all(runtime_root).context("create OCI runtime directory")?;
         self.load_offline_if_missing(runtime_root)?;
         let (_, image_for_run) = self.admit_image()?;
@@ -807,14 +851,30 @@ impl DockerOciAdapter {
         };
         let mut forwarders = Vec::with_capacity(self.spec.endpoints.len());
         for endpoint in &self.spec.endpoints {
-            let Some(address) = container_address else {
-                return Err(failed_launch(
-                    &self.docker,
-                    &container_id,
-                    anyhow::anyhow!("network-free container cannot expose endpoints"),
-                ));
+            // The Surface is forwarded to 127.0.0.1 either way. Which way the
+            // forwarder then reaches the Port is the connector's business:
+            // the container's own address (direct) or the Run's relay. There
+            // is no third option; without either, an endpoint is not exposed.
+            let target = match &self.connector {
+                Some(connector) => ForwardTarget::Connector {
+                    connector: std::sync::Arc::clone(connector),
+                    service: alias.unwrap_or(&self.spec.id).to_owned(),
+                    guest_port: endpoint.guest_port,
+                },
+                None => {
+                    let Some(address) = container_address else {
+                        return Err(failed_launch(
+                            &self.docker,
+                            &container_id,
+                            anyhow::anyhow!(
+                                "network-free container cannot expose endpoints, and this Run has                                  no connector for them"
+                            ),
+                        ));
+                    };
+                    ForwardTarget::Direct(SocketAddr::new(address, endpoint.guest_port))
+                }
             };
-            match PortForwarder::start(endpoint.host_port, address, endpoint.guest_port) {
+            match PortForwarder::start(endpoint.host_port, target) {
                 Ok(forwarder) => forwarders.push(forwarder),
                 Err(error) => {
                     drop(forwarders);
@@ -837,6 +897,7 @@ impl DockerOciAdapter {
             platform: self.spec.platform.clone(),
             endpoints: self.spec.endpoints.clone(),
             forwarders,
+            connector: self.connector.clone(),
             outcome: None,
             terminal: terminal.map(Box::new),
         })
@@ -1229,6 +1290,13 @@ pub struct OciServiceGroup {
     auxiliary_networks: Vec<OciNetwork>,
     services: Vec<(String, OciHandle)>,
     retained_resources: Vec<Box<dyn Send>>,
+    /// The relay this Run started because its daemon keeps the container
+    /// network out of reach. Owned by the group: it is stopped, and its
+    /// absence verified, before the network goes.
+    relay: Option<std::sync::Arc<DaemonRelay>>,
+    /// Loopback proxies this group opened for a logical Port that something
+    /// other than the Surface has to reach (an observation).
+    exposed: Vec<PortForwarder>,
 }
 
 impl OciServiceGroup {
@@ -1238,7 +1306,77 @@ impl OciServiceGroup {
             auxiliary_networks: Vec::new(),
             services: Vec::new(),
             retained_resources: Vec::new(),
+            relay: None,
+            exposed: Vec::new(),
         }
+    }
+
+    /// Take ownership of the Run's relay. Services still to start reach their
+    /// Ports through it; the group stops it after them.
+    pub fn set_relay(&mut self, relay: std::sync::Arc<DaemonRelay>) {
+        self.relay = Some(relay);
+    }
+
+    /// How this group's Ports are reached, for the Run's evidence.
+    pub fn connector_kind(&self) -> ConnectorKind {
+        match &self.relay {
+            Some(relay) => relay.kind(),
+            None => ConnectorKind::Direct,
+        }
+    }
+
+    /// What the Run records about its relay, when it used one.
+    pub fn relay_evidence(&self) -> Option<RelayEvidence> {
+        self.relay.as_ref().map(|relay| relay.evidence())
+    }
+
+    /// Open a connection to one service's logical Port through this group's
+    /// connector. Readiness and observation both come through here, so
+    /// neither one knows which materialization is in use.
+    pub fn connect(&self, service: &str, guest_port: u16) -> Result<Box<dyn PortConnection>> {
+        if let Some(relay) = &self.relay {
+            return relay.connect(service, guest_port);
+        }
+        let (_, handle) = self
+            .services
+            .iter()
+            .find(|(name, _)| name == service)
+            .with_context(|| format!("OCI service {service} was not started"))?;
+        handle.connect(service, guest_port)
+    }
+
+    /// Expose one logical Port on a loopback address this Run owns.
+    ///
+    /// Only a relay needs this: a direct Run's observation reaches the
+    /// container's own address, while a relayed Run reaches it through the
+    /// relay, and the observation path wants a URL it can dial.
+    pub fn expose(&mut self, service: &str, guest_port: u16) -> Result<SocketAddr> {
+        let Some(relay) = self.relay.clone() else {
+            let (_, handle) = self
+                .services
+                .iter()
+                .find(|(name, _)| name == service)
+                .with_context(|| format!("OCI service {service} was not started"))?;
+            return Ok(SocketAddr::new(
+                handle
+                    .container_address()
+                    .context("OCI service has no network address")?,
+                guest_port,
+            ));
+        };
+        let forwarder = PortForwarder::start(
+            0,
+            ForwardTarget::Connector {
+                connector: relay,
+                service: service.to_owned(),
+                guest_port,
+            },
+        )?;
+        let address = forwarder
+            .local_address()
+            .context("loopback Port proxy has no address")?;
+        self.exposed.push(forwarder);
+        Ok(address)
     }
 
     pub fn network(&self) -> &OciNetwork {
@@ -1323,8 +1461,21 @@ impl OciServiceGroup {
         while let Some((name, handle)) = self.services.pop() {
             services.push((name, handle.stop_gracefully(budget)));
         }
+        // Proxies first: they only carry connections to services that are
+        // already gone, and closing them is what ends those threads.
+        self.exposed.clear();
         self.retained_resources.clear();
-        let all_confirmed = services.iter().all(|(_, outcome)| outcome.is_confirmed());
+        // The relay is removed after the services and before the network: a
+        // network with a live endpoint cannot be removed. Its absence is
+        // verified by `DaemonRelay::stop`, so a relay that outlives this call
+        // makes the whole stop unconfirmed rather than quietly "cleaned up".
+        let relay_stopped = self.relay.take().map(|relay| relay.stop());
+        let relay_confirmed = relay_stopped
+            .as_ref()
+            .map(|result| result.is_ok())
+            .unwrap_or(true);
+        let all_confirmed =
+            relay_confirmed && services.iter().all(|(_, outcome)| outcome.is_confirmed());
         let network_removed = match self.network.take() {
             // A network with a live endpoint cannot be removed, and removing
             // it is not how a Run ends; leave it for recovery.
@@ -1348,6 +1499,7 @@ impl OciServiceGroup {
         GroupStopReport {
             services,
             network_removed: network_removed && auxiliary_removed,
+            relay_stopped: relay_stopped.map(|result| result.is_ok()),
         }
     }
 }
@@ -1357,6 +1509,9 @@ impl OciServiceGroup {
 pub struct GroupStopReport {
     pub services: Vec<(String, StopOutcome)>,
     pub network_removed: bool,
+    /// Whether a relay this group owned is confirmed absent; `None` when the
+    /// group never had one.
+    pub relay_stopped: Option<bool>,
 }
 
 impl GroupStopReport {
@@ -1368,7 +1523,7 @@ impl GroupStopReport {
 
 impl Drop for OciServiceGroup {
     fn drop(&mut self) {
-        if !self.services.is_empty() || self.network.is_some() {
+        if !self.services.is_empty() || self.network.is_some() || self.relay.is_some() {
             let _ = self.stop_all(StopBudget::DEFAULT);
         }
     }
@@ -1386,6 +1541,8 @@ pub struct OciHandle {
     platform: String,
     endpoints: Vec<OciEndpoint>,
     forwarders: Vec<PortForwarder>,
+    /// How this container's logical Ports are reached by this Run.
+    connector: Option<SharedConnector>,
     /// Set once a stop has been attempted, so drop never stops twice.
     outcome: Option<StopOutcome>,
     terminal: Option<Box<OciTerminal>>,
@@ -1474,6 +1631,29 @@ impl OciHandle {
 
     /// The container's address on its Run network. Used to probe internal
     /// Endpoints from the Runner, which is the trusted execution substrate.
+    /// Open a connection to one of this container's logical Ports.
+    ///
+    /// `container_address()` is not called here: when the Run has a connector
+    /// (a relay, or a bridge), the connector decides how the Port is reached.
+    /// The container's own address is only used when this Run is direct.
+    pub fn connect(&self, service: &str, guest_port: u16) -> Result<Box<dyn PortConnection>> {
+        if let Some(connector) = &self.connector {
+            return connector.connect(service, guest_port);
+        }
+        let address = self
+            .container_address
+            .context("OCI service has no network address to connect to")?;
+        DirectBridge::new(address, guest_port).connect(service, guest_port)
+    }
+
+    /// How this container's Ports are reached, for the Run's evidence.
+    pub fn connector_kind(&self) -> ConnectorKind {
+        self.connector
+            .as_ref()
+            .map(|connector| connector.kind())
+            .unwrap_or(ConnectorKind::Direct)
+    }
+
     pub fn container_address(&self) -> Option<IpAddr> {
         self.container_address
     }
@@ -1564,19 +1744,53 @@ impl OciHandle {
     }
 }
 
+/// Where a loopback forwarder sends the connections it accepts.
+enum ForwardTarget {
+    /// The container's own address on the Run's internal network.
+    Direct(SocketAddr),
+    /// The Run's connector: a relay, or a direct bridge the caller chose.
+    Connector {
+        connector: SharedConnector,
+        service: String,
+        guest_port: u16,
+    },
+}
+
+impl ForwardTarget {
+    fn connect(&self) -> Option<Box<dyn PortConnection>> {
+        match self {
+            Self::Direct(address) => {
+                let bridge = DirectBridge::new(address.ip(), address.port());
+                bridge.connect("", address.port()).ok()
+            }
+            Self::Connector {
+                connector,
+                service,
+                guest_port,
+            } => connector.connect(service, *guest_port).ok(),
+        }
+    }
+}
+
 struct PortForwarder {
     stop: Sender<()>,
     thread: Option<JoinHandle<()>>,
+    /// The loopback address this forwarder listens on; `port 0` in the request
+    /// means the kernel chose it.
+    local_address: SocketAddr,
 }
 
 impl PortForwarder {
-    fn start(host_port: u16, container_address: IpAddr, guest_port: u16) -> Result<Self> {
+    fn start(host_port: u16, target: ForwardTarget) -> Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, host_port))
             .with_context(|| format!("bind loopback Port {host_port}"))?;
+        let local_address = listener
+            .local_addr()
+            .context("read the OCI Port forwarder's loopback address")?;
         listener
             .set_nonblocking(true)
             .context("make OCI Port forwarder non-blocking")?;
-        let target = SocketAddr::new(container_address, guest_port);
+        let target = std::sync::Arc::new(target);
         let (stop, stopped) = mpsc::channel();
         let thread = thread::Builder::new()
             .name(format!("ato-oci-port-{host_port}"))
@@ -1585,7 +1799,12 @@ impl PortForwarder {
         Ok(Self {
             stop,
             thread: Some(thread),
+            local_address,
         })
+    }
+
+    fn local_address(&self) -> Option<SocketAddr> {
+        Some(self.local_address)
     }
 }
 
@@ -1598,7 +1817,11 @@ impl Drop for PortForwarder {
     }
 }
 
-fn run_port_forwarder(listener: TcpListener, target: SocketAddr, stopped: Receiver<()>) {
+fn run_port_forwarder(
+    listener: TcpListener,
+    target: std::sync::Arc<ForwardTarget>,
+    stopped: Receiver<()>,
+) {
     loop {
         match stopped.try_recv() {
             Ok(()) | Err(TryRecvError::Disconnected) => return,
@@ -1606,9 +1829,10 @@ fn run_port_forwarder(listener: TcpListener, target: SocketAddr, stopped: Receiv
         }
         match listener.accept() {
             Ok((client, _)) => {
+                let target = std::sync::Arc::clone(&target);
                 let _ = thread::Builder::new()
                     .name("ato-oci-port-connection".to_owned())
-                    .spawn(move || forward_connection(client, target));
+                    .spawn(move || forward_connection(client, &target));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -1618,23 +1842,37 @@ fn run_port_forwarder(listener: TcpListener, target: SocketAddr, stopped: Receiv
     }
 }
 
-fn forward_connection(client: TcpStream, target: SocketAddr) {
-    let Ok(upstream) = TcpStream::connect_timeout(&target, Duration::from_secs(2)) else {
+fn forward_connection(client: TcpStream, target: &ForwardTarget) {
+    // A socket accepted from a non-blocking listener inherits that flag on
+    // macOS, and `io::copy` on one fails with EAGAIN the first time the peer
+    // has nothing to say yet — which is every request. The listener polls for
+    // accepts; the accepted connection is blocking from here on.
+    if let Err(error) = client.set_nonblocking(false) {
+        eprintln!("[ato oci] accepted connection cannot be made blocking: {error}");
+        return;
+    }
+    let Some(upstream) = target.connect() else {
+        eprintln!("[ato oci] forwarder could not open the target Port");
         return;
     };
     let Ok(mut client_read) = client.try_clone() else {
         return;
     };
-    let Ok(mut upstream_write) = upstream.try_clone() else {
+    let Ok((mut upstream_read, mut upstream_write)) = upstream.split() else {
         return;
     };
     let upload = thread::spawn(move || {
-        let _ = io::copy(&mut client_read, &mut upstream_write);
-        let _ = upstream_write.shutdown(Shutdown::Write);
+        let copied = io::copy(&mut client_read, &mut upstream_write);
+        if std::env::var_os("ATO_OCI_FORWARD_TRACE").is_some() {
+            eprintln!("[ato oci] upload ended: {copied:?}");
+        }
+        let _ = upstream_write.shutdown_write();
     });
-    let mut upstream_read = upstream;
     let mut client_write = client;
-    let _ = io::copy(&mut upstream_read, &mut client_write);
+    let copied = io::copy(&mut upstream_read, &mut client_write);
+    if std::env::var_os("ATO_OCI_FORWARD_TRACE").is_some() {
+        eprintln!("[ato oci] download ended: {copied:?}");
+    }
     // An HTTP server may close an idle keep-alive connection while the proxy
     // keeps its read half open. Forward that EOF immediately: waiting for the
     // upload thread first leaves an apparently live socket in the proxy pool,
@@ -1749,6 +1987,22 @@ impl Drop for OciHandle {
 /// The host-independent checks [`DockerOciAdapter::new`] applies to a spec.
 pub fn validate_oci_spec(spec: &OciSpec) -> Result<()> {
     validate_spec(spec)
+}
+
+/// Whether this host can reach the container network this spec's Ports are on.
+///
+/// The old rule refused at construction, which would also have refused the
+/// Runs that now succeed through a relay. The refusal belongs to the
+/// materialization: without a connector, a non-Linux host has no route to a
+/// container's address, because the daemon keeps that network inside its VM.
+fn ensure_ports_reachable(spec: &OciSpec, has_connector: bool) -> Result<()> {
+    ensure!(
+        spec.endpoints.is_empty() || cfg!(target_os = "linux") || has_connector,
+        "OCI runtime admission failed: this host cannot reach the container network (the daemon \
+         keeps it out of this process's reach) and this Run has no relay connector; run the \
+         route on a native Linux daemon, or let the Run start its relay"
+    );
+    Ok(())
 }
 
 fn validate_spec(spec: &OciSpec) -> Result<()> {
@@ -2350,11 +2604,17 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn vm_backed_docker_cannot_admit_an_isolated_http_endpoint() {
-        let error = DockerOciAdapter::new_at(spec(), std::env::current_exe().unwrap())
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("native Linux host"));
+    fn a_run_without_a_connector_cannot_expose_ports_here_but_a_relayed_one_can() {
+        // The refusal moved from construction to the materialization: a VM
+        // backed daemon cannot be reached directly, and a Run that carries a
+        // connector can. Refusing at construction would have refused both.
+        let error = ensure_ports_reachable(&spec(), false).unwrap_err();
+        assert!(error.to_string().contains("no relay connector"), "{error}");
+        ensure_ports_reachable(&spec(), true).unwrap();
+        // A spec with no Ports needs no route at all.
+        let mut silent = spec();
+        silent.endpoints.clear();
+        ensure_ports_reachable(&silent, false).unwrap();
     }
 
     #[test]
@@ -2792,7 +3052,7 @@ mod tests {
         let proxy_address = listener.local_addr().unwrap();
         let proxy = thread::spawn(move || {
             let (client, _) = listener.accept().unwrap();
-            forward_connection(client, target);
+            forward_connection(client, &ForwardTarget::Direct(target));
         });
 
         let mut client = TcpStream::connect(proxy_address).unwrap();
