@@ -121,10 +121,21 @@ The local receipt and staging UI both confirmed the Contract. In the staging
 owner Instance, setup and a synthetic expense succeeded and survived reload;
 the source page listed 188 files and the license page opened. The Discover
 source tab reported that the files were unavailable; the app embeds its own
-source page, and the listing discloses this limitation. A source ZIP download,
-an added copy and the public trial were not verified. The listing explicitly
+source page, and the listing discloses this limitation. A source ZIP download
+and an added copy were not verified. The listing explicitly
 prohibits real data and tax filing and notes local-only storage and old-backup
 incompatibility.
+
+On 2026-11-06, the public Discover listing admitted a trial with an HTTP 200 and
+began loading the application frame, but twice ended with the generic failure
+screen before the embedded app appeared. The browser's parent-page timing log
+recorded `frame-start`; it did not establish why the frame failed. During the
+second attempt, opening the same generated trial origin directly in a separate
+Chrome tab reached Wakerun. A synthetic profile was created, a synthetic
+1,234-yen expense was saved, and that expense remained after reloading the
+direct tab. This demonstrates only the direct trial origin in that browser;
+the Discover embedded flow remains broken, and the trial origin is not a
+durable shared-data service. No real accounting data was used.
 
 A separate local browser test on the same assembled preview exercised two
 simultaneous synthetic expense writes in separate tabs, reloaded and observed
@@ -133,4 +144,4 @@ file through the browser's file input. The two saved expenses survived the
 restore and reload, and the later expense was absent. A browser download from
 the compiled static source page produced a ZIP whose 188 filenames and bytes
 matched the source manifest. These are local browser tests; they do not verify
-staging Discover's source tab, the public trial, or an added copy.
+staging Discover's source tab or an added copy.
