@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -61,6 +62,21 @@ class SourceComparisonTests(unittest.TestCase):
             files, links = compare.installed_files(root)
             self.assertEqual(sorted(files), ['file.php'])
             self.assertEqual(links, ['external', 'link'])
+
+    def test_recorded_extra_sources_match_installed_composer_references(self):
+        directory = Path(__file__).parent
+        sources = json.loads((directory / 'extra-source-trees.json').read_text())
+        installed = json.loads((directory / 'composer-inventory.json').read_text())
+        packages = {entry['name']: entry for entry in installed['packages']}
+        entries = sources['packages']
+        self.assertEqual(len(entries), len(compare.EXTRA_PACKAGES))
+        self.assertEqual({entry['name'] for entry in entries}, compare.EXTRA_PACKAGES)
+        for entry in entries:
+            package = packages[entry['name']]
+            self.assertEqual(entry['commit'], package['source_commit'])
+            self.assertEqual(entry['repository'], package['source_url'])
+            self.assertRegex(entry['archive_sha256'], r'^[0-9a-f]{64}$')
+            self.assertRegex(entry['tree'], r'^[0-9a-f]{40}$')
 
 
 if __name__ == '__main__':
