@@ -31,7 +31,7 @@ docker exec "$server" mkdir /data/redis
 cat samples/discover-oss/beveren-fsm/local-test/single-volume/redis_probe.py | docker exec -i "$server" sh -c 'cat > /data/tmp/redis_probe.py'
 docker exec -d -e LD_LIBRARY_PATH=/opt/redis-libs "$server" /opt/redis/redis-server --bind 127.0.0.1 --port 6379 --dir /data/redis --appendonly yes --appendfsync always --save '' --protected-mode yes
 docker exec -e TMPDIR=/data/tmp "$server" /home/frappe/frappe-bench/env/bin/python /data/tmp/redis_probe.py set
-docker exec -i "$server" sh -s <<'SETUP' 
+docker exec -i "$server" sh -s <<'SETUP'
 set -eu
 umask 077
 mkdir -p /data/bench/sites /data/bench/logs /data/bench/config/pids
