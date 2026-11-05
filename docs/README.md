@@ -81,6 +81,7 @@ not permission to rewrite either side during documentation maintenance.
   execution, Hosted Formation and Scenario verification.
 - [Capsule bundle overview](capsule.md) and [computation lifecycle](run.md).
 - [Snapshot materialization](snapshot.md) and [COOP](coop.md).
+- [Licensing](licensing.md): the per-material license and notice index.
 - [Research tour](guides/research-tour.md): problem, model, profiles, data
   identity, verified results, independence, prior work and open questions.
 - [Theory draft](theory/capsule-process-model.md): research background, not an
