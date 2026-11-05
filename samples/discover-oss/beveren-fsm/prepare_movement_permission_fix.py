@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a narrow movement authorization fix for the pinned upstream file."""
+"""Prepare narrow order endpoint authorization fixes for the pinned source."""
 
 import argparse
 import hashlib
@@ -35,6 +35,25 @@ def main():
     if section.count(before) != 1:
         raise ValueError("Unexpected movement function structure")
     updated = text[:start] + section.replace(before, after, 1) + text[end:]
+    # Mapping endpoints return new documents without saving them. Check both
+    # access to the source and permission to create the target before mapping.
+    for method, target in (
+        ("make_stock_entry", "Stock Entry"),
+        ("make_delivery_note", "Delivery Note"),
+        ("make_purchase_receipt", "Purchase Receipt"),
+        ("make_purchase_order", "Purchase Order"),
+        ("make_purchase_invoice", "Purchase Invoice"),
+    ):
+        start = updated.index(f"def {method}(")
+        end = updated.index("\n\n@frappe.whitelist()", start)
+        section = updated[start:end]
+        before = '\torder = frappe.get_doc("Service Order", service_order)\n'
+        after = (before + '\torder.check_permission("read")\n'
+                 + f'\tif not frappe.has_permission("{target}", "create"):\n'
+                 + '\t\tfrappe.throw("Not permitted to create target document", frappe.PermissionError)\n')
+        if section.count(before) != 1:
+            raise ValueError(f"Unexpected {method} function structure")
+        updated = updated[:start] + section.replace(before, after, 1) + updated[end:]
     compile(updated, args.upstream.name, "exec")
     result = updated.encode("utf-8")
     with args.output.open("xb") as output:
