@@ -29,6 +29,20 @@ point again yields a Capsule. Files, applications, runtime state and operation
 history are handled within that one lifecycle, with the physical realization
 kept separate from the point's identity.
 
+```mermaid
+flowchart LR
+    C["Computation C"] -->|"α"| C2["Computation C'"]
+    C -->|"seal"| CAP["Capsule κ<br/>immutable, addressable"]
+    CAP -->|"resume"| RUN["Run<br/>mutable evaluation"]
+    K["Contract K<br/>required conditions"] -.->|"checked against"| RUN
+    D["Derivation D<br/>declared realization"] -->|"realizes"| CAP
+    RUN -->|"observations"| REC["Receipt"]
+```
+
+The diagram is a concept map, not an internal data structure. A Capsule's
+identity does not depend on the realization, and satisfying K is a judgment
+about a Run, not a proof that two references are the same.
+
 ## What is lost when only the environment is preserved
 
 Someone you know made a small tool for their own use. You want to use it with
@@ -109,6 +123,47 @@ assert that the realization is the same Computation, or that either Capsule
 reference is identical. The two reference domains are not interchangeable.
 See [application contracts](docs/concepts/application-contracts.md) for the
 profile map and the decisions that remain open.
+
+## A recorded example: same K, a different source
+
+The archived transformation v0 experiment is the smallest concrete check of the
+rule above. It ran in Linux CI, not on every platform, and it was not
+re-executed for this README.
+
+Prerequisites: Linux with bubblewrap and Python 3.12.7 at
+`/opt/ato/toolchains/python/3.12.7` (the CI fixture), and a CLI built from this
+repository.
+
+```sh
+cargo build -p ato-cli --bin ato --locked
+mkdir -p .tmp/transformation-v0
+target/debug/ato pack apps/cli/tests/fixtures/transformation-v0/source-a \
+  -o .tmp/transformation-v0/bundle-a.capsule
+target/debug/ato run .tmp/transformation-v0/bundle-a.capsule --no-open \
+  --verification-receipt .tmp/transformation-v0/receipt-a.json
+target/debug/ato reform .tmp/transformation-v0/bundle-a.capsule \
+  apps/cli/tests/fixtures/transformation-v0/source-b \
+  --out .tmp/transformation-v0/candidate
+```
+
+Expected, from the recorded evidence:
+
+- `.tmp/transformation-v0/candidate/report.json` has `k_preserved: true` and
+  `fully_satisfied: true`, and its `frozen_contract_ref` equals the baseline
+  receipt's `contract_ref`;
+- `.tmp/transformation-v0/candidate/receipt.json` names a different
+  `derivation_ref` and source closure, and is `fully_satisfied: true`;
+- `candidate.capsule` roots at the frozen `ContractRef` while its transport
+  hash differs, and the baseline bundle and receipt stay byte-identical.
+
+A negative case is part of the same record: `source-b-broken` returns a
+`degraded` body, and `reform` rejects it with `k_preserved: true` and
+`fully_satisfied: false`
+([evidence](docs/archive/2026/ops/contract-preserving-transformation-v0.md)).
+What this shows is that the source and the realization changed while K stayed
+frozen. It does not show restart persistence, hosted execution or a safe
+rollout; see [Derivation transformation](docs/guides/derivation-transformation.md)
+for the full command list and the non-claims.
 
 ## Heterogeneous execution, with declared derivations
 
@@ -211,6 +266,9 @@ See [Computation](docs/concepts/computation.md) and the
 
 - [Research tour](docs/guides/research-tour.md): the problem, model, identity
   profiles, data identity, verified results, independence and open questions.
+- [State continuity](docs/guides/research-tour.md#10-state-continuity-recorded-evidence-and-the-next-experiment):
+  what the recorded stateful scenario shows, and the restart/export experiment
+  that is still unproven.
 - Archived experiments: [contract-preserving transformation v0](docs/archive/2026/ops/contract-preserving-transformation-v0.md)
   and [stateful transformation v1](docs/archive/2026/ops/stateful-transformation-v1.md).
   They record Linux-local evidence, with fixtures and limits; they were not
