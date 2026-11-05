@@ -42,8 +42,9 @@ Tauri connection pool or any hosted/browser implementation.
 `assemble_browser.py` operates on a disposable copy of exactly the pinned
 upstream source. It verifies upstream file hashes before applying the overlay;
 it refuses to operate on a Git checkout. The overlay includes the tested npm
-manifest and lock. Run `npm ci` in that copy and then `npm run build`; configure
-the npm cache and temporary directory inside the workspace. The original
+manifest and lock. Run `npm ci`, `python3 package_licenses.py`,
+`python3 package_source.py`, and `npm run build` in that copy; configure the
+npm cache and temporary directory inside the workspace. The original
 SQLite migrations and business queries are retained. The browser adapter uses
 SQL.js, IndexedDB and a Web Lock held across each exported database operation;
 failed operations discard their in-memory changes. It stores full-backup JSON
@@ -55,11 +56,26 @@ On 2026-11-05, a local Chrome session completed initial setup, recorded a
 synthetic expense, created a synthetic invoice, and retained each after a page
 reload. A second tab could read the first tab's saved data. Manual and automatic
 backup entries were created in the browser. The same revision built after
-dependency updates and a production dependency audit reported zero findings;
+dependency updates and a full npm dependency audit reported zero findings;
 the updated router required explicit settings and report links, which were
-checked for settings navigation. The separate SQLite test exercised full
-backup restore and rollback; browser import/export and concurrent writes have
-not yet been verified end to end.
+checked for settings navigation. The source page listed the complete build
+inputs; a locally generated archive's 185 files matched the source tree
+byte-for-byte. That count predates later test and notice changes and is not a
+claim about a later build. The separate SQLite test exercised full backup
+restore and rollback. Four additional tests used the SQL.js asm.js engine,
+fake IndexedDB and a simulated Web Lock to exercise concurrent updates,
+failed writes, unfinished transactions and a backup roundtrip with invoices
+and transactions. Run them with `npx vitest run tests/browser-sql.test.ts
+--exclude '**/browser-adapter/**'`; the exclusion avoids treating the bundled
+adapter source as a second test suite. Real multi-tab simultaneous writes, browser file-picker
+restore and the shipped WebAssembly build's fault handling remain unverified.
+
+The notice generator includes production dependency notices. Radix packages
+without a bundled license all report the same pinned upstream gitHead as the
+included fallback. The `react-remove-scroll-bar` npm package reports a gitHead
+that was not found in its stated repository; its included fallback is from
+the repository's newer pinned commit and must be checked against the historical
+package before production distribution.
 
 Upstream's calculator states that it uses 2024 tax rules. Its UI also described
 the amount of a blue-filing income deduction as a direct tax reduction. The

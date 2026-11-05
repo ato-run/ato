@@ -20,6 +20,7 @@ hashes = {
     "src/components/settings/SettingsPage.tsx": "abf552d6fc9435e63e9a49445e65847f25ba2770268680d3665dcd2cebbf0472",
     "src/components/reports/ReportsPage.tsx": "94edb252f8d7935d495184b2dc78dde7d8bb3f58579ba2075485f73775c5f334",
     "src/App.tsx": "0a040c8ca6a7d29fd0371f75482edfacaac3ef914d7b6d1ca1355830840856d4",
+    "vite.config.ts": "a7dbb7eabc0091a46acf7be3df886ed5a919cc5b707b6dfaef385b7a14be7d28",
 }
 for name, expected in hashes.items():
     if hashlib.sha256((root / name).read_bytes()).hexdigest() != expected:
@@ -28,6 +29,8 @@ for name, expected in hashes.items():
 subprocess.run([sys.executable, str(here / "assemble_db.py"), str(root)], check=True)
 shutil.copytree(here / "overlay", root, dirs_exist_ok=True)
 shutil.copy2(here / "backup.ts", root / "src/lib/full-backup.ts")
+shutil.copytree(here, root / "browser-adapter", dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
 path = root / "src/lib/export.ts"
 source = path.read_text().split("// ===== .wakerun (JSON) =====", 1)[0]
@@ -120,12 +123,23 @@ path.write_text(source)
 path = root / "src/App.tsx"
 source = path.read_text().replace('''      <ToastContainer />''', '''      <div role="status" className="bg-amber-100 px-4 py-3 text-sm text-amber-950">
         試用版です。税計算は2024年基準で最新の税制に対応していません。実データを入力せず、申告には使用しないでください。
+        {" "}<a className="underline" href="/source.html">ソースコード</a>
       </div>
       <ToastContainer />''', 1)
 source = source.replace('''        await runAutoBackup();''', '''        const backup = await runAutoBackup();
         if (backup.error && !cancelled) {
           toast("自動バックアップに失敗しました", { tone: "error", description: backup.error });
         }''', 1)
+path.write_text(source)
+
+path = root / "vite.config.ts"
+source = path.read_text().replace('import react from "@vitejs/plugin-react";',
+    'import react from "@vitejs/plugin-react";\nimport { resolve } from "node:path";', 1)
+source = source.replace('  plugins: [react()],', '''  plugins: [react()],
+  build: { rollupOptions: { input: {
+    index: resolve(process.cwd(), "index.html"),
+    source: resolve(process.cwd(), "source.html"),
+  } } },''', 1)
 path.write_text(source)
 
 # React Router 7 resolves relative links differently under nested splats.
