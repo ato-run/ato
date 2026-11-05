@@ -1,0 +1,94 @@
+services:
+  db:
+    image: mariadb@sha256:f1c56f035ed268a0d7c2c2e06dc879f6319b997cb434cf822a4cfd72a7aa184d
+    pull_policy: never
+    environment:
+      MARIADB_ROOT_PASSWORD: ${BEVEREN_DB_PASSWORD:?}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--skip-character-set-client-handshake"]
+    tmpfs:
+      - /var/lib/mysql:rw,nosuid,size=1536m
+    networks: [test]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 2g
+    pids_limit: 256
+  redis:
+    image: redis@sha256:987c376c727652f99625c7d205a1cba3cb2c53b92b0b62aade2bd48ee1593232
+    pull_policy: never
+    command: ["redis-server", "--protected-mode", "no", "--appendonly", "yes"]
+    volumes:
+      - ./redis2:/data
+    networks: [test]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    pids_limit: 64
+  init:
+    image: beveren-fsm-local-proof:20261106
+    pull_policy: never
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      BEVEREN_DB_PASSWORD: ${BEVEREN_DB_PASSWORD:?}
+      BEVEREN_ADMIN_PASSWORD: ${BEVEREN_ADMIN_PASSWORD:?}
+      PYTHONDONTWRITEBYTECODE: "1"
+      TMPDIR: /home/frappe/frappe-bench/sites/.tmp
+    volumes:
+      - ./sites2:/home/frappe/frappe-bench/sites
+      - ./logs2:/home/frappe/frappe-bench/logs
+      - ./config2:/home/frappe/frappe-bench/config
+    networks: [test]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    mem_limit: 2g
+    pids_limit: 256
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -eu
+        mkdir -p sites/.tmp
+        printf 'frappe\nerpnext\nbeveren_fsm\n' > sites/apps.txt
+        bench set-config -g db_host db
+        bench set-config -gp db_port 3306
+        bench set-config -g redis_cache redis://redis:6379
+        bench set-config -g redis_queue redis://redis:6379
+        bench set-config -g redis_socketio redis://redis:6379
+        bench new-site --db-host db --db-root-password "$$BEVEREN_DB_PASSWORD" --admin-password "$$BEVEREN_ADMIN_PASSWORD" --mariadb-user-host-login-scope '%' --install-app erpnext --set-default demo.local
+        bench --site demo.local install-app beveren_fsm
+  web:
+    image: beveren-fsm-local-proof:20261106
+    pull_policy: never
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      TMPDIR: /home/frappe/frappe-bench/sites/.tmp
+    volumes:
+      - ./sites2:/home/frappe/frappe-bench/sites
+      - ./logs2:/home/frappe/frappe-bench/logs
+      - ./config2:/home/frappe/frappe-bench/config
+      - ./patched-api/service_request.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_request.py:ro
+      - ./patched-api/service_order.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_order.py:ro
+      - ./patched-api/service_appointment.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_appointment.py:ro
+      - ./patched-doctype/service_order.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/doctype/service_order/service_order.py:ro
+    networks: [test]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports: ["127.0.0.1::8000"]
+    mem_limit: 1g
+    pids_limit: 128
+    entrypoint: ["bench", "--site", "demo.local", "serve", "--port", "8000", "--noreload"]
+networks:
+  test:
+    internal: true
