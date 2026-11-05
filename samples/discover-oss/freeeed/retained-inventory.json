@@ -1,0 +1,1782 @@
+{
+  "kind": "preliminary-trimmed-entry-inventory/1",
+  "preview_sha256": "98c82da53ce5061bee5c725bbfd9cb7f3c502d8c4e86181e284d35fa9f27282c",
+  "warning": "Byte matches are evidence of inclusion, not a complete SBOM or license review.",
+  "dependencies": [
+    {
+      "coordinate": "bouncycastle:bcmail-jdk14:138",
+      "classifier": null,
+      "sha256": "389f405cfa66b26004484733937a22624782a5d86456e0c35e007b60ebc8e359",
+      "pom_licenses": [
+        {
+          "name": "Bouncy Castle License",
+          "url": "http://www.bouncycastle.org/licence.html"
+        }
+      ],
+      "license_pom": "bouncycastle:bcmail-jdk14:138",
+      "byte_identical_entries": 146
+    },
+    {
+      "coordinate": "bouncycastle:bcprov-jdk14:138",
+      "classifier": null,
+      "sha256": "d60b88c5d1932de8d98edd5a3ae2d5d5647793de3eb6157015807ee523cd2bee",
+      "pom_licenses": [
+        {
+          "name": "Bouncy Castle License",
+          "url": "http://www.bouncycastle.org/licence.html"
+        }
+      ],
+      "license_pom": "bouncycastle:bcprov-jdk14:138",
+      "byte_identical_entries": 1294
+    },
+    {
+      "coordinate": "com.fasterxml.jackson.core:jackson-annotations:2.17.2",
+      "classifier": null,
+      "sha256": "873a606e23507969f9bbbea939d5e19274a88775ea5a169ba7e2d795aa5156e1",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.fasterxml.jackson.core:jackson-annotations:2.17.2",
+      "byte_identical_entries": 74
+    },
+    {
+      "coordinate": "com.fasterxml.jackson.core:jackson-core:2.18.6",
+      "classifier": null,
+      "sha256": "e7e1bfa50f0a79db37e6aa37db111cf03aebf4a484b359d21127ab43ab2398c6",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.fasterxml.jackson.core:jackson-core:2.18.6",
+      "byte_identical_entries": 211
+    },
+    {
+      "coordinate": "com.fasterxml.jackson.core:jackson-databind:2.17.2",
+      "classifier": null,
+      "sha256": "c04993f33c0f845342653784f14f38373d005280e6359db5f808701cfae73c0c",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.fasterxml.jackson.core:jackson-databind:2.17.2",
+      "byte_identical_entries": 784
+    },
+    {
+      "coordinate": "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.18.0",
+      "classifier": null,
+      "sha256": "f015cdf06d22fa6c06bbcb2f79047bc260f586d6ade01dae1c619f4bb76fad21",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.18.0",
+      "byte_identical_entries": 17
+    },
+    {
+      "coordinate": "com.fasterxml.jackson.dataformat:jackson-dataformat-smile:2.18.0",
+      "classifier": null,
+      "sha256": "c8f5aa2789e3a7112f5226de0ffdda9479a18da14c94253c8d5f429ca681e7ee",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.fasterxml.jackson.dataformat:jackson-dataformat-smile:2.18.0",
+      "byte_identical_entries": 20
+    },
+    {
+      "coordinate": "com.fasterxml.jackson.module:jackson-module-jakarta-xmlbind-annotations:2.18.0",
+      "classifier": null,
+      "sha256": "42b0cc7ca19b2ad8cbc633f624f84ea9e7065e09d71668c1af59cca073a96382",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.fasterxml.jackson.module:jackson-module-jakarta-xmlbind-annotations:2.18.0",
+      "byte_identical_entries": 11
+    },
+    {
+      "coordinate": "com.fasterxml.woodstox:woodstox-core:7.0.0",
+      "classifier": null,
+      "sha256": "eeb3853282c24964a93a6eb4c1bbcb60c8d09fd8e0ffc75ab64ad21045a1fa78",
+      "pom_licenses": [
+        {
+          "name": "The Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.fasterxml.woodstox:woodstox-core:7.0.0",
+      "byte_identical_entries": 976
+    },
+    {
+      "coordinate": "com.formdev:flatlaf:3.4.1",
+      "classifier": null,
+      "sha256": "8b4bbd34727f80e74555b2be3d8dcb994434654986c64f4298162247a9d35ffc",
+      "pom_licenses": [
+        {
+          "name": "The Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.formdev:flatlaf:3.4.1",
+      "byte_identical_entries": 339
+    },
+    {
+      "coordinate": "com.github.ben-manes.caffeine:caffeine:3.1.8",
+      "classifier": null,
+      "sha256": "7dd15f9df1be238ffaa367ce6f556737a88031de4294dad18eef57c474ddf1d3",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.github.ben-manes.caffeine:caffeine:3.1.8",
+      "byte_identical_entries": 703
+    },
+    {
+      "coordinate": "com.google.code.findbugs:jsr305:3.0.2",
+      "classifier": null,
+      "sha256": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.google.code.findbugs:jsr305:3.0.2",
+      "byte_identical_entries": 35
+    },
+    {
+      "coordinate": "com.google.code.gson:gson:2.2.2",
+      "classifier": null,
+      "sha256": "0f2b5f715a5506cc14ed352e5ff406b4c480a06344a479629b85e76c2aae7faa",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.google.code.gson:gson:2.2.2",
+      "byte_identical_entries": 155
+    },
+    {
+      "coordinate": "com.google.code.typica:typica:1.4.1",
+      "classifier": null,
+      "sha256": "4fcd6fb6ba04069b904c4a5f003a0fb2127492afe30c60102eb634368c93dad5",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.google.code.typica:typica:1.4.1",
+      "byte_identical_entries": 345
+    },
+    {
+      "coordinate": "com.google.guava:guava:19.0",
+      "classifier": null,
+      "sha256": "58d4cc2e05ebb012bbac568b032f75623be1cb6fb096f3c60c72a86f7f057de4",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.google.guava:guava-parent:19.0",
+      "byte_identical_entries": 1717
+    },
+    {
+      "coordinate": "com.google.protobuf:protobuf-java:3.11.4",
+      "classifier": null,
+      "sha256": "42e98f58f53d1a49fd734c2dd193880f2dfec3436a2993a00d06b8800a22a3f2",
+      "pom_licenses": [
+        {
+          "name": "3-Clause BSD License",
+          "url": "https://opensource.org/licenses/BSD-3-Clause"
+        }
+      ],
+      "license_pom": "com.google.protobuf:protobuf-parent:3.11.4",
+      "byte_identical_entries": 12
+    },
+    {
+      "coordinate": "com.j256.simplemagic:simplemagic:1.17",
+      "classifier": null,
+      "sha256": "9c705c1587427a8706fea56e3902bb53c98368ff1fe23ad83cf60e451933e1cb",
+      "pom_licenses": [
+        {
+          "name": "ISC License",
+          "url": "https://opensource.org/licenses/ISC"
+        }
+      ],
+      "license_pom": "com.j256.simplemagic:simplemagic:1.17",
+      "byte_identical_entries": 98
+    },
+    {
+      "coordinate": "com.jamesmurty.utils:java-xmlbuilder:0.4",
+      "classifier": null,
+      "sha256": "681e53c4ffd59fa12068803b259e3a83d43f07a47c112e748a187dee179eb31f",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0"
+        }
+      ],
+      "license_pom": "com.jamesmurty.utils:java-xmlbuilder:0.4",
+      "byte_identical_entries": 4
+    },
+    {
+      "coordinate": "com.jayway.jsonpath:json-path:2.9.0",
+      "classifier": null,
+      "sha256": "11a9ee6f88bb31f1450108d1cf6441377dec84aca075eb6bb2343be157575bea",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.jayway.jsonpath:json-path:2.9.0",
+      "byte_identical_entries": 203
+    },
+    {
+      "coordinate": "com.lowagie:itext:2.1.7",
+      "classifier": null,
+      "sha256": "7d82c6b097a31cdf5a6d49a327bf582fdec7304da69308f9f6abf54aa9fd9055",
+      "pom_licenses": [
+        {
+          "name": "Mozilla Public License",
+          "url": "http://www.mozilla.org/MPL/MPL-1.1.html"
+        }
+      ],
+      "license_pom": "com.lowagie:itext:2.1.7",
+      "byte_identical_entries": 495
+    },
+    {
+      "coordinate": "com.opencsv:opencsv:5.5.2",
+      "classifier": null,
+      "sha256": "ca584453a40dd8a1a124321ef7bc618b9ec9a625ca5f29f3f466a64f835060fb",
+      "pom_licenses": [
+        {
+          "name": "Apache 2",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.opencsv:opencsv:5.5.2",
+      "byte_identical_entries": 160
+    },
+    {
+      "coordinate": "com.squareup.okhttp3:okhttp:4.9.3",
+      "classifier": null,
+      "sha256": "93ecd6cba19d87dccfe566ec848d91aae799e3cf16c00709358ea69bd9227219",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.squareup.okhttp3:okhttp:4.9.3",
+      "byte_identical_entries": 323
+    },
+    {
+      "coordinate": "com.squareup.okio:okio:2.8.0",
+      "classifier": null,
+      "sha256": "4496b06e73982fcdd8a5393f46e5df2ce2fa4465df5895454cac68a32f09bbc8",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.squareup.okio:okio:2.8.0",
+      "byte_identical_entries": 70
+    },
+    {
+      "coordinate": "com.sun.mail:mailapi:1.4.4",
+      "classifier": null,
+      "sha256": "2bc7862817b07f69eeb678ad8a339bb3e13b588db939fc8422a132036cf5d063",
+      "pom_licenses": [
+        {
+          "name": "CDDL",
+          "url": "http://www.sun.com/cddl"
+        },
+        {
+          "name": "GPLv2+CE",
+          "url": "https://glassfish.dev.java.net/public/CDDL+GPL.html"
+        }
+      ],
+      "license_pom": "com.sun.mail:all:1.4.4",
+      "byte_identical_entries": 169
+    },
+    {
+      "coordinate": "com.sun.mail:smtp:1.4.4",
+      "classifier": null,
+      "sha256": "30df39e1c78601b156ccf8040748c00df0ee109ab78602807a0fde3d14b63998",
+      "pom_licenses": [
+        {
+          "name": "CDDL",
+          "url": "http://www.sun.com/cddl"
+        },
+        {
+          "name": "GPLv2+CE",
+          "url": "https://glassfish.dev.java.net/public/CDDL+GPL.html"
+        }
+      ],
+      "license_pom": "com.sun.mail:all:1.4.4",
+      "byte_identical_entries": 17
+    },
+    {
+      "coordinate": "com.sun.xml.bind:jaxb-core:2.3.0.1",
+      "classifier": null,
+      "sha256": "d2ecba63615f317a11fb55c6468f6a9480f6411c10951d9881bafd9a9a8d0467",
+      "pom_licenses": [
+        {
+          "name": "CDDL+GPL License",
+          "url": "http://glassfish.java.net/public/CDDL+GPL_1_1.html"
+        }
+      ],
+      "license_pom": "com.sun.xml.bind.mvn:jaxb-parent:2.3.0.1",
+      "byte_identical_entries": 209
+    },
+    {
+      "coordinate": "com.sun.xml.bind:jaxb-impl:2.4.0-b180830.0438",
+      "classifier": null,
+      "sha256": "4e4e4876368f5e1d088839a4ac37cfd419b6d1792518919116650a61a99f6a7a",
+      "pom_licenses": [
+        {
+          "name": "CDDL+GPL License",
+          "url": "http://glassfish.java.net/public/CDDL+GPL_1_1.html"
+        }
+      ],
+      "license_pom": "com.sun.xml.bind.mvn:jaxb-parent:2.4.0-b180830.0438",
+      "byte_identical_entries": 762
+    },
+    {
+      "coordinate": "com.tdunning:t-digest:3.3",
+      "classifier": null,
+      "sha256": "dc8be5228e0733e12fbe35eeffb6f720dff576bb2eb5dee69c1c211adcd7aeb9",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.tdunning:t-digest-parent:3.3",
+      "byte_identical_entries": 44
+    },
+    {
+      "coordinate": "com.typesafe.netty:netty-reactive-streams:2.0.5",
+      "classifier": null,
+      "sha256": "f949849fc8ee75fde468ba3a35df2e04577fa31a2940b83b2a7dc9d14dac13d6",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.typesafe.netty:netty-reactive-streams-parent:2.0.5",
+      "byte_identical_entries": 17
+    },
+    {
+      "coordinate": "com.typesafe.netty:netty-reactive-streams-http:2.0.5",
+      "classifier": null,
+      "sha256": "b39224751ad936758176e9d994230380ade5e9079e7c8ad778e3995779bcf303",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.typesafe.netty:netty-reactive-streams-parent:2.0.5",
+      "byte_identical_entries": 27
+    },
+    {
+      "coordinate": "com.zaxxer:SparseBitSet:1.3",
+      "classifier": null,
+      "sha256": "f76b85adb0c00721ae267b7cfde4da7f71d3121cc2160c9fc00c0c89f8c53c8a",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "com.zaxxer:SparseBitSet:1.3",
+      "byte_identical_entries": 15
+    },
+    {
+      "coordinate": "commons-beanutils:commons-beanutils:1.9.4",
+      "classifier": null,
+      "sha256": "7d938c81789028045c08c065e94be75fc280527620d5bd62b519d5838532368a",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:19",
+      "byte_identical_entries": 137
+    },
+    {
+      "coordinate": "commons-cli:commons-cli:1.6.0",
+      "classifier": null,
+      "sha256": "69e1237059acd56f0f8654dcde09d8a1412eee82918bef5564d51f8fb275711b",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:30",
+      "byte_identical_entries": 30
+    },
+    {
+      "coordinate": "commons-codec:commons-codec:1.14",
+      "classifier": null,
+      "sha256": "a128e4f93fabe5381ded64cf2873019e06030b718eb43ceeae0b0e5d17ad33e9",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:21",
+      "byte_identical_entries": 230
+    },
+    {
+      "coordinate": "commons-collections:commons-collections:3.2.2",
+      "classifier": null,
+      "sha256": "eeeae917917144a68a741d4c0dff66aa5c5c5fd85593ff217bced3fc8ca783b8",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:16",
+      "byte_identical_entries": 460
+    },
+    {
+      "coordinate": "commons-configuration:commons-configuration:1.9",
+      "classifier": null,
+      "sha256": "9465c1df5de771f68009227e034d4a665573d6a5f45560ac96e23032bec719d9",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:9",
+      "byte_identical_entries": 195
+    },
+    {
+      "coordinate": "commons-httpclient:commons-httpclient:3.1",
+      "classifier": null,
+      "sha256": "dbd4953d013e10e7c1cc3701a3e6ccd8c950c892f08d804fabfac21705930443",
+      "pom_licenses": [],
+      "license_pom": null,
+      "byte_identical_entries": 167
+    },
+    {
+      "coordinate": "commons-io:commons-io:2.5",
+      "classifier": null,
+      "sha256": "a10418348d234968600ccb1d988efcbbd08716e1d96936ccc1880e7d22513474",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:16",
+      "byte_identical_entries": 123
+    },
+    {
+      "coordinate": "commons-lang:commons-lang:2.6",
+      "classifier": null,
+      "sha256": "50f11b09f877c294d56f24463f47d28f929cf5044f648661c0f0cfbae9a2f49c",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:7",
+      "byte_identical_entries": 133
+    },
+    {
+      "coordinate": "commons-logging:commons-logging:1.1.1",
+      "classifier": null,
+      "sha256": "ce6f913cad1f0db3aad70186d65c5bc7ffcc9a99e3fe8e0b137312819f7c362f",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:4",
+      "byte_identical_entries": 28
+    },
+    {
+      "coordinate": "de.jollyday:jollyday:0.4.9",
+      "classifier": null,
+      "sha256": "556a1a11275d1d1df094b127a3e158377c0026ad150c0e651c9c46c533027e48",
+      "pom_licenses": [
+        {
+          "name": "Apache 2",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "de.jollyday:jollyday:0.4.9",
+      "byte_identical_entries": 162
+    },
+    {
+      "coordinate": "io.dropwizard.metrics:metrics-core:4.2.26",
+      "classifier": null,
+      "sha256": "9691fe898dd4fa5a4667b694e2e9f9ca6837c1e906f57627423121cf2552616e",
+      "pom_licenses": [
+        {
+          "name": "Apache License 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+        }
+      ],
+      "license_pom": "io.dropwizard.metrics:metrics-parent:4.2.26",
+      "byte_identical_entries": 104
+    },
+    {
+      "coordinate": "io.dropwizard.metrics:metrics-graphite:4.2.26",
+      "classifier": null,
+      "sha256": "719fadf00ad1900487c957da2184e014454780e5206f3ace4bb77973839e4458",
+      "pom_licenses": [
+        {
+          "name": "Apache License 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+        }
+      ],
+      "license_pom": "io.dropwizard.metrics:metrics-parent:4.2.26",
+      "byte_identical_entries": 11
+    },
+    {
+      "coordinate": "io.dropwizard.metrics:metrics-jmx:4.2.26",
+      "classifier": null,
+      "sha256": "dd12dbf6c53fe7032d63bde4cb2b452132bdb6c148a39f41a31d028db8b31ef5",
+      "pom_licenses": [
+        {
+          "name": "Apache License 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+        }
+      ],
+      "license_pom": "io.dropwizard.metrics:metrics-parent:4.2.26",
+      "byte_identical_entries": 19
+    },
+    {
+      "coordinate": "io.dropwizard.metrics:metrics-jvm:4.2.26",
+      "classifier": null,
+      "sha256": "7fd9bd468326da6bc7804d3fbd0bf4a6684a6024d7b9377326c22c90c68ad711",
+      "pom_licenses": [
+        {
+          "name": "Apache License 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+        }
+      ],
+      "license_pom": "io.dropwizard.metrics:metrics-parent:4.2.26",
+      "byte_identical_entries": 16
+    },
+    {
+      "coordinate": "io.opentracing:opentracing-api:0.33.0",
+      "classifier": null,
+      "sha256": "4534541b8e9f41a17bcdf1d09affe45b98c13574db6e529a93a58264b9472c7c",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "io.opentracing:parent:0.33.0",
+      "byte_identical_entries": 29
+    },
+    {
+      "coordinate": "io.opentracing:opentracing-noop:0.33.0",
+      "classifier": null,
+      "sha256": "8529f91e10047b2b94cb21b50086a3d3913fa4da43594eddbd9ecf5917efe040",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "io.opentracing:parent:0.33.0",
+      "byte_identical_entries": 13
+    },
+    {
+      "coordinate": "io.opentracing:opentracing-util:0.33.0",
+      "classifier": null,
+      "sha256": "22c5dfbb9b0e2f08f7371bf3d68372c7604c804d3129499b43f37a8877c4379e",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "io.opentracing:parent:0.33.0",
+      "byte_identical_entries": 5
+    },
+    {
+      "coordinate": "io.prometheus:prometheus-metrics-exposition-formats:1.1.0",
+      "classifier": null,
+      "sha256": "39f79bad8a3f138e1b35f8402f2c69af19dbc1f5ea75b01ea2379b617daa1b07",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "io.prometheus:prometheus-metrics-exposition-formats:1.1.0",
+      "byte_identical_entries": 59
+    },
+    {
+      "coordinate": "io.prometheus:prometheus-metrics-model:1.1.0",
+      "classifier": null,
+      "sha256": "1110968b17997d69fdecf04b820a24d4a57569bb1db3ba60ccd179e8fbd23bf1",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "io.prometheus:prometheus-metrics-model:1.1.0",
+      "byte_identical_entries": 77
+    },
+    {
+      "coordinate": "io.sgr:s2-geometry-library-java:1.0.0",
+      "classifier": null,
+      "sha256": "8e2c74fbe98adf02e93cc831c3a2d9fda9c4c8577eff7bec3ce9ce5863abbda7",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "io.sgr:s2-geometry-library-java:1.0.0",
+      "byte_identical_entries": 51
+    },
+    {
+      "coordinate": "io.swagger.core.v3:swagger-annotations-jakarta:2.2.22",
+      "classifier": null,
+      "sha256": "f2caefc17f7989a59aea59785f746201ea88635cb5c440c582d9a8ebdbf2a96f",
+      "pom_licenses": [
+        {
+          "name": "Apache License 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.html"
+        }
+      ],
+      "license_pom": "io.swagger.core.v3:swagger-project-jakarta:2.2.22",
+      "byte_identical_entries": 58
+    },
+    {
+      "coordinate": "jakarta.annotation:jakarta.annotation-api:2.1.1",
+      "classifier": null,
+      "sha256": "5f65fdaf424eee2b55e1d882ba9bb376be93fb09b37b808be6e22e8851c909fe",
+      "pom_licenses": [
+        {
+          "name": "EPL 2.0",
+          "url": "http://www.eclipse.org/legal/epl-2.0"
+        },
+        {
+          "name": "GPL2 w/ CPE",
+          "url": "https://www.gnu.org/software/classpath/license.html"
+        }
+      ],
+      "license_pom": "jakarta.annotation:jakarta.annotation-api:2.1.1",
+      "byte_identical_entries": 17
+    },
+    {
+      "coordinate": "jakarta.inject:jakarta.inject-api:2.0.1",
+      "classifier": null,
+      "sha256": "f7dc98062fccf14126abb751b64fab12c312566e8cbdc8483598bffcea93af7c",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "jakarta.inject:jakarta.inject-api:2.0.1",
+      "byte_identical_entries": 6
+    },
+    {
+      "coordinate": "jakarta.validation:jakarta.validation-api:3.0.2",
+      "classifier": null,
+      "sha256": "291c25e6910cc6a7ebd96d4c6baebf6d7c37676c5482c2d96146e901b62c1fc9",
+      "pom_licenses": [
+        {
+          "name": "Apache License 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "jakarta.validation:jakarta.validation-api:3.0.2",
+      "byte_identical_entries": 143
+    },
+    {
+      "coordinate": "jakarta.ws.rs:jakarta.ws.rs-api:3.1.0",
+      "classifier": null,
+      "sha256": "6b3b3628b8b4aedda0d24c3354335e985497d8ef3c510b8f3028e920d5b8663d",
+      "pom_licenses": [
+        {
+          "name": "EPL-2.0",
+          "url": "http://www.eclipse.org/legal/epl-2.0"
+        },
+        {
+          "name": "GPL-2.0-with-classpath-exception",
+          "url": "https://www.gnu.org/software/classpath/license.html"
+        }
+      ],
+      "license_pom": "jakarta.ws.rs:jakarta.ws.rs-api:3.1.0",
+      "byte_identical_entries": 149
+    },
+    {
+      "coordinate": "javax.activation:activation:1.1.1",
+      "classifier": null,
+      "sha256": "ae475120e9fcd99b4b00b38329bd61cdc5eb754eee03fe66c01f50e137724f99",
+      "pom_licenses": [],
+      "license_pom": null,
+      "byte_identical_entries": 38
+    },
+    {
+      "coordinate": "javax.activation:javax.activation-api:1.2.0",
+      "classifier": null,
+      "sha256": "43fdef0b5b6ceb31b0424b208b930c74ab58fac2ceeb7b3f6fd3aeb8b5ca4393",
+      "pom_licenses": [
+        {
+          "name": "CDDL/GPLv2+CE",
+          "url": "https://github.com/javaee/activation/blob/master/LICENSE.txt"
+        }
+      ],
+      "license_pom": "com.sun.activation:all:1.2.0",
+      "byte_identical_entries": 4
+    },
+    {
+      "coordinate": "javax.mail:javax.mail-api:1.4.4",
+      "classifier": null,
+      "sha256": "ed719ae70549580aef8d9f2b55fbcca938b72fa293c08a6945fbd3062680e260",
+      "pom_licenses": [
+        {
+          "name": "CDDL",
+          "url": "http://www.sun.com/cddl"
+        },
+        {
+          "name": "GPLv2+CE",
+          "url": "https://glassfish.dev.java.net/public/CDDL+GPL.html"
+        }
+      ],
+      "license_pom": "com.sun.mail:all:1.4.4",
+      "byte_identical_entries": 131
+    },
+    {
+      "coordinate": "javax.xml.bind:jaxb-api:2.4.0-b180830.0359",
+      "classifier": null,
+      "sha256": "56b9e9702753763007435162ea788055efcfefc86ab920f032c0411dc547b836",
+      "pom_licenses": [
+        {
+          "name": "CDDL 1.1",
+          "url": "https://oss.oracle.com/licenses/CDDL+GPL-1.1"
+        },
+        {
+          "name": "GPL2 w/ CPE",
+          "url": "https://oss.oracle.com/licenses/CDDL+GPL-1.1"
+        }
+      ],
+      "license_pom": "javax.xml.bind:jaxb-api-parent:2.4.0-b180830.0359",
+      "byte_identical_entries": 113
+    },
+    {
+      "coordinate": "joda-time:joda-time:2.10.5",
+      "classifier": null,
+      "sha256": "4ee73e7ff8e2df0d4e3408cf1a1527a59f265dd9fb43fb9b2eb818d87f93759e",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "joda-time:joda-time:2.10.5",
+      "byte_identical_entries": 731
+    },
+    {
+      "coordinate": "junit:junit:4.12",
+      "classifier": null,
+      "sha256": "59721f0805e223d84b90677887d9ff567dc534d7c502ca903c0c2b17f05c116a",
+      "pom_licenses": [
+        {
+          "name": "Eclipse Public License 1.0",
+          "url": "http://www.eclipse.org/legal/epl-v10.html"
+        }
+      ],
+      "license_pom": "junit:junit:4.12",
+      "byte_identical_entries": 289
+    },
+    {
+      "coordinate": "net.java.dev.jets3t:jets3t:0.9.0",
+      "classifier": null,
+      "sha256": "e89893fc754b252af717d7d14accda946f7dfcfc1e293fd3e04725163d661bd7",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0"
+        }
+      ],
+      "license_pom": "net.java.dev.jets3t:jets3t:0.9.0",
+      "byte_identical_entries": 312
+    },
+    {
+      "coordinate": "org.antlr:antlr4-runtime:4.11.1",
+      "classifier": null,
+      "sha256": "e06c6553c1ccc14d36052ec4b0fc6f13b808cf957b5b1dc3f61bf401996ada59",
+      "pom_licenses": [
+        {
+          "name": "BSD-3-Clause",
+          "url": "https://www.antlr.org/license.html"
+        }
+      ],
+      "license_pom": "org.antlr:antlr4-master:4.11.1",
+      "byte_identical_entries": 215
+    },
+    {
+      "coordinate": "org.apache.commons:commons-collections4:4.4",
+      "classifier": null,
+      "sha256": "1df8b9430b5c8ed143d7815e403e33ef5371b2400aadbe9bda0883762e0846d1",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:21",
+      "byte_identical_entries": 524
+    },
+    {
+      "coordinate": "org.apache.commons:commons-exec:1.5.0",
+      "classifier": null,
+      "sha256": "d52d35801747902527826cca30734034e65baa7f36836cc0facf67131025f703",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:34",
+      "byte_identical_entries": 49
+    },
+    {
+      "coordinate": "org.apache.commons:commons-lang3:3.19.0",
+      "classifier": null,
+      "sha256": "32733ab4bc90b45b63eb72677d886961003fd4ed113e07b1028f9877cb2ac735",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:35",
+      "byte_identical_entries": 418
+    },
+    {
+      "coordinate": "org.apache.commons:commons-math3:3.6.1",
+      "classifier": null,
+      "sha256": "1e56d7b058d28b65abd256b8458e3885b674c1d588fa43cd7d1cbb9c7ef2b308",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:16",
+      "byte_identical_entries": 1303
+    },
+    {
+      "coordinate": "org.apache.commons:commons-text:1.9",
+      "classifier": null,
+      "sha256": "0812f284ac5dd0d617461d9a2ab6ac6811137f25122dfffd4788a4871e732d00",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:23",
+      "byte_identical_entries": 135
+    },
+    {
+      "coordinate": "org.apache.hadoop:hadoop-client-api:3.3.1",
+      "classifier": null,
+      "sha256": "5434cede7fd14d451ff70073aa08ae678f461e701203cabd6b7eada76fd565bf",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.hadoop:hadoop-main:3.3.1",
+      "byte_identical_entries": 68
+    },
+    {
+      "coordinate": "org.apache.hadoop:hadoop-client-runtime:3.3.1",
+      "classifier": null,
+      "sha256": "8e9fad88e5048b8f8b120de9e14eb8a47cc440045f54edb36125fca4ba88d82d",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.hadoop:hadoop-main:3.3.1",
+      "byte_identical_entries": 3
+    },
+    {
+      "coordinate": "org.apache.httpcomponents:httpclient:4.5.13",
+      "classifier": null,
+      "sha256": "6fe9026a566c6a5001608cf3fc32196641f6c1e5e1986d1037ccdbd5f31ef743",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.httpcomponents:httpcomponents-client:4.5.13",
+      "byte_identical_entries": 472
+    },
+    {
+      "coordinate": "org.apache.httpcomponents:httpcore:4.4.15",
+      "classifier": null,
+      "sha256": "3cbaed088c499a10f96dde58f39dc0e7985171abd88138ca1655a872011bb142",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.httpcomponents:httpcomponents-core:4.4.15",
+      "byte_identical_entries": 254
+    },
+    {
+      "coordinate": "org.apache.httpcomponents:httpmime:4.5.13",
+      "classifier": null,
+      "sha256": "06e754d99245b98dcc2860dcb43d20e737d650da2bf2077a105f68accbd5c5cc",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.httpcomponents:httpcomponents-client:4.5.13",
+      "byte_identical_entries": 24
+    },
+    {
+      "coordinate": "org.apache.logging.log4j:log4j-api:2.25.3",
+      "classifier": null,
+      "sha256": "e886682920fa0fb9d6eb6395dcb4de088443f8646c89c5e5846e168e327f406f",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.logging.log4j:log4j-api:2.25.3",
+      "byte_identical_entries": 210
+    },
+    {
+      "coordinate": "org.apache.logging.log4j:log4j-core:2.25.3",
+      "classifier": null,
+      "sha256": "362b7fcb65b73aa46cc4bc53abf4eb216f444a83b5d1a037cb6fdfff0ae9f0f9",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.logging.log4j:log4j-core:2.25.3",
+      "byte_identical_entries": 1266
+    },
+    {
+      "coordinate": "org.apache.logging.log4j:log4j-slf4j2-impl:2.25.3",
+      "classifier": null,
+      "sha256": "bedc560168f4005d09452e6b6959b252f9efa2eb8cbd17c6660c36eecec7238b",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.logging.log4j:log4j-slf4j2-impl:2.25.3",
+      "byte_identical_entries": 13
+    },
+    {
+      "coordinate": "org.apache.lucene:lucene-analysis-common:9.12.3",
+      "classifier": null,
+      "sha256": "fa571bd7caf0f0b4faf46a72ca004a7836f348c31d92bd522dddcc3d128d287e",
+      "pom_licenses": [
+        {
+          "name": "Apache 2",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.lucene:lucene-analysis-common:9.12.3",
+      "byte_identical_entries": 36
+    },
+    {
+      "coordinate": "org.apache.lucene:lucene-analyzers-common:7.5.0",
+      "classifier": null,
+      "sha256": "bd25432a3da6effd009751a2c6e2567c914b510158728775846d2653e61220f4",
+      "pom_licenses": [
+        {
+          "name": "Apache 2",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.lucene:lucene-solr-grandparent:7.5.0",
+      "byte_identical_entries": 2
+    },
+    {
+      "coordinate": "org.apache.lucene:lucene-core:8.11.1",
+      "classifier": null,
+      "sha256": "78a61d0b843c1cf1fe5be380a4d3a4c1602d3fbba4ca1185da8797c9bb115483",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.lucene:lucene-solr-grandparent:8.11.1",
+      "byte_identical_entries": 2136
+    },
+    {
+      "coordinate": "org.apache.poi:poi:5.2.5",
+      "classifier": null,
+      "sha256": "352e1b44a5777af2df3d7dc408cda9f75f932d0e0125fa1a7d336a13c0a663a7",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.poi:poi:5.2.5",
+      "byte_identical_entries": 1
+    },
+    {
+      "coordinate": "org.apache.solr:solr-core:9.10.1",
+      "classifier": null,
+      "sha256": "21fc9371929652009cbff04cb9614340ce3ccf3f57563bc9717de1f61fb3c523",
+      "pom_licenses": [
+        {
+          "name": "Apache 2",
+          "url": "https://apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.solr:solr-core:9.10.1",
+      "byte_identical_entries": 6
+    },
+    {
+      "coordinate": "org.apache.solr:solr-solrj:9.10.1",
+      "classifier": null,
+      "sha256": "a504c1e68f0ebb828b76dde1684dae7238a7c9709d4658a6439831a3aa74765d",
+      "pom_licenses": [
+        {
+          "name": "Apache 2",
+          "url": "https://apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.solr:solr-solrj:9.10.1",
+      "byte_identical_entries": 11
+    },
+    {
+      "coordinate": "org.apache.tika:tika-core:3.2.2",
+      "classifier": null,
+      "sha256": "a34ba35d675f5a9733e3b60d5782edd8636a5c7785ac5e1c44125d025d57ad1f",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:35",
+      "byte_identical_entries": 462
+    },
+    {
+      "coordinate": "org.apache.zookeeper:zookeeper-jute:3.9.4",
+      "classifier": null,
+      "sha256": "bd9750935add09b6cb920f7bcf0fa7b9a8165c45cdafd8ee1fc6808c46ec9094",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache.zookeeper:parent:3.9.4",
+      "byte_identical_entries": 40
+    },
+    {
+      "coordinate": "org.bouncycastle:bcmail-jdk14:1.38",
+      "classifier": null,
+      "sha256": "389f405cfa66b26004484733937a22624782a5d86456e0c35e007b60ebc8e359",
+      "pom_licenses": [],
+      "license_pom": null,
+      "byte_identical_entries": 146
+    },
+    {
+      "coordinate": "org.bouncycastle:bcprov-jdk14:1.38",
+      "classifier": null,
+      "sha256": "d60b88c5d1932de8d98edd5a3ae2d5d5647793de3eb6157015807ee523cd2bee",
+      "pom_licenses": [],
+      "license_pom": null,
+      "byte_identical_entries": 1294
+    },
+    {
+      "coordinate": "org.bouncycastle:bctsp-jdk14:1.38",
+      "classifier": null,
+      "sha256": "ecbbe4d19c256e4dbfec3454b82b4d24b149f90f3f9c90e6aaef229463cd4da8",
+      "pom_licenses": [],
+      "license_pom": null,
+      "byte_identical_entries": 13
+    },
+    {
+      "coordinate": "org.codehaus.jackson:jackson-core-asl:1.9.13",
+      "classifier": null,
+      "sha256": "440a9cb5ca95b215f953d3a20a6b1a10da1f09b529a9ddea5f8a4905ddab4f5a",
+      "pom_licenses": [],
+      "license_pom": null,
+      "byte_identical_entries": 122
+    },
+    {
+      "coordinate": "org.codehaus.jackson:jackson-mapper-asl:1.9.13",
+      "classifier": null,
+      "sha256": "74e7a07a76f2edbade29312a5a2ebccfa019128bc021ece3856d76197e9be0c2",
+      "pom_licenses": [],
+      "license_pom": null,
+      "byte_identical_entries": 503
+    },
+    {
+      "coordinate": "org.codehaus.woodstox:stax2-api:4.2.2",
+      "classifier": null,
+      "sha256": "a61c48d553efad78bc01fffc4ac528bebbae64cbaec170b2a5e39cf61eb51abe",
+      "pom_licenses": [
+        {
+          "name": "The BSD 2-Clause License",
+          "url": "http://www.opensource.org/licenses/bsd-license.php"
+        }
+      ],
+      "license_pom": "org.codehaus.woodstox:stax2-api:4.2.2",
+      "byte_identical_entries": 124
+    },
+    {
+      "coordinate": "org.eclipse.jetty:jetty-server:9.4.49.v20220914",
+      "classifier": null,
+      "sha256": "06ae86baded124f81935a0701ed6af7b9e7ce33ee8ef58a87b779bb0a6b23dc4",
+      "pom_licenses": [
+        {
+          "name": "Apache Software License - Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0"
+        },
+        {
+          "name": "Eclipse Public License - Version 1.0",
+          "url": "https://www.eclipse.org/org/documents/epl-v10.php"
+        }
+      ],
+      "license_pom": "org.eclipse.jetty:jetty-project:9.4.49.v20220914",
+      "byte_identical_entries": 2
+    },
+    {
+      "coordinate": "org.eclipse.jetty.toolchain:jetty-servlet-api:4.0.6",
+      "classifier": null,
+      "sha256": "d90bf1f8a9d2ba89f4510bb51e1516dcf94ef6dc034e00f233654abdd78f2210",
+      "pom_licenses": [
+        {
+          "name": "Apache Software License - Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0"
+        },
+        {
+          "name": "Eclipse Public License - Version 1.0",
+          "url": "http://www.eclipse.org/org/documents/epl-v10.php"
+        }
+      ],
+      "license_pom": "org.eclipse.jetty.toolchain:jetty-toolchain:1.7",
+      "byte_identical_entries": 127
+    },
+    {
+      "coordinate": "org.ejml:ejml-cdense:0.39",
+      "classifier": null,
+      "sha256": "ab333ff4984a8b8d7c5ef5015f52ea27f1a2fc24ee377f2e5dab31da0a10165c",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-cdense:0.39",
+      "byte_identical_entries": 31
+    },
+    {
+      "coordinate": "org.ejml:ejml-core:0.39",
+      "classifier": null,
+      "sha256": "937fb1b1a0859d88e76b5cf0b2ddc62d03198120fbf213b5cdf2d6c950abc995",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-core:0.39",
+      "byte_identical_entries": 147
+    },
+    {
+      "coordinate": "org.ejml:ejml-ddense:0.39",
+      "classifier": null,
+      "sha256": "28bb9c06901211de146d80ef4ef0299c5dae468a8f9d585d016c19479ed93ef2",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-ddense:0.39",
+      "byte_identical_entries": 124
+    },
+    {
+      "coordinate": "org.ejml:ejml-dsparse:0.39",
+      "classifier": null,
+      "sha256": "c45113df12bb5ca6f6d69e6c2b5dfb74e91acb518c90adc75fa90225c4c1616e",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-dsparse:0.39",
+      "byte_identical_entries": 27
+    },
+    {
+      "coordinate": "org.ejml:ejml-fdense:0.39",
+      "classifier": null,
+      "sha256": "9deed9648a6954c37f79543630638689fc683fb341154bf265cf41aa019e8d38",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-fdense:0.39",
+      "byte_identical_entries": 124
+    },
+    {
+      "coordinate": "org.ejml:ejml-fsparse:0.39",
+      "classifier": null,
+      "sha256": "8e588f16233c5961ddc0f517a165ca35c46f85136756ee6119727885b375d1b9",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-fsparse:0.39",
+      "byte_identical_entries": 26
+    },
+    {
+      "coordinate": "org.ejml:ejml-simple:0.39",
+      "classifier": null,
+      "sha256": "7639609431b267091f81362c70897768a3b8193836206d344c08b2004934d2ef",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-simple:0.39",
+      "byte_identical_entries": 146
+    },
+    {
+      "coordinate": "org.ejml:ejml-zdense:0.39",
+      "classifier": null,
+      "sha256": "475ac2a2cf4467f814a54f13fa68c1345f82cd2cabaa23757e96e2c0cb2c80d3",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.ejml:ejml-zdense:0.39",
+      "byte_identical_entries": 31
+    },
+    {
+      "coordinate": "org.glassfish:javax.json:1.0.4",
+      "classifier": null,
+      "sha256": "0e1dec40a1ede965941251eda968aeee052cc4f50378bc316cc48e8159bdbeb4",
+      "pom_licenses": [
+        {
+          "name": "Dual license consisting of the CDDL v1.1 and GPL v2",
+          "url": "https://glassfish.java.net/public/CDDL+GPL_1_1.html"
+        }
+      ],
+      "license_pom": "org.glassfish:json:1.0.4",
+      "byte_identical_entries": 28
+    },
+    {
+      "coordinate": "org.glassfish.hk2:hk2-api:3.1.1",
+      "classifier": null,
+      "sha256": "ac14d92910ac539505b4c0c72ab6c5f757aa12a43bc88d13a5bc9f23b187062b",
+      "pom_licenses": [
+        {
+          "name": "EPL 2.0",
+          "url": "http://www.eclipse.org/legal/epl-2.0"
+        },
+        {
+          "name": "GPL2 w/ CPE",
+          "url": "https://www.gnu.org/software/classpath/license.html"
+        }
+      ],
+      "license_pom": "org.glassfish.hk2:hk2-parent:3.1.1",
+      "byte_identical_entries": 6
+    },
+    {
+      "coordinate": "org.glassfish.hk2:hk2-locator:3.0.6",
+      "classifier": null,
+      "sha256": "e2664d21b017c3aa1518b913264602bea604edc54d356103c10afba99abd04fc",
+      "pom_licenses": [
+        {
+          "name": "EPL 2.0",
+          "url": "http://www.eclipse.org/legal/epl-2.0"
+        },
+        {
+          "name": "GPL2 w/ CPE",
+          "url": "https://www.gnu.org/software/classpath/license.html"
+        }
+      ],
+      "license_pom": "org.glassfish.hk2:hk2-parent:3.0.6",
+      "byte_identical_entries": 97
+    },
+    {
+      "coordinate": "org.glassfish.hk2:hk2-utils:3.1.1",
+      "classifier": null,
+      "sha256": "6f5ea5fef50755ba20fbb893782b2c63f9aea463c183d63a57dcc9fa6b117139",
+      "pom_licenses": [
+        {
+          "name": "EPL 2.0",
+          "url": "http://www.eclipse.org/legal/epl-2.0"
+        },
+        {
+          "name": "GPL2 w/ CPE",
+          "url": "https://www.gnu.org/software/classpath/license.html"
+        }
+      ],
+      "license_pom": "org.glassfish.hk2:hk2-parent:3.1.1",
+      "byte_identical_entries": 2
+    },
+    {
+      "coordinate": "org.glassfish.hk2.external:aopalliance-repackaged:3.1.1",
+      "classifier": null,
+      "sha256": "e40c643016d40dd9acaa3842a980b93b796d945621f820fcbd82b25c96968fab",
+      "pom_licenses": [
+        {
+          "name": "EPL 2.0",
+          "url": "http://www.eclipse.org/legal/epl-2.0"
+        },
+        {
+          "name": "GPL2 w/ CPE",
+          "url": "https://www.gnu.org/software/classpath/license.html"
+        }
+      ],
+      "license_pom": "org.glassfish.hk2:hk2-parent:3.1.1",
+      "byte_identical_entries": 26
+    },
+    {
+      "coordinate": "org.glassfish.jersey.core:jersey-server:3.1.11",
+      "classifier": null,
+      "sha256": "7dde2adf6600f3e8f723e37a8c96c31838a682f8db854fdcfcf4f00695d6f903",
+      "pom_licenses": [
+        {
+          "name": "EPL 2.0",
+          "url": "http://www.eclipse.org/legal/epl-2.0"
+        },
+        {
+          "name": "The GNU General Public License (GPL), Version 2, With Classpath Exception",
+          "url": "https://www.gnu.org/software/classpath/license.html"
+        },
+        {
+          "name": "Apache License, 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.html"
+        },
+        {
+          "name": "Modified BSD",
+          "url": "https://asm.ow2.io/license.html"
+        }
+      ],
+      "license_pom": "org.glassfish.jersey.core:jersey-server:3.1.11",
+      "byte_identical_entries": 53
+    },
+    {
+      "coordinate": "org.hamcrest:hamcrest-core:1.3",
+      "classifier": null,
+      "sha256": "66fdef91e9739348df7a096aa384a5685f4e875584cce89386a7a47251c4d8e9",
+      "pom_licenses": [
+        {
+          "name": "New BSD License",
+          "url": "http://www.opensource.org/licenses/bsd-license.php"
+        }
+      ],
+      "license_pom": "org.hamcrest:hamcrest-parent:1.3",
+      "byte_identical_entries": 46
+    },
+    {
+      "coordinate": "org.javassist:javassist:3.30.2-GA",
+      "classifier": null,
+      "sha256": "eba37290994b5e4868f3af98ff113f6244a6b099385d9ad46881307d3cb01aaf",
+      "pom_licenses": [
+        {
+          "name": "MPL 1.1",
+          "url": "https://www.mozilla.org/en-US/MPL/1.1/"
+        },
+        {
+          "name": "LGPL 2.1",
+          "url": "https://www.gnu.org/licenses/lgpl-2.1.html"
+        },
+        {
+          "name": "Apache License 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0"
+        }
+      ],
+      "license_pom": "org.javassist:javassist:3.30.2-GA",
+      "byte_identical_entries": 426
+    },
+    {
+      "coordinate": "org.jetbrains:annotations:13.0",
+      "classifier": null,
+      "sha256": "ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.jetbrains:annotations:13.0",
+      "byte_identical_entries": 32
+    },
+    {
+      "coordinate": "org.jetbrains.kotlin:kotlin-stdlib:1.4.10",
+      "classifier": null,
+      "sha256": "01ecb09782c042b931c1839acf21a188340b295d05400afd6e3415d4475b8daa",
+      "pom_licenses": [
+        {
+          "name": "The Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.jetbrains.kotlin:kotlin-stdlib:1.4.10",
+      "byte_identical_entries": 859
+    },
+    {
+      "coordinate": "org.jetbrains.kotlin:kotlin-stdlib-common:1.4.0",
+      "classifier": null,
+      "sha256": "8601e004d74d4be5e871f6c43a730b482ce4dff45082b08924d5d69d33c9f7d1",
+      "pom_licenses": [
+        {
+          "name": "The Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.jetbrains.kotlin:kotlin-stdlib-common:1.4.0",
+      "byte_identical_entries": 302
+    },
+    {
+      "coordinate": "org.json:json:20231013",
+      "classifier": null,
+      "sha256": "0f18192df289114e17aa1a0d0a7f8372cc9f5c7e4f7e39adcf8906fe714fa7d3",
+      "pom_licenses": [
+        {
+          "name": "Public Domain",
+          "url": "https://github.com/stleary/JSON-java/blob/master/LICENSE"
+        }
+      ],
+      "license_pom": "org.json:json:20231013",
+      "byte_identical_entries": 29
+    },
+    {
+      "coordinate": "org.jsoup:jsoup:1.9.2",
+      "classifier": null,
+      "sha256": "9c1885f1b182256e06f1e30b8451caed0c0dee96299d6348f968d18b54d0a46a",
+      "pom_licenses": [
+        {
+          "name": "The MIT License",
+          "url": "https://jsoup.org/license"
+        }
+      ],
+      "license_pom": "org.jsoup:jsoup:1.9.2",
+      "byte_identical_entries": 237
+    },
+    {
+      "coordinate": "org.jspecify:jspecify:1.0.0",
+      "classifier": null,
+      "sha256": "1fad6e6be7557781e4d33729d49ae1cdc8fdda6fe477bb0cc68ce351eafdfbab",
+      "pom_licenses": [
+        {
+          "name": "The Apache License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.jspecify:jspecify:1.0.0",
+      "byte_identical_entries": 4
+    },
+    {
+      "coordinate": "org.locationtech.spatial4j:spatial4j:0.8",
+      "classifier": null,
+      "sha256": "566cfe7eea3a96ef7dd2f4e30394edefca71454505513f090fa54be21c529082",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.locationtech.spatial4j:spatial4j:0.8",
+      "byte_identical_entries": 109
+    },
+    {
+      "coordinate": "org.ow2.asm:asm:7.2",
+      "classifier": null,
+      "sha256": "7e6cc9e92eb94d04e39356c6d8144ca058cda961c344a7f62166a405f3206672",
+      "pom_licenses": [
+        {
+          "name": "BSD-3-Clause",
+          "url": "https://asm.ow2.io/license.html"
+        }
+      ],
+      "license_pom": "org.ow2.asm:asm:7.2",
+      "byte_identical_entries": 35
+    },
+    {
+      "coordinate": "org.ow2.asm:asm-analysis:7.2",
+      "classifier": null,
+      "sha256": "be922aae60ff1ff1768e8e6544a38a7f92bd0a6d6b0b9791f94955d1bd453de2",
+      "pom_licenses": [
+        {
+          "name": "BSD-3-Clause",
+          "url": "https://asm.ow2.io/license.html"
+        }
+      ],
+      "license_pom": "org.ow2.asm:asm-analysis:7.2",
+      "byte_identical_entries": 14
+    },
+    {
+      "coordinate": "org.ow2.asm:asm-commons:7.2",
+      "classifier": null,
+      "sha256": "0e86b8b179c5fb223d1a880a0ff4960b6978223984b94e62e71135f2d8ea3558",
+      "pom_licenses": [
+        {
+          "name": "BSD-3-Clause",
+          "url": "https://asm.ow2.io/license.html"
+        }
+      ],
+      "license_pom": "org.ow2.asm:asm-commons:7.2",
+      "byte_identical_entries": 26
+    },
+    {
+      "coordinate": "org.ow2.asm:asm-tree:7.2",
+      "classifier": null,
+      "sha256": "c063f5a67fa03cdc9bd79fd1c2ea6816cc4a19473ecdfbd9e9153b408c6f2656",
+      "pom_licenses": [
+        {
+          "name": "BSD-3-Clause",
+          "url": "https://asm.ow2.io/license.html"
+        }
+      ],
+      "license_pom": "org.ow2.asm:asm-tree:7.2",
+      "byte_identical_entries": 37
+    },
+    {
+      "coordinate": "org.reactivestreams:reactive-streams:1.0.3",
+      "classifier": null,
+      "sha256": "1dee0481072d19c929b623e155e14d2f6085dc011529a0a0dbefc84cf571d865",
+      "pom_licenses": [
+        {
+          "name": "CC0",
+          "url": "http://creativecommons.org/publicdomain/zero/1.0/"
+        }
+      ],
+      "license_pom": "org.reactivestreams:reactive-streams:1.0.3",
+      "byte_identical_entries": 13
+    },
+    {
+      "coordinate": "org.semver4j:semver4j:5.8.0",
+      "classifier": null,
+      "sha256": "ca4055d354c9ad37bcb03b932a4bb8288166ec069c75d8ceaff14f8c76197fe6",
+      "pom_licenses": [
+        {
+          "name": "The MIT License",
+          "url": "https://opensource.org/licenses/MIT"
+        }
+      ],
+      "license_pom": "org.semver4j:semver4j:5.8.0",
+      "byte_identical_entries": 28
+    },
+    {
+      "coordinate": "org.slf4j:jcl-over-slf4j:2.0.17",
+      "classifier": null,
+      "sha256": "affd06771589ebfe454bb11315a4f466ecaa135b95f3e7939534cf1d2fd7064c",
+      "pom_licenses": [
+        {
+          "name": "Apache-2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.slf4j:jcl-over-slf4j:2.0.17",
+      "byte_identical_entries": 3
+    },
+    {
+      "coordinate": "org.slf4j:slf4j-api:2.0.17",
+      "classifier": null,
+      "sha256": "7b751d952061954d5abfed7181c1f645d336091b679891591d63329c622eb832",
+      "pom_licenses": [
+        {
+          "name": "MIT",
+          "url": "https://opensource.org/license/mit"
+        }
+      ],
+      "license_pom": "org.slf4j:slf4j-bom:2.0.17",
+      "byte_identical_entries": 55
+    },
+    {
+      "coordinate": "org.xerial:sqlite-jdbc:3.41.2.1",
+      "classifier": null,
+      "sha256": "b3141057bfb685ea9f9ab200c2158bc28b47c4a2d42c88fcb0a1a00954fad26d",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.xerial:sqlite-jdbc:3.41.2.1",
+      "byte_identical_entries": 117
+    },
+    {
+      "coordinate": "software.amazon.awssdk:comprehend:2.17.102",
+      "classifier": null,
+      "sha256": "6c1dcf62df412136fd873b1777f784a6a563fb37ceb60ec12405cfb33c6b87b4",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://aws.amazon.com/apache2.0"
+        }
+      ],
+      "license_pom": "software.amazon.awssdk:aws-sdk-java-pom:2.17.102",
+      "byte_identical_entries": 4
+    },
+    {
+      "coordinate": "software.amazon.awssdk:s3:2.16.60",
+      "classifier": null,
+      "sha256": "d0f19c7b2b7a55e0ccc44697c75936de255bb117248904c1af0bd5b79ddd5cc9",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://aws.amazon.com/apache2.0"
+        }
+      ],
+      "license_pom": "software.amazon.awssdk:aws-sdk-java-pom:2.16.60",
+      "byte_identical_entries": 1
+    },
+    {
+      "coordinate": "software.amazon.awssdk:sdk-core:2.17.102",
+      "classifier": null,
+      "sha256": "4671a514ff7543dc5509dfc5b57c11cfb52aaa335b024caef24cedfdfc582542",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://aws.amazon.com/apache2.0"
+        }
+      ],
+      "license_pom": "software.amazon.awssdk:aws-sdk-java-pom:2.17.102",
+      "byte_identical_entries": 2
+    },
+    {
+      "coordinate": "software.amazon.eventstream:eventstream:1.0.1",
+      "classifier": null,
+      "sha256": "0c37d8e696117f02c302191b8110b0d0eb20fa412fce34c3a269ec73c16ce822",
+      "pom_licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://aws.amazon.com/apache2.0"
+        }
+      ],
+      "license_pom": "software.amazon.eventstream:eventstream:1.0.1",
+      "byte_identical_entries": 19
+    },
+    {
+      "coordinate": "xalan:serializer:2.7.2",
+      "classifier": null,
+      "sha256": "e8f5b4340d3b12a0cfa44ac2db4be4e0639e479ae847df04c4ed8b521734bb4a",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:4",
+      "byte_identical_entries": 115
+    },
+    {
+      "coordinate": "xalan:xalan:2.7.2",
+      "classifier": null,
+      "sha256": "a44bd80e82cb0f4cfac0dac8575746223802514e3cec9dc75235bc0de646af14",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:4",
+      "byte_identical_entries": 1503
+    },
+    {
+      "coordinate": "xerces:xercesImpl:2.8.0",
+      "classifier": null,
+      "sha256": "13bb155eb24f03229798b3fb409d3a2c47e332d79c34d4b4b1ad39b0a917f3b8",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:1",
+      "byte_identical_entries": 891
+    },
+    {
+      "coordinate": "xml-apis:xml-apis:1.3.03",
+      "classifier": null,
+      "sha256": "ec225a1c66d4505fecd1ad7644ce4477e626f439fd9230dbf8338cebdfc3a0e5",
+      "pom_licenses": [
+        {
+          "name": "The Apache Software License, Version 2.0",
+          "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "license_pom": "org.apache:apache:1",
+      "byte_identical_entries": 309
+    },
+    {
+      "coordinate": "xom:xom:1.3.7",
+      "classifier": null,
+      "sha256": "5088907a28ad5e1aeb1a7db16cf4a48cdded5bb0febfdb4ffce4e0516ec361db",
+      "pom_licenses": [
+        {
+          "name": "The GNU Lesser General Public License, Version 2.1",
+          "url": "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html"
+        }
+      ],
+      "license_pom": "xom:xom:1.3.7",
+      "byte_identical_entries": 290
+    }
+  ]
+}
