@@ -83,6 +83,16 @@ The preparation command checks the original file digests and refuses an
 existing output directory. The optional extra probes cover only the paths named
 above. The resulting image remains private to the local Docker daemon.
 
+`private_bootstrap_probe.py` is a separate synthetic experiment against the
+pinned Frappe version: it generated an administrator password and a temporary
+database bootstrap password in Python, called Frappe's private `_new_site`
+function without putting either secret in process arguments, installed the
+three applications, and verified the resulting administrator credential. It
+checked that neither synthetic secret appeared in captured output and removed
+the temporary database user. This is not a user-facing binding implementation:
+it relies on a private Frappe API, uses the test database's privileged local
+socket user and does not provide crash-safe cleanup or a credential handoff.
+
 Using the separate Redis and a one-shot `bench worker --queue short --burst`,
 the `enqueue_probe.py` / `synthetic_job.py` fixture executed one synthetic job
 and wrote its marker under the site's private files. This exercises a worker,
