@@ -245,6 +245,14 @@ whether ingress evidence was recorded. An earlier managed-Runner import was
 refused as `portable_runner_unavailable`; selecting the connected personal
 Runner allowed this separate attempt to start.
 
+The API source also has an operator-only portable curation publication path.
+It requires an owned, active, fenced curation attempt, a matching source
+commit and import, the accepted receipt and runtime evidence, and current
+ingress and operation verification evidence. Those conditions have not been
+established for this instance. This source inspection does not show which
+endpoint produced the UI error or prove that this curation route would accept
+the instance; a ready screen alone must not be treated as publication evidence.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
