@@ -129,3 +129,32 @@ PYTHONDONTWRITEBYTECODE=1 python3 samples/discover-oss/fleetbase/prototype/prove
   > .tmp/fleetbase-console-packages.json
 cmp .tmp/fleetbase-console-packages.json samples/discover-oss/fleetbase/prototype/provenance/console-packages.json
 ```
+
+## Pinned Fleetbase source trees
+
+The upstream v0.7.75 annotated tag resolves to commit
+`67b2db64c7490599aaa6c799b26d5e4de897c25c` and tree
+`06657c9a96f9c0a286c2b2ebaef4774492305547`. Its source archive contains all
+972 regular blobs in that tree, while its 14 Git submodule references require
+separate archives. `provenance/fleetbase-source-trees.json` records each pinned
+submodule commit, tree, archive digest and file count. The root and all 14
+submodule archives were compared against their Git trees: 15,191 regular files
+matched by Git blob digest and executable mode. The tree and tag evidence was
+read from the upstream GitHub API; no customer data was used.
+
+Four GitHub-generated archives omit files marked `export-ignore`: core-api
+omits 251, fleetops 680, registry-bridge 4 and storefront 127. For those four,
+`provenance/archive_git_tree.py` produces a complete, deterministic archive
+from the pinned Git objects after comparing the tree with the GitHub tree. The
+resulting archives were independently checked and rebuilt byte-for-byte. The
+other ten upstream archives contained all blobs in their pinned trees.
+`provenance/verify_git_tree_archive.py` checks Git tree identity and archive
+contents without extracting the archives. The local archives live under
+`.tmp/fleetbase-submodule-sources/`; they are not committed or published.
+
+The submodule commits are the ones recorded by the v0.7.75 source tree; they
+are not necessarily the same revisions as separately published npm packages.
+This evidence does not prove the release images were built from these trees,
+and it does not include every third-party dependency or constitute a complete
+corresponding-source distribution. Those checks, notice coverage and hosted
+acceptance remain open.
