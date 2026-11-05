@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / 'src' / 'source-manifest.json'
-PATHS = ['src', 'source.html', 'index.html', 'vite.config.ts', 'tsconfig.json',
+PATHS = ['src', 'tests', 'source.html', 'index.html', 'vite.config.ts', 'tsconfig.json',
          'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'README.md',
          'DESIGN.md', 'AGPL-3.0.txt', 'THIRD-PARTY-NOTICES.txt',
          'BROWSER-ADAPTER-README.txt', 'package_source.py']
