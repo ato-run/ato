@@ -392,6 +392,10 @@ pub struct PortableExecutionSpec {
 pub struct PortableFilesystemStateSpec {
     pub id: String,
     pub mount: String,
+    /// `Some(false)` when the route locates the slot through
+    /// `ATO_STATE_PATH_<ID>` instead of requiring a fixed mount. `None` keeps
+    /// the fixed-mount declaration every existing bundle already has.
+    pub mount_required: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -1558,6 +1562,7 @@ fn authored_bundle_spec_v2(
             .map(|state| PortableFilesystemStateSpec {
                 id: state.id,
                 mount: state.mount,
+                mount_required: state.mount_required,
             }),
         bindings: draft
             .bindings
@@ -1930,6 +1935,7 @@ fn build_routes_bundle(
                 protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: state.mount.clone(),
                 access: StateAccess::ReadWrite,
+                mount_required: state.mount_required,
             })
             .into_iter()
             .collect(),
@@ -5670,6 +5676,7 @@ status = 200
         spec.filesystem_state = Some(PortableFilesystemStateSpec {
             id: "data".to_owned(),
             mount: "/data".to_owned(),
+            mount_required: None,
         });
         let (_, mut bundle) =
             build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
@@ -5685,6 +5692,98 @@ status = 200
         assert!(validate_bundle_for_derivation(&bundle, &invalid_ref).is_err());
     }
 
+    /// The authored grammar is how a user says a slot needs no fixed mount.
+    /// This walks that declaration all the way to the canonical Derivation,
+    /// and proves an authoring source that omits it still produces the exact
+    /// pre-existing state bytes.
+    #[test]
+    fn an_authored_slot_can_declare_that_a_fixed_mount_is_not_required() {
+        const SOURCE: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Native state"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+MOUNT_REQUIRED
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "health"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+status = 200
+
+[[derivation]]
+id = "serve"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
+"#;
+
+        fn process_route(source: &Path) -> ValidatedPortableApplication {
+            let (_, bundle) = build_authored_bundle_v2(source).expect("the source packs");
+            validate_all_derivations(&bundle)
+                .expect("the bundle validates")
+                .into_iter()
+                .find(|route| route.realization == PortableRealizationKind::LocalProcess)
+                .expect("one process route")
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("app.py"), "print('ok')\n").unwrap();
+        fs::write(
+            root.path().join(CAPSULE_FILE_NAME),
+            SOURCE.replace("MOUNT_REQUIRED", "mount_required = false"),
+        )
+        .unwrap();
+        let path_delivered = process_route(root.path());
+        assert_eq!(
+            path_delivered.derivation.state[0].mount_required,
+            Some(false)
+        );
+        assert!(
+            serde_jcs::to_string(&path_delivered.derivation.state[0])
+                .unwrap()
+                .contains(r#""mount_required":false"#)
+        );
+
+        fs::write(
+            root.path().join(CAPSULE_FILE_NAME),
+            SOURCE.replace("MOUNT_REQUIRED", ""),
+        )
+        .unwrap();
+        let fixed_mount = process_route(root.path());
+        assert_eq!(fixed_mount.derivation.state[0].mount_required, None);
+        assert_eq!(
+            serde_jcs::to_string(&fixed_mount.derivation.state[0]).unwrap(),
+            r#"{"access":"read-write","id":"data","mount":"/data","protocol":"ato.state.filesystem@1"}"#,
+            "an authored source that does not declare the relaxation keeps the old bytes"
+        );
+        assert_ne!(
+            fixed_mount.derivation_ref, path_delivered.derivation_ref,
+            "the declaration is part of the addressed route"
+        );
+    }
+
     #[test]
     fn dynamic_routes_reject_multiple_or_read_only_filesystem_states() {
         let (_, original) =
@@ -5698,6 +5797,7 @@ status = 200
                 protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: "/data".to_owned(),
                 access: StateAccess::ReadOnly,
+                mount_required: None,
             });
         });
         assert!(validate_bundle_for_derivation(&read_only, &read_only_ref).is_err());
@@ -5710,6 +5810,7 @@ status = 200
                     protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                     mount: mount.to_owned(),
                     access: StateAccess::ReadWrite,
+                    mount_required: None,
                 });
             }
         });
@@ -5729,6 +5830,7 @@ status = 200
                     protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                     mount: "/data".to_owned(),
                     access: StateAccess::ReadWrite,
+                    mount_required: None,
                 });
             });
         }

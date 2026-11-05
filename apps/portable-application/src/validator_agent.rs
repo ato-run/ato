@@ -1956,6 +1956,7 @@ mod tests {
                 protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: "/data".to_owned(),
                 access: StateAccess::ReadWrite,
+                mount_required: None,
             });
         let report = validated_routes(&[route]).unwrap().remove(0);
         assert_eq!(report.state.as_ref().unwrap().state_key, "data");
