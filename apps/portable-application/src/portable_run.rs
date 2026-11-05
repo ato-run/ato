@@ -30,7 +30,9 @@ use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
 };
-use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
+use ato_adapter_process::{
+    ProcessAdapter, ProcessHandle, ProcessSpec, StopBudget as ProcessStopBudget,
+};
 use ato_formation::request::{AttemptFailure, AttemptOutcomes, RuntimeProfile};
 use ato_formation::verify::{
     ContractVerification, ContractVerificationReceipt, VerificationExecutionEvidence,
@@ -964,17 +966,14 @@ impl RunningCandidate for PortableProcessCandidate {
     }
 
     fn stop(mut self: Box<Self>) -> Result<()> {
-        if let Some(mut handle) = self.handle.take()
-            && handle.try_wait()?.is_none()
-        {
-            handle.terminate()?;
-            for _ in 0..200 {
-                if handle.try_wait()?.is_some() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            // Still running: dropping the handle kills the group and reaps.
+        if let Some(mut handle) = self.handle.take() {
+            // The leader's exit is not the question: a workload that left a
+            // child behind is still running in the same group. The group is
+            // stopped and shown empty, and a group that survives is an error
+            // this Run reports instead of a cleanup the Drop path hides.
+            handle
+                .stop_group(ProcessStopBudget::default())
+                .context("stopping the selected process group")?;
         }
         remove_owned(&self.owned)
     }

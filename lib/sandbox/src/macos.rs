@@ -194,9 +194,14 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
                 "(allow network-inbound (local tcp \"*:{port}\"))\n"
             ));
         }
+        // Outbound is scoped to the loopback host, not to the port alone.
+        // `*:{port}` would also permit the same port on any other host, which
+        // is a different grant: a workload is allowed to reach the peer this
+        // Run bound (a loopback shim or a forwarded port), never an arbitrary
+        // remote service that happens to listen on the same number.
         for port in &policy.allowed_connect_tcp_ports {
             profile.push_str(&format!(
-                "(allow network-outbound (remote tcp \"*:{port}\"))\n"
+                "(allow network-outbound (remote tcp \"localhost:{port}\"))\n"
             ));
         }
     }
@@ -425,6 +430,41 @@ mod tests {
 
         assert!(profile.contains("(allow network-inbound (local tcp \"*:43123\"))"));
         assert!(!profile.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn test_generate_sbpl_profile_scopes_outbound_connect_to_loopback() {
+        let policy = SandboxPolicy::new()
+            .with_network(false)
+            .allow_tcp_connect([43124]);
+        let profile = generate_sbpl_profile(&policy);
+
+        assert!(
+            profile.contains("(allow network-outbound (remote tcp \"localhost:43124\"))"),
+            "outbound connect must name the loopback host:\n{profile}"
+        );
+    }
+
+    #[test]
+    fn test_generate_sbpl_profile_never_grants_outbound_to_any_host() {
+        let policy = SandboxPolicy::new()
+            .with_network(false)
+            .allow_tcp_bind([43123])
+            .allow_tcp_connect([43124, 43125]);
+        let profile = generate_sbpl_profile(&policy);
+
+        // A wildcard *remote* host is exactly the grant Seatbelt cannot take
+        // back: any host reachable on that port would be allowed.
+        for line in profile.lines() {
+            if line.contains("network-outbound") && line.contains("remote tcp") {
+                assert!(
+                    !line.contains("\"*:"),
+                    "outbound rule granted a wildcard host: {line}"
+                );
+            }
+        }
+        // Bind is a different grant and stays as it was.
+        assert!(profile.contains("(allow network-inbound (local tcp \"*:43123\"))"));
     }
 
     #[test]
