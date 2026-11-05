@@ -1991,11 +1991,11 @@ fn stop_local_instance(instance_id: &str) -> Result<()> {
         // truncates before it writes. A reader in that window sees an empty
         // file, not an empty answer: keep polling instead of treating it as a
         // failed cleanup.
-        if let Ok(value) = fs::read_to_string(&ack) {
-            if !value.trim().is_empty() {
-                acknowledged = Some(value);
-                break;
-            }
+        if let Ok(value) = fs::read_to_string(&ack)
+            && !value.trim().is_empty()
+        {
+            acknowledged = Some(value);
+            break;
         }
         if !worker_exited && !identity.matches_live_process()? {
             // The worker writes the acknowledgement immediately before it
