@@ -1,0 +1,58 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "PicPeak"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[binding]]
+id = "initial_admin_password"
+protocol = "ato.secret@1"
+required = true
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "health"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/api/health"
+status = 200
+
+[[contract.observation]]
+id = "admin-login"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/admin/login"
+status = 200
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["/ato/workspace/bootstrap.sh"]
+cwd = "."
+guest_port = 3000
+env = { COOKIE_SECURE = "true", TRUST_PROXY = "1" }
+runtimes = { "oci.image" = "ghcr.io/picpeak/picpeak/aio@sha256:7b9e53c278d71816c652e1a19f2338b5e8212ec97036ecee1dfe9aa913487d49", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/bin/sh", "oci.workspace_mount" = "/ato/workspace", "oci.working_dir" = "/app", "oci.memory_bytes" = "1610612736", "oci.cpu_limit_millis" = "2000", "oci.pids_limit" = "256" }
+
+[derivation.startup]
+port = "app.http"
+path = "/api/health"
+timeout_ms = 120000
+expect_status = 200
+
+[effects]
+default = "pure"
