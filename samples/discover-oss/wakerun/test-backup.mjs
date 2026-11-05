@@ -54,10 +54,18 @@ invalidReference.tables.invoice_items[0].invoice_id = 9999;
 await assert.rejects(() => restoreBackup(db, JSON.stringify(invalidReference)));
 assert.deepEqual(JSON.parse(await makeBackup(db)), JSON.parse(beforeFailures));
 
+const unsafeInteger = JSON.parse(original);
+unsafeInteger.tables.transactions[0].amount = 9007199254740992;
+await assert.rejects(() => restoreBackup(db, JSON.stringify(unsafeInteger)));
+assert.deepEqual(JSON.parse(await makeBackup(db)), JSON.parse(beforeFailures));
+
 await db.execute("CREATE TABLE future_data (id INTEGER)");
 await assert.rejects(() => restoreBackup(db, original), /Unsupported database schema/);
 await assert.rejects(() => makeBackup(db), /Unsupported database schema/);
 await db.execute("DROP TABLE future_data");
 assert.deepEqual(JSON.parse(await makeBackup(db)), JSON.parse(beforeFailures));
+await db.execute("CREATE TABLE sqliteXfuture (id INTEGER)");
+await assert.rejects(() => makeBackup(db), /Unsupported database schema/);
+await db.execute("DROP TABLE sqliteXfuture");
 console.log("Wakerun backup: full SQLite roundtrip, sequences, validation and rollback passed");
 sqlite.close();

@@ -33,7 +33,8 @@ function quote(identifier: string): string {
 
 function validScalar(value: unknown): value is Scalar {
   return value === null || typeof value === "string" ||
-    (typeof value === "number" && Number.isFinite(value));
+    (typeof value === "number" && Number.isFinite(value) &&
+      (!Number.isInteger(value) || Number.isSafeInteger(value)));
 }
 
 async function columns(db: Database, table: string): Promise<string[]> {
@@ -44,7 +45,7 @@ async function columns(db: Database, table: string): Promise<string[]> {
 
 async function assertSchema(db: Database): Promise<void> {
   const entries = await db.select<Array<{ name: string }>>(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'",
   );
   const actual = entries.map((entry) => entry.name).filter((name) => name !== "_sqlx_migrations");
   if (actual.length !== TABLES.length || TABLES.some((name) => !actual.includes(name))) {
