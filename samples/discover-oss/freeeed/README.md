@@ -144,6 +144,18 @@ The local native test additionally rejected binary and non-TXT inputs and
 verified failure when Tika was stopped. This remains an experiment, not a
 hosted verification or a complete license review.
 
+On 2026-11-05 the text-only Capsule passed the staging format validation but
+the owner-selected Connected Runner import ended in `hosted_contract_failed`.
+The UI did not show a failed observation or runtime log and no app was created.
+This result does not establish whether either container started or what caused
+the failure. The local Docker success above must not be presented as a hosted
+success.
+
+`retained-inventory.json` compares the trimmed JAR against the 217 resolved
+dependency JARs by matching each entry's bytes. It found matching entries in
+134 artifacts; seven still lack POM license metadata. Byte matching is useful
+evidence but is not a complete binary/source provenance or license review.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
