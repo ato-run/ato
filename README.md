@@ -286,6 +286,8 @@ not guarantee state continuity or safe side effects. See
   and [stateful transformation v1](docs/archive/2026/ops/stateful-transformation-v1.md).
   They record Linux-local evidence, with fixtures and limits; they were not
   re-measured for this overview.
+- [Research Q&A](docs/guides/research-qa.md): Playwright comparison, build
+  failures, stalled derivations, LLM tuning and the limits of K.
 - [Specifications](docs/specifications/README.md): accepted computation-root
   RFCs and the portable-application implementation track.
 

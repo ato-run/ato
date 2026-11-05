@@ -246,6 +246,8 @@ state continuity across a restart or a migration remains unproven.
 
 ## See also
 
+- [Research Q&A](research-qa.md): Playwright comparison, build failures, stalled
+  derivations, engineering assessment, LLM tuning and the K scope.
 - [Computation](../concepts/computation.md), [Capsule and Run](../concepts/capsule.md),
   [application contracts](../concepts/application-contracts.md), and the
   [glossary](../glossary-reference.md).
