@@ -98,6 +98,27 @@ def comparison(source, installed, symlinks):
     }
 
 
+def find_archive_matches(archive, expected_digest, targets):
+    data = archive.read_bytes()
+    if digest(data) != expected_digest:
+        raise ValueError('Source archive digest mismatch: ' + archive.name)
+    matches = {name: [] for name in targets}
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
+        for item in tar:
+            if not item.isfile():
+                continue
+            if item.size > MAX_FILE_SIZE:
+                raise ValueError('Archive file too large: ' + item.name)
+            contents = tar.extractfile(item)
+            if contents is None:
+                raise ValueError('Missing archive content: ' + item.name)
+            file_digest = digest(contents.read())
+            for name, target_digest in targets.items():
+                if file_digest == target_digest:
+                    matches[name].append(item.name)
+    return {name: sorted(paths) for name, paths in sorted(matches.items())}
+
+
 def main():
     source_info = json.loads(Path('/input/fleetbase-source-trees.json').read_text())
     composer = json.loads(Path('/input/composer-inventory.json').read_text())
@@ -105,11 +126,14 @@ def main():
     installed_packages = {entry['name']: entry for entry in composer['packages']}
     api = Path('/fleetbase/api')
     root_ignore = ('vendor', '.composer', 'storage')
-    root_source = archive_files(Path('/input/root.tar.gz'), ROOT_ARCHIVE_SHA256, ROOT_PREFIX, root_ignore)
+    root_archive = Path('/input/root.tar.gz')
+    root_source = archive_files(root_archive, ROOT_ARCHIVE_SHA256, ROOT_PREFIX, root_ignore)
     root_installed, root_links = installed_files(api, root_ignore)
     report = {'schema': 'ato.fleetbase-api-source-comparison/1', 'image': IMAGE,
               'root_archive_sha256': ROOT_ARCHIVE_SHA256,
               'root': comparison(root_source, root_installed, root_links), 'packages': {}}
+    extras = {path: root_installed[path] for path in report['root']['installed_only']}
+    report['root']['installed_only_archive_matches'] = find_archive_matches(root_archive, ROOT_ARCHIVE_SHA256, extras)
     for path, name in sorted(PACKAGES.items()):
         pin = submodules[path]
         package = installed_packages[name]

@@ -17,7 +17,15 @@
       "bootstrap/cache/services.php",
       "crontab"
     ],
-    "installed_symlinks": []
+    "installed_symlinks": [],
+    "installed_only_archive_matches": {
+      ".fleetbase-id": [],
+      "bootstrap/cache/packages.php": [],
+      "bootstrap/cache/services.php": [],
+      "crontab": [
+        "fleetbase-67b2db64c7490599aaa6c799b26d5e4de897c25c/docker/crontab"
+      ]
+    }
   },
   "packages": {
     "fleetbase/ai": {

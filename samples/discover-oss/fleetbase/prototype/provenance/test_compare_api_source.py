@@ -29,6 +29,11 @@ class SourceComparisonTests(unittest.TestCase):
             self.assertEqual(result['mismatches'], ['a.php'])
             self.assertEqual(result['source_only'], ['b.php'])
             self.assertEqual(result['installed_only'], ['extra.php'])
+            matches = compare.find_archive_matches(archive, pin, {
+                'same': hashlib.sha256(b'two').hexdigest(),
+                'missing': hashlib.sha256(b'other').hexdigest(),
+            })
+            self.assertEqual(matches, {'missing': [], 'same': ['source/b.php']})
             with self.assertRaisesRegex(ValueError, 'digest mismatch'):
                 compare.archive_files(archive, '0' * 64, 'source/')
 
