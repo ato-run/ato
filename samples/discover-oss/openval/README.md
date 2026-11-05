@@ -66,3 +66,25 @@ These identify that particular candidate, not later rebuilds. Its tar tree
 includes the upstream license and complete pinned source. At this size the
 hosted bundle upload requires the direct-upload path to be configured. The
 staging import did not complete; the UI did not confirm the stored artifact.
+
+An alternative Linux x86-64-only candidate uses `bootstrap_preinstalled.py`.
+In the pinned Python 3.12.8 image above, install the same lock offline with
+`pip install --no-index --require-hashes --only-binary=:all: --no-compile
+--target /stage/site --find-links <linux-wheelhouse> -r requirements.lock`.
+Archive the resulting complete `site` directory as `site.tar.xz`, include it
+in the assembled tree instead of the wheelhouses, and change the derivation's
+argv to use `bootstrap_preinstalled.py`. This archive is created from the
+hash-checked wheels at assembly time and is sealed with the Capsule; the
+bootstrap validates its entries and extracts it to a fresh Run directory.
+It requires Linux x86-64 and exactly Python 3.12.8, so it does not replace the
+multi-platform candidate. No dependencies were omitted.
+
+The Linux candidate tested on 2026-11-05 was 29,206,310 bytes with bundle
+SHA-256 `0f8b443f6c7505bf841d2a2429d56bef5d18e3163cad37639074f3e7291e8281`,
+the same ContractRef as above, and DerivationRef
+`301cc4f1ba9ccfc7179d1ab097e9c967b2b5f591c17a32913c984afbaa9b9d16`.
+In the pinned Linux image, with no network, a read-only workspace, and a
+non-root process, it served the page and passed a sample workbook parse,
+cashflow calculation, export and reimport, and invalid-input rejection.
+This is local evidence only; no staging import or browser workflow has been
+verified for this candidate. The upstream audit findings above still apply.
