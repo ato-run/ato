@@ -91,6 +91,18 @@ refused and an administrator or a user explicitly granted read access could
 still list it. This does not establish that the other scheduling operations or
 the underlying cross-appointment filtering are secure.
 
+In the same isolated stack, the actual scheduling API created and submitted a
+synthetic appointment against a submitted order, assigned a synthetic
+technician and changed the order to Scheduled. An unauthorized reschedule was
+rejected without a change; an administrator rescheduled it successfully.
+Separately, the original purchase-order and purchase-invoice mapping endpoints
+returned details of an unreadable order to a restricted user. The local order
+source candidate adds source-read and target-create checks to all five order
+mapping endpoints. Tests rejected an unshared user and an order-read-only user;
+an administrator and a non-admin operator with the required roles and order
+share could produce the two synthetic purchase documents. This is not a full
+authorization audit of the application.
+
 `local-test/` contains the synthetic-only Dockerfile, Compose configuration and
 request probes used for these observations. They are not a production
 deployment and must never be pointed at real customer data.
