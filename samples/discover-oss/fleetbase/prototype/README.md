@@ -59,7 +59,10 @@ digests and library paths; the other API Dockerfile targets arm64. Extract the
 original `index.html`, `assets/vendor.js` and
 `assets/console.js` from the pinned console image into `console/`, run
 `python3 console/prepare.py`, and build `console/Dockerfile` with that folder
-as context. These Dockerfiles pin the arm64 runtime images; console assets come
+as context. Use `console/Dockerfile.amd64` and
+`breach_proxy/Dockerfile.amd64` for x86_64: their base image digests are the
+x86_64 counterparts in the same official multi-platform indexes as the arm64
+versions. Console assets come
 from the upstream amd64 image. The generated inputs and images are intentionally
 not checked in. Build and run only in an isolated local environment with
 synthetic data. No secrets or real customer evidence belong in the build context.
@@ -94,6 +97,13 @@ uses `volume-nocopy`: Docker's default volume population copies the image's
 `/data/caddy` into an otherwise new volume, causing the supervisor to reject
 the nonempty state as designed. The proof removes its own containers, network
 and synthetic volume on exit.
+
+The proxy and socket round-trip proofs were also built and passed on native
+Linux x86_64 on 2026-11-06 using the amd64 Dockerfiles. Their transferred build
+and probe inputs were checked by SHA-256 and file mode before building. The
+test-only mock breach service, no-egress network, synthetic credentials and
+limitations above apply equally to this proof. This is a host-local test, not
+a hosted Ato Runner receipt or a staging publication.
 
 ## Composer source and notice inventory
 
