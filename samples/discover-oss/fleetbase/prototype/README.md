@@ -216,7 +216,9 @@ comparison excludes `vendor`, `.composer` and mutable `storage`: 105 source
 files matched byte-for-byte, two Git metadata files were absent from the image,
 and four image files had no root-source counterpart (`.fleetbase-id`,
 `bootstrap/cache/packages.php`, `bootstrap/cache/services.php` and `crontab`).
-Those four have not been independently attributed by this comparison.
+The image's `crontab` matches `docker/crontab` elsewhere in the pinned root
+source archive. The other three have no byte-identical regular file in that
+archive and are not independently attributed by this comparison.
 
 For seven installed Fleetbase Composer packages whose source commits match the
 release's submodule pins, all 8,498 installed regular files matched their
