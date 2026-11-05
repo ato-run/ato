@@ -81,6 +81,13 @@ parameter was rejected. Other whitelisted methods, including scheduling APIs, st
 authorization and security review before exposure. The image itself contains
 the unpatched source unless these generated files are incorporated.
 
+The unassigned-order scheduling API also exposed a submitted synthetic order
+to a user whose standard order read returned HTTP 403. With the local
+`prepare_schedule_permission_fix.py` candidate mounted, the unshared user was
+refused and an administrator or a user explicitly granted read access could
+still list it. This does not establish that the other scheduling operations or
+the underlying cross-appointment filtering are secure.
+
 `local-test/` contains the synthetic-only Dockerfile, Compose configuration and
 request probes used for these observations. They are not a production
 deployment and must never be pointed at real customer data.
