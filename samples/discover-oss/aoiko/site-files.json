@@ -1,6 +1,6 @@
 {
   "schema": "ato.aoiko-static-site-inventory/1",
-  "note": "Locally observed site; upstream source commit and complete dependency provenance have not been independently established.",
+  "note": "Locally observed site; this inventory alone does not establish upstream source or complete dependency provenance. See README for separate source and build comparisons.",
   "files": [
     {
       "path": "LICENSE.txt",
