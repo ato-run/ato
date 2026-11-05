@@ -1,7 +1,8 @@
 # FreeEed processing investigation
 
-This is local investigation toward running [FreeEed](https://github.com/shmsoft/FreeEed)
-on ato.run. It is not a staging deployment or a complete eDiscovery application.
+This investigates running [FreeEed](https://github.com/shmsoft/FreeEed) on
+ato.run. A narrowly scoped text-only preview has been tested in a private
+staging Instance; it is not a complete eDiscovery application.
 The inspected upstream commit is `d268fac3c59beb91b3d9d77d7c386657d149ac4d`.
 The processing code carries Apache-2.0 notices, while the repository also
 contains an EULA and separately licensed components. The complete distribution,
@@ -179,6 +180,38 @@ ContractRef is `e8614c1f6588857a76305ceb920703687e9ed52fef0635afeb72a414885fc819
 and its DerivationRef is `a3c4acc111c25526990233f87308e83800520f6a6df4c2a4a1530dd8cfd2bda7`.
 The third-party license/source review remains incomplete; do not publish this
 candidate as a finished FreeEed service.
+
+The same single-container bundle reached staging Instance
+`cinst_01M6NNC72FKGJM4A76FGDSD1BT` on the owner's connected Runner on
+2026-11-05. Its ready page showed the OCI Contract verified. In the owner
+browser, the notice identified the direct text adapter and a synthetic TXT
+file reached the "Results downloaded" state. The returned file's contents
+were verified in the local Docker test, not independently in staging. The
+Instance remains unpublished while dependency notices and source provenance
+are reviewed; this is not FreeEed Review or a full-format eDiscovery service.
+
+For a smaller text-only candidate, `trim_text_preview.py` accepts
+`--single-text-extractor` and removes additional mail, PDF, XML and other
+unused classes. This intentionally further narrows the application. The
+resulting pinned engine SHA-256 is
+`86a59cf6a6587ab6d89f260985ab959d96c93d48885414633802bff56a543f64`.
+The synthetic success, malformed-input and extractor-failure tests passed.
+`single-text-inventory.json` records 105 candidate dependencies. The separate
+`audit_trimmed_provenance.py` matched all 23,565 retained non-metadata files
+and metadata class files to the pinned application or Maven JARs; the report
+does not claim that merged non-class `META-INF` files were independently
+attributed. Three POMs lack license metadata, but their distributed binary
+notices identify Apache 2.0.
+
+`collect_dependency_sources.py` downloads pinned-version Maven source
+artifacts, and `fetch_extra_licenses.py` retrieves hash-checked upstream
+license texts. `package_dependency_notices.py` checks the binary and source
+digests and packages the notices, supplemental license texts, source URLs,
+source hashes and provenance report. `assemble_candidate.py --single-text
+--engine <engine> --notices <notices.zip>` checks that the notice bundle names
+the exact engine and includes it, the adapter's MPL-2.0 license, the upstream
+Apache license and adapter sources in the app's source download. This evidence
+does not establish correctness for arbitrary documents or a full legal audit.
 
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project

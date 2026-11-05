@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -20,9 +21,12 @@ def main() -> None:
     parser.add_argument("output", type=Path, help="new directory beneath .tmp")
     parser.add_argument("--engine", type=Path, help="explicit text-only preview JAR")
     parser.add_argument("--single-text", action="store_true", help="use the local text extractor and a single OCI service")
+    parser.add_argument("--notices", type=Path, help="dependency notices ZIP for this exact engine")
     args = parser.parse_args()
     if args.single_text and not args.engine:
         parser.error("--single-text requires an explicitly trimmed --engine")
+    if args.notices and not args.single_text:
+        parser.error("--notices is supported for the single-text candidate only")
     upstream = args.upstream.resolve(strict=True)
     build = args.build.resolve(strict=True)
     output = args.output.resolve()
@@ -62,11 +66,29 @@ def main() -> None:
                     str(local / "ProcessingPreview.java"), str(local / "TextOnlyExtractor.java")], check=True)
     source = output / "source"
     source.mkdir()
+    if args.notices:
+        notices = args.notices.resolve(strict=True)
+        with ZipFile(notices) as notice_archive:
+            provenance = json.loads(notice_archive.read("provenance.json"))
+            if (provenance.get("kind") != "trimmed-byte-provenance/1" or provenance.get("unmatched")
+                    or provenance.get("preview_sha256") != digest.hexdigest()):
+                raise ValueError("notices do not identify the exact trimmed engine")
+            if not json.loads(notice_archive.read("dependency-manifest.json")):
+                raise ValueError("empty dependency notice manifest")
+        shutil.copyfile(notices, source / "third-party-notices.zip")
+        audited = json.loads((local / "single-text-inventory.json").read_text())
+        if audited.get("preview_sha256") != digest.hexdigest():
+            raise ValueError("retained inventory does not identify the exact trimmed engine")
+        for name in ("single-text-inventory.json", "single-text-provenance.json"):
+            shutil.copyfile(local / name, source / name)
+    shutil.copyfile(local.parents[2] / "LICENSE", source / "ATO-ADAPTER-LICENSE-MPL-2.0.txt")
     shutil.copyfile(sources, source / "freeeed-processing-sources.jar")
     for name in ("ProcessingPreview.java", "patch_upstream.py", "assemble_candidate.py",
                  "trim_text_preview.py", "make_dependency_inventory.py", "dependency-inventory.json",
                  "synthetic_check.py", "test_preview.py", "start.sh", "capsule.template.toml", "README.md",
-                 "TextOnlyExtractor.java", "start-single-text.sh", "single-text.capsule.toml"):
+                 "TextOnlyExtractor.java", "start-single-text.sh", "single-text.capsule.toml",
+                 "audit_trimmed_provenance.py", "package_dependency_notices.py", "collect_dependency_sources.py",
+                 "fetch_extra_licenses.py"):
         shutil.copyfile(local / name, source / name)
     for filename in ("LICENSE", "freeeed-processing/NOTICE", "pom.xml", "freeeed-processing/pom.xml"):
         target = source / filename
