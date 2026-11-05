@@ -1,0 +1,152 @@
+{
+  "schema": "ato.fleetbase-source-trees/1",
+  "tag": "v0.7.75",
+  "tag_object": "a49ab6ff6a1e7d4d8cba80f657f86c9293cd4fdc",
+  "repository": "https://github.com/fleetbase/fleetbase",
+  "commit": "67b2db64c7490599aaa6c799b26d5e4de897c25c",
+  "tree": "06657c9a96f9c0a286c2b2ebaef4774492305547",
+  "archive_sha256": "720565ac99a37383801a48317d26b599505e2793a55d32497d04cd9bac957937",
+  "files": 972,
+  "submodules": [
+    {
+      "path": "packages/ai",
+      "repository": "https://github.com/fleetbase/ai",
+      "commit": "46ebe2bcc22372f65fc45f379f79971b4bf911bd",
+      "tree": "a34f4c684e3a7d0474e83576b09834019b961296",
+      "archive": "ai-46ebe2bcc22372f65fc45f379f79971b4bf911bd.tar.gz",
+      "archive_sha256": "6a5fb27cfe65eb518c9f2db0d6b9e0f3d6cdd68132df82d7c2a15965a3a90c34",
+      "files": 246,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/core-api",
+      "repository": "https://github.com/fleetbase/core-api",
+      "commit": "ac97b5620b260660ae4e6fd5ea0e64025629b0c9",
+      "tree": "4ef26ce28a22637b961fb94e02caf4e20b36c32a",
+      "archive": "core-api-ac97b5620b260660ae4e6fd5ea0e64025629b0c9.full.tar.gz",
+      "archive_sha256": "5c25f4f478edfe3fbb249ce0070d5a280c3440e8ac38461686c037d30d25581b",
+      "files": 988,
+      "method": "complete-git-tree"
+    },
+    {
+      "path": "packages/customer-portal",
+      "repository": "https://github.com/fleetbase/customer-portal",
+      "commit": "f153923f1f925665cc5c2433e296eabd5756582b",
+      "tree": "6cf4d9bd1f9ef1f7fe1b77c523702add29fa0b31",
+      "archive": "customer-portal-f153923f1f925665cc5c2433e296eabd5756582b.tar.gz",
+      "archive_sha256": "7c6a656fce707bd70f40c26dca392a3bc886de2b959f20778cf014c4a2ff6e5c",
+      "files": 439,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/dev-engine",
+      "repository": "https://github.com/fleetbase/dev-engine",
+      "commit": "461abda780f3bd81e6ee4ce5bf734006db62e427",
+      "tree": "5f452d90db3681e1cf797df783d09a1a9b2d7269",
+      "archive": "dev-engine-461abda780f3bd81e6ee4ce5bf734006db62e427.tar.gz",
+      "archive_sha256": "e11d5e375dd1c9f0e558c952c6ea7236bac84d2515b2e7b77bd037c7b9e6073a",
+      "files": 281,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/ember-core",
+      "repository": "https://github.com/fleetbase/ember-core",
+      "commit": "20262cf26edafaf2f67b052ce5fbba00e5041dad",
+      "tree": "2876d209c11b4cfb18e50946be26bf3adfcc60ea",
+      "archive": "ember-core-20262cf26edafaf2f67b052ce5fbba00e5041dad.tar.gz",
+      "archive_sha256": "3362e3236fc433707e655d22abe0026ff5fd346cb790d9cc7bd80504d2ead6fe",
+      "files": 616,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/ember-ui",
+      "repository": "https://github.com/fleetbase/ember-ui",
+      "commit": "6c582719fc366738d13ee2cbbe382d13d6f45c72",
+      "tree": "d153f7e4dd0222eaa4cf91ee7a964fb94402b2d5",
+      "archive": "ember-ui-6c582719fc366738d13ee2cbbe382d13d6f45c72.tar.gz",
+      "archive_sha256": "8731cf91da8161a0797ac8b29736aee737abd2039950be32ae16e6e5b8bca3d3",
+      "files": 1903,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/fleetbase-extensions-indexer",
+      "repository": "https://github.com/fleetbase/fleetbase-extensions-indexer",
+      "commit": "db26b8add36a53345997fe6263ef5b6a151c712f",
+      "tree": "0d63b8dbb33593faf7b0ade22d85e96913c5c479",
+      "archive": "fleetbase-extensions-indexer-db26b8add36a53345997fe6263ef5b6a151c712f.tar.gz",
+      "archive_sha256": "e0cc8e404213ead82e591f26198b2d4522db0e6f420898254ae57e41c0e9601c",
+      "files": 6,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/fleetops",
+      "repository": "https://github.com/fleetbase/fleetops",
+      "commit": "811aa711a68833dfd8390d8ddac582d4ed75f3c6",
+      "tree": "aec24505d081e4b6c008ad4b5e2dce6219e6ea29",
+      "archive": "fleetops-811aa711a68833dfd8390d8ddac582d4ed75f3c6.full.tar.gz",
+      "archive_sha256": "ecec530d51ce43c33650114ef7c70fb440d51bb2e4e07a3e7a75053184c5d54c",
+      "files": 5117,
+      "method": "complete-git-tree"
+    },
+    {
+      "path": "packages/fleetops-data",
+      "repository": "https://github.com/fleetbase/fleetops-data",
+      "commit": "4911b06ffdb86ce451f537dc636907b4df956618",
+      "tree": "b192579292b586b30efeb0be6fdbd9279a05e873",
+      "archive": "fleetops-data-4911b06ffdb86ce451f537dc636907b4df956618.tar.gz",
+      "archive_sha256": "070569409f768b4146af276a741c45267a35eb8eeed29b5f08ef41b933bd8a4d",
+      "files": 616,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/iam-engine",
+      "repository": "https://github.com/fleetbase/iam-engine",
+      "commit": "caf12a1a14b8af83dce6d315a8d47a5150cee023",
+      "tree": "190de80fab0c1497ee23c397a350181059e2a9ed",
+      "archive": "iam-engine-caf12a1a14b8af83dce6d315a8d47a5150cee023.tar.gz",
+      "archive_sha256": "67d9251d50b33a86226ea7626f2b117c8a53bca4eaa35332edcf2010cd2b1704",
+      "files": 269,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/ledger",
+      "repository": "https://github.com/fleetbase/ledger",
+      "commit": "e93eadc2d8b6a67a241b63ec30c21e6003c66663",
+      "tree": "58c047330d00dc639be1f20e96ee8a46f06220a6",
+      "archive": "ledger-e93eadc2d8b6a67a241b63ec30c21e6003c66663.tar.gz",
+      "archive_sha256": "3deed88658aaa802c8f52a38d3293d48f9ca3a7a49187dc3d5a03b373a7fc7a0",
+      "files": 737,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/pallet",
+      "repository": "https://github.com/fleetbase/pallet",
+      "commit": "55247cf9635314fa943512594134e9efe5957731",
+      "tree": "2b944a51ae344d80747cf781cf74b414a222095e",
+      "archive": "pallet-55247cf9635314fa943512594134e9efe5957731.tar.gz",
+      "archive_sha256": "776e9b462952ee1ed321ce8540533a41858dcad3b4a6f50260b9a3e272e9a23e",
+      "files": 968,
+      "method": "github-codeload"
+    },
+    {
+      "path": "packages/registry-bridge",
+      "repository": "https://github.com/fleetbase/registry-bridge",
+      "commit": "7eecac11e0b9a3ab0ece8728b8a2a9706d89dffd",
+      "tree": "5b24227205a976cf081dd7e82f1aa68c70b30b6a",
+      "archive": "registry-bridge-7eecac11e0b9a3ab0ece8728b8a2a9706d89dffd.full.tar.gz",
+      "archive_sha256": "8f34dc16fb5dbaa69bac425ccfd1965db826dbd4b863ef3401228d6bca1576f1",
+      "files": 338,
+      "method": "complete-git-tree"
+    },
+    {
+      "path": "packages/storefront",
+      "repository": "https://github.com/fleetbase/storefront",
+      "commit": "2a5dd325b4d2777f0b644da53cf5c902a8e7ffc2",
+      "tree": "08abd571b822893f6579f8518c55a2f82c88d043",
+      "archive": "storefront-2a5dd325b4d2777f0b644da53cf5c902a8e7ffc2.full.tar.gz",
+      "archive_sha256": "ecf02ba8525d55c5820a1a3868f9d529ad1686f5e355c4377213ecf0e1889564",
+      "files": 1695,
+      "method": "complete-git-tree"
+    }
+  ]
+}
