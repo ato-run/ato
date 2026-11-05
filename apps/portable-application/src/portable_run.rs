@@ -2492,7 +2492,10 @@ mod process_group_policy_tests {
         let policy = policy(&policy_path);
         assert_eq!(policy.allowed_bind_tcp_ports, [43102]);
         assert!(policy.allowed_connect_tcp_ports.is_empty());
-        assert_eq!(policy.ipc_socket_paths, [broker.clone()]);
+        assert_eq!(
+            policy.ipc_socket_paths.as_slice(),
+            std::slice::from_ref(&broker)
+        );
         assert!(!policy.allow_network);
         // A broker outside the service runtime (the short-path fallback under
         // the platform temp directory) still has to be traversable: path
