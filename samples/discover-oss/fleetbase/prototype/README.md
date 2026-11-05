@@ -141,6 +141,10 @@ submodule commit, tree, archive digest and file count. The root and all 14
 submodule archives were compared against their Git trees: 15,191 regular files
 matched by Git blob digest and executable mode. The tree and tag evidence was
 read from the upstream GitHub API; no customer data was used.
+Each of these 15 source archives contains the same root `LICENSE.md`, whose
+recorded SHA-256 identifies the GNU Affero General Public License version 3
+text. This records the upstream files; it does not establish the license or
+notice obligations of all bundled third-party components.
 
 Four GitHub-generated archives omit files marked `export-ignore`: core-api
 omits 251, fleetops 680, registry-bridge 4 and storefront 127. For those four,
