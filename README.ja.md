@@ -59,19 +59,39 @@ target/debug/ato run samples/interop-static.capsule --no-open \
 ato run samples/whiteboard.capsule
 ```
 
-ブラウザでホワイトボードが開き、あらかじめ配置された図形が表示されます。その状態から編集を続け、新しい継続地点として保存することを目指すサンプルです。
+ブラウザでホワイトボードが開き、あらかじめ配置された図形が表示されます。`samples/whiteboard/` のソースと `samples/whiteboard.capsule` が同梱されています。図形は初期状態として表示され、編集内容はブラウザのlocalStorageに保持されます（Runをまたぐ永続化はこのサンプルの範囲外です）。
 
-### 4. さらに試す
+### 4. ワークスペースを復元する
+
+`samples/workspace.capsule` は、bundleに同梱した `state.json` からワークスペースを読み込み、編集を続けられる静的サンプルです。
+
+```bash
+ato run samples/workspace.capsule
+```
+
+編集はlocalStorageに保存され、「Restore bundled state」で同梱状態に戻せます。Runをまたぐ保存はdurable Instanceやsnapshotの経路で扱います。
+
+### 5. 同じKを別実装で検証する
+
+`samples/contract-preserving/` には、異なるソースから作った2つのbundleがあります。同じK（proof.txtのdigest）を共有し、Derivationだけが異なることを確認します。
+
+```bash
+bash samples/contract-preserving/check.sh
+```
+
+PASSが表示されれば、`contract_ref` が一致し `derivation_ref` が異なることを確認できています。
+
+### 6. さらに試す
 
 | サンプル | 体験できること |
 |---|---|
-| [Restore a Workspace](docs/guides/samples.md#restore-a-workspace) | ファイルや編集状態を復元し、作業を継続する。 |
-| [Compose Applications](docs/guides/samples.md#compose-applications) | 複数のアプリケーションとデータを組み合わせて実行する。 |
+| [Restore a Workspace](docs/guides/samples.md#restore-a-workspace) | 同梱のワークスペース状態から編集を続ける。 |
+| [Compose Applications](docs/guides/samples.md#compose-applications) | 複数のアプリケーションとデータをLinux/amd64 + Dockerで組み合わせて実行する。 |
 | [Contract-preserving Derivation](docs/guides/samples.md#contract-preserving-derivation) | 同じKを維持しながら、異なるDで計算を実現・検証する。 |
 
 それぞれのサンプルについて、対応環境、実行手順、検証できる条件を[サンプルガイド](docs/guides/samples.md)で説明します。
 
-> **開発状況について：** ホワイトボードと複数アプリケーションのサンプルは構想段階です。上記のコマンドは目標とする操作例であり、現時点での動作を保証するものではありません。
+> **開発状況について：** ホワイトボード、ワークスペース、Contract-preserving Derivationの3つは静的サンプルとして動作します。Compose ApplicationsはLinux/amd64とDockerが必要で、この環境では未検証です。
 
 ## Atoを利用したサービス
 

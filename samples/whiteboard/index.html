@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Whiteboard capsule</title>
+<style>
+  html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; padding: 8px 12px;
+         background: #111; color: #eee; display: flex; gap: 12px; align-items: center; }
+  #bar button { font: inherit; }
+  canvas { display: block; background: #fff; cursor: crosshair; }
+</style>
+<div id="bar">
+  <strong>Whiteboard</strong>
+  <span>Click to add a shape. Drag a shape to move it.</span>
+  <button id="clear">Reset to the bundled state</button>
+</div>
+<canvas id="board"></canvas>
+<script>
+const KEY = "ato-whiteboard-v1";
+const bundled = [
+  { kind: "rect", x: 120, y: 140, w: 180, h: 110, fill: "#cfe3ff", stroke: "#2b6cb0" },
+  { kind: "arrow", x1: 320, y1: 195, x2: 520, y2: 230, stroke: "#c53030" },
+  { kind: "circle", x: 620, y: 220, r: 42, fill: "#fefcbf", stroke: "#b7791f" }
+];
+let shapes = load();
+let drag = null;
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+function resize() { canvas.width = innerWidth; canvas.height = innerHeight - 40; draw(); }
+function load() {
+  try { const raw = localStorage.getItem(KEY); if (raw) return JSON.parse(raw); } catch (e) {}
+  return structuredClone(bundled);
+}
+function save() { localStorage.setItem(KEY, JSON.stringify(shapes)); }
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#f7fafc"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (const s of shapes) {
+    if (s.kind === "rect") {
+      ctx.fillStyle = s.fill; ctx.fillRect(s.x, s.y, s.w, s.h);
+      ctx.strokeStyle = s.stroke; ctx.lineWidth = 3; ctx.strokeRect(s.x, s.y, s.w, s.h);
+    } else if (s.kind === "circle") {
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = s.fill; ctx.fill(); ctx.strokeStyle = s.stroke; ctx.lineWidth = 3; ctx.stroke();
+    } else if (s.kind === "arrow") {
+      ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2);
+      ctx.strokeStyle = s.stroke; ctx.lineWidth = 4; ctx.stroke();
+      const a = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
+      ctx.beginPath(); ctx.moveTo(s.x2, s.y2);
+      ctx.lineTo(s.x2 - 18 * Math.cos(a - 0.4), s.y2 - 18 * Math.sin(a - 0.4));
+      ctx.lineTo(s.x2 - 18 * Math.cos(a + 0.4), s.y2 - 18 * Math.sin(a + 0.4));
+      ctx.closePath(); ctx.fillStyle = s.stroke; ctx.fill();
+    }
+  }
+}
+function hit(s, x, y) {
+  if (s.kind === "rect") return x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h;
+  if (s.kind === "circle") return Math.hypot(x - s.x, y - s.y) <= s.r;
+  return false;
+}
+canvas.addEventListener("pointerdown", (e) => {
+  const found = [...shapes].reverse().find((s) => hit(s, e.offsetX, e.offsetY));
+  if (found) { drag = { shape: found, dx: e.offsetX, dy: e.offsetY }; return; }
+  shapes.push({ kind: "circle", x: e.offsetX, y: e.offsetY, r: 26,
+                fill: "#e9d8fd", stroke: "#6b46c1" });
+  save(); draw();
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const s = drag.shape;
+  if (s.kind === "rect") { s.x += e.offsetX - drag.dx; s.y += e.offsetY - drag.dy; }
+  if (s.kind === "circle") { s.x += e.offsetX - drag.dx; s.y += e.offsetY - drag.dy; }
+  drag.dx = e.offsetX; drag.dy = e.offsetY; save(); draw();
+});
+addEventListener("pointerup", () => { drag = null; });
+document.getElementById("clear").addEventListener("click", () => {
+  shapes = structuredClone(bundled); save(); draw();
+});
+addEventListener("resize", resize); resize();
+</script>
+</html>

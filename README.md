@@ -78,23 +78,51 @@ Resume a whiteboard that already contains placed shapes from a saved Capsule:
 ato run samples/whiteboard.capsule
 ```
 
-The whiteboard opens in a browser with the pre-placed shapes. The sample is
-intended to continue editing from that state and save a new continuation point.
+The whiteboard opens in a browser with the pre-placed shapes. The source in
+`samples/whiteboard/` and `samples/whiteboard.capsule` are both included.
+Edits are kept in the browser's local storage; persistence across Runs is
+outside this sample's scope.
 
-### 4. Try more
+### 4. Restore a workspace
+
+`samples/workspace.capsule` loads a workspace from the bundled `state.json`
+and lets you continue editing it:
+
+```bash
+ato run samples/workspace.capsule
+```
+
+Edits are kept in local storage, and "Restore bundled state" returns to the
+bundled data. Saving across Runs belongs to the durable Instance and snapshot
+path, not this static sample.
+
+### 5. Verify the same K with different implementations
+
+`samples/contract-preserving/` contains two bundles built from different source
+trees. They share one K (the digest of `proof.txt`); only the Derivation
+differs:
+
+```bash
+bash samples/contract-preserving/check.sh
+```
+
+`PASS` means the two receipts have the same `contract_ref` and different
+`derivation_ref` values.
+
+### 6. Try more
 
 | Sample | What you can try |
 |---|---|
-| [Restore a Workspace](docs/guides/samples.md#restore-a-workspace) | Restore files and editing state, then continue the work. |
-| [Compose Applications](docs/guides/samples.md#compose-applications) | Combine several applications and data sets and run them together. |
-| [Contract-preserving Derivation](docs/guides/samples.md#contract-preserving-derivation) | Keep the same K and realize or verify it with a different D. |
+| [Restore a Workspace](docs/guides/samples.md#restore-a-workspace) | Continue from a bundled workspace state. |
+| [Compose Applications](docs/guides/samples.md#compose-applications) | Run several applications and data sets together on Linux/amd64 with Docker. |
+| [Contract-preserving Derivation](docs/guides/samples.md#contract-preserving-derivation) | Keep the same K while verifying a different D. |
 
 The [sample guide](docs/guides/samples.md) describes the supported
 environment, commands and verifiable conditions for each sample.
 
-> **Development status:** the whiteboard and multi-application samples are at
-> the concept stage. The commands above are target operations, not a guarantee
-> of current behavior.
+> **Development status:** the whiteboard, workspace and contract-preserving
+> samples run as static samples. Compose Applications requires Linux/amd64 and
+> Docker and was not verified in this environment.
 
 ## Services built on Ato
 
