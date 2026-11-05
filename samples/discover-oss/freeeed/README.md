@@ -217,6 +217,16 @@ the exact engine and includes it, the adapter's MPL-2.0 license, the upstream
 Apache license and adapter sources in the app's source download. This evidence
 does not establish correctness for arbitrary documents or a full legal audit.
 
+The updated candidate bundle SHA-256 is
+`ce8adfd5a7ab074c323477b48542af97f67dfe8027289da73bf1c7455a214677`.
+On 2026-11-05, staging Instance `cinst_01M6NR95TNK438HD86NE543XYJ`
+on the owner's connected Runner reported the OCI Contract verified. The
+owner browser processed a synthetic TXT and displayed "Results downloaded";
+the downloaded bytes were checked in local Docker, not independently on
+staging. An attempt to publish this instance to Discover was refused with a
+message that its build was not ready, so this instance is private and no
+public availability is claimed. The response does not establish the cause.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
