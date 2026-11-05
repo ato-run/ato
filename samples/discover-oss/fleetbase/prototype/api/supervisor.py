@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Experimental local-only supervisor; not a deployable staging artifact."""
 import base64
+import json
+from ato_origin import socket_origin
 import os
 from pathlib import Path
 import re
@@ -157,6 +159,7 @@ def stop_children(clean):
 
 
 try:
+    origin, allowed_socket_origin = socket_origin(os.environ.get('ATO_BINDING_APP_ORIGIN') or os.environ.get('APP_URL'))
     if not root.is_dir():
         fail('Persistent state is missing.')
     initialized = private / 'initialized'
@@ -194,7 +197,8 @@ try:
     password = secret('db-password')
     socket_key = secret('socket-key')
     env = os.environ.copy()
-    env.update({'HOME':'/data/fleetbase/home', 'TMPDIR':'/data/fleetbase/tmp',
+    env.update({'APP_URL': origin, 'CONSOLE_HOST': origin, 'SOCKETCLUSTER_ORIGIN': origin,
+                'HOME':'/data/fleetbase/home', 'TMPDIR':'/data/fleetbase/tmp',
                 'XDG_CONFIG_HOME':'/data/fleetbase/config', 'XDG_DATA_HOME':'/data/fleetbase/home',
                 'APP_ENV':'production', 'APP_DEBUG':'false', 'APP_KEY':app_key,
                 'DB_HOST':'localhost', 'DB_DATABASE':'fleetbase', 'DB_USERNAME':'fleetbase',
@@ -225,7 +229,9 @@ try:
         initialized.write_text('initialized')
         (private / 'initializing').unlink()
     socket_env = env.copy()
-    socket_env.update({'LD_LIBRARY_PATH':'/opt/socket-libs', 'SOCKETCLUSTER_PORT':'8002',
+    socket_env.update({'SOCKETCLUSTER_CONFIG_POLL_SECONDS':'0',
+                       'SOCKETCLUSTER_OPTIONS':json.dumps({'origins':allowed_socket_origin}),
+                       'LD_LIBRARY_PATH':'/opt/socket-libs', 'SOCKETCLUSTER_PORT':'8002',
                        'SOCKETCLUSTER_INTERNAL_PORT':'8003',
                        'SOCKETCLUSTER_AUTHORIZE_URL':'http://127.0.0.1:8000/int/v1/socket/authorize'})
     children.append(subprocess.Popen(('/opt/fleetbase-socket/node', 'server.js'),
@@ -252,8 +258,8 @@ try:
         time.sleep(1)
     clean_shutdown = True
 except Exception as error:
-    if private.is_dir() and (private / 'initialized').is_file():
-        (private / 'unclean').write_text('a required process exited unexpectedly')
+    # mark_active persists the marker before any service starts; do not create
+    # one for configuration errors detected before the state is opened.
     print('Fleetbase local prototype stopped:', type(error).__name__, file=sys.stderr, flush=True)
     sys.exit(1)
 finally:

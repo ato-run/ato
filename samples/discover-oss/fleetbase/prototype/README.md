@@ -26,8 +26,12 @@ are in the adjacent patches; patches without context require `git apply
 plugins and dependencies must be assembled and reviewed before distribution.
 The local nginx configuration trusts an incoming forwarded-proto header and is
 not suitable for hosted use without a verified trusted-proxy boundary. Upload
-limits, socket origin enforcement and the generated instance origin also need
-hosted validation.
+limits, the forwarded-proto trust boundary and the generated instance origin
+also need hosted validation. The supervisor restricts the socket to the configured
+application hostname and port, forces authenticated `enforce` mode, and disables
+upstream polling that could override those settings from the console. Browser
+origin filtering was tested locally; hosted proxy and authenticated end-to-end
+websocket behavior remain unverified.
 
 The upstream Laravel compromised-password check fails open on network errors.
 `api/patch_breach_verifier.py` checks the upstream file digest and generates a
@@ -56,7 +60,8 @@ synthetic data. No secrets or real customer evidence belong in the build context
 Local tests covered fresh initialization, anonymous API rejection, creation of
 a synthetic account and vehicle with a **test-only mock** breach checker, and
 retention of synthetic database, attachment and Redis data after a clean stop
-and restart. They do not establish full Fleetbase functionality or safety.
+and restart. The same database/file/Redis restart checks also passed on a locally
+emulated x86_64 build; a fresh x86_64 initialization took about 147 seconds. They do not establish full Fleetbase functionality or safety.
 The initial local initialization exceeded the current hosted 60-second group
 readiness limit. The candidate extension is draft PR
 https://github.com/ato-run/ato-api/pull/1133; it has not been deployed to stg.
