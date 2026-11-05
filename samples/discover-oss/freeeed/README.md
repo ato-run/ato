@@ -237,3 +237,65 @@ requires additional components beyond the processing engine and Tika. The
 upstream project deletes its selected staging directory before processing;
 any hosted adapter must control that directory and never accept arbitrary
 server paths from a user.
+
+## Review and indexing local integration
+
+On 2026-11-05 the separately maintained upstream
+[FreeEedUI](https://github.com/shmsoft/FreeEedUI) Apache-2.0 repository was
+inspected at commit `dbe04fcc8cecc4634894d81eeb684d558031912a`. Its original
+WAR built with Maven 3.9.11 and Java 17; the resulting local WAR SHA-256 was
+`7745058a31069a8d82e7f61f08b2be8117ff245b6e9ed92b7b3995932de63a36`.
+The build resolved dependencies from Maven Central without a complete lock, so
+this hash is evidence for that build only, not a reproducibility claim.
+The upstream release script downloads a customized Solr 4.0.0 archive; the
+inspected archive SHA-256 was
+`f46814b984a01aeb0548205e7d1cd5cd4f5477d95d34d11fbfdc934f9f0354de`.
+No upstream checksum was available from that release script.
+
+With all services sharing a Docker network namespace with **no external
+network**, the patched full processing engine, Tika 3.2.2, the upstream Solr,
+and the original review WAR ran as non-root with read-only container roots.
+The engine processed one synthetic UTF-8 file, created its Solr core and review
+case, and the review search returned the corresponding indexed document. The
+SQLite native library was extracted to a writable executable test directory;
+this local arrangement is not suitable for an unreviewed hosted release.
+
+The original review app initializes a known administrator password and stores
+user passwords without hashing. Its internal case-creation endpoint was also
+observed to create a synthetic case without a session. Controllers store
+per-request fields on singleton Spring beans. These concrete issues, legacy
+Solr and dependencies, direct file-path handling, source/notices, state backup,
+resource bounds, and user authentication require review before deployment.
+The test did not use real customer data and did not publish this full workflow.
+
+`review/prepare_candidate.py` verifies the two affected source file digests,
+then prepares a **local-only** candidate that creates per-request controller
+instances and permits automatic case creation only for a loopback POST carrying
+a per-instance internal token. Ordinary case access still requires the
+application's case permission. `review/prepare_engine_case_creator.py` verifies
+the original engine source digest, then prepares its matching client: it sends
+the token only to the fixed local review endpoint, rejects redirects, and
+requires a bounded success response naming a case ID. `CaseCreatorProbe.java`
+exercises response and destination restrictions against a synthetic loopback
+server. The modified engine and review app locally rejected missing/wrong tokens
+and unauthorized case operations, and processed, indexed, registered and
+searched a new synthetic document with the correct token. A token-absent engine
+run did not create a review case. These changes **do not address** the default
+administrator or plaintext user storage and are not a complete security review.
+No token or user password is included in the source or build inputs.
+
+The two preparation commands accept an extracted pinned source tree and write
+a new destination; they refuse unexpected input hashes or an existing output:
+
+```sh
+python3 samples/discover-oss/freeeed/review/prepare_candidate.py <review-source> <new-review-directory>
+python3 samples/discover-oss/freeeed/review/prepare_engine_case_creator.py <upstream-AutomaticUICaseCreator.java> <new-java-file>
+```
+
+For the local experiment the two processes received the same freshly generated
+`FREEEED_INTERNAL_CASE_TOKEN`, and the review endpoint was restricted to
+loopback port 8090. A production or stg implementation would need a protected,
+per-Instance binding and lifecycle for that token, rather than putting it in a
+Capsule or logs. Test-only instrumentation confirmed that repeated requests
+were dispatched to different controller objects. Other shared objects and the
+full authentication and file-upload paths have not been audited.
