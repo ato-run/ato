@@ -30,11 +30,21 @@ workers and two threads against that site. An administrator could sign in,
 list synthetic requests, load the scheduling HTML and its JavaScript, and read
 the saved attachment; an anonymous request for that private attachment
 returned HTTP 403. The wrapper relies on private Frappe module attributes and
-has not been validated as a supported or secure hosted entrypoint.
+has not been validated as a supported or secure hosted entrypoint. In a
+separate synthetic request an untrusted `X-Frappe-Site-Name` header did not
+change the selected site.
+
+Using the separate Redis and a one-shot `bench worker --queue short --burst`,
+the `enqueue_probe.py` / `synthetic_job.py` fixture executed one synthetic job
+and wrote its marker under the site's private files. This exercises a worker,
+not queue persistence, restart recovery or sustained load. A due synthetic
+`frappe.ping` scheduled-job record was also enqueued using its normal job-type
+method, run by a one-shot default worker, and observed as `Complete` in the
+site's job log. The periodic scheduler daemon itself was not exercised.
 
 This result does not establish a stg Runner-compatible package. The proof used
-an interactive development server, did not supervise its processes or exercise
-the scheduler and workers, and did not make Redis durable. It has no safe
+an interactive development server for the restart test, did not supervise its
+processes or exercise the scheduler, and did not make Redis durable. It has no safe
 production initialization or credential handoff, no crash recovery or complete
 backup, and no portable Capsule or hosted receipt. The socket-authenticated
 database administrator shares a UID and process boundary with the app; that
