@@ -678,6 +678,7 @@ fn realization_name(kind: PortableRealizationKind) -> &'static str {
         PortableRealizationKind::LocalProcess => "local_process",
         PortableRealizationKind::OciContainer => "oci_container",
         PortableRealizationKind::OciServiceGroup => "oci_service_group",
+        PortableRealizationKind::ProcessServiceGroup => "process_service_group",
     }
 }
 
