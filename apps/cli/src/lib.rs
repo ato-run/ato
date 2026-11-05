@@ -1883,9 +1883,15 @@ fn stop_local_instance(instance_id: &str) -> Result<()> {
     let mut acknowledged = None;
     let mut worker_exited = false;
     for _ in 0..250 {
+        // The worker creates the acknowledgement with `fs::write`, which
+        // truncates before it writes. A reader in that window sees an empty
+        // file, not an empty answer: keep polling instead of treating it as a
+        // failed cleanup.
         if let Ok(value) = fs::read_to_string(&ack) {
-            acknowledged = Some(value);
-            break;
+            if !value.trim().is_empty() {
+                acknowledged = Some(value);
+                break;
+            }
         }
         if !worker_exited && !identity.matches_live_process()? {
             // The worker writes the acknowledgement immediately before it
