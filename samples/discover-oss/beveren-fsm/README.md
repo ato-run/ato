@@ -108,8 +108,11 @@ returned details of an unreadable order to a restricted user. The local order
 source candidate adds source-read and target-create checks to all five order
 mapping endpoints. Tests rejected an unshared user and an order-read-only user;
 an administrator and a non-admin operator with the required roles and order
-share could produce the two synthetic purchase documents. This is not a full
-authorization audit of the application.
+share could produce the two synthetic purchase documents. A subsequent test
+showed that the original mapping also disclosed a supplier from an unreadable
+linked request. The updated candidate hides that supplier until the request is
+shared; it preserves mapping for a user who can read only the order. This is
+not a full authorization audit of the application.
 
 `local-test/` contains the synthetic-only Dockerfile, Compose configuration and
 request probes used for these observations. They are not a production
