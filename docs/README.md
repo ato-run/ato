@@ -76,6 +76,7 @@ not permission to rewrite either side during documentation maintenance.
 
 - [Developer guides](guides/README.md): CLI, formation, transformation, Runner,
   hosting, contribution and component instructions.
+- [Samples](guides/samples.md): the README samples, their status and environment.
 - [Architecture](architecture/README.md): library boundaries, shared portable
   execution, Hosted Formation and Scenario verification.
 - [Capsule bundle overview](capsule.md) and [computation lifecycle](run.md).
