@@ -1,7 +1,7 @@
 # Beveren FSM integration investigation
 
-Status: local frontend build evidence only; **not installed or published on
-staging**. Beveren FSM is a Frappe/ERPNext application, distinct from the
+Status: local synthetic workflow and security investigation only; **not
+installed or published on staging**. Beveren FSM is a Frappe/ERPNext application, distinct from the
 Puter Field Service preview. Its scheduling interface calls Frappe APIs and
 requires the server's session, boot context and CSRF token. A static export is
 not an operating instance of Beveren FSM.
@@ -38,6 +38,50 @@ synthetic Bench configuration; all five resulting files matched byte-for-byte.
 The generated `index.html` still contains Frappe template substitutions;
 neither the frontend nor Frappe was run or tested on staging.
 
+## Isolated backend and authorization checks
+
+A local-only image built offline from the pinned upstream app and
+`frappe/erpnext:v15.124.5` image digest
+`sha256:6e016c0fc3aec5b32c14ff7c2ac97523cc864748c83ce75197779b8fe5a665a8`.
+It installed Beveren 0.0.1 beside Frappe 15.126.0 and ERPNext 15.124.5.
+With a private Docker network, synthetic credentials, Redis and MariaDB, it
+installed the app, authenticated a synthetic administrator, served the actual
+scheduling page and JS, and created and retrieved a synthetic customer,
+service request, service order and order movement. The web container used a
+read-only root and a non-root user. The scheduler was disabled. MariaDB used a
+Linux tmpfs because the macOS shared filesystem caused a case-sensitivity
+failure; this test does **not** establish durable storage or restart recovery.
+An SQL dump of the synthetic site was imported into a separate database on the
+same server; both databases contained 729 tables, one service request and one
+service order. This checks database dump and import, not complete application
+recovery: site configuration, encryption key, uploaded files and runtime have
+not been restored and exercised together.
+
+The original source also failed two actual role checks. A synthetic Website
+User without Service Request or Service Order access received HTTP 200 and
+could read another user's service request through Beveren's custom list API;
+the same user could record an order movement despite the standard order API
+returning HTTP 403. `prepare_list_permission_fix.py` and
+`prepare_movement_permission_fix.py` make narrow, digest-fenced changes to the
+inspected source. With those files mounted into the local web container, both
+unauthorized actions returned HTTP 403. An administrator could still list and
+update the synthetic data; a user granted write access to only the order was
+refused without mutation, and the same user succeeded after the linked request
+was also shared. A separate synthetic appointment test showed that both the
+original custom appointment list and single-record endpoints returned a
+restricted record despite the standard endpoint returning HTTP 403. The narrow
+`prepare_appointment_permission_fix.py` candidate made both endpoints reject
+the unshared user, while an administrator and a user explicitly granted read
+access could still retrieve it. These checks cover only those endpoints and do
+not prove all fields and linked objects are protected. Other whitelisted
+methods, including appointment invoice and scheduling APIs, still need
+authorization and security review before exposure. The image itself contains
+the unpatched source unless these generated files are incorporated.
+
+`local-test/` contains the synthetic-only Dockerfile, Compose configuration and
+request probes used for these observations. They are not a production
+deployment and must never be pointed at real customer data.
+
 On 2026-11-06, `npm audit --omit=dev` against the completed lock reported 23
 affected dependency entries: 14 high and 9 moderate, including transitive
 dependencies. This is an advisory inventory, not proof that each issue is
@@ -47,11 +91,9 @@ remediate those dependencies; investigate and test fixes before deployment.
 The map view refers to external CDN assets and OpenStreetMap tiles; the
 geocoding API sends entered queries to Nominatim. Actual use may disclose map
 activity or searches and needs an explicit network and privacy design. The
-whitelisted `record_product_movement` method obtains an order and saves it with
-`ignore_permissions=True` without an explicit permission check in that method.
-Its authorization must be checked against real Frappe roles before exposure;
-this source inspection alone is not an end-to-end exploit test. A deployable
-instance also requires a compatible
+unpatched movement method saves documents with `ignore_permissions=True`; the
+local role checks above confirmed that this was reachable without write access.
+A deployable instance also requires a compatible
 Frappe/ERPNext stack, database, queue, scheduler, app installation, secret
 bootstrap, durable storage, backup and restore, source/notices, and end-to-end
 verification. None of those is established by the frontend build.
