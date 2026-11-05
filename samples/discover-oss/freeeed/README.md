@@ -104,6 +104,15 @@ original and extracted text; the job directory was removed. This is Docker
 evidence, not an ato Runner receipt. On the macOS test host, `ato run` refused
 the route because OCI service groups require a native Linux Docker host.
 
+On 2026-11-05 the candidate was submitted in the staging import UI with the
+owner's Connected Runner selected. The UI returned `validator_failed`; it did
+not expose the validator's detailed error or create an app. The current API
+source limits the validator's uploaded workspace artifact to 64 MiB, while the
+three engine chunks alone total more than 175 MiB. The observed error is
+consistent with that limit, but the deployed code and exact rejection cause
+were not independently observed. Uploading the same candidate again without a
+change would not establish the cause.
+
 This candidate has not been imported or published on staging. Its preview
 does not provide FreeEed Review, search, OCR, or a complete eDiscovery
 workflow. Do not treat this experiment as a safe place for real evidence or
