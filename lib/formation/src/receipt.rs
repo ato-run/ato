@@ -589,6 +589,7 @@ mod tests {
             portability_profile: None,
             embedded_oci_image_loaded: None,
             services: Vec::new(),
+            ..Default::default()
         });
         receipt
     }
@@ -784,6 +785,7 @@ mod tests {
             portability_profile: None,
             embedded_oci_image_loaded: None,
             services: Vec::new(),
+            ..Default::default()
         });
         receipt
     }

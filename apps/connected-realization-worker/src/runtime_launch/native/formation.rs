@@ -447,6 +447,7 @@ impl CandidateRealizer for NativePortableRealizer<'_> {
                     image: s.image.clone(),
                 })
                 .collect(),
+            ..Default::default()
         };
         Ok(Realized {
             candidate: Box::new(NativeCandidate {
