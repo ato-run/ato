@@ -2,7 +2,7 @@
 # Isolated synthetic integration proof; never use real user data or credentials.
 set -eu
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 tag=$(python3 -c 'import secrets; print(secrets.token_hex(6))')
 network="fleetbase-socket-proof-$tag"
 volume="fleetbase-socket-proof-data-$tag"
@@ -10,7 +10,7 @@ app="fleetbase-socket-proof-app-$tag"
 console="fleetbase-socket-proof-console-$tag"
 mock="fleetbase-socket-proof-mock-$tag"
 app_image=${FLEETBASE_SOCKET_PROOF_APP_IMAGE:-ato-local-proof/fleetbase-combined:socket-roundtrip}
-console_image=${FLEETBASE_SOCKET_PROOF_CONSOLE_IMAGE:-ato-local-proof/fleetbase-console:vehicle-arm64}
+console_image=${FLEETBASE_SOCKET_PROOF_CONSOLE_IMAGE:-ato-local-proof/fleetbase-console:origin-bound-arm64}
 mock_image=${FLEETBASE_SOCKET_PROOF_MOCK_IMAGE:-ato-local-proof/fleetbase-breach-proxy:arm64-v2}
 
 cleanup() {
@@ -45,7 +45,8 @@ docker run -d --name "$app" --network "$network" --network-alias application \
 
 docker run -d --name "$console" --network "$network" --network-alias console \
   --read-only --cap-drop ALL --security-opt no-new-privileges --user 65532:65532 \
-  --tmpfs /tmp:rw,noexec,nosuid,size=64m "$console_image" >/dev/null
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  -e ATO_BINDING_APP_ORIGIN=http://localhost:4200 "$console_image" >/dev/null
 
 docker run --rm --network "$network" --read-only --cap-drop ALL \
   --security-opt no-new-privileges --user 65532:65532 \
