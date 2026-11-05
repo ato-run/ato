@@ -1068,10 +1068,13 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
 fn atomic_create(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
     let parent = path.parent().ok_or(RepositoryError::MissingParent)?;
     fs::create_dir_all(parent)?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    // Readers do not take the transaction lock. Publish only after the full
+    // contents are written, while retaining create_new's no-overwrite rule.
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
     use std::io::Write;
     file.write_all(bytes)?;
-    file.sync_all()?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -1138,9 +1141,90 @@ pub enum RepositoryError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    #[test]
+    fn created_file_is_never_visible_before_its_contents_are_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("published.json");
+        let payload = vec![b'x'; 16 * 1024 * 1024];
+        let expected_len = payload.len() as u64;
+        let barrier = Arc::new(Barrier::new(2));
+        let done = Arc::new(AtomicBool::new(false));
+        let writer_path = path.clone();
+        let writer_barrier = Arc::clone(&barrier);
+        let writer_done = Arc::clone(&done);
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            let result = atomic_create(&writer_path, &payload);
+            writer_done.store(true, Ordering::Release);
+            result
+        });
+        barrier.wait();
+        let mut partial = None;
+        while !done.load(Ordering::Acquire) {
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.len() != expected_len => {
+                    partial = Some(metadata.len());
+                    break;
+                }
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("reading published file metadata failed: {error}"),
+            }
+        }
+        writer.join().unwrap().unwrap();
+        assert_eq!(partial, None, "observed an incomplete published file");
+        assert_eq!(fs::metadata(path).unwrap().len(), expected_len);
+    }
+
+    #[test]
+    fn atomic_create_never_overwrites_an_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("published.json");
+        atomic_create(&path, b"original").unwrap();
+        let error = atomic_create(&path, b"replacement").unwrap_err();
+        assert!(
+            matches!(error, RepositoryError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_atomic_creates_have_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("published.json");
+        let barrier = Arc::new(Barrier::new(2));
+        let writers: Vec<_> = [b"first".as_slice(), b"second".as_slice()]
+            .into_iter()
+            .map(|contents| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    atomic_create(&path, contents)
+                })
+            })
+            .collect();
+        let results: Vec<_> = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results.iter().any(|result| matches!(
+            result,
+            Err(RepositoryError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+        )));
+        let contents = fs::read(&path).unwrap();
+        assert!(contents == b"first" || contents == b"second");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     fn reference(byte: &str) -> ComputationRef {
         ComputationRef::parse(format!("blake3:{}", byte.repeat(64))).unwrap()
