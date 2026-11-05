@@ -95,9 +95,12 @@ An independent arm64 local experiment combined MariaDB and the app image on a
 single persistent volume and used a separate internal, ephemeral Redis. After
 creating a synthetic customer, request, order and private attachment, it
 restarted the database container and manually restarted Frappe; the records
-and attachment were readable. See `local-test/single-volume/README.md` for
-the exact scope and serious limitations. This is not a hosted Runner test or
-a production-ready process and storage arrangement.
+and attachment were readable. A later synthetic amd64 candidate combined the
+database, Redis with AOF, web process and workers under one local supervisor;
+it verified normal restart, bound-secret initialization, restricted access and
+refusal to restart after an unclean stop. See `local-test/single-volume/README.md`
+for the exact scope and serious limitations. This is not a hosted Runner test
+or a production-ready process and storage arrangement.
 
 In the same isolated stack, the actual scheduling API created and submitted a
 synthetic appointment against a submitted order, assigned a synthetic
