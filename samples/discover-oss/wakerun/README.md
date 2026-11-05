@@ -73,10 +73,33 @@ restore and the shipped WebAssembly build's fault handling remain unverified.
 
 The notice generator includes production dependency notices. Radix packages
 without a bundled license all report the same pinned upstream gitHead as the
-included fallback. The `react-remove-scroll-bar` npm package reports a gitHead
-that was not found in its stated repository; its included fallback is from
-the repository's newer pinned commit and must be checked against the historical
-package before production distribution.
+included fallback. The `react-remove-scroll-bar` 2.3.8 npm package reports a
+gitHead that was not found in its stated repository and contains no license
+file. The fallback is the upstream MIT license file at commit
+`7301c160fda44cb8cf2b9fdfde61efad35736196` (SHA-256
+`a79aae0c0f21990d9d963bb3c5a79cdcea9a46f8523ba55c58d7fe776b6ebc84`).
+Its parent is the npm 2.3.7 gitHead, and upstream merged the license addition
+in [PR 76](https://github.com/theKashey/react-remove-scroll-bar/pull/76).
+The npm registry's integrity-checked 2.3.7 and 2.3.8 archives contain exactly
+the same 26 non-manifest files; their manifests differ only in version and the
+`react-style-singleton` dependency range. Both declare MIT and the same
+author. `verify_scrollbar_releases.py` checks these exact archives and the
+fallback license without extracting them. This strengthens the evidence for
+using the upstream notice, but does not prove that the published archives were
+reproducibly built from the Git tree or settle all distribution obligations.
+The current staging build predates this additional verification.
+
+To repeat the release comparison, download the two archives from the official
+registry URLs in the command below into a local workspace `.tmp` directory,
+then run:
+
+```sh
+curl -fsSL https://registry.npmjs.org/react-remove-scroll-bar/-/react-remove-scroll-bar-2.3.7.tgz -o .tmp/scrollbar-2.3.7.tgz
+curl -fsSL https://registry.npmjs.org/react-remove-scroll-bar/-/react-remove-scroll-bar-2.3.8.tgz -o .tmp/scrollbar-2.3.8.tgz
+python3 samples/discover-oss/wakerun/verify_scrollbar_releases.py \
+  .tmp/scrollbar-2.3.7.tgz .tmp/scrollbar-2.3.8.tgz \
+  samples/discover-oss/wakerun/overlay/browser-license-fallbacks/react-remove-scroll-bar-LICENSE.txt
+```
 
 Upstream's calculator states that it uses 2024 tax rules. Its UI also described
 the amount of a blue-filing income deduction as a direct tax reduction. The
