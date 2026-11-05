@@ -27,8 +27,6 @@ use crate::{
     OCI_WORKSPACE_MOUNT_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationServer,
     StaticApplicationServerExt, StaticApplicationState, ValidatedPortableApplication,
 };
-#[cfg(unix)]
-use ato_runtime_attempt::peer_broker::PeerBroker;
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
@@ -46,6 +44,8 @@ use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry, ModelSetManifes
 use ato_runtime_attempt::launch::oci::{
     LaunchedOci, OciCandidate, ServiceStart, start_service_group,
 };
+#[cfg(unix)]
+use ato_runtime_attempt::peer_broker::PeerBroker;
 use ato_runtime_attempt::realize::{CandidateRealizer, RealizeFailure, Realized, RunningCandidate};
 use ato_sandbox::SandboxPolicy;
 
@@ -283,11 +283,9 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
             PortableRealizationKind::OciServiceGroup => {
                 self.start_service_group(&hydrated, workspace, &state_mounts)?
             }
-            PortableRealizationKind::ProcessServiceGroup => self.start_process_group(
-                workspace,
-                &state_mounts,
-                &input_mounts,
-            )?,
+            PortableRealizationKind::ProcessServiceGroup => {
+                self.start_process_group(workspace, &state_mounts, &input_mounts)?
+            }
         };
         realized.execution.dependency_fetches = dependency_fetches;
         Ok(realized)
@@ -932,8 +930,8 @@ impl PortableBundleExecutor<'_> {
                     step.id
                 )));
             }
-            let (executable, version) = resolve_pinned_python(python_version)
-                .map_err(|error| launch(error, &workspace))?;
+            let (executable, version) =
+                resolve_pinned_python(python_version).map_err(|error| launch(error, &workspace))?;
             command[0] = executable.clone();
             // No argv port rewrite: the new path binds explicitly through the
             // environment and refuses a hardcoded guest port.
@@ -955,8 +953,8 @@ impl PortableBundleExecutor<'_> {
                 let socket = broker_socket
                     .as_deref()
                     .expect("a declared edge implies a broker");
-                let policy_path = service_runtime
-                    .join(format!("peer-{}.json", edge.peer.replace('.', "_")));
+                let policy_path =
+                    service_runtime.join(format!("peer-{}.json", edge.peer.replace('.', "_")));
                 let shim_command = portable_peer_shim_command(
                     &workspace,
                     &service_runtime,
@@ -980,10 +978,7 @@ impl PortableBundleExecutor<'_> {
                     .spawn(&workspace)
                     .map_err(|error| launch(error.into(), &workspace))?;
                 wait_for_loopback(
-                    std::net::SocketAddr::from((
-                        std::net::Ipv4Addr::LOCALHOST,
-                        edge.shim_port,
-                    )),
+                    std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, edge.shim_port)),
                     &mut handle,
                     &format!("{} peer {}", step.id, edge.peer),
                 )
@@ -1000,7 +995,10 @@ impl PortableBundleExecutor<'_> {
                 .filter(|port| port.from == step.id)
                 .map(|port| host_ports[port.id.as_str()])
                 .collect::<Vec<_>>();
-            let connect_ports = step_edges.iter().map(|edge| edge.shim_port).collect::<Vec<_>>();
+            let connect_ports = step_edges
+                .iter()
+                .map(|edge| edge.shim_port)
+                .collect::<Vec<_>>();
             let policy_path = service_runtime.join("sandbox-policy.json");
             let command = portable_process_group_sandbox_command(
                 &workspace,

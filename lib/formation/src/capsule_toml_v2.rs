@@ -1289,9 +1289,7 @@ fn compile_services(
             if owner_index >= index {
                 return Err(invalid(
                     "derivation.service.connect",
-                    format!(
-                        "Port {peer:?} is served by a later service; peers must start first"
-                    ),
+                    format!("Port {peer:?} is served by a later service; peers must start first"),
                 ));
             }
         }
@@ -1636,12 +1634,10 @@ default = "pure"
         // An OCI group still refuses a connection declaration: its containers
         // share one internal network and its profile is unchanged.
         assert!(
-            parse_capsule_toml_v2(
-                &SERVICE_GROUP.replace(
-                    "ports = [{ id = \"app.http\", guest_port = 8080 }]",
-                    "ports = [{ id = \"app.http\", guest_port = 8080 }]\nconnect = [\"backend.http\"]",
-                )
-            )
+            parse_capsule_toml_v2(&SERVICE_GROUP.replace(
+                "ports = [{ id = \"app.http\", guest_port = 8080 }]",
+                "ports = [{ id = \"app.http\", guest_port = 8080 }]\nconnect = [\"backend.http\"]",
+            ))
             .is_err()
         );
     }

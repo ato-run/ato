@@ -94,10 +94,9 @@ impl ProcessServiceGroup {
             let handle = match adapter.spawn(workspace) {
                 Ok(handle) => handle,
                 Err(error) => {
-                    return Err(group.fail(anyhow::Error::new(error).context(format!(
-                        "start service `{}`",
-                        spec.name
-                    ))));
+                    return Err(group.fail(
+                        anyhow::Error::new(error).context(format!("start service `{}`", spec.name)),
+                    ));
                 }
             };
             group.services.push(RunningService {
@@ -117,10 +116,7 @@ impl ProcessServiceGroup {
     pub fn exited(&mut self) -> Result<Option<String>> {
         for service in &mut self.services {
             if let Some(status) = service.handle.try_wait()? {
-                return Ok(Some(format!(
-                    "service `{}` exited: {status}",
-                    service.name
-                )));
+                return Ok(Some(format!("service `{}` exited: {status}", service.name)));
             }
             for helper in &mut service.helpers {
                 if let Some(status) = helper.handle.try_wait()? {
@@ -159,7 +155,10 @@ impl ProcessServiceGroup {
         if failures.is_empty() {
             Ok(())
         } else {
-            bail!("process group was not fully stopped: {}", failures.join("; "))
+            bail!(
+                "process group was not fully stopped: {}",
+                failures.join("; ")
+            )
         }
     }
 
@@ -224,7 +223,10 @@ impl ProcessServiceGroup {
         if failures.is_empty() {
             Ok(())
         } else {
-            bail!("process group was not fully stopped: {}", failures.join("; "))
+            bail!(
+                "process group was not fully stopped: {}",
+                failures.join("; ")
+            )
         }
     }
 }
@@ -356,7 +358,11 @@ mod tests {
         let first = free_port();
         let failing = ServiceSpec {
             name: "fails".to_owned(),
-            command: vec!["python3".to_owned(), "-c".to_owned(), "raise SystemExit(7)".to_owned()],
+            command: vec![
+                "python3".to_owned(),
+                "-c".to_owned(),
+                "raise SystemExit(7)".to_owned(),
+            ],
             cwd: PathBuf::from("."),
             environment: BTreeMap::new(),
             readiness: (std::net::Ipv4Addr::LOCALHOST, free_port()).into(),

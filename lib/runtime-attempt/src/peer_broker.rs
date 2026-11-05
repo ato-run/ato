@@ -308,11 +308,8 @@ mod tests {
     fn shim_turns_loopback_traffic_into_one_authorized_edge() {
         let (peer, peer_stop) = echo_server();
         let root = tempfile::tempdir().unwrap();
-        let broker = PeerBroker::start(
-            root.path(),
-            BTreeMap::from([("edge".to_owned(), peer)]),
-        )
-        .unwrap();
+        let broker =
+            PeerBroker::start(root.path(), BTreeMap::from([("edge".to_owned(), peer)])).unwrap();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let shim_port = listener.local_addr().unwrap().port();
         let stopped = Arc::new(AtomicBool::new(false));
