@@ -8,6 +8,7 @@ not the backend's real host port.
 import errno
 import os
 import socket
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BACKEND_PORT = int(os.environ["ATO_ENDPOINT_BACKEND_HTTP_PORT"])
@@ -36,7 +37,10 @@ def probe_undeclared_egress():
     try:
         connection = socket.create_connection(("1.1.1.1", 80), timeout=2)
     except OSError as error:
-        if error.errno == errno.EPERM:
+        # The kernel's refusal is EPERM on macOS and EACCES on Linux; both
+        # mean "denied". Reporting the platform's errno would make K's
+        # observation depend on the OS, so both normalize to one body.
+        if error.errno in (errno.EPERM, errno.EACCES):
             return b"denied\n"
         return f"reached:{error.errno}\n".encode("ascii")
     connection.close()
@@ -55,7 +59,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
                 return
-        except OSError:
+        except OSError as error:
+            # The failing leg is not visible in K; say it on stderr so a failed
+            # observation has a cause in the Run's own output.
+            sys.stderr.write(f"proxy: {self.path}: {error!r}\n")
+            sys.stderr.flush()
             self.send_error(502)
             return
         self.send_response(200)
