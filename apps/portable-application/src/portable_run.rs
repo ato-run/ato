@@ -2672,11 +2672,14 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"]))
         let route_ref = bundle.index.derivations[0].to_string();
         let validated = crate::validate_bundle_for_derivation(&bundle, &route_ref).unwrap();
 
-        // A shim that forwards the workload instead of applying a policy.
+        // A shim that forwards the workload instead of applying a policy. It
+        // keeps the workload's output so a failed start has a cause in the
+        // test's own failure message.
         let shim = root.path().join("shim.sh");
         std::fs::write(
             &shim,
-            "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n",
+            "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\n\
+             exec \"$@\" >> \"$ATO_RUNTIME_DIR/workload.log\" 2>&1\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -2728,7 +2731,7 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"]))
                 .get("app.http")
                 .cloned()
                 .expect("the serving endpoint");
-            let counter = wait_for_counter(&url);
+            let counter = wait_for_counter(&url, &runtime_root);
             realized
                 .candidate
                 .stop()
@@ -2744,9 +2747,16 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"]))
         );
     }
 
+    /// The workload's own output, when the shim kept it.
+    #[cfg(target_os = "macos")]
+    fn workload_log(runtime_root: &std::path::Path) -> String {
+        std::fs::read_to_string(runtime_root.join("process/workload.log"))
+            .unwrap_or_else(|_| "(no workload output)".to_owned())
+    }
+
     /// Poll the workload until it answers; stop is the caller's business.
     #[cfg(target_os = "macos")]
-    fn wait_for_counter(base: &str) -> u64 {
+    fn wait_for_counter(base: &str, runtime_root: &std::path::Path) -> u64 {
         use std::io::{Read, Write};
         use std::net::TcpStream;
         let authority = base.strip_prefix("http://").expect("loopback URL");
@@ -2771,7 +2781,8 @@ ThreadingHTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"]))
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the workload never answered at {base}"
+                "the workload never answered at {base}; workload log:\n{}",
+                workload_log(runtime_root)
             );
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
