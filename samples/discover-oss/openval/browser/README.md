@@ -49,4 +49,15 @@ upstream synthetic workbook produced its report. A browser download event
 was not observed in the staging automation, so the staging export path is not
 claimed as verified; the local browser round-trip passed. Discover listing:
 https://stg-app.ato.run/?view=discover&detail=discover%3Adapp_01M6NMJAYJBYV9SW46VWXVMMZ9
-The public trial path has not been verified.
+The public trial path has not been verified. This earlier listing remains
+published and is labeled as an earlier build; its listing description was
+corrected to disclose Instance state synchronization.
+
+After observing that Ato's Instance bridge synchronizes localStorage, a new
+build added the warning in the app itself. Its bundle SHA-256 is
+`f24827e6fa6171e52f856cdc1e06c5b80ddaaf5d63290fbdd919caabd04e4426`.
+On 2026-11-05, staging Instance `cinst_01M6NMVJ1KMY4R5TSGBG83FPRW` showed a
+verified Static Web Contract; its owner view displayed the warning and the
+upstream sample workbook's cashflow report. The current listing is:
+https://stg-app.ato.run/?view=discover&detail=discover%3Adapp_01M6NMXH157ETDNT2HTNMJPY51
+The separate public trial and staging workbook download remain unverified.
