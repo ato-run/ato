@@ -3,6 +3,7 @@
 import base64
 import json
 from ato_origin import socket_origin
+from state_lock import acquire_state_lock
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,7 @@ mysql_args = ['/usr/sbin/mysqld', '--no-defaults', '--basedir=/usr',
 children = []
 stopping = False
 clean_shutdown = False
+state_lock = None
 
 def fail(message):
     print(message, file=sys.stderr, flush=True)
@@ -162,6 +164,10 @@ try:
     origin, allowed_socket_origin = socket_origin(os.environ.get('ATO_BINDING_APP_ORIGIN') or os.environ.get('APP_URL'))
     if not root.is_dir():
         fail('Persistent state is missing.')
+    try:
+        state_lock = acquire_state_lock(root)
+    except OSError:
+        fail('Persistent state is locked or invalid; refusing to start.')
     initialized = private / 'initialized'
     first = not private.exists()
     if first:
@@ -263,4 +269,8 @@ except Exception as error:
     print('Fleetbase local prototype stopped:', type(error).__name__, file=sys.stderr, flush=True)
     sys.exit(1)
 finally:
-    stop_children(clean_shutdown)
+    try:
+        stop_children(clean_shutdown)
+    finally:
+        if state_lock is not None:
+            os.close(state_lock)

@@ -118,6 +118,28 @@ test-only mock breach service, no-egress network, synthetic credentials and
 limitations above apply equally to this proof. This is a host-local test, not
 a hosted Ato Runner receipt or a staging publication.
 
+On 2026-11-06, the local supervisor was extended to hold an exclusive advisory
+lock on the mounted state directory from before initialization until all its
+children have stopped. This provides a coordination primitive for a future
+offline backup or recovery tool; it does not implement either. All processes
+that access the state would have to take the same lock, and the lock does not
+replace Runner fencing or establish cross-host filesystem semantics. The
+existing unclean-shutdown marker still prevents an automatic restart after a
+forced stop.
+
+The revised arm64 local image passed the complete synthetic socket round-trip
+above. A second supervisor in another container was refused while the first
+held the same Docker volume, and a graceful stop released the lock so the
+original container restarted and became healthy again. This checks the local
+Docker volume behavior, not a hosted Runner, crash recovery, or a consistent
+backup. The lock's unit tests additionally cover a competing process, release,
+missing directories and symlink rejection. For the proof, the local
+`ato-local-proof/fleetbase-combined:state-lock` image used the earlier
+`socket-roundtrip` image with the current `supervisor.py` and `state_lock.py`
+copied into `/opt`; a fresh build from the Dockerfiles also copies the lock
+module. The proof script accepts another locally built compatible image via
+`FLEETBASE_SOCKET_PROOF_APP_IMAGE`.
+
 ## Composer source and notice inventory
 
 `provenance/composer_inventory.py` reads the API image's installed Composer
