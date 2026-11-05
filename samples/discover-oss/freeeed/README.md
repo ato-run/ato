@@ -227,6 +227,20 @@ staging. An attempt to publish this instance to Discover was refused with a
 message that its build was not ready, so this instance is private and no
 public availability is claimed. The response does not establish the cause.
 
+On 2026-11-06, the hosted validator from
+[ato #1696](https://github.com/ato-run/ato/pull/1696) was deployed to staging.
+Using the same `freeeed-safe-text.capsule` and the owner's connected personal
+Runner, a new staging Instance `cinst_01M6P4CVS2MYZAPQHK5J3HZS48` reported
+the OCI Contract verified and its surface ready. The owner browser opened
+`https://cinst-o2g4qlqbxmigpigg.stg-app.ato.run/`, processed a synthetic TXT,
+and displayed "Results downloaded"; the downloaded bytes were not examined in
+that staging run. Discover publication was refused with the build-not-ready
+message even after this validator deployment, so the Instance remains private.
+The UI message alone does not identify the exact server-side refusal or prove
+whether ingress evidence was recorded. An earlier managed-Runner import was
+refused as `portable_runner_unavailable`; selecting the connected personal
+Runner allowed this separate attempt to start.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
