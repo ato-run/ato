@@ -45,6 +45,15 @@ Atoとato.runは責務が異なります。オープンソースの中核がサ�
 
 すべての経路がすべてのホストで動くわけではありません。ランタイム、platform、権限、依存関係はadmissionの判定対象です。同梱のアプリカタログはなく、発見はato.runの機能です。ソースが現行のauthoring schemaに合う場合は `ato pack` でbundleを作成できます。
 
+## ソフトウェアがcapsuleになるまで
+
+現在、`.capsule` を作る方法は2つあります。
+
+- **作成済み入力。** `capsule.toml`（`ato.capsule/2`）に観測条件と少なくとも1つのDerivationを書き、`ato pack <source> -o app.capsule` を実行します。
+- **ソースからのFormation。** `ato form <source> --runtime local ...` を実行します。プロジェクトがプリセット（`single-html/v1`、`static-files/v1`、`node-static/v1`、`single-jsx/v1`）に合えば適用し、候補をビルド・起動してKに照らして検証します。
+
+Formationは汎用ビルダーではなく、ビルド失敗からKを作りません。ビルドの成功は受理ではありません。判定するのは検証器です。失敗したattemptは証拠として記録され、次の手段はKを弱めることではなく別のDです。通常の経路にplanner、自動の最適D選択、暗黙のフォールバックはありません。[Formation](docs/concepts/formation.md)、[Formationガイド](docs/guides/formation.md)、[探索モデルのドラフト](docs/rfcs/draft/FORMATION_EXPLORATION_MODEL.md)を参照してください。
+
 ## クイックスタート
 
 アカウントは不要です。[rust-toolchain.toml](rust-toolchain.toml) のRustツールチェーンを用意し、リポジトリをcloneしてCLIをビルドし、同梱の静的bundleを実行します。
