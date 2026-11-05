@@ -94,7 +94,8 @@ KとDは正規化されたJSONオブジェクトです。同梱の静的bundle�
 }
 ```
 
-`ContractRef` と `DerivationRef` は、これらのオブジェクトの正規化バイト列のSHA-256です。このbundleでは `sha256:b565…`（416バイト）が `root_contract_ref`、`sha256:87a0…`（397バイト）が `derivations` の先頭です。作成時の入力（`capsule.toml`）、authoringから正規形への対応表、process route、receiptは[Contract and derivation formats](docs/guides/contract-and-derivation-format.md)にあります。
+`ContractRef` と `DerivationRef` は、これらのオブジェクトの正規化バイト列のSHA-256です。このbundleでは `sha256:b565…`（416バイト）が `root_contract_ref`、`sha256:87a0…`（397バイト）が `derivations` の先頭です。作成時の入力（`capsule.toml`）、authoringから正規形への対応表、process route、receiptは[Contract and derivation formats](docs/guides/contract-and-derivation-format.md)にあり、
+同梱bundleからデコードした例は[Sample K and D objects](docs/guides/contract-derivation-samples.md)にあります。
 
 Kが保証するのは宣言した観測だけであり、部分的です。`ContractRef` の一致は正規化されたKのバイト列の一致を意味し、振る舞いの等価性ではありません。Kを満たしても、2つのRunが同じComputationになるわけではありません。検証器の一覧、同一性保証の内容と限界は形式ガイドにあります。
 

@@ -380,6 +380,8 @@ K describes the whole application:
 
 ## See also
 
+- [Sample Contract and Derivation objects](contract-derivation-samples.md): decoded
+  K/D examples from the committed bundles.
 - [Capsule bundle overview](../capsule.md) and the
   [wire v3 draft](../rfcs/draft/PORTABLE_APPLICATION_BUNDLE_V3.md).
 - [Application contracts](../concepts/application-contracts.md) for the profile

@@ -84,6 +84,8 @@ not permission to rewrite either side during documentation maintenance.
 - [Licensing](licensing.md): the per-material license and notice index.
 - [Contract and derivation formats](guides/contract-and-derivation-format.md): canonical
   K and D JSON, bundle references and receipts.
+- [Sample K and D objects](guides/contract-derivation-samples.md): decoded examples
+  from the committed bundles.
 - [Research tour](guides/research-tour.md): problem, model, profiles, data
   identity, verified results, independence, prior work and open questions.
 - [Theory draft](theory/capsule-process-model.md): research background, not an

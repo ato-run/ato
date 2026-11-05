@@ -18,6 +18,8 @@ owned by the [ato.run documentation](https://ato.run/docs/); see the
   implementation against a frozen Contract.
 - [Contract and derivation formats](contract-and-derivation-format.md):
   authoring input, canonical K/D JSON, bundle references and receipts.
+- [Sample K and D objects](contract-derivation-samples.md): decoded K/D examples
+  from the committed bundles.
 - [Computation lifecycle](../run.md): init, stop, resume and export a local
   computation branch.
 - [Runner and Hosting](runner-hosting.md): select local execution, a Connected

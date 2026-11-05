@@ -135,7 +135,9 @@ bytes of these objects: here `sha256:b565…` (416 bytes) is
 `root_contract_ref` and `sha256:87a0…` (397 bytes) is the first entry of
 `derivations`. The authoring input (`capsule.toml`), the authoring-to-canonical
 field map, a process route and a receipt are in
-[Contract and derivation formats](docs/guides/contract-and-derivation-format.md).
+[Contract and derivation formats](docs/guides/contract-and-derivation-format.md);
+decoded examples from committed bundles are in
+[Sample K and D objects](docs/guides/contract-derivation-samples.md).
 
 K is a partial specification: it guarantees only the observations it declares.
 Equal `ContractRef` values mean equal canonical K bytes, not behavioral
