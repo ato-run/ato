@@ -5,8 +5,11 @@ This adapter runs the unmodified OpenVal cashflow engine from upstream commit
 Pyodide 0.29.4 worker. It changes the upstream workbook reader only to interpret
 a blank optional gross-up field as absent, so a default workbook exported by
 the app can be imported again. It is pre-alpha software, not validated for
-actual underwriting. Property data is stored in the user's browser and the
-adapter sends no property data to a server.
+actual underwriting. The upstream app stores property data in localStorage.
+On an Ato Instance the host's injected state bridge can sync those saved
+inputs to the Instance; use sample data only. The local test server has no
+host bridge, so its no-external-network test does not prove the hosted data
+remains local.
 
 The frontend uses Next.js 16.4.5 and React 18.3.1, with the exact package lock
 and Python wheels in this directory. `source_archive.py` includes the upstream

@@ -67,7 +67,7 @@ export async function fetchCashflow(
     needle = '      <div className="flex-1 min-w-0">\n        <CashflowTable'
     replacement = '''      <div className="flex-1 min-w-0">
         <div className="px-4 py-2 text-xs bg-amber-100 text-amber-950" role="note">
-          Pre-alpha preview. Calculations are not validated for real underwriting. Deal data is stored in this browser.
+          Pre-alpha preview: use sample data only. Calculations are not validated for underwriting. Ato may sync saved data to your instance.
           {" "}<a className="underline" href="/source.zip" download>Source and notices</a>
         </div>
         <CashflowTable'''
