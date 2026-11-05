@@ -2309,7 +2309,7 @@ mod process_group_policy_tests {
         let policy = policy(&policy_path);
         assert_eq!(policy.allowed_bind_tcp_ports, [43101]);
         assert_eq!(policy.allowed_connect_tcp_ports, [43102]);
-        assert!(policy.allow_network == false);
+        assert!(!policy.allow_network);
         assert_eq!(policy.ipc_socket_paths, [broker]);
         // A peer's real host port never appears in a consumer's authority.
         assert!(!policy.allowed_connect_tcp_ports.contains(&43199));
@@ -2335,6 +2335,6 @@ mod process_group_policy_tests {
         assert_eq!(policy.allowed_bind_tcp_ports, [43102]);
         assert!(policy.allowed_connect_tcp_ports.is_empty());
         assert_eq!(policy.ipc_socket_paths, [broker]);
-        assert!(policy.allow_network == false);
+        assert!(!policy.allow_network);
     }
 }
