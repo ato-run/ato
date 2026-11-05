@@ -1,0 +1,24 @@
+{
+  "schema": "ato.fleetbase-supplemental-notices/1",
+  "notices": [
+    {
+      "package": "fleetbase/twilio",
+      "source_url": "https://github.com/fleetbase/laravel-twilio/blob/1f7f411d6c5b5071a0d7353bb6432f6e71aa9d87/LICENSE",
+      "path": "upstream-notices/fleetbase-twilio.txt",
+      "sha256": "bf4eb369138b28ed594494eaa923137834c399c4c2fd6681ec94520e8f050f97"
+    },
+    {
+      "package": "phrity/websocket",
+      "source_url": "https://github.com/sirn-se/websocket-php/blob/8a525da4457b599ab1960f24183f25626c96ce3c/COPYING.md",
+      "path": "upstream-notices/phrity-websocket.txt",
+      "sha256": "e69e704ca9f8a448f2032fe78f1b96c933d826fb76c45c6392ea583275a2ccfb"
+    },
+    {
+      "package": "twilio/sdk",
+      "source_url": "https://github.com/twilio/twilio-php/blob/08aad5f377e2245b9cd7508e7762d95e7392fa4d/LICENSE",
+      "path": "upstream-notices/twilio-sdk.txt",
+      "sha256": "282418d5a4ca0a6cd3476637c41bb229e592fc289156d22fbfa188cec1169ff3"
+    }
+  ],
+  "unresolved_missing_notices": ["phrity/net-stream", "phrity/net-uri"]
+}

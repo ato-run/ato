@@ -72,3 +72,39 @@ Discover publication all remain unverified or incomplete.
 Relay tests: `PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.tmp" python3 -m unittest
 discover -s samples/discover-oss/fleetbase/prototype/breach_proxy -p 'test_*.py'
 -v` from the repository root.
+
+## Composer source and notice inventory
+
+`provenance/composer_inventory.py` reads the API image's installed Composer
+metadata and lock file only after verifying their SHA-256 digests. It rejects
+unmatched versions or source references, invalid package paths, unpinned Git
+references and unsafe notice files. `composer-inventory.json` records the
+243 installed packages, their declared license metadata, source references,
+and the hashes of top-level license and notice files actually present in the
+pinned API image. Re-running against that image produced the same inventory.
+The lock and source references are metadata: they do **not** establish that
+installed code is byte-identical to those source revisions.
+
+Five installed packages do not include a top-level notice in that image.
+`supplemental-notices.json` records the three notice texts obtained from the
+exact commits of their upstream repositories. The pinned `phrity/net-stream`
+and `phrity/net-uri` repositories contain no license or notice file in their
+source trees; both declare MIT in Composer metadata, but no missing copyright
+or license text has been invented. `webit/eval-math` contains a license file
+but does not declare a license in Composer metadata. These items need further
+review. The inventory covers only installed Composer packages: it does not
+cover the API's own code, OS and language runtime packages, the console,
+JavaScript dependencies, Fleet-Ops, MySQL, Redis, sockets or the auxiliary
+service. It is not a complete notice package or a legal determination.
+
+To reproduce the image inventory from the repository root:
+
+```sh
+docker run --rm --network none --read-only --user 65532:65532 \
+  --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/composer_inventory.py",dst=/inventory.py,readonly \
+  --entrypoint python3 \
+  fleetbase/fleetbase-api@sha256:ccd1f9d4ee93625edd9f9aa446e8655cbc2ffbe7c249387bdf52169967933572 \
+  /inventory.py > .tmp/fleetbase-composer-inventory.json
+cmp .tmp/fleetbase-composer-inventory.json samples/discover-oss/fleetbase/prototype/provenance/composer-inventory.json
+PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.tmp" python3 -m unittest discover -s samples/discover-oss/fleetbase/prototype/provenance -p 'test_*.py' -v
+```

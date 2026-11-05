@@ -1,0 +1,3890 @@
+{
+  "schema": "ato.fleetbase-composer-inventory/1",
+  "image": "fleetbase/fleetbase-api@sha256:ccd1f9d4ee93625edd9f9aa446e8655cbc2ffbe7c249387bdf52169967933572",
+  "installed_sha256": "6069cc97d9f68d64d11859cca7c3f0644ac0ef6095cef4a6ba1397b2185255dd",
+  "lock_sha256": "20bfb94409e7aeda0dbbcedebc7866ed9856708b4874a674539733d065204dab",
+  "packages": [
+    {
+      "name": "appstract/laravel-opcache",
+      "version": "4.0.2",
+      "source_url": "https://github.com/appstract/laravel-opcache.git",
+      "source_commit": "d2ce88cddda6af54c14d1f9ceaaf94b54f38f9d3",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "1be96d161a6189fc001ee12a06ceadf71593e376bbadcf1a24029c1025570747",
+          "bytes": 1105
+        }
+      ]
+    },
+    {
+      "name": "aws/aws-crt-php",
+      "version": "v1.2.7",
+      "source_url": "https://github.com/awslabs/aws-crt-php.git",
+      "source_commit": "d71d9906c7bb63a28295447ba12e74723bd3730e",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b",
+          "bytes": 10142
+        },
+        {
+          "path": "NOTICE",
+          "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+          "bytes": 67
+        }
+      ]
+    },
+    {
+      "name": "aws/aws-sdk-php",
+      "version": "3.394.10",
+      "source_url": "https://github.com/aws/aws-sdk-php.git",
+      "source_commit": "3b7cbf17b8ba568f77546d1e5edd3f2071861c8f",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "d86082393c045c6ee8fcef26a1680e31c72b2afb07f687ac337325747f341585",
+          "bytes": 9202
+        },
+        {
+          "path": "NOTICE",
+          "sha256": "d0a3df5a5e115541aacefa0ae21e533a4614834f18ebf7b6c010c526c3089b59",
+          "bytes": 638
+        }
+      ]
+    },
+    {
+      "name": "aws/aws-sdk-php-laravel",
+      "version": "3.11.0",
+      "source_url": "https://github.com/aws/aws-sdk-php-laravel.git",
+      "source_commit": "d55fe3329e5f4aad262a7757506913bb669644fd",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "d86082393c045c6ee8fcef26a1680e31c72b2afb07f687ac337325747f341585",
+          "bytes": 9202
+        },
+        {
+          "path": "NOTICE.md",
+          "sha256": "7fbab7e61fbe26cf3c67680aee38dab9fcfa43920a4e6a7622787ea49c0f7020",
+          "bytes": 623
+        }
+      ]
+    },
+    {
+      "name": "barryvdh/laravel-dompdf",
+      "version": "v3.1.2",
+      "source_url": "https://github.com/barryvdh/laravel-dompdf.git",
+      "source_commit": "ee3b72b19ccdf57d0243116ecb2b90261344dedc",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0e459da9d1f05aaa381069531ec191f95851a8a5afd4ae3ac821a5111b296af4",
+          "bytes": 1065
+        }
+      ]
+    },
+    {
+      "name": "beste/clock",
+      "version": "3.1.0",
+      "source_url": "https://github.com/beste/clock.git",
+      "source_commit": "9818902960afc11d258c6d8a369e4a34aa6f9817",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "72b0159d1a7d828fe1b19a82246be65ed1cf267d6b328898be4fb5e3902bba88",
+          "bytes": 1122
+        }
+      ]
+    },
+    {
+      "name": "beste/in-memory-cache",
+      "version": "1.4.0",
+      "source_url": "https://github.com/beste/in-memory-cache-php.git",
+      "source_commit": "1b9fbfcfbd0b657b90a759ac41b22748501c7f0e",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "72b0159d1a7d828fe1b19a82246be65ed1cf267d6b328898be4fb5e3902bba88",
+          "bytes": 1122
+        }
+      ]
+    },
+    {
+      "name": "beste/json",
+      "version": "1.7.0",
+      "source_url": "https://github.com/beste/json.git",
+      "source_commit": "976525f1ce2323a4e044364269d60b402603e216",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "72b0159d1a7d828fe1b19a82246be65ed1cf267d6b328898be4fb5e3902bba88",
+          "bytes": 1122
+        }
+      ]
+    },
+    {
+      "name": "brick/geo",
+      "version": "0.7.2",
+      "source_url": "https://github.com/brick/geo.git",
+      "source_commit": "725789f7c090235e230b9a666acf59e0fc7f8e24",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "d2625cc652e6ffa9f16827f1dba2d83ac12b050dc8150a38720420dbb810cae3",
+          "bytes": 1089
+        }
+      ]
+    },
+    {
+      "name": "brick/math",
+      "version": "0.12.3",
+      "source_url": "https://github.com/brick/math.git",
+      "source_commit": "866551da34e9a618e64a819ee1e01c20d8a588ba",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "d2625cc652e6ffa9f16827f1dba2d83ac12b050dc8150a38720420dbb810cae3",
+          "bytes": 1089
+        }
+      ]
+    },
+    {
+      "name": "carbonphp/carbon-doctrine-types",
+      "version": "2.1.1",
+      "source_url": "https://github.com/CarbonPHP/carbon-doctrine-types.git",
+      "source_commit": "bf72f821b9952722ea9f9c3912f85946e1af9e3d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "cf9aa3a6374d6e4a4f0f886c484426200f83f2d05fedc1b66e09a3b74c05e5ea",
+          "bytes": 1063
+        }
+      ]
+    },
+    {
+      "name": "cknow/laravel-money",
+      "version": "v7.2.1",
+      "source_url": "https://github.com/cknow/laravel-money.git",
+      "source_commit": "82d506202f95e8b6977a9ffffcdbd218bc58bdc5",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "8506ea628b3d7e9cb089ba64cec5890163c03d6f724d6d369e3d93c58bdf99ba",
+          "bytes": 1117
+        }
+      ]
+    },
+    {
+      "name": "clue/stream-filter",
+      "version": "v1.7.0",
+      "source_url": "https://github.com/clue/stream-filter.git",
+      "source_commit": "049509fef80032cb3f051595029ab75b49a3c2f7",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "08b5a49ecbfa3bf8659f7190dd8ecbcad2cc9c4547f65396947c92dff40db926",
+          "bytes": 1082
+        }
+      ]
+    },
+    {
+      "name": "colinodell/json5",
+      "version": "v2.3.0",
+      "source_url": "https://github.com/colinodell/json5.git",
+      "source_commit": "15b063f8cb5e6deb15f0cd39123264ec0d19c710",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "c926b56ed00404c927187fb004d533c060f22b2179b35cebeb888f817d04d1d8",
+          "bytes": 1234
+        }
+      ]
+    },
+    {
+      "name": "composer/pcre",
+      "version": "3.4.0",
+      "source_url": "https://github.com/composer/pcre.git",
+      "source_commit": "d5a341b3fb61f3001970940afb1d332968a183ed",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "984627c7eb714851bb191d4d463aec6e5bb71bf2f373c8b898304bd8298bfe48",
+          "bytes": 1052
+        }
+      ]
+    },
+    {
+      "name": "composer/semver",
+      "version": "3.4.4",
+      "source_url": "https://github.com/composer/semver.git",
+      "source_commit": "198166618906cb2de69b95d7d47e5fa8aa1b2b95",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "6bb16991cf366c84116c5f6a4d5078f7113ebc47d1f245ea9b57b8c10abd7479",
+          "bytes": 1052
+        }
+      ]
+    },
+    {
+      "name": "cuyz/valinor",
+      "version": "2.6.0",
+      "source_url": "https://github.com/CuyZ/Valinor.git",
+      "source_commit": "15e5afc4a5463d15d26b010fd0a703e16f14c90f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "3e43c83d3b5da5b6c003f6f3d4ba3cbae49000cf3881bdf263888df7f7ca665a",
+          "bytes": 1056
+        }
+      ]
+    },
+    {
+      "name": "defuse/php-encryption",
+      "version": "v2.4.0",
+      "source_url": "https://github.com/defuse/php-encryption.git",
+      "source_commit": "f53396c2d34225064647a05ca76c1da9d99e5828",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "145660444d945408559108f6b335db5088846431067ed7f61ccb14367b071076",
+          "bytes": 1175
+        }
+      ]
+    },
+    {
+      "name": "dflydev/dot-access-data",
+      "version": "v3.0.3",
+      "source_url": "https://github.com/dflydev/dflydev-dot-access-data.git",
+      "source_commit": "a23a2bf4f31d3518f3ecb38660c95715dfead60f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "a51874d3253d042002b8971c778102223ca89048c5b71c46e58f7bb5bc728941",
+          "bytes": 1070
+        }
+      ]
+    },
+    {
+      "name": "doctrine/dbal",
+      "version": "3.10.6",
+      "source_url": "https://github.com/doctrine/dbal.git",
+      "source_commit": "c95589d775a0b2e543467d40f8c3ecccf586f2b4",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "1a3f34d131b4e4af999549ed676a0e842d007427f08785750d45bae82728c772",
+          "bytes": 1065
+        }
+      ]
+    },
+    {
+      "name": "doctrine/deprecations",
+      "version": "1.1.6",
+      "source_url": "https://github.com/doctrine/deprecations.git",
+      "source_commit": "d4fe3e6fd9bb9e72557a19674f44d8ac7db4c6ca",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "fab123d96d6e51e89e46358eb3578d1f3c72b794b9bdf2f0a9ff94d799721b6d",
+          "bytes": 1065
+        }
+      ]
+    },
+    {
+      "name": "doctrine/event-manager",
+      "version": "2.1.1",
+      "source_url": "https://github.com/doctrine/event-manager.git",
+      "source_commit": "dda33921b198841ca8dbad2eaa5d4d34769d18cf",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "ecd726866355b7a96c6c49f8ac3e9992d7e48da2bff756697b7b98cde5f69bbc",
+          "bytes": 1065
+        }
+      ]
+    },
+    {
+      "name": "doctrine/inflector",
+      "version": "2.1.0",
+      "source_url": "https://github.com/doctrine/inflector.git",
+      "source_commit": "6d6c96277ea252fc1304627204c3d5e6e15faa3b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "ecd726866355b7a96c6c49f8ac3e9992d7e48da2bff756697b7b98cde5f69bbc",
+          "bytes": 1065
+        }
+      ]
+    },
+    {
+      "name": "doctrine/lexer",
+      "version": "3.0.1",
+      "source_url": "https://github.com/doctrine/lexer.git",
+      "source_commit": "31ad66abc0fc9e1a1f2d9bc6a42668d2fbbcd6dd",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "1a3f34d131b4e4af999549ed676a0e842d007427f08785750d45bae82728c772",
+          "bytes": 1065
+        }
+      ]
+    },
+    {
+      "name": "dompdf/dompdf",
+      "version": "v3.1.6",
+      "source_url": "https://github.com/dompdf/dompdf.git",
+      "source_commit": "6d4b4eb8500f7a786da8868ba463a71b725a4005",
+      "declared_licenses": [
+        "LGPL-2.1"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.LGPL",
+          "sha256": "a90fe41057cac85869176942a0bca3da94a49e277ee5f8c5284be1aeaa59497e",
+          "bytes": 24352
+        }
+      ]
+    },
+    {
+      "name": "dompdf/php-font-lib",
+      "version": "1.0.2",
+      "source_url": "https://github.com/dompdf/php-font-lib.git",
+      "source_commit": "a6e9a688a2a80016ac080b97be73d3e10c444c9a",
+      "declared_licenses": [
+        "LGPL-2.1-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "273cc5937b062c569acdd8c4cc8a4440ff4dcddbc33a7b2baa8f4ff0611ae403",
+          "bytes": 24362
+        }
+      ]
+    },
+    {
+      "name": "dompdf/php-svg-lib",
+      "version": "1.0.2",
+      "source_url": "https://github.com/dompdf/php-svg-lib.git",
+      "source_commit": "8259ffb930817e72b1ff1caef5d226501f3dfeb1",
+      "declared_licenses": [
+        "LGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+          "bytes": 7652
+        }
+      ]
+    },
+    {
+      "name": "dragonmantank/cron-expression",
+      "version": "v3.6.0",
+      "source_url": "https://github.com/dragonmantank/cron-expression.git",
+      "source_commit": "d61a8a9604ec1f8c3d150d09db6ce98b32675013",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "adbbf6c8829fa66f18592055b0e3abd5da8f721c4d91db0d2251c46f7db1edc5",
+          "bytes": 1146
+        }
+      ]
+    },
+    {
+      "name": "edamov/pushok",
+      "version": "0.18.1",
+      "source_url": "https://github.com/edamov/pushok.git",
+      "source_commit": "f404cbcb5479b88d2d121ef174e34862491ffc42",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "f7873c632a869bba03b7003ac4bdc055b02b039bc866acc25d34c9e613a9ca84",
+          "bytes": 1132
+        }
+      ]
+    },
+    {
+      "name": "egulias/email-validator",
+      "version": "4.0.4",
+      "source_url": "https://github.com/egulias/EmailValidator.git",
+      "source_commit": "d42c8731f0624ad6bdc8d3e5e9a4524f68801cfa",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "2e56ccade3e89c00da1b1bb33f24faaed6704605e339b44f52b8c31ef9f04b82",
+          "bytes": 1069
+        }
+      ]
+    },
+    {
+      "name": "ezyang/htmlpurifier",
+      "version": "v4.19.0",
+      "source_url": "https://github.com/ezyang/htmlpurifier.git",
+      "source_commit": "b287d2a16aceffbf6e0295559b39662612b77fcf",
+      "declared_licenses": [
+        "LGPL-2.1-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "cc8ab76d79191e4dada4a25fee98ae289c63e612d923861cf36032805aa3349d",
+          "bytes": 26456
+        }
+      ]
+    },
+    {
+      "name": "fig/http-message-util",
+      "version": "1.1.5",
+      "source_url": "https://github.com/php-fig/http-message-util.git",
+      "source_commit": "9d94dc0154230ac39e5bf89398b324a86f63f765",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c6efb5af73d04f10da731a8a83cdf11afb87ba6a1e49f30877d536bbf770a606",
+          "bytes": 1085
+        }
+      ]
+    },
+    {
+      "name": "firebase/php-jwt",
+      "version": "v7.1.0",
+      "source_url": "https://github.com/googleapis/php-jwt.git",
+      "source_commit": "b374a5d1a4f1f67fadc2165cdb284645945e2fc0",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "00e641cb185172e752bb3ab744925502c099dca06c9ecf53ea6fba941a65910c",
+          "bytes": 1529
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/ai",
+      "version": "0.0.5",
+      "source_url": "https://github.com/fleetbase/ai.git",
+      "source_commit": "46ebe2bcc22372f65fc45f379f79971b4bf911bd",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/core-api",
+      "version": "1.6.74",
+      "source_url": "https://github.com/fleetbase/core-api.git",
+      "source_commit": "ac97b5620b260660ae4e6fd5ea0e64025629b0c9",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/countries",
+      "version": "0.8.3",
+      "source_url": "https://github.com/fleetbase/countries.git",
+      "source_commit": "0ea7476fd12b4d9254e9e6b387880d96a07b3119",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "6baedd8d5833c8801e7ab0269f23be8cd1ad6d6c1a6e2393761e055874cc0378",
+          "bytes": 1494
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/customer-portal-api",
+      "version": "0.0.16",
+      "source_url": "https://github.com/fleetbase/customer-portal.git",
+      "source_commit": "f153923f1f925665cc5c2433e296eabd5756582b",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/fleetops-api",
+      "version": "0.6.75",
+      "source_url": "https://github.com/fleetbase/fleetops.git",
+      "source_commit": "811aa711a68833dfd8390d8ddac582d4ed75f3c6",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/laravel-mysql-spatial",
+      "version": "1.0.3",
+      "source_url": "https://github.com/fleetbase/laravel-mysql-spatial.git",
+      "source_commit": "0fb5bb91295028df1f46d80cb6ccb05838a17f11",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "64eff334eb50bed458a4699d4dfe521b30d9cbccc3dde8dd68ffcecbf31891a5",
+          "bytes": 1129
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/ledger-api",
+      "version": "0.0.13",
+      "source_url": "https://github.com/fleetbase/ledger.git",
+      "source_commit": "e93eadc2d8b6a67a241b63ec30c21e6003c66663",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/registry-bridge",
+      "version": "0.1.11",
+      "source_url": "https://github.com/fleetbase/registry-bridge.git",
+      "source_commit": "7eecac11e0b9a3ab0ece8728b8a2a9706d89dffd",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/storefront-api",
+      "version": "0.4.31",
+      "source_url": "https://github.com/fleetbase/storefront.git",
+      "source_commit": "2a5dd325b4d2777f0b644da53cf5c902a8e7ffc2",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/twilio",
+      "version": "5.0.1",
+      "source_url": "https://github.com/fleetbase/laravel-twilio.git",
+      "source_commit": "1f7f411d6c5b5071a0d7353bb6432f6e71aa9d87",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": []
+    },
+    {
+      "name": "fleetbase/valhalla-api",
+      "version": "0.0.5",
+      "source_url": "https://github.com/fleetbase/valhalla.git",
+      "source_commit": "7be6021ae9418debcc265ed89e0518777a05ea22",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fleetbase/vroom-api",
+      "version": "0.0.5",
+      "source_url": "https://github.com/fleetbase/vroom.git",
+      "source_commit": "e758becbb92a2cd2997462184f02e87d9436d2e1",
+      "declared_licenses": [
+        "AGPL-3.0-or-later"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998",
+          "bytes": 34353
+        }
+      ]
+    },
+    {
+      "name": "fruitcake/php-cors",
+      "version": "v1.4.0",
+      "source_url": "https://github.com/fruitcake/php-cors.git",
+      "source_commit": "38aaa6c3fd4c157ffe2a4d10aa8b9b16ba8de379",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "5c584152649d495dcdf6ceb8ec2640cd5bcc63cbe331e540e7250d581beb7ead",
+          "bytes": 1134
+        }
+      ]
+    },
+    {
+      "name": "geo-io/interface",
+      "version": "v1.0.1",
+      "source_url": "https://github.com/geo-io/interface.git",
+      "source_commit": "cf46fe7b013de20ab8b601238c7d91b480810644",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "834a32a6bd6eb40a552f99629921f1238c5855fb6d665fb6703e41f88528addd",
+          "bytes": 1061
+        }
+      ]
+    },
+    {
+      "name": "geo-io/wkb-parser",
+      "version": "v1.0.2",
+      "source_url": "https://github.com/geo-io/wkb-parser.git",
+      "source_commit": "d6c3101e6fa255c2a5064fedb33551c4d50e58f6",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c8c2a342bb9d1807c375a8b5472a0aeb86ab8c2d9207829ed85e5bd83732b1bb",
+          "bytes": 1061
+        }
+      ]
+    },
+    {
+      "name": "geocoder-php/chain-provider",
+      "version": "4.6.0",
+      "source_url": "https://github.com/geocoder-php/chain-provider.git",
+      "source_commit": "38e03ddb2c16ac3c964072f4f9d06837164341df",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "47c7105360c16a68011105bfdc9540b6a343ad7a3907ced1e84d14c40a9cff8c",
+          "bytes": 1113
+        }
+      ]
+    },
+    {
+      "name": "geocoder-php/common-http",
+      "version": "4.7.0",
+      "source_url": "https://github.com/geocoder-php/php-common-http.git",
+      "source_commit": "4209be6c31946ed5a658f6240ab21faaf5413f61",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "47c7105360c16a68011105bfdc9540b6a343ad7a3907ced1e84d14c40a9cff8c",
+          "bytes": 1113
+        }
+      ]
+    },
+    {
+      "name": "geocoder-php/geo-plugin-provider",
+      "version": "4.4.0",
+      "source_url": "https://github.com/geocoder-php/geo-plugin-provider.git",
+      "source_commit": "0fffb478260d8c3ec6cb5388a67d0684b006191a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "47c7105360c16a68011105bfdc9540b6a343ad7a3907ced1e84d14c40a9cff8c",
+          "bytes": 1113
+        }
+      ]
+    },
+    {
+      "name": "geocoder-php/google-maps-places-provider",
+      "version": "1.5.0",
+      "source_url": "https://github.com/geocoder-php/google-maps-places-provider.git",
+      "source_commit": "eff3ced1b249d6a18418c47b3d7c90517879e0b0",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "47c7105360c16a68011105bfdc9540b6a343ad7a3907ced1e84d14c40a9cff8c",
+          "bytes": 1113
+        }
+      ]
+    },
+    {
+      "name": "geocoder-php/google-maps-provider",
+      "version": "4.8.0",
+      "source_url": "https://github.com/geocoder-php/google-maps-provider.git",
+      "source_commit": "587aac3647ebd2ce2090b613fc56c753b9dee9a7",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "47c7105360c16a68011105bfdc9540b6a343ad7a3907ced1e84d14c40a9cff8c",
+          "bytes": 1113
+        }
+      ]
+    },
+    {
+      "name": "giggsey/libphonenumber-for-php",
+      "version": "8.13.55",
+      "source_url": "https://github.com/giggsey/libphonenumber-for-php.git",
+      "source_commit": "6e28b3d53cf96d7f41c83d9b80b6021ecbd00537",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "69849221bfb90053de2134ef5e6d540287b4b98062326492f1f96f5da685524b",
+          "bytes": 10174
+        }
+      ]
+    },
+    {
+      "name": "giggsey/locale",
+      "version": "2.9.0",
+      "source_url": "https://github.com/giggsey/Locale.git",
+      "source_commit": "fe741e99ae6ccbe8132f3d63d8ec89924e689778",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "4a2be2463c8e7d8ce64aa262ccbc2cc17751cc1976cd67c7350d80d0b0cd8e51",
+          "bytes": 1088
+        }
+      ]
+    },
+    {
+      "name": "google/apiclient",
+      "version": "v2.19.4",
+      "source_url": "https://github.com/googleapis/google-api-php-client.git",
+      "source_commit": "f745b310113d556c19d5e54ccc48b5821d1e2622",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c07795dc0d0e17cc4b23566ddc05a508f14e8ce98bb7404963250039a2c1a811",
+          "bytes": 10256
+        }
+      ]
+    },
+    {
+      "name": "google/apiclient-services",
+      "version": "v0.458.0",
+      "source_url": "https://github.com/googleapis/google-api-php-client-services.git",
+      "source_commit": "1bf817c792a3c2112f93d785d1a891510f7366c9",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c07795dc0d0e17cc4b23566ddc05a508f14e8ce98bb7404963250039a2c1a811",
+          "bytes": 10256
+        }
+      ]
+    },
+    {
+      "name": "google/auth",
+      "version": "v1.53.0",
+      "source_url": "https://github.com/googleapis/google-auth-library-php.git",
+      "source_commit": "d677d0b0c4bd52ab222a85df8e74e0d491c0cc5a",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "COPYING",
+          "sha256": "09668bdc6071d983e15bbf36896cff08aa42aa8e41d7813f0304aeeb7f6d888f",
+          "bytes": 11342
+        },
+        {
+          "path": "LICENSE",
+          "sha256": "c07795dc0d0e17cc4b23566ddc05a508f14e8ce98bb7404963250039a2c1a811",
+          "bytes": 10256
+        }
+      ]
+    },
+    {
+      "name": "google/cloud-core",
+      "version": "v1.73.2",
+      "source_url": "https://github.com/googleapis/google-cloud-php-core.git",
+      "source_commit": "883bc97bdcd5e09552eb82cb47a752271a310c7a",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+          "bytes": 11358
+        }
+      ]
+    },
+    {
+      "name": "google/cloud-storage",
+      "version": "v1.51.0",
+      "source_url": "https://github.com/googleapis/google-cloud-php-storage.git",
+      "source_commit": "9ba3d5e8cbd53bf67fab644b5be310e719533def",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+          "bytes": 11358
+        }
+      ]
+    },
+    {
+      "name": "google/common-protos",
+      "version": "4.14.2",
+      "source_url": "https://github.com/googleapis/common-protos-php.git",
+      "source_commit": "a0ceb5e7b9f966e9e53592bb358b1e5dc3377ad3",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "bytes": 11357
+        }
+      ]
+    },
+    {
+      "name": "google/gax",
+      "version": "v1.49.0",
+      "source_url": "https://github.com/googleapis/gax-php.git",
+      "source_commit": "6c46a601c493ad7fe057b457662d79cf7b01d8e2",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "7c316172e7444b140201fcc0c769655c24783c4d7b5580c9c03c56cadf4b767b",
+          "bytes": 1472
+        }
+      ]
+    },
+    {
+      "name": "google/grpc-gcp",
+      "version": "0.4.2",
+      "source_url": "https://github.com/GoogleCloudPlatform/grpc-gcp-php.git",
+      "source_commit": "1049c0c15b6a1789fdeb52af688a94d540932469",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "bytes": 11358
+        }
+      ]
+    },
+    {
+      "name": "google/longrunning",
+      "version": "0.8.3",
+      "source_url": "https://github.com/googleapis/php-longrunning.git",
+      "source_commit": "51cffc3eb1e3059698cda4d8796bd432e266fc95",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "bytes": 11358
+        }
+      ]
+    },
+    {
+      "name": "google/protobuf",
+      "version": "v5.36.1",
+      "source_url": "https://github.com/protocolbuffers/protobuf-php.git",
+      "source_commit": "d64d16befba8632967f604b9644c0bb8f64cfbc3",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "2d4cfcfdf007905742e8021124697f2e19e5e0853dd7722d324d954ddf1971f7",
+          "bytes": 1516
+        }
+      ]
+    },
+    {
+      "name": "graham-campbell/result-type",
+      "version": "v1.2.0",
+      "source_url": "https://github.com/GrahamCampbell/Result-Type.git",
+      "source_commit": "adccca3324eece92ca35463648c12b9e6293c05b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "be68811474d347ce1582b5778d31810ef5a5b553a1f5da1956a86d9b39289540",
+          "bytes": 1112
+        }
+      ]
+    },
+    {
+      "name": "grpc/grpc",
+      "version": "1.82.0",
+      "source_url": "https://github.com/grpc/grpc-php.git",
+      "source_commit": "be984cb608f21e96453b3cfe54c748cc7b192250",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+          "bytes": 11357
+        }
+      ]
+    },
+    {
+      "name": "guzzlehttp/guzzle",
+      "version": "7.15.5",
+      "source_url": "https://github.com/guzzle/guzzle.git",
+      "source_commit": "ee80339fd9177ba44c49cdb653ff02a4d1106b9a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "1090e16630dfd10d5f79be2fb68c4f2f0b168cc34fae57eca7150f735078332d",
+          "bytes": 1460
+        }
+      ]
+    },
+    {
+      "name": "guzzlehttp/promises",
+      "version": "2.5.3",
+      "source_url": "https://github.com/guzzle/promises.git",
+      "source_commit": "cde49999552d185d64715fe9c1f77a2aadd2f9f1",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "098313b3908e2a799731aa3816386fe33af0bef21dbe6acc75e7c98958ec89ed",
+          "bytes": 1284
+        }
+      ]
+    },
+    {
+      "name": "guzzlehttp/psr7",
+      "version": "2.13.1",
+      "source_url": "https://github.com/guzzle/psr7.git",
+      "source_commit": "95e7828100de18b4e269fb1703be530082d5166d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "709437fdecfeb9f22f71d0c144eb4d11938b99a7665f650e6f49fb9dcbfcce84",
+          "bytes": 1402
+        }
+      ]
+    },
+    {
+      "name": "guzzlehttp/uri-template",
+      "version": "v1.0.11",
+      "source_url": "https://github.com/guzzle/uri-template.git",
+      "source_commit": "d0058dccf4299d70c3d9da3378b8908b32780368",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "4265292d1f8887f445cec60fb0d97698603d335ad1bb9b3f988f2a0555c063ae",
+          "bytes": 1217
+        }
+      ]
+    },
+    {
+      "name": "hammerstone/fast-paginate",
+      "version": "v1.1.1",
+      "source_url": "https://github.com/hammerstonedev/fast-paginate.git",
+      "source_commit": "6a1fb26c860d04176d00761ae8a93f04da14c81c",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "7d44160e3b5b3a741947b9b2f22f3f23027e06cd8d50f7d0070e467fb8ed1580",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "http-interop/http-factory-guzzle",
+      "version": "1.2.1",
+      "source_url": "https://github.com/http-interop/http-factory-guzzle.git",
+      "source_commit": "c2c859ceb05c3f42e710b60555f4c35b6a4a3995",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "72240799a052cf8038eaa1f9c202e855c871db0885ff97927459cadf3b49ee3d",
+          "bytes": 1077
+        }
+      ]
+    },
+    {
+      "name": "igorw/get-in",
+      "version": "v1.0.3",
+      "source_url": "https://github.com/igorw/get-in.git",
+      "source_commit": "170ded831f49abc6a6061f655aba9bdbcf7b8111",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "461aaf26949603aca31f053ec689fdbc14c204da72e6f77f20c6477b88d3f323",
+          "bytes": 1056
+        }
+      ]
+    },
+    {
+      "name": "inkrot/php-compress-json",
+      "version": "v0.1.3",
+      "source_url": "https://github.com/inkrot/php-compress-json.git",
+      "source_commit": "16226b495cd889a6069e8d93423480aea62dc6aa",
+      "declared_licenses": [
+        "BSD-2-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "ce2d9b9c8c3f11987f7ed9bb4dc1533493101bb703c4a216e82baa608108efde",
+          "bytes": 1301
+        }
+      ]
+    },
+    {
+      "name": "innoge/laravel-msgraph-mail",
+      "version": "1.5.0",
+      "source_url": "https://github.com/InnoGE/laravel-msgraph-mail.git",
+      "source_commit": "0c93af359c4d6c49445b0523b75cf7870056c41d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "67399bcbe2a0533634ee7390f85c3b55e5c089601a2749aedd037a03de03e971",
+          "bytes": 1101
+        }
+      ]
+    },
+    {
+      "name": "intervention/gif",
+      "version": "4.2.4",
+      "source_url": "https://github.com/Intervention/gif.git",
+      "source_commit": "c3598a16ebe7690cd55640c44144a9df383ea73c",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "b4e9283eba2f7d48d3bae06c948b71590bebdfd2d8b9fad91103037dc9038174",
+          "bytes": 1087
+        }
+      ]
+    },
+    {
+      "name": "intervention/image",
+      "version": "3.11.8",
+      "source_url": "https://github.com/Intervention/image.git",
+      "source_commit": "cf04c8dd245697f701057c13d4bfe140d584e738",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "30437cc67643ff62944f25df75176cf603f5fe441a4f50badbe14b9d4798755a",
+          "bytes": 1087
+        }
+      ]
+    },
+    {
+      "name": "jdorn/sql-formatter",
+      "version": "v1.2.17",
+      "source_url": "https://github.com/jdorn/sql-formatter.git",
+      "source_commit": "64990d96e0959dff8e059dfcdc1af130728d92bc",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.txt",
+          "sha256": "6b3ddd22f9b3e30edec7b50aba75a38904d6ef30b1a5561b0b3d90bd8c165f85",
+          "bytes": 1102
+        }
+      ]
+    },
+    {
+      "name": "jean85/pretty-package-versions",
+      "version": "2.1.1",
+      "source_url": "https://github.com/Jean85/pretty-package-versions.git",
+      "source_commit": "4d7aa5dab42e2a76d99559706022885de0e18e1a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "3a576d6cc1e03c12c5444b79bb3b359694f6fe81d00c74bae788ddf081c16896",
+          "bytes": 1071
+        }
+      ]
+    },
+    {
+      "name": "jmikola/geojson",
+      "version": "1.2.0",
+      "source_url": "https://github.com/jmikola/geojson.git",
+      "source_commit": "e28f3855bb61a91aab32b74c176d76dd0b5658d7",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "72970981c5d70da1678f2e6f15fa4e2361aaf1f854deaa03f1cbe2abf1b56cc6",
+          "bytes": 1065
+        }
+      ]
+    },
+    {
+      "name": "kreait/firebase-php",
+      "version": "7.24.1",
+      "source_url": "https://github.com/beste/firebase-php.git",
+      "source_commit": "935292e2af33af0120654ce704f1dc8f1c03025b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "11276ef9b6722683effc9e908383c8f3e42f59919d3a9f5c2bf220370fd46803",
+          "bytes": 1128
+        }
+      ]
+    },
+    {
+      "name": "kreait/firebase-tokens",
+      "version": "5.3.0",
+      "source_url": "https://github.com/beste/firebase-tokens-php.git",
+      "source_commit": "5dc119c8c29fcab1fb3a35ed5164dee0d33e4430",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "11276ef9b6722683effc9e908383c8f3e42f59919d3a9f5c2bf220370fd46803",
+          "bytes": 1128
+        }
+      ]
+    },
+    {
+      "name": "kreait/laravel-firebase",
+      "version": "5.10.0",
+      "source_url": "https://github.com/beste/laravel-firebase.git",
+      "source_commit": "d00093fdc6ef006a489ea0fe59f1a2feb5045057",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "11276ef9b6722683effc9e908383c8f3e42f59919d3a9f5c2bf220370fd46803",
+          "bytes": 1128
+        }
+      ]
+    },
+    {
+      "name": "laminas/laminas-diactoros",
+      "version": "3.8.0",
+      "source_url": "https://github.com/laminas/laminas-diactoros.git",
+      "source_commit": "60c182916b2749480895601649563970f3f12ec4",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "40f4348d58cdb54e442ad698de0a990144f38e166f2f77bfb60f658c9252b9c7",
+          "bytes": 1498
+        }
+      ]
+    },
+    {
+      "name": "laravel-notification-channels/apn",
+      "version": "v5.5.0",
+      "source_url": "https://github.com/laravel-notification-channels/apn.git",
+      "source_commit": "4ed67d59640fb93a2e100ba354d54cfe3e2d5fd2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "6f99602d231baf55642b70acdbae4b579d390240e90d3ba14d4d61c2c3557f19",
+          "bytes": 1125
+        }
+      ]
+    },
+    {
+      "name": "laravel-notification-channels/fcm",
+      "version": "4.5.0",
+      "source_url": "https://github.com/laravel-notification-channels/fcm.git",
+      "source_commit": "292c482bd6318c95e167fa2dad63ca6ab32c9899",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "de71549e9c7e2f27c0672fa1841a7bec189d412496ca54eeea1356ae6d4044b9",
+          "bytes": 1131
+        }
+      ]
+    },
+    {
+      "name": "laravel-notification-channels/twilio",
+      "version": "3.4.0",
+      "source_url": "https://github.com/laravel-notification-channels/twilio.git",
+      "source_commit": "761d57bfccf7c2eccb0ca9fe0e7a66173e0e203f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "335bffc03e3d4e3b5b943c78520d36d14a9cc2a1450e7bf2f46548d083f3ab0b",
+          "bytes": 1143
+        }
+      ]
+    },
+    {
+      "name": "laravel/cashier",
+      "version": "v16.7.0",
+      "source_url": "https://github.com/laravel/cashier-stripe.git",
+      "source_commit": "781ff517a544004f4ae0501f634c1ada40b78572",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "laravel/framework",
+      "version": "10.x-dev",
+      "source_url": "https://github.com/laravel/framework.git",
+      "source_commit": "74e222cee687f957d95aaadddae69270e3205cf7",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "laravel/octane",
+      "version": "v2.22.0",
+      "source_url": "https://github.com/laravel/octane.git",
+      "source_commit": "c49ff458e94bf14b382f6414c6b9ddb39ac82b28",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "laravel/prompts",
+      "version": "v0.1.25",
+      "source_url": "https://github.com/laravel/prompts.git",
+      "source_commit": "7b4029a84c37cb2725fc7f011586e2997040bc95",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "laravel/sanctum",
+      "version": "v3.2.4",
+      "source_url": "https://github.com/laravel/sanctum.git",
+      "source_commit": "c8269dcff3cda261ce113ab9548a0253d709aa91",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "laravel/serializable-closure",
+      "version": "v1.3.7",
+      "source_url": "https://github.com/laravel/serializable-closure.git",
+      "source_commit": "4f48ade902b94323ca3be7646db16209ec76be3d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "laravel/socialite",
+      "version": "v5.31.0",
+      "source_url": "https://github.com/laravel/socialite.git",
+      "source_commit": "f721b2cbec327ab820bd6aabea6ab211cfcc9f08",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "laravel/tinker",
+      "version": "v2.11.1",
+      "source_url": "https://github.com/laravel/tinker.git",
+      "source_commit": "c9f80cc835649b5c1842898fb043f8cc098dd741",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "7b4f9149597fbae2ce689bc9317d1869e17f1b3fa5f01c289998c108f8c37cf7",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "lcobucci/clock",
+      "version": "3.3.1",
+      "source_url": "https://github.com/lcobucci/clock.git",
+      "source_commit": "db3713a61addfffd615b79bf0bc22f0ccc61b86b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "275ed5ac6aeaa8983cc98869511ecc4cb52f7955dc27f4211cf92a4322610832",
+          "bytes": 1070
+        }
+      ]
+    },
+    {
+      "name": "lcobucci/jwt",
+      "version": "5.6.0",
+      "source_url": "https://github.com/lcobucci/jwt.git",
+      "source_commit": "bb3e9f21e4196e8afc41def81ef649c164bca25e",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "4f9ce505580b4630a8403016dabdd58805f1db0baef38ccb1a5ec1317c0ae833",
+          "bytes": 1489
+        }
+      ]
+    },
+    {
+      "name": "league/commonmark",
+      "version": "2.10.4",
+      "source_url": "https://github.com/thephpleague/commonmark.git",
+      "source_commit": "40821b7606d8d946bac57dbd2290076c722e3a65",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "80043e4e2ba13ff485810363631657baae7e2a2a02ef62b463bf1661134ac56c",
+          "bytes": 1651
+        }
+      ]
+    },
+    {
+      "name": "league/config",
+      "version": "v1.2.0",
+      "source_url": "https://github.com/thephpleague/config.git",
+      "source_commit": "754b3604fb2984c71f4af4a9cbe7b57f346ec1f3",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "606d0cd2fa9148dceaad6a1f6ccf83dbec4ee375dadc960ab6ad5a18adb6db84",
+          "bytes": 1513
+        }
+      ]
+    },
+    {
+      "name": "league/event",
+      "version": "2.3.0",
+      "source_url": "https://github.com/thephpleague/event.git",
+      "source_commit": "062ebb450efbe9a09bc2478e89b7c933875b0935",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "71c5b9031441af065f7721e00f4caca0d7f577f215d7df020cf45ddeedf62398",
+          "bytes": 1058
+        }
+      ]
+    },
+    {
+      "name": "league/flysystem",
+      "version": "3.36.0",
+      "source_url": "https://github.com/thephpleague/flysystem.git",
+      "source_commit": "f7fb152932f30072d573510cbd4dd657d6475b25",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "fd2d704048994f2512569d2b0064ae8c91ae9c3bbaf7f6a33d627e3229dcbca3",
+          "bytes": 1063
+        }
+      ]
+    },
+    {
+      "name": "league/flysystem-aws-s3-v3",
+      "version": "3.35.3",
+      "source_url": "https://github.com/thephpleague/flysystem-aws-s3-v3.git",
+      "source_commit": "b03780cb97585ee7e48977f40ed599b33b751634",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "fd2d704048994f2512569d2b0064ae8c91ae9c3bbaf7f6a33d627e3229dcbca3",
+          "bytes": 1063
+        }
+      ]
+    },
+    {
+      "name": "league/flysystem-google-cloud-storage",
+      "version": "3.34.0",
+      "source_url": "https://github.com/thephpleague/flysystem-google-cloud-storage.git",
+      "source_commit": "7ae8cd9ec58dd4b387ee1f7349e728ed8c455b09",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "fd2d704048994f2512569d2b0064ae8c91ae9c3bbaf7f6a33d627e3229dcbca3",
+          "bytes": 1063
+        }
+      ]
+    },
+    {
+      "name": "league/flysystem-local",
+      "version": "3.35.3",
+      "source_url": "https://github.com/thephpleague/flysystem-local.git",
+      "source_commit": "a099b24dce160f3b2239043d13d47c4a1a214ea4",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "fd2d704048994f2512569d2b0064ae8c91ae9c3bbaf7f6a33d627e3229dcbca3",
+          "bytes": 1063
+        }
+      ]
+    },
+    {
+      "name": "league/geotools",
+      "version": "1.3.1",
+      "source_url": "https://github.com/thephpleague/geotools.git",
+      "source_commit": "6aebc99f7b7dc8b928f815fa1db0217720def3ee",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "69f67a0860fe181fba11405e24c39dcac9de76b9e00e6df8e0fe0f46bd1a3cc9",
+          "bytes": 1075
+        }
+      ]
+    },
+    {
+      "name": "league/mime-type-detection",
+      "version": "1.17.0",
+      "source_url": "https://github.com/thephpleague/mime-type-detection.git",
+      "source_commit": "f5f47eff7c48ed1003069a2ca67f316fb4021c76",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "d189ee0791bb4df7efa56d7852450a449673430d395f263d7d0eb524b35d4c42",
+          "bytes": 1063
+        }
+      ]
+    },
+    {
+      "name": "league/oauth1-client",
+      "version": "v1.12.0",
+      "source_url": "https://github.com/thephpleague/oauth1-client.git",
+      "source_commit": "aa8fe766f772f9233d6c06f9ef003fd8129e408d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "774fcc5bdd0c0c38aeb7cecf52f345e75dd7773a34ae024de345638d1a9d5562",
+          "bytes": 1098
+        }
+      ]
+    },
+    {
+      "name": "league/oauth2-server",
+      "version": "8.5.5",
+      "source_url": "https://github.com/thephpleague/oauth2-server.git",
+      "source_commit": "cc8778350f905667e796b3c2364a9d3bd7a73518",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "3b78d9af4d8ea70790fa510ab72ddf07370144072997b6f5ad73be381d59022c",
+          "bytes": 1062
+        }
+      ]
+    },
+    {
+      "name": "league/uri",
+      "version": "7.9.0",
+      "source_url": "https://github.com/thephpleague/uri.git",
+      "source_commit": "fcc872a3d872aa13f935e0cd1887b9abb06da07f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "bb7f984073bf5083be5cd56d144bf3508181409ee6a866b51538725a3dd8ce24",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "league/uri-interfaces",
+      "version": "7.9.0",
+      "source_url": "https://github.com/thephpleague/uri-interfaces.git",
+      "source_commit": "eb5f6d24e6a4fe0a8e9c78ded4eb1dfff1404f58",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "bb7f984073bf5083be5cd56d144bf3508181409ee6a866b51538725a3dd8ce24",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "lorisleiva/cron-translator",
+      "version": "v0.4.6",
+      "source_url": "https://github.com/lorisleiva/cron-translator.git",
+      "source_commit": "082e3cd493de13bd5816bfdda484d07bb2326768",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "1f0eec0d8967f9c31959430bf9abedfbd4226af310df03f24f42f27d166ec5d9",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "maatwebsite/excel",
+      "version": "3.1.70",
+      "source_url": "https://github.com/SpartnerNL/Laravel-Excel.git",
+      "source_commit": "b5cafdfcf7ec63924e83303763be8fcae340f70b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "daddc6354da30e838e60d474ff8d453d5525e688b66bb37070153bc7754cc0d4",
+          "bytes": 1060
+        }
+      ]
+    },
+    {
+      "name": "maennchen/zipstream-php",
+      "version": "3.1.2",
+      "source_url": "https://github.com/maennchen/ZipStream-PHP.git",
+      "source_commit": "aeadcf5c412332eb426c0f9b4485f6accba2a99f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "8d353aaa4565ce29c9e7dfc81c198dd621190407faf7719bab8e5d078f588810",
+          "bytes": 1265
+        }
+      ]
+    },
+    {
+      "name": "markbaker/complex",
+      "version": "3.0.2",
+      "source_url": "https://github.com/MarkBaker/PHPComplex.git",
+      "source_commit": "95c56caa1cf5c766ad6d65b6344b807c1e8405b9",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "license.md",
+          "sha256": "f9285493611c689d91458db90c2206ec840966d8a3ed55af342ada1b8af929ea",
+          "bytes": 1109
+        }
+      ]
+    },
+    {
+      "name": "markbaker/matrix",
+      "version": "3.0.1",
+      "source_url": "https://github.com/MarkBaker/PHPMatrix.git",
+      "source_commit": "728434227fe21be27ff6d86621a1b13107a2562c",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "license.md",
+          "sha256": "c09e197c92276a219afc5488cf0b8ce57544c41345c0fdc394d88f92a4786961",
+          "bytes": 1109
+        }
+      ]
+    },
+    {
+      "name": "masterminds/html5",
+      "version": "2.11.0",
+      "source_url": "https://github.com/Masterminds/html5-php.git",
+      "source_commit": "a1e7a2f88ee13635d86fc61cfbdf2306a76ddfc7",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.txt",
+          "sha256": "fef48d3bbf037920a4f52ade06733b18ce31217a5847447a348dfef2e2e196cb",
+          "bytes": 2973
+        }
+      ]
+    },
+    {
+      "name": "milon/barcode",
+      "version": "v10.0.1",
+      "source_url": "https://github.com/milon/barcode.git",
+      "source_commit": "e643a713466f0109aa3ad7d29dae4900444187a5",
+      "declared_licenses": [
+        "LGPL-3.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.TXT",
+          "sha256": "ae233d50413c1edc34785fffbb3058646aad3aebb5c16e4b5d7f478b3d41a49f",
+          "bytes": 43636
+        }
+      ]
+    },
+    {
+      "name": "moneyphp/money",
+      "version": "v4.9.0",
+      "source_url": "https://github.com/moneyphp/money.git",
+      "source_commit": "d49ee625c6ba79b9d7a228ce153b02fc1032152b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "d206323b5093da697f01238d8e6e35c46e8415720c1963f96cbee7370fb45ac8",
+          "bytes": 1183
+        }
+      ]
+    },
+    {
+      "name": "monolog/monolog",
+      "version": "3.11.0",
+      "source_url": "https://github.com/Seldaek/monolog.git",
+      "source_commit": "147f303310f06334f03f409e49d7ad1e275ff05a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "3a351f8f434ff941f4946afb534f7df1185523638b311c22901631d8882f70e1",
+          "bytes": 1063
+        }
+      ]
+    },
+    {
+      "name": "mossadal/math-parser",
+      "version": "v1.3.16",
+      "source_url": "https://github.com/mossadal/math-parser.git",
+      "source_commit": "981b03ca603fd281049e092d75245ac029e13dec",
+      "declared_licenses": [
+        "LGPL-3.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "97628afebc60f026f5c2b25d7491c46a5c4ee61f693e7cfa07fbd2c03605979b",
+          "bytes": 7652
+        }
+      ]
+    },
+    {
+      "name": "mtdowling/jmespath.php",
+      "version": "2.9.2",
+      "source_url": "https://github.com/jmespath/jmespath.php.git",
+      "source_commit": "2157c5e50e813ec6a96c1eed3be7f64a20fb32a8",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0aa598fe040b1d94435f48b6ac2df81e1f9af444921ff5a62a29b9e26c0bc020",
+          "bytes": 1089
+        }
+      ]
+    },
+    {
+      "name": "nesbot/carbon",
+      "version": "2.73.0",
+      "source_url": "https://github.com/CarbonPHP/carbon.git",
+      "source_commit": "9228ce90e1035ff2f0db84b40ec2e023ed802075",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "57a20d90f47d71dbfbb681c33f909bdc9e3ba2b82eeb187be1ed19a4910a23c5",
+          "bytes": 1052
+        }
+      ]
+    },
+    {
+      "name": "nette/caching",
+      "version": "v3.4.2",
+      "source_url": "https://github.com/nette/caching.git",
+      "source_commit": "31f4bc6b366e6896998bd4538b26fa88a627bf2b",
+      "declared_licenses": [
+        "BSD-3-Clause",
+        "GPL-2.0-only",
+        "GPL-3.0-only"
+      ],
+      "notices": [
+        {
+          "path": "license.md",
+          "sha256": "b3bc3d38b9ec29d98bc83bd5fa44e583e8303cd97b62d203a9e5e21935126de9",
+          "bytes": 2724
+        }
+      ]
+    },
+    {
+      "name": "nette/schema",
+      "version": "v1.4.0",
+      "source_url": "https://github.com/nette/schema.git",
+      "source_commit": "af9fa8a86bfca9b02b10346220db26e62ef942ec",
+      "declared_licenses": [
+        "BSD-3-Clause",
+        "GPL-2.0-only",
+        "GPL-3.0-only"
+      ],
+      "notices": [
+        {
+          "path": "license.md",
+          "sha256": "b3bc3d38b9ec29d98bc83bd5fa44e583e8303cd97b62d203a9e5e21935126de9",
+          "bytes": 2724
+        }
+      ]
+    },
+    {
+      "name": "nette/utils",
+      "version": "v4.1.6",
+      "source_url": "https://github.com/nette/utils.git",
+      "source_commit": "6bf24518accf32cf845bca305e0b92078700fd01",
+      "declared_licenses": [
+        "BSD-3-Clause",
+        "GPL-2.0-only",
+        "GPL-3.0-only"
+      ],
+      "notices": [
+        {
+          "path": "license.md",
+          "sha256": "b3bc3d38b9ec29d98bc83bd5fa44e583e8303cd97b62d203a9e5e21935126de9",
+          "bytes": 2724
+        }
+      ]
+    },
+    {
+      "name": "nikic/php-parser",
+      "version": "v5.8.0",
+      "source_url": "https://github.com/nikic/PHP-Parser.git",
+      "source_commit": "044a6a392ff8ad0d61f14370a5fbbd0a0107152f",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "dd859e107fac9f87a4413ab8c3c96f0f1611a17f596a2db562a5a4f4904c1e97",
+          "bytes": 1520
+        }
+      ]
+    },
+    {
+      "name": "nunomaduro/termwind",
+      "version": "v1.17.0",
+      "source_url": "https://github.com/nunomaduro/termwind.git",
+      "source_commit": "5369ef84d8142c1d87e4ec278711d4ece3cbf301",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "90c8b018f3de7647f2584e2ffd5e5d5d6e14771b3d1091ffb59096968a904f71",
+          "bytes": 1097
+        }
+      ]
+    },
+    {
+      "name": "nyholm/psr7",
+      "version": "1.8.2",
+      "source_url": "https://github.com/Nyholm/psr7.git",
+      "source_commit": "a71f2b11690f4b24d099d6b16690a90ae14fc6f3",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "a683f57e45992c4f0e7394e2f99a7a49bcffee6f973e42c7b5b720af6c8a3f05",
+          "bytes": 1070
+        }
+      ]
+    },
+    {
+      "name": "paragonie/constant_time_encoding",
+      "version": "v3.1.3",
+      "source_url": "https://github.com/paragonie/constant_time_encoding.git",
+      "source_commit": "d5b01a39b3415c2cd581d3bd3a3575c1ebbd8e77",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.txt",
+          "sha256": "d175ac2e6bc71c13117ea49cc2c3be95284690dc07cc7fc441c6538c280641fd",
+          "bytes": 2405
+        }
+      ]
+    },
+    {
+      "name": "paragonie/random_compat",
+      "version": "v9.99.100",
+      "source_url": "https://github.com/paragonie/random_compat.git",
+      "source_commit": "996434e5492cb4c3edcb9168db6fbb1359ef965a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "e79a4c7d03c72850c60b2d5c41c2f92d33448ed2b243bd4686cfa7674e15e3ba",
+          "bytes": 1098
+        }
+      ]
+    },
+    {
+      "name": "paragonie/sodium_compat",
+      "version": "v2.5.2",
+      "source_url": "https://github.com/paragonie/sodium_compat.git",
+      "source_commit": "3246b36803c177847e677862fedeb7f937869adb",
+      "declared_licenses": [
+        "ISC"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "b35a4f2b87ebdd34df68b93b69a56126090bd981a0e81cbd28ce1e791fb147d0",
+          "bytes": 860
+        }
+      ]
+    },
+    {
+      "name": "php-http/curl-client",
+      "version": "2.4.0",
+      "source_url": "https://github.com/php-http/curl-client.git",
+      "source_commit": "f59d6992065f44be8b8fb484dd678a919c27dbf2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "9784a2f98714603a66e0c2506118af3cc2ed2622e210267a9712a133411d0129",
+          "bytes": 1077
+        }
+      ]
+    },
+    {
+      "name": "php-http/discovery",
+      "version": "1.20.0",
+      "source_url": "https://github.com/php-http/discovery.git",
+      "source_commit": "82fe4c73ef3363caed49ff8dd1539ba06044910d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "ac99bc614f4bd9908575f9d2fc239c82ab2b8a0626810837e191d0ebd5d1a5dc",
+          "bytes": 1082
+        }
+      ]
+    },
+    {
+      "name": "php-http/guzzle7-adapter",
+      "version": "1.1.0",
+      "source_url": "https://github.com/php-http/guzzle7-adapter.git",
+      "source_commit": "03a415fde709c2f25539790fecf4d9a31bc3d0eb",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "9298baa74a7b5efc5c077007c74ac32c803516ec81147909fa2838e6a3e10059",
+          "bytes": 1077
+        }
+      ]
+    },
+    {
+      "name": "php-http/httplug",
+      "version": "2.4.1",
+      "source_url": "https://github.com/php-http/httplug.git",
+      "source_commit": "5cad731844891a4c282f3f3e1b582c46839d22f4",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "5f0b45033ea15c407280938c1432ed23488ea3a77e40a35fdced08601c1d8867",
+          "bytes": 1132
+        }
+      ]
+    },
+    {
+      "name": "php-http/message",
+      "version": "1.16.2",
+      "source_url": "https://github.com/php-http/message.git",
+      "source_commit": "06dd5e8562f84e641bf929bfe699ee0f5ce8080a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "ac99bc614f4bd9908575f9d2fc239c82ab2b8a0626810837e191d0ebd5d1a5dc",
+          "bytes": 1082
+        }
+      ]
+    },
+    {
+      "name": "php-http/promise",
+      "version": "1.3.1",
+      "source_url": "https://github.com/php-http/promise.git",
+      "source_commit": "fc85b1fba37c169a69a07ef0d5a8075770cc1f83",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "ac99bc614f4bd9908575f9d2fc239c82ab2b8a0626810837e191d0ebd5d1a5dc",
+          "bytes": 1082
+        }
+      ]
+    },
+    {
+      "name": "php-units-of-measure/php-units-of-measure",
+      "version": "v2.2.0",
+      "source_url": "https://github.com/PhpUnitsOfMeasure/php-units-of-measure.git",
+      "source_commit": "cf1b83b1ef7615dd53f70864c9e7f496b1ec0fd1",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "3d37d5928b94e49c12f68a66b17b03e6a032f9374bd25e34d1d3f8cfb2b69425",
+          "bytes": 1086
+        }
+      ]
+    },
+    {
+      "name": "phpoffice/phpspreadsheet",
+      "version": "1.30.6",
+      "source_url": "https://github.com/PHPOffice/PhpSpreadsheet.git",
+      "source_commit": "a416375ffc8bf5b661c1bb4e6c60d8f3fddbe5ce",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "1416c9cb9b9925bbbecbd2aaeb62864fa5544f5572e5e0e130304f532c38ac8e",
+          "bytes": 1084
+        }
+      ]
+    },
+    {
+      "name": "phpoption/phpoption",
+      "version": "1.10.0",
+      "source_url": "https://github.com/schmittjoh/php-option.git",
+      "source_commit": "67b192b6a42ec03944b972d6e633ddec78ad2c6d",
+      "declared_licenses": [
+        "Apache-2.0"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1",
+          "bytes": 11356
+        }
+      ]
+    },
+    {
+      "name": "phpseclib/phpseclib",
+      "version": "4.0.1",
+      "source_url": "https://github.com/phpseclib/phpseclib.git",
+      "source_commit": "bb7b959c8159957edae6f5084ebbac765d310e16",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "fa986c1ac53f7bd83e30fe296f8dced7003ab0a05ec11945b5aea4a4ebd626dd",
+          "bytes": 1081
+        }
+      ]
+    },
+    {
+      "name": "phrity/net-stream",
+      "version": "1.3.0",
+      "source_url": "https://github.com/sirn-se/phrity-net-stream.git",
+      "source_commit": "9105931b65ad90c75f4885a40b268b0f65802e3e",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": []
+    },
+    {
+      "name": "phrity/net-uri",
+      "version": "1.3.0",
+      "source_url": "https://github.com/sirn-se/phrity-net-uri.git",
+      "source_commit": "3f458e0c4d1ddc0e218d7a5b9420127c63925f43",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": []
+    },
+    {
+      "name": "phrity/util-errorhandler",
+      "version": "1.2.2",
+      "source_url": "https://github.com/sirn-se/phrity-util-errorhandler.git",
+      "source_commit": "70a669cc22db2eed6a109ec66fd95168a4332c9b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "8585e0de81ea01053f3f19fe122e69a5122c7392aad8629cf39480b4d3aece44",
+          "bytes": 1070
+        }
+      ]
+    },
+    {
+      "name": "phrity/websocket",
+      "version": "1.7.3",
+      "source_url": "https://github.com/sirn-se/websocket-php.git",
+      "source_commit": "8a525da4457b599ab1960f24183f25626c96ce3c",
+      "declared_licenses": [
+        "ISC"
+      ],
+      "notices": []
+    },
+    {
+      "name": "pragmarx/coollection",
+      "version": "v0.8.1",
+      "source_url": "https://github.com/antonioribeiro/coollection.git",
+      "source_commit": "4b05b086ee37bee048bff25dda2094b9bd5777df",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "08fc2e5e0df493bad72f359acca102a71d2fc289430602ecbb6a6bb57ff6956f",
+          "bytes": 1154
+        }
+      ]
+    },
+    {
+      "name": "pragmarx/google2fa",
+      "version": "v8.0.3",
+      "source_url": "https://github.com/antonioribeiro/google2fa.git",
+      "source_commit": "6f8d87ebd5afbf7790bde1ffc7579c7c705e0fad",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "1d5304c79db3db570892c66ea61e715b5c43f936c97eca34012b20b013c7538a",
+          "bytes": 1094
+        }
+      ]
+    },
+    {
+      "name": "pragmarx/ia-arr",
+      "version": "v7.3.3",
+      "source_url": "https://github.com/antonioribeiro/ia-arr.git",
+      "source_commit": "6f4303c25cc1a79a55044ca413e0a0d757628fab",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "08fc2e5e0df493bad72f359acca102a71d2fc289430602ecbb6a6bb57ff6956f",
+          "bytes": 1154
+        }
+      ]
+    },
+    {
+      "name": "pragmarx/ia-collection",
+      "version": "v7.3.2",
+      "source_url": "https://github.com/antonioribeiro/ia-collection.git",
+      "source_commit": "c88a4ca6842fbaed57ac394ecff7ee3e7d27d15e",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "08fc2e5e0df493bad72f359acca102a71d2fc289430602ecbb6a6bb57ff6956f",
+          "bytes": 1154
+        }
+      ]
+    },
+    {
+      "name": "pragmarx/ia-str",
+      "version": "v7.3.1",
+      "source_url": "https://github.com/antonioribeiro/ia-str.git",
+      "source_commit": "ce022c92a972bee66e1d54f32a604b0ee19e6488",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "08fc2e5e0df493bad72f359acca102a71d2fc289430602ecbb6a6bb57ff6956f",
+          "bytes": 1154
+        }
+      ]
+    },
+    {
+      "name": "predis/predis",
+      "version": "v2.4.1",
+      "source_url": "https://github.com/predis/predis.git",
+      "source_commit": "07105e050622ed80bd60808367ced9e379f31530",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "1ea021f34f9ad28f6de384edb41375666f21361441ab62c0b9d7b14fdbb154b7",
+          "bytes": 1148
+        }
+      ]
+    },
+    {
+      "name": "psr/cache",
+      "version": "3.0.0",
+      "source_url": "https://github.com/php-fig/cache.git",
+      "source_commit": "aa5030cfa5405eccfdcb1083ce040c2cb8d253bf",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.txt",
+          "sha256": "a5291f8c6905c638db35dc564c0924ba99365248cdc8f9978b5b637f374af7d6",
+          "bytes": 1080
+        }
+      ]
+    },
+    {
+      "name": "psr/clock",
+      "version": "1.0.0",
+      "source_url": "https://github.com/php-fig/clock.git",
+      "source_commit": "e41a24703d4560fd0acb709162f73b8adfc3aa0d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "8f35dcf3247dcce7f0c4d1ad51de19726a56a43ced7a59ad1df0378125ac9227",
+          "bytes": 1080
+        }
+      ]
+    },
+    {
+      "name": "psr/container",
+      "version": "2.0.2",
+      "source_url": "https://github.com/php-fig/container.git",
+      "source_commit": "c71ecc56dfe541dbd90c5360474fbc405f8d5963",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0688ee39285c33067ad77d82349cdacb5569756bea4398b34bb223af9e57f1c0",
+          "bytes": 1145
+        }
+      ]
+    },
+    {
+      "name": "psr/event-dispatcher",
+      "version": "1.0.0",
+      "source_url": "https://github.com/php-fig/event-dispatcher.git",
+      "source_commit": "dbefd12671e8a14ec7f180cab83036ed26714bb0",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "d2e70341a9667b93ad542e4842b0b7022d302aa7c2d2a909b156b8f1e3c4cca8",
+          "bytes": 1064
+        }
+      ]
+    },
+    {
+      "name": "psr/http-client",
+      "version": "1.0.3",
+      "source_url": "https://github.com/php-fig/http-client.git",
+      "source_commit": "bb5906edc1c324c9a05aa0873d40117941e5fa90",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "ea5ec78820494a5256b0ccbecef9212bc7b93b797273ab08cc2eaa34e0ab3e50",
+          "bytes": 1085
+        }
+      ]
+    },
+    {
+      "name": "psr/http-factory",
+      "version": "1.1.0",
+      "source_url": "https://github.com/php-fig/http-factory.git",
+      "source_commit": "2b4765fddfe3b508ac62f829e852b1501d3f6e8a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "d2e70341a9667b93ad542e4842b0b7022d302aa7c2d2a909b156b8f1e3c4cca8",
+          "bytes": 1064
+        }
+      ]
+    },
+    {
+      "name": "psr/http-message",
+      "version": "2.0",
+      "source_url": "https://github.com/php-fig/http-message.git",
+      "source_commit": "402d35bcb92c70c026d1a6a9883f06b2ead23d71",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "8d36e938943b04ef01994bb148793c971685b746d0ced31da03a97594a47ee62",
+          "bytes": 1085
+        }
+      ]
+    },
+    {
+      "name": "psr/log",
+      "version": "3.0.2",
+      "source_url": "https://github.com/php-fig/log.git",
+      "source_commit": "f16e1d5863e37f8d8c2a01719f5b34baa2b714d3",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "6e944907067bae93c00a9f2ad51032243820b22df34b77c77690d46cb2e98e24",
+          "bytes": 1085
+        }
+      ]
+    },
+    {
+      "name": "psr/simple-cache",
+      "version": "3.0.0",
+      "source_url": "https://github.com/php-fig/simple-cache.git",
+      "source_commit": "764e0b3939f5ca87cb904f570ef9be2d78a07865",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "9d7269855b25e36b54461c029260a56c97499a647117ea37f4c5cdfc956a7f8b",
+          "bytes": 1137
+        }
+      ]
+    },
+    {
+      "name": "psy/psysh",
+      "version": "v0.12.24",
+      "source_url": "https://github.com/bobthecow/psysh.git",
+      "source_commit": "ca0fdcf8a7617afa3adfdf1b5fef573dffb69ca1",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "fd81edd061aa55f446bd146ca332715f892802f0ecea395d85680da2b8b6a24d",
+          "bytes": 1086
+        }
+      ]
+    },
+    {
+      "name": "ralouphie/getallheaders",
+      "version": "3.0.3",
+      "source_url": "https://github.com/ralouphie/getallheaders.git",
+      "source_commit": "120b605dfeb996808c31b6477290a714d356e822",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "e97490769229e08f0a017f5c6fd5d8aa1669672110c6df5ebd0506f23ec91087",
+          "bytes": 1080
+        }
+      ]
+    },
+    {
+      "name": "ramsey/collection",
+      "version": "2.1.1",
+      "source_url": "https://github.com/ramsey/collection.git",
+      "source_commit": "344572933ad0181accbf4ba763e85a0306a8c5e2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "aa1e787bd6d05172d2962fa865a592af00ec474984d6b5bcb9a0df91abe8717d",
+          "bytes": 1079
+        }
+      ]
+    },
+    {
+      "name": "ramsey/uuid",
+      "version": "4.9.3",
+      "source_url": "https://github.com/ramsey/uuid.git",
+      "source_commit": "1df15849d00943a67d677dc9cfd80795f038c9f8",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "9e8bf008e16a9ee5cc2d3bfe60701ec2351a2ddf29e9092275f71441a6d5a167",
+          "bytes": 1079
+        }
+      ]
+    },
+    {
+      "name": "react/event-loop",
+      "version": "v1.6.0",
+      "source_url": "https://github.com/reactphp/event-loop.git",
+      "source_commit": "ba276bda6083df7e0050fd9b33f66ad7a4ac747a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "edc8e8a071bce730193e22b4f3845d3fa826d706ee1ea3cb5acb4b7fa89000b2",
+          "bytes": 1141
+        }
+      ]
+    },
+    {
+      "name": "react/promise",
+      "version": "v3.3.0",
+      "source_url": "https://github.com/reactphp/promise.git",
+      "source_commit": "23444f53a813a3296c1368bb104793ce8d88f04a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "9f298e074f98e26e819fc536cdf4a5fd3adfb10587b2bbc6a3cbb23ffcd87652",
+          "bytes": 1127
+        }
+      ]
+    },
+    {
+      "name": "resend/resend-php",
+      "version": "v0.14.0",
+      "source_url": "https://github.com/resend/resend-php.git",
+      "source_commit": "d7900752bb9839421d40d9e66362bffb3ec07aac",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "c741f3cf438aa1c352e8e07b92f01119787dea9580b095d32c0e750e604e2bfa",
+          "bytes": 1077
+        }
+      ]
+    },
+    {
+      "name": "rize/uri-template",
+      "version": "0.4.2",
+      "source_url": "https://github.com/rize/UriTemplate.git",
+      "source_commit": "7ad22944daede547b4542e1c977ec4a81aa20832",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "6081d51cdb7da8aa04de3c77834ec4a5d1fad85e9cb9ebf37b658febddabad89",
+          "bytes": 1084
+        }
+      ]
+    },
+    {
+      "name": "rlanvin/php-rrule",
+      "version": "v2.6.0",
+      "source_url": "https://github.com/rlanvin/php-rrule.git",
+      "source_commit": "2a389a9fa67dda58bc5a569a3264555152db3c49",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "98bc4f214a1581987f321fe3123325d37bce9d882e170068aab3353b29a5da5c",
+          "bytes": 2884
+        }
+      ]
+    },
+    {
+      "name": "s-ichikawa/laravel-sendgrid-driver",
+      "version": "4.0.11",
+      "source_url": "https://github.com/s-ichikawa/laravel-sendgrid-driver.git",
+      "source_commit": "403c50812c3241b7ef5e694b5ab5304b9594cb59",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.txt",
+          "sha256": "8f92dda8e9fa05fb4afbe23ce3f5ea28a8e193228c393694cae203613421c329",
+          "bytes": 1081
+        }
+      ]
+    },
+    {
+      "name": "sabberworm/php-css-parser",
+      "version": "v9.4.0",
+      "source_url": "https://github.com/MyIntervals/PHP-CSS-Parser.git",
+      "source_commit": "fd3bf9fb173e0df649bc4e3e0d088a1b2417c08f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "48d350a9bc14589e71bd4256c3ca2539d02232fa482f155d9bb61f8f71d39575",
+          "bytes": 1104
+        }
+      ]
+    },
+    {
+      "name": "sentry/sentry",
+      "version": "4.31.0",
+      "source_url": "https://github.com/getsentry/sentry-php.git",
+      "source_commit": "39d9f86bd56c6cc6ae7b64c2b849f7f046d38394",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "9adbd8b2db917f8660c0832ccd7b6b81f8a68a68803b788f3528bfb3636814d4",
+          "bytes": 1092
+        }
+      ]
+    },
+    {
+      "name": "sentry/sentry-laravel",
+      "version": "4.27.0",
+      "source_url": "https://github.com/getsentry/sentry-laravel.git",
+      "source_commit": "caa0ff39805a2eb8c70c4535a1443d7421c5a5b8",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "23d0f2ea30bf85007793b8ba8bc33e1a7a97a78312ded3af5d204a689023ba69",
+          "bytes": 1092
+        }
+      ]
+    },
+    {
+      "name": "spatie/browsershot",
+      "version": "5.4.0",
+      "source_url": "https://github.com/spatie/browsershot.git",
+      "source_commit": "dcf7a65fd1d0fc8fd113739b84982377728d0b2f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "d8260cbe08811ef8a4e9124307edaf954f945d3b029c77345d40c2a9a1c53d91",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spatie/enum",
+      "version": "3.13.0",
+      "source_url": "https://github.com/spatie/enum.git",
+      "source_commit": "f1a0f464ba909491a53e60a955ce84ad7cd93a2c",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "e740bbfe97453393ad766ec9ec6c2bc695401389d2c96b6ad5e870577953c49f",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spatie/icalendar-generator",
+      "version": "2.9.2",
+      "source_url": "https://github.com/spatie/icalendar-generator.git",
+      "source_commit": "6fa4d5b20490afeebe711f6cad1733853c667aa2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "e740bbfe97453393ad766ec9ec6c2bc695401389d2c96b6ad5e870577953c49f",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-activitylog",
+      "version": "4.12.3",
+      "source_url": "https://github.com/spatie/laravel-activitylog.git",
+      "source_commit": "2a2024fcac05628b0d1bfdbb1b94dda8b0661dc0",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "e740bbfe97453393ad766ec9ec6c2bc695401389d2c96b6ad5e870577953c49f",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-google-cloud-storage",
+      "version": "2.3.4",
+      "source_url": "https://github.com/spatie/laravel-google-cloud-storage.git",
+      "source_commit": "10c91e6dcaebf83eba9f21b8107267595bb40d2a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "516f45960a3d32fbe96035242ecfff67fea534e2d9580b98cf511bdec0db7562",
+          "bytes": 1085
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-package-tools",
+      "version": "1.93.2",
+      "source_url": "https://github.com/spatie/laravel-package-tools.git",
+      "source_commit": "e927d5b5b05e9fecae098e559e51918aa608ad02",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "1117d4b6fe781f1b9ed5ba5f6d8384ad0e5e1d7b68d1e0120745e4a16bbc2fba",
+          "bytes": 1086
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-pdf",
+      "version": "1.9.0",
+      "source_url": "https://github.com/spatie/laravel-pdf.git",
+      "source_commit": "65a803cb1fc2dcf9035eedfc53e58dcf19109864",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "642a738115a0fa17ec0c746761e1926ba1ff6e65ac5d90cb5b8294fbb242f4cf",
+          "bytes": 1086
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-permission",
+      "version": "6.25.0",
+      "source_url": "https://github.com/spatie/laravel-permission.git",
+      "source_commit": "d7d4cb0d58616722f1afc90e0484e4825155b9b3",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "e740bbfe97453393ad766ec9ec6c2bc695401389d2c96b6ad5e870577953c49f",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-responsecache",
+      "version": "7.7.2",
+      "source_url": "https://github.com/spatie/laravel-responsecache.git",
+      "source_commit": "039f8b9c2e2b2d838d0bfce32cfe52cf5d1cb8fc",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "e740bbfe97453393ad766ec9ec6c2bc695401389d2c96b6ad5e870577953c49f",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-schedule-monitor",
+      "version": "3.10.3",
+      "source_url": "https://github.com/spatie/laravel-schedule-monitor.git",
+      "source_commit": "8731755b91d5d724a5bd2c7028e3d0c8c930e8a1",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "65684d8ac55793acaaddf234a767040569d72c9431ec27e772de924c58273e1d",
+          "bytes": 1071
+        }
+      ]
+    },
+    {
+      "name": "spatie/laravel-sluggable",
+      "version": "3.8.1",
+      "source_url": "https://github.com/spatie/laravel-sluggable.git",
+      "source_commit": "3624a2d7d8c8475d8561c53faf63f1af583ef76c",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "e740bbfe97453393ad766ec9ec6c2bc695401389d2c96b6ad5e870577953c49f",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spatie/temporary-directory",
+      "version": "2.4.0",
+      "source_url": "https://github.com/spatie/temporary-directory.git",
+      "source_commit": "32cbb9645b28839cf4f476708e99a2c70e6802c9",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "e740bbfe97453393ad766ec9ec6c2bc695401389d2c96b6ad5e870577953c49f",
+          "bytes": 1090
+        }
+      ]
+    },
+    {
+      "name": "spomky-labs/pki-framework",
+      "version": "1.6.2",
+      "source_url": "https://github.com/Spomky-Labs/pki-framework.git",
+      "source_commit": "8f333bebe104ea24f1a160a6fb69e2dead4f1882",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "886d60c46ae5a9a368a6b5069f7401664eeb1c3648ffc202f8d228b5557eccf5",
+          "bytes": 1107
+        }
+      ]
+    },
+    {
+      "name": "sqids/sqids",
+      "version": "0.4.1",
+      "source_url": "https://github.com/sqids/sqids-php.git",
+      "source_commit": "ff3d1214c0c2119ae4b676cc00f3abb22f61da42",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "949edb0100225e39285f3afcbbb4029398d1a04075e6aebfa56c5515a3e55629",
+          "bytes": 1083
+        }
+      ]
+    },
+    {
+      "name": "stripe/stripe-php",
+      "version": "v17.6.0",
+      "source_url": "https://github.com/stripe/stripe-php.git",
+      "source_commit": "a6219df5df1324a0d3f1da25fb5e4b8a3307ea16",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "94f42d92c166f90b1af271f69eb2202f7be24f9aa32944d777ab0ff2beee84a0",
+          "bytes": 1099
+        }
+      ]
+    },
+    {
+      "name": "symfony/cache",
+      "version": "v7.4.18",
+      "source_url": "https://github.com/symfony/cache.git",
+      "source_commit": "6c521e19a99e8ae57e22aa85b9271534513ee850",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "94b02414fb0c736c107f63e4f6fb7882ab1aa797b818acc7f52cf4902fb4bdf4",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/cache-contracts",
+      "version": "v3.7.1",
+      "source_url": "https://github.com/symfony/cache-contracts.git",
+      "source_commit": "9789738bc19af1106dc54d6afba9a0b467516cf2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/console",
+      "version": "v6.4.45",
+      "source_url": "https://github.com/symfony/console.git",
+      "source_commit": "3b8473e0d14157f2d22b0a0d7259ad23483d1e6d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/css-selector",
+      "version": "v7.4.18",
+      "source_url": "https://github.com/symfony/css-selector.git",
+      "source_commit": "fecf40067fc8d8880ea87b8ac227600b9aadd1d0",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/deprecation-contracts",
+      "version": "v3.7.1",
+      "source_url": "https://github.com/symfony/deprecation-contracts.git",
+      "source_commit": "f3202fa1b5097b0af062dc978b32ecf63404e31d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "b92809182501f0fa422167ea44484b41877e1736e8283d0377fdc9664bb9a02d",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/error-handler",
+      "version": "v6.4.44",
+      "source_url": "https://github.com/symfony/error-handler.git",
+      "source_commit": "8fa59eb915a14b2881993565a122c9dd1b0f8a19",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0bedd88a1c55457e9731dd9b99ceb976675bee5412d9565eb31ac84533df7bb5",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/event-dispatcher",
+      "version": "v7.4.17",
+      "source_url": "https://github.com/symfony/event-dispatcher.git",
+      "source_commit": "d269974ee93c61d03620ffee358355bfdb471d66",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/event-dispatcher-contracts",
+      "version": "v3.7.1",
+      "source_url": "https://github.com/symfony/event-dispatcher-contracts.git",
+      "source_commit": "c7de7a00ffb67842132da02ea92988a39ccd9f4e",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/filesystem",
+      "version": "v7.4.18",
+      "source_url": "https://github.com/symfony/filesystem.git",
+      "source_commit": "90d412aa5277c6819db39e7605aa46b1019e3232",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/finder",
+      "version": "v6.4.44",
+      "source_url": "https://github.com/symfony/finder.git",
+      "source_commit": "211b28d13d044dacdc00c1629a3bbcff27dc793a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/http-client",
+      "version": "v7.4.18",
+      "source_url": "https://github.com/symfony/http-client.git",
+      "source_commit": "68d81f78d127984ff2e741f0e0d9cb1078f8f3ea",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/http-client-contracts",
+      "version": "v3.7.3",
+      "source_url": "https://github.com/symfony/http-client-contracts.git",
+      "source_commit": "35be0019e2c2c9fba80f9dc033290a5240f7b44f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/http-foundation",
+      "version": "v6.4.48",
+      "source_url": "https://github.com/symfony/http-foundation.git",
+      "source_commit": "b1721caa556f32d150d9a14bb0a3fc4b86dfda33",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/http-kernel",
+      "version": "v6.4.45",
+      "source_url": "https://github.com/symfony/http-kernel.git",
+      "source_commit": "e5e8372b0e16ee6d6afa8fba37f23c25822dbfe2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/mailer",
+      "version": "v6.4.44",
+      "source_url": "https://github.com/symfony/mailer.git",
+      "source_commit": "cea6ee2fb64d486f709d80bd3158cf28346e1ba4",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0bedd88a1c55457e9731dd9b99ceb976675bee5412d9565eb31ac84533df7bb5",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/mailgun-mailer",
+      "version": "v7.1.6",
+      "source_url": "https://github.com/symfony/mailgun-mailer.git",
+      "source_commit": "b0117bf42b6dd8dfcfcab2a7e18508b594520b5a",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0bedd88a1c55457e9731dd9b99ceb976675bee5412d9565eb31ac84533df7bb5",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/mime",
+      "version": "v6.4.45",
+      "source_url": "https://github.com/symfony/mime.git",
+      "source_commit": "3f850171f3bb396a84117ca97d3d474fc4b83deb",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "b3c56a3a0faa6defe7ad709b765168c2422642624a0480fa087d8b464c9f1913",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/options-resolver",
+      "version": "v7.4.8",
+      "source_url": "https://github.com/symfony/options-resolver.git",
+      "source_commit": "2888fcdc4dc2fd5f7c7397be78631e8af12e02b4",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-ctype",
+      "version": "v1.37.0",
+      "source_url": "https://github.com/symfony/polyfill-ctype.git",
+      "source_commit": "141046a8f9477948ff284fa65be2095baafb94f2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-intl-grapheme",
+      "version": "v1.41.0",
+      "source_url": "https://github.com/symfony/polyfill-intl-grapheme.git",
+      "source_commit": "bb899c1db0aa8127dc3afe8cda4a67eb24915f8d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "eaa5d6e59ff1d5322ae36d3ab9124460df72d2d0c8af60a99222e8a90dcbdf31",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-intl-icu",
+      "version": "v1.38.0",
+      "source_url": "https://github.com/symfony/polyfill-intl-icu.git",
+      "source_commit": "445c90e341fccda10311019cf82ff73bb7343945",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-intl-idn",
+      "version": "v1.42.0",
+      "source_url": "https://github.com/symfony/polyfill-intl-idn.git",
+      "source_commit": "51b5ff5ba85452b31ec6f55490b08148612339d9",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "718d02a093edb2e5e3f6bd9ddf16417b27b66c4af62bee7b8aba64ebebfa6da0",
+          "bytes": 1114
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-intl-normalizer",
+      "version": "v1.42.0",
+      "source_url": "https://github.com/symfony/polyfill-intl-normalizer.git",
+      "source_commit": "aa20edea75bd9c48cfecc8360922e5a6e5c44502",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "eaa5d6e59ff1d5322ae36d3ab9124460df72d2d0c8af60a99222e8a90dcbdf31",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-mbstring",
+      "version": "v1.43.0",
+      "source_url": "https://github.com/symfony/polyfill-mbstring.git",
+      "source_commit": "4d5d331bf731e0aedbc6b2f5e61135b7b7996a72",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "eaa5d6e59ff1d5322ae36d3ab9124460df72d2d0c8af60a99222e8a90dcbdf31",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-php80",
+      "version": "v1.43.0",
+      "source_url": "https://github.com/symfony/polyfill-php80.git",
+      "source_commit": "9c6a5d6b01ca51d486c813e9a9c0ed55f208bb74",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "b92809182501f0fa422167ea44484b41877e1736e8283d0377fdc9664bb9a02d",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-php82",
+      "version": "v1.38.1",
+      "source_url": "https://github.com/symfony/polyfill-php82.git",
+      "source_commit": "002dc0cfe5fd4ed6033d48f27d4f19a486c4b04b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "6439cc1bba78b7de0c1905b0643679a5a7768ba020a090370d7742030303c6b2",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-php83",
+      "version": "v1.43.0",
+      "source_url": "https://github.com/symfony/polyfill-php83.git",
+      "source_commit": "80ccff923a8d61f73ebe9da0aa94e25232f004ce",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "6439cc1bba78b7de0c1905b0643679a5a7768ba020a090370d7742030303c6b2",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-php84",
+      "version": "v1.38.1",
+      "source_url": "https://github.com/symfony/polyfill-php84.git",
+      "source_commit": "f4e1dfaee5b74aba5964fe1fd4dfc7ba5e3085fa",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "db54a3771e71cada8e5a5dd11e5533e985117354057fc268129898ef415683b1",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/polyfill-uuid",
+      "version": "v1.37.0",
+      "source_url": "https://github.com/symfony/polyfill-uuid.git",
+      "source_commit": "26dfec253c4cf3e51b541b52ddf7e42cb0908e94",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/postmark-mailer",
+      "version": "v7.1.6",
+      "source_url": "https://github.com/symfony/postmark-mailer.git",
+      "source_commit": "91c86a65dec04bc8313094087671486eac6ed3c1",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0bedd88a1c55457e9731dd9b99ceb976675bee5412d9565eb31ac84533df7bb5",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/process",
+      "version": "v6.4.45",
+      "source_url": "https://github.com/symfony/process.git",
+      "source_commit": "0b0c5b7d895211b82021469d1cb8ef2448caed96",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/property-access",
+      "version": "v7.4.16",
+      "source_url": "https://github.com/symfony/property-access.git",
+      "source_commit": "c3dce76a6697c6428f7d80d5cd1cf0aa5d9679f3",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/property-info",
+      "version": "v7.4.18",
+      "source_url": "https://github.com/symfony/property-info.git",
+      "source_commit": "52420d499b03ec20c0d38f0dc2f940bc9c43dc8e",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "eaa5d6e59ff1d5322ae36d3ab9124460df72d2d0c8af60a99222e8a90dcbdf31",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/psr-http-message-bridge",
+      "version": "v7.4.8",
+      "source_url": "https://github.com/symfony/psr-http-message-bridge.git",
+      "source_commit": "76f1a57719a4a04c0ea18678a6c9305b5dcb9da8",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/routing",
+      "version": "v6.4.45",
+      "source_url": "https://github.com/symfony/routing.git",
+      "source_commit": "6fe2ed5b356beec41d5720dd73db72887c3f9d6d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/serializer",
+      "version": "v7.4.18",
+      "source_url": "https://github.com/symfony/serializer.git",
+      "source_commit": "1f31d4e902c85b820af5dce27dbe17435524bed0",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/service-contracts",
+      "version": "v3.7.3",
+      "source_url": "https://github.com/symfony/service-contracts.git",
+      "source_commit": "15e6a07ec2a2c75ceb1b21dd98105ee8456d2257",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/string",
+      "version": "v7.4.15",
+      "source_url": "https://github.com/symfony/string.git",
+      "source_commit": "e394af32256bf9e7bf80849d95e589167c10097b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "0bedd88a1c55457e9731dd9b99ceb976675bee5412d9565eb31ac84533df7bb5",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/translation",
+      "version": "v6.4.44",
+      "source_url": "https://github.com/symfony/translation.git",
+      "source_commit": "fa2235501e2cf6b1d38ab42954b248a5e93c8e89",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "18da7e490d2aa77197a0619b25bcc771a0110132a9d76071665718d3295e73cb",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/translation-contracts",
+      "version": "v3.7.1",
+      "source_url": "https://github.com/symfony/translation-contracts.git",
+      "source_commit": "ccb206b98faccc511ebae8e5fad50f2dc0b30621",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/type-info",
+      "version": "v7.4.17",
+      "source_url": "https://github.com/symfony/type-info.git",
+      "source_commit": "62d0ad6995630a4f7ea8fd270aadb3e2545c8e31",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "db54a3771e71cada8e5a5dd11e5533e985117354057fc268129898ef415683b1",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/uid",
+      "version": "v6.4.32",
+      "source_url": "https://github.com/symfony/uid.git",
+      "source_commit": "6b973c385f00341b246f697d82dc01a09107acdd",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "b92809182501f0fa422167ea44484b41877e1736e8283d0377fdc9664bb9a02d",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/var-dumper",
+      "version": "v6.4.45",
+      "source_url": "https://github.com/symfony/var-dumper.git",
+      "source_commit": "86a9b2f1bd81c9780a809632238ab6ba10292166",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "cbad2ab8fcfa03932eaef0d2c88482f30a4198f18ae7ed6f9cef96a94e861296",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "symfony/var-exporter",
+      "version": "v7.4.18",
+      "source_url": "https://github.com/symfony/var-exporter.git",
+      "source_commit": "d6a87acbe48cbc707b9aba7f1a6c2215aab02603",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19",
+          "bytes": 1068
+        }
+      ]
+    },
+    {
+      "name": "thecodingmachine/safe",
+      "version": "v3.4.0",
+      "source_url": "https://github.com/thecodingmachine/safe.git",
+      "source_commit": "705683a25bacf0d4860c7dea4d7947bfd09eea19",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "70b9075df06f8cf8e117f88f98597a88ae4a1196f2810e893f099ced7ab8c1a4",
+          "bytes": 1072
+        }
+      ]
+    },
+    {
+      "name": "tijsverkoyen/css-to-inline-styles",
+      "version": "v2.4.0",
+      "source_url": "https://github.com/tijsverkoyen/CssToInlineStyles.git",
+      "source_commit": "f0292ccf0ec75843d65027214426b6b163b48b41",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.md",
+          "sha256": "28bb809fa4dae8ab4a8d26311c8cff9910af2b9ddbcafe1966ab5ce45cc5fa53",
+          "bytes": 1491
+        }
+      ]
+    },
+    {
+      "name": "toin0u/geocoder-laravel",
+      "version": "4.7.0",
+      "source_url": "https://github.com/geocoder-php/GeocoderLaravel.git",
+      "source_commit": "f354165d10768b04da0e46b76dd99fd44dba89d2",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "83c0feb8448d87a7f884d0ae1e2b217aafea5a4945a2dda92482dbb4b2a483fe",
+          "bytes": 1080
+        }
+      ]
+    },
+    {
+      "name": "twilio/sdk",
+      "version": "6.44.4",
+      "source_url": "https://github.com/twilio/twilio-php.git",
+      "source_commit": "08aad5f377e2245b9cd7508e7762d95e7392fa4d",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": []
+    },
+    {
+      "name": "vlucas/phpdotenv",
+      "version": "v5.7.0",
+      "source_url": "https://github.com/vlucas/phpdotenv.git",
+      "source_commit": "301c07936b16d88628b126b01d082ba153cf4c40",
+      "declared_licenses": [
+        "BSD-3-Clause"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "6e220eb4494c0bf146244805783c1e13e43cba29dd18afe8a5d2e4e30492eb31",
+          "bytes": 1557
+        }
+      ]
+    },
+    {
+      "name": "voku/portable-ascii",
+      "version": "2.1.1",
+      "source_url": "https://github.com/voku/portable-ascii.git",
+      "source_commit": "8e1051fe39379367aecf014f41744ce7539a856f",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE.txt",
+          "sha256": "e564345a249cd6664d20956857126d364d95f7b4f0f6cf542711a2c14570c97c",
+          "bytes": 1058
+        }
+      ]
+    },
+    {
+      "name": "web-token/jwt-library",
+      "version": "3.4.10",
+      "source_url": "https://github.com/web-token/jwt-library.git",
+      "source_commit": "8c38010d971c2313406fa1376d763cee745a833b",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "9c8e44cc77a2465f62983433da0107435395146d76eb370d43ee2adba91ab219",
+          "bytes": 1083
+        }
+      ]
+    },
+    {
+      "name": "webit/eval-math",
+      "version": "1.0.2",
+      "source_url": "https://github.com/dbojdo/eval-math.git",
+      "source_commit": "ffe48f6d86eb461795918b754b83aa63e645ef87",
+      "declared_licenses": [],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "87b581a5cc34321c1bc88e0c42af36c6c868788637b4d7bcc6de0e5931baf1ca",
+          "bytes": 1453
+        }
+      ]
+    },
+    {
+      "name": "willdurand/geocoder",
+      "version": "4.6.0",
+      "source_url": "https://github.com/geocoder-php/php-common.git",
+      "source_commit": "be3d9ed0fddf8c698ee079d8a07ae9520b4a49a1",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "LICENSE",
+          "sha256": "47c7105360c16a68011105bfdc9540b6a343ad7a3907ced1e84d14c40a9cff8c",
+          "bytes": 1113
+        }
+      ]
+    },
+    {
+      "name": "xantios/mimey",
+      "version": "v2.2.0",
+      "source_url": "https://github.com/Xantios/mimey.git",
+      "source_commit": "8cb6f0c29b8eadde38777ed947847f4253c00b60",
+      "declared_licenses": [
+        "MIT"
+      ],
+      "notices": [
+        {
+          "path": "license",
+          "sha256": "bbf13986574a43e3be62d393681b52ecf68b43157b67725c0b03bd364e475b3a",
+          "bytes": 1081
+        }
+      ]
+    }
+  ]
+}
