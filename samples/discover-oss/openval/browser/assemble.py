@@ -102,7 +102,10 @@ def main():
     env["TMPDIR"] = str(root)
     subprocess.run(["npm", "ci", "--ignore-scripts"], cwd=web, env=env, check=True)
     subprocess.run([sys.executable, str(HERE / "source_archive.py"), str(root / "upstream.tar.gz"), str(app), str(wheels), str(licenses), str(public / "source.zip")], check=True)
-    subprocess.run(["npm", "run", "build"], cwd=web, env=env, check=True)
+    # Turbopack keys initial chunks by their exact URL. The Instance gateway
+    # namespaces asset URLs, so use webpack's chunk-ID based loader instead.
+    subprocess.run(["npm", "run", "build", "--", "--webpack"], cwd=web, env=env, check=True)
+    subprocess.run([sys.executable, str(HERE / "externalize_scripts.py"), str(web / "out")], check=True)
     print(f"Static site: {web / 'out'}")
 
 
