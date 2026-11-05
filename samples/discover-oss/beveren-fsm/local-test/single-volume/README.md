@@ -159,6 +159,16 @@ this is a local-only candidate, not a hosted import or distribution. Parsing
 the authored TOML is not proof that a Capsule has been packed, admitted or
 executed by an Ato Runner.
 
+On 2026-11-06, the candidate was packed with CLI commit `27e4942f`, transferred
+with a verified SHA-256 to a native Linux x86_64 host, and attempted using a
+fresh CLI test environment and a synthetic secret. The Runner refused before
+execution with `execution_authority_required`: the selected Derivation includes
+the startup requirement, and ordinary `ato run` does not carry the required
+assessment and authorization. No verification receipt or hosted import resulted.
+The image was built and retained only on that host; its digest is not a registry
+distribution. Any further attempt must use an authorized execution path rather
+than removing the startup requirement to evade admission.
+
 This result does not establish a stg Runner-compatible package. The manually
 started proof used a development server and ephemeral Redis; the supervisor
 candidate remains local and does not establish scheduled execution or a safe
