@@ -10,7 +10,7 @@ no cross-device sync, backup, external API or agent, OCR, or file uploads.
 Use sample data only. Clearing browser storage deletes the saved database.
 
 Build with Node 22, pnpm 11 and Python 3: pnpm install --frozen-lockfile;
-python3 package_source.py; pnpm build.
+python3 package_source.py; pnpm test:security; pnpm build.
 A WebAssembly-capable secure browser with IndexedDB and Web Locks is required.
 The original Clawnify server entry remains for reference and is not the
 entry used by this browser build. The source page provides the corresponding modified source for the browser

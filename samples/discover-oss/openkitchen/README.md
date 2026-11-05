@@ -24,8 +24,17 @@ commit into a clean directory, then copy the `overlay` files into it:
 cp -R /path/to/openkitchen/overlay/. .
 pnpm install --frozen-lockfile
 python3 package_source.py
+pnpm test:security
 pnpm build
 ```
+
+The local overlay restricts PATCH fields to known columns. The upstream store
+interpolates untrusted JSON field names into UPDATE statements; a synthetic
+request against the original code changed two ingredient rows instead of one.
+The regression tests exercise that request, valid updates on all five PATCH
+routes, and attempts to change identifiers or timestamps. They passed under
+Node 22 on 2026-11-06. The staging schema listed below predates this local
+fix; rebuilding alone does not update the staged Instance or listing.
 
 On 2026-11-05, the stg owner Instance was updated to schema
 `csch_01M6N8E0PBDPM8540TJADNWFZB` and published as Discover listing
