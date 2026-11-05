@@ -46,10 +46,23 @@ docker run -d --name "$app" --network "$network" --network-alias application \
 docker run -d --name "$console" --network "$network" --network-alias console \
   --read-only --cap-drop ALL --security-opt no-new-privileges --user 65532:65532 \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  -e ATO_BINDING_APP_ORIGIN=http://localhost:4200 "$console_image" >/dev/null
+  -e ATO_BINDING_CONSOLE_ORIGIN=http://localhost:4200 "$console_image" >/dev/null
 
 docker run --rm --network "$network" --read-only --cap-drop ALL \
   --security-opt no-new-privileges --user 65532:65532 \
   --mount "type=bind,src=$here/socket_roundtrip.js,dst=/probe.js,readonly" \
   -e LD_LIBRARY_PATH=/opt/socket-libs --entrypoint /opt/fleetbase-socket/node \
   "$app_image" /probe.js
+
+# Docker health is an independent operator signal. It must become healthy
+# after the real API workflow, rather than reporting the upstream image's
+# unrelated Caddy admin-port check as a failure.
+i=0
+while :; do
+  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$app")
+  case "$health" in healthy) break ;; unhealthy|missing) echo "Unexpected application health: $health" >&2; exit 1 ;; esac
+  i=$((i + 1))
+  [ "$i" -lt 30 ] || { echo 'Application health did not become ready' >&2; exit 1; }
+  sleep 1
+done
+echo 'PASS: application Docker health checks the live API'

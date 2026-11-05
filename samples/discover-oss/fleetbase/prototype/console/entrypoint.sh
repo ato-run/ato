@@ -5,7 +5,7 @@ set -f
 umask 077
 
 invalid() { printf '%s\n' 'Invalid or missing application origin' >&2; exit 1; }
-origin=${ATO_BINDING_APP_ORIGIN:-}
+origin=${ATO_BINDING_CONSOLE_ORIGIN:-}
 case "$origin" in
   https://*) ATO_SCHEME=https; default_port=443; authority=${origin#https://} ;;
   http://*) ATO_SCHEME=http; default_port=80; authority=${origin#http://} ;;
