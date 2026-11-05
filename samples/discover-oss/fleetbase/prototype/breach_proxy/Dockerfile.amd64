@@ -1,0 +1,5 @@
+FROM python@sha256:48d884813cf44e927cf64c5529dd630dd3b18338c6dc727991eef9b71e934a20
+COPY breach_proxy.py /opt/breach_proxy.py
+USER 65532:65532
+ENV PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python3", "/opt/breach_proxy.py"]

@@ -1,0 +1,11 @@
+ARG UPSTREAM_PLATFORM=linux/amd64
+FROM --platform=$UPSTREAM_PLATFORM fleetbase/fleetbase-console@sha256:2212ecf41247d0cbc9aef4fa7f9d790943e95392d47422ec68c5164b8f4a2286 AS assets
+FROM nginx@sha256:2db7d28517d1fba17c2da3210395f7be11a11b419246ad0da2edf782af72f367
+COPY --from=assets /usr/share/nginx/html /usr/share/nginx/html
+COPY ato.conf /etc/nginx/ato.conf
+COPY proxy-headers.conf /etc/nginx/ato-proxy-headers.conf
+COPY --chmod=0555 entrypoint.sh /opt/ato-console-entrypoint.sh
+COPY index-ato.html /usr/share/nginx/html/index.html
+COPY assets/ato-*.js /usr/share/nginx/html/assets/
+USER 65532:65532
+ENTRYPOINT ["/opt/ato-console-entrypoint.sh"]
