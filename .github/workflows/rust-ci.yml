@@ -4,7 +4,10 @@ on:
   push:
     branches: [main, dev, nightly, stg]
   pull_request:
-    branches: [main, dev, nightly, stg]
+    # `feat/**` is here so a stacked PR (base = its parent feature branch)
+    # still gets the workspace, clippy and arch-check evidence; without it a
+    # stack silently stops being tested after its first PR.
+    branches: [main, dev, nightly, stg, "feat/**"]
   workflow_dispatch:
 
 permissions:
