@@ -10,6 +10,7 @@ redis="beveren-proof-$suffix-redis"
 network="beveren-proof-$suffix-net"
 cleanup() {
     result=$?
+    trap - EXIT
     if [ "$result" -eq 0 ] && [ "${BEVEREN_KEEP_TEST:-0}" != 1 ]; then
         docker rm -fv "$server" "$redis" >/dev/null 2>&1 || :
         docker network rm "$network" >/dev/null 2>&1 || :
@@ -17,6 +18,7 @@ cleanup() {
     else
         printf 'Synthetic test resources: volume=%s, network=%s, app=%s, redis=%s\n' "$volume" "$network" "$server" "$redis" >&2
     fi
+    exit "$result"
 }
 if docker volume inspect "$volume" >/dev/null 2>&1 || docker network inspect "$network" >/dev/null 2>&1 || docker inspect "$server" >/dev/null 2>&1 || docker inspect "$redis" >/dev/null 2>&1; then
     printf 'Test resource name collision; refusing to continue.\n' >&2
@@ -67,9 +69,34 @@ db_password=$(cat /data/test-db-bootstrap)
 bench new-site --db-root-username ato_setup --db-root-password "$db_password" --db-socket /data/mysql.sock --admin-password "$admin_password" --install-app erpnext --set-default single2.local > /data/bench-install.log 2>&1
 bench --site single2.local install-app beveren_fsm >> /data/bench-install.log 2>&1
 bench --site single2.local list-apps
-mariadb --no-defaults --protocol=socket --socket=/data/mysql.sock -ufrappe -e "DROP USER 'ato_setup'@'localhost'"
+mariadb --no-defaults --protocol=socket --socket=/data/mysql.sock -ufrappe -e "DROP USER 'ato_setup'@'localhost'; DROP USER 'frappe'@'localhost'"
 rm /data/test-db-bootstrap /data/tmp/create_bootstrap.py
-printf 'Synthetic x86_64 Beveren installed and bootstrap user removed.\n'
+if mariadb --no-defaults --protocol=socket --socket=/data/mysql.sock -ufrappe -e 'SELECT 1' >/dev/null 2>&1; then
+    printf 'Unexpected privileged socket access after setup.\n' >&2
+    exit 1
+fi
+if mariadb --no-defaults --protocol=socket --socket=/data/mysql.sock -uroot -e 'SELECT 1' >/dev/null 2>&1; then
+    printf 'Unexpected root socket access from the app user.\n' >&2
+    exit 1
+fi
+cat > /data/tmp/check_database.py <<'PYDB'
+import json,pymysql
+with open('/data/bench/sites/single2.local/site_config.json') as f:
+    config=json.load(f)
+connection=pymysql.connect(unix_socket='/data/mysql.sock',user=config['db_name'],
+                           password=config['db_password'],database=config['db_name'])
+with connection.cursor() as cursor:
+    cursor.execute('SELECT DATABASE()')
+    assert cursor.fetchone()[0] == config['db_name']
+    cursor.execute('SHOW GRANTS')
+    grants=[row[0] for row in cursor.fetchall()]
+    global_grants=[grant for grant in grants if ' ON *.* ' in grant]
+    assert global_grants and all('GRANT USAGE ON *.*' in grant for grant in global_grants)
+    assert all('WITH GRANT OPTION' not in grant for grant in grants)
+connection.close()
+PYDB
+/data/bench/env/bin/python /data/tmp/check_database.py
+printf 'Synthetic x86_64 Beveren installed; bootstrap users removed and site database access verified.\n'
 SETUP
 docker exec -d -w /data/bench -e TMPDIR=/data/tmp -e PYTHONDONTWRITEBYTECODE=1 -e FRAPPE_BENCH_ROOT=/data/bench -e CI=1 "$server" sh -c 'exec bench --site single2.local serve --port 8000 --noreload > /data/bench-web.log 2>&1'
 docker exec "$server" sh -c 'i=0; until /data/bench/env/bin/python -c "import requests;requests.get(\"http://127.0.0.1:8000/login\",timeout=3).raise_for_status()" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 60 ] || exit 1; sleep 1; done'
@@ -79,14 +106,15 @@ cat samples/discover-oss/beveren-fsm/local-test/single-volume/persist_probe.py |
 docker exec -w /data/bench "$server" sh -c 'set -eu; export TMPDIR=/data/tmp PYTHONDONTWRITEBYTECODE=1 FRAPPE_BENCH_ROOT=/data/bench; export BEVEREN_ADMIN_PASSWORD="$(cat /data/test-admin-password)"; /data/bench/env/bin/python /data/tmp/setup_synthetic.py; /data/bench/env/bin/python /data/tmp/workflow.py; /data/bench/env/bin/python /data/tmp/persist_probe.py create'
 docker stop --timeout 30 "$server" >/dev/null
 docker start "$server" >/dev/null
-docker exec "$server" sh -c 'i=0; until mariadb --no-defaults --protocol=socket --socket=/data/mysql.sock -ufrappe --batch --skip-column-names -e "SELECT 1" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 60 ] || exit 1; sleep 1; done'
+docker exec "$server" sh -c 'i=0; until /data/bench/env/bin/python /data/tmp/check_database.py >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 60 ] || exit 1; sleep 1; done'
 docker exec -d -w /data/bench -e TMPDIR=/data/tmp -e PYTHONDONTWRITEBYTECODE=1 -e FRAPPE_BENCH_ROOT=/data/bench -e CI=1 "$server" sh -c 'exec bench --site single2.local serve --port 8000 --noreload >> /data/bench-web.log 2>&1'
 docker exec "$server" sh -c 'i=0; until /data/bench/env/bin/python -c "import requests;requests.get(\"http://127.0.0.1:8000/login\",timeout=3).raise_for_status()" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 60 ] || exit 1; sleep 1; done; export BEVEREN_ADMIN_PASSWORD="$(cat /data/test-admin-password)"; /data/bench/env/bin/python /data/tmp/persist_probe.py verify'
 if [ "${BEVEREN_TEST_PATCHED:-0}" = 1 ]; then
     docker exec "$server" mkdir -p /data/bench/sites/.tmp
-    for probe in authz_probe.py shared_order_probe.py appointment_probe.py order_mapping_probe.py schedule_probe.py schedule_workflow_probe.py; do
+    for probe in authz_probe.py shared_order_probe.py appointment_probe.py order_mapping_probe.py linked_request_probe.py schedule_probe.py schedule_workflow_probe.py; do
         sed 's|http://web:8000|http://127.0.0.1:8000|' "samples/discover-oss/beveren-fsm/local-test/$probe" |
             docker exec -i "$server" sh -c "cat > /data/bench/sites/.tmp/$probe"
     done
-    docker exec -w /data/bench "$server" sh -c 'set -eu; export TMPDIR=/data/tmp PYTHONDONTWRITEBYTECODE=1 FRAPPE_BENCH_ROOT=/data/bench; export BEVEREN_ADMIN_PASSWORD="$(cat /data/test-admin-password)"; for probe in authz_probe.py shared_order_probe.py appointment_probe.py order_mapping_probe.py schedule_probe.py schedule_workflow_probe.py; do /data/bench/env/bin/python "sites/.tmp/$probe"; done'
+    docker exec -w /data/bench "$server" sh -c 'set -eu; export TMPDIR=/data/tmp PYTHONDONTWRITEBYTECODE=1 FRAPPE_BENCH_ROOT=/data/bench; export BEVEREN_ADMIN_PASSWORD="$(cat /data/test-admin-password)"; for probe in authz_probe.py shared_order_probe.py appointment_probe.py order_mapping_probe.py linked_request_probe.py schedule_probe.py schedule_workflow_probe.py; do /data/bench/env/bin/python "sites/.tmp/$probe"; done'
 fi
+printf 'Synthetic amd64 proof completed.\n'
