@@ -1,67 +1,152 @@
 # Ato
 
-Ato is a computing interface for preserving, sharing, and continuing work from
-an addressable point. It combines a computation model with a runtime and CLI
-for working with Capsules.
+Ato is an experimental computing interface for treating diverse applications,
+data and work state through one **Computation** model: preserving, sharing,
+running and continuing them. The central idea is to separate *what must be
+maintained* from *how it is realized*, so that changing an implementation does
+not silently change the requirements.
 
-[ato.run](https://ato.run/) is the web service built on Ato for discovering,
-trying, saving, and sharing runnable software. This repository contains the
-runtime, CLI, adapters, and supporting tools. [About Ato](https://ato.run/about/)
-· [日本語](README.ja.md)
+- [ato.run](https://ato.run/) is the web service built on Ato for discovering,
+  trying, saving and sharing runnable software.
+- [About Ato](https://ato.run/about/) describes the background and the intent.
+- [日本語](README.ja.md) is the Japanese overview; this repository's current
+  technical documentation is in English ([documentation index](docs/README.md)).
 
-## The problem
+This repository contains the computation model, runtime, CLI, adapters and
+supporting tools.
 
-Someone you know made a small tool for their own use. You would like to use it
-with your data, change one thing about it, and still open it next week, on
-another machine, after the original author has moved on. Today software is
-usually shared as source, an image, or setup instructions, so the recipient
-has to reconstruct both the point the author already reached and the data and
-services around it.
+## One model for different kinds of software
 
-Work is often tied to a process, machine, source tree, or particular snapshot.
-Moving it elsewhere can require rebuilding the environment and checking whether
-the result still behaves as intended. Ato explores an approach that identifies
-the work separately from the physical means used to realize it, such as a
-process, container, or snapshot.
+A text editor saves a document. A development environment manages source and
+dependencies. A game has progress. An AI application has models, intermediate
+data and external services. Ato does not fix each of these as a separate kind
+with its own lifecycle.
 
-The design aims to support application sharing, continuing development work,
-and handing off long-running agent tasks through a common interface. These are
-use cases for the model, not a claim that every form of state or handoff is
-supported today.
+A **Computation** is the work that can continue from a point, not a file or a
+process. Sealing that point yields an immutable, addressable **Capsule**;
+resuming it yields a mutable **Run**. Runs can diverge, and saving the next
+point again yields a Capsule. Files, applications, runtime state and operation
+history are handled within that one lifecycle, with the physical realization
+kept separate from the point's identity.
 
-## What Ato is testing
+## What is lost when only the environment is preserved
 
-- A **persistent continuation independent of its realization**: a sealed
-  Capsule keeps its identity whether it is realized by Replay, a filesystem
-  reconstruction, a checkpoint, or a VM snapshot.
-- **Contract-indexed equivalence**: two realizations could count as the same
-  point when they satisfy the same declared Contract K, even if their bytes
-  differ. This is a hypothesis, not a behavior the implementation checks for
-  arbitrary artifacts.
+Someone you know made a small tool for their own use. You want to use it with
+your data, change one thing about it, and still open it next week, on another
+machine, after the original author has moved on. What should be handed over is
+not only the source: it is the behavior, the data and work state, the
+connections to external services, the history so far, and the ability to
+continue from there. Software is increasingly generated and modified
+continuously, so the question of what may change and what must be preserved
+comes up sooner and more often.
 
-Neither is a claim of novelty; the open question is whether this combination is
-a workable unit for sharing and continuing software. The
-[research tour](docs/guides/research-tour.md) connects the model, the existing
-evidence, prior work and the questions we want reviewed. The
-[theory draft](docs/theory/capsule-process-model.md) describes the deeper
-framing.
+Rebuilding a source tree, image or environment can reproduce a starting point,
+but it does not necessarily preserve what made the work usable. **Being able to
+start the software again is not the same as being able to continue the work.**
 
-## Core concepts
+## From environment reproducibility to computation continuity
 
-- **Computation** is the work that can continue from its current point.
-- **Capsule** is a sealed, immutable, addressable continuation point. It can
-  be preserved and shared; the physical method used to realize it does not
-  define its identity.
-- **Run** resumes a Capsule and advances the computation. Runs can develop
-  different futures from the same Capsule.
+Cloud-native practice already provides many ways to prepare an execution
+environment. Docker packages an application and its dependencies; Nix improves
+the reproducibility of builds and environments; VMs and snapshots preserve
+broader execution state. Ato does not replace them.
 
-For portable applications, a **Contract** describes observable requirements,
-a **Derivation** declares a way to realize them, and a verification **receipt**
-records the observations for a Run. There are two identity profiles
-(`ComputationRef` and `ContractRef`) that must not be reinterpreted as each
-other. See [Computation](docs/concepts/computation.md) and
-[application contracts](docs/concepts/application-contracts.md) for the model,
-the profile map, and the decisions that remain open.
+The remaining question is what must be preserved when the realization changes.
+Ato abstracts the conditions that have to survive a realization, not the
+hardware or runtime differences themselves.
+
+## Example: handing off the same work in different ways
+
+Suppose you draw a diagram in a whiteboard application and want to continue
+editing it on another computer. There are several candidate ways to restore the
+work:
+
+| Candidate | What it restores |
+|---|---|
+| Replay | Re-execute the drawing and editing operations from an initial state |
+| Stored revision | Fetch the saved document at a specific revision — for example through a Git-based source fetch — and open it |
+| Snapshot | Restore saved filesystem or execution state |
+
+These store different material and restore it differently. If the requirement
+is "the blue rectangle and the red arrow are at these positions and remain
+individually editable", any of them can be a candidate realization. Generating
+a PNG with the same appearance is not enough: the shapes could no longer be
+edited individually. If undo history is required, it has to be part of the
+requirement and needs a matching restore and verification path.
+
+These are concept-level candidates, not a claim that every one is implemented
+for every application. See [what has been verified](#research-and-evidence) and
+[Materialization](docs/concepts/materialization.md) for the current status.
+
+## Contracts and derivations, and what identity means
+
+Ato separates the conditions from the means of realization:
+
+- **Contract K** declares what a realization must satisfy. It can range from an
+  HTTP observation and a data digest to a semantic condition such as "the item
+  list contains these entries in this order".
+- **Derivation D** declares one concrete way to realize K: what input is used,
+  which runtime and Ports it needs, and how the execution is carried out.
+- A verification **receipt** records what was observed for the Run, which D
+  was selected, and what was not satisfied.
+
+The important rule is to freeze K and change D, then verify against the same
+conditions. That distinguishes changing the realization from changing the
+requirements. A realization does not need to be byte-identical to the previous
+one, and K does not describe unobserved state.
+
+This does **not** mean that the same K implies the same Computation. Ato keeps
+three different notions apart:
+
+| Notion | Meaning |
+|---|---|
+| `ComputationRef` | The reference identity of a computation, in the computation-root profile |
+| `ContractRef` | The identity rooted at a declared Contract, in the portable-application profile |
+| Contract satisfaction | The judgment that one realization satisfies K |
+
+Satisfying K is a judgment about an observation of a realization. It does not
+assert that the realization is the same Computation, or that either Capsule
+reference is identical. The two reference domains are not interchangeable.
+See [application contracts](docs/concepts/application-contracts.md) for the
+profile map and the decisions that remain open.
+
+## Heterogeneous execution, with declared derivations
+
+Ato is meant to realize computations on Runners with different operating
+systems, runtimes and hardware. The point of that network is not to make every
+Runner look like one machine. It is to run a **declared** derivation on a
+Runner whose capabilities admit it, and to keep the conditions separate from
+the environment that happens to be available.
+
+Selection stays explicit in the current design: the caller chooses a declared
+D, and a Runner's advertised capabilities are admission checks. There is no
+automatic best-D optimizer, capability inference or implicit fallback. General
+cross-host state restoration and heterogeneous scheduling remain research
+targets. See [Runner and Hosting](docs/guides/runner-hosting.md).
+
+**The execution environment is a means to realize a Computation, not the
+Computation's identity.**
+
+## Current status
+
+Ato is experimental. The current tree includes computation and Capsule objects,
+lifecycle commands, adapters, portable bundle handling, a limited static
+verification path, and explicit selection among declared Derivations.
+
+The following remain research or development work, not finished guarantees:
+
+- general state restoration across different hosts;
+- restoration of arbitrary process memory;
+- general state continuity across heterogeneous realizations;
+- autonomous AI Formation;
+- general automatic selection or optimization across Runners.
+
+Python, OCI, GPU, persistent state and external services need their own
+declared routes and host admission. Their presence in the code does not
+establish availability on ato.run production. A matching Contract alone does
+not guarantee state continuity or safe side effects. See
+[compatibility](docs/concepts/compatibility.md) and
+[state continuity](docs/concepts/state-continuity.md).
 
 ## Quick start
 
@@ -80,16 +165,8 @@ target/debug/ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 
-The CLI validates the bundle, realizes its declared route, checks the source
-identity and HTTP response against the Contract, and writes a receipt. On
-success, inspect `.tmp/getting-started/receipt.json` for the selected
-Derivation and observations; `fully_satisfied` is `true` when all required
-observations are satisfied. `--no-open` verifies and exits without opening a
-browser. See [Getting started](docs/guides/getting-started.md) for details,
-other routes, and failure boundaries. Published CLI artifacts are listed in
-[GitHub Releases](https://github.com/ato-run/ato/releases).
-
-For example, inspect the receipt with Python 3:
+This verifies the supplied bundle's declared route and its captured HTTP
+observation on this host, then writes a receipt. Inspect it with Python 3:
 
 ```sh
 python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
@@ -101,48 +178,45 @@ app-proof: satisfied
 source-identity: satisfied
 ```
 
-This static example does not demonstrate general cross-host portability or
-restoration of process memory.
+`fully_satisfied` means that the observations declared by this Contract were
+satisfied for this Run. It does not demonstrate general cross-host
+portability, restoration of process memory, or continuity of user data. See
+[Getting started](docs/guides/getting-started.md) for the expected output,
+other routes and failure boundaries. Published CLI artifacts are listed in
+[GitHub Releases](https://github.com/ato-run/ato/releases).
 
 ### Try ato.run (optional)
 
 Explore public software on [ato.run](https://ato.run/) or
-[try 2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)
-in your browser. ato.run is a separate product surface; using it is not
-required for the local example above.
+[try 2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048) in
+your browser. ato.run is a separate product surface; the local example above
+does not require it.
 
-## Current status
+## Concepts
 
-Ato is experimental. This repository includes computation objects, lifecycle
-commands, adapters, portable bundle handling, and the static verification
-example above. Python, OCI, GPU, state, and external services require their
-own declared routes and host admission; their presence in the code does not
-establish availability on ato.run production.
+| Concept | Meaning |
+|---|---|
+| **Computation** | Work that can continue from its current point |
+| **Capsule** | A sealed, immutable, addressable continuation point |
+| **Run** | An active evaluation started from a Capsule that advances the computation |
+| **Contract (K)** | The conditions a realization must satisfy |
+| **Derivation (D)** | One declared way to realize a Contract |
+| **Receipt** | Recorded observations and the verification result for a Run |
+| **Port / Binding** | A typed interaction boundary, and its mapping to a physical resource at run time |
 
-General recovery across different hosts, process-memory restoration, and
-autonomous AI Formation are research or development work. Ato does not
-promise that every application runs everywhere or replace tools such as
-Docker and Nix. Matching a Contract alone does not guarantee state continuity
-or safe side effects. See [compatibility](docs/concepts/compatibility.md) and
-[state continuity](docs/concepts/state-continuity.md).
+See [Computation](docs/concepts/computation.md) and the
+[glossary](docs/glossary-reference.md) for the full vocabulary.
 
 ## Research and evidence
 
-- [Research tour](docs/guides/research-tour.md): problem, model, profiles,
-  data identity, verified results, independence and open questions.
+- [Research tour](docs/guides/research-tour.md): the problem, model, identity
+  profiles, data identity, verified results, independence and open questions.
 - Archived experiments: [contract-preserving transformation v0](docs/archive/2026/ops/contract-preserving-transformation-v0.md)
   and [stateful transformation v1](docs/archive/2026/ops/stateful-transformation-v1.md).
-  These are historical Linux evidence with recorded fixtures and limits; they
-  were not re-measured for this overview.
-- [Specifications](docs/specifications/README.md), including the accepted
-  computation-root RFCs and the portable-application implementation track.
-
-## Roadmap and work tracking
-
-Work is tracked in [GitHub Issues](https://github.com/ato-run/ato/issues) (and
-GitHub Projects when a board is used). There is no Markdown roadmap in this
-repository; [the archived roadmap](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)
-is historical evidence and is not updated.
+  They record Linux-local evidence, with fixtures and limits; they were not
+  re-measured for this overview.
+- [Specifications](docs/specifications/README.md): accepted computation-root
+  RFCs and the portable-application implementation track.
 
 ## Documentation
 
@@ -151,33 +225,30 @@ General user documentation is owned by the
 technical documentation for the runtime, CLI, specifications and operations
 ([documentation index](docs/README.md)).
 
-- [Research tour](docs/guides/research-tour.md) and the [theory draft](docs/theory/capsule-process-model.md)
-- [Getting started](docs/guides/getting-started.md) and [Formation guide](docs/guides/formation.md)
-- [Concepts](docs/concepts/computation.md), [application contracts](docs/concepts/application-contracts.md), and [glossary](docs/glossary-reference.md)
-- [Architecture](docs/architecture/README.md) and [specifications](docs/specifications/README.md)
-- [Runner and hosting](docs/guides/runner-hosting.md), [operations](docs/operations/README.md), and the [documentation index](docs/README.md)
+- [Getting started](docs/guides/getting-started.md) and [Formation](docs/guides/formation.md)
+- [Application contracts](docs/concepts/application-contracts.md), including the
+  profile map, and [state continuity](docs/concepts/state-continuity.md)
+- [Runner and hosting](docs/guides/runner-hosting.md) and [operations](docs/operations/README.md)
+- [Theory draft](docs/theory/capsule-process-model.md) and [architecture](docs/architecture/README.md)
 
-## Contributing and license
+## Contributing
 
-See [Contributing](CONTRIBUTING.md) and [GitHub issues](https://github.com/ato-run/ato/issues).
+Work is tracked in [GitHub Issues](https://github.com/ato-run/ato/issues) and
+design questions are welcome in
+[GitHub Discussions](https://github.com/ato-run/ato/discussions). See
+[Contributing](CONTRIBUTING.md) for the branch policy, checks and PR
+expectations. There is no Markdown roadmap in this repository; the
+[archived roadmap](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md) is
+historical evidence.
 
-Project-authored code is licensed under the [Mozilla Public License 2.0](LICENSE)
-(`MPL-2.0`). Third-party code, dependencies, patches containing upstream code,
-and materials with their own license notices retain their respective terms.
-For example, the CPython fixture, WiX templates, and release workflow retain
-their upstream licenses; the AODD skill retains its MIT license. The CLI's
-[Apache license text](apps/cli/LICENSE-APACHE) is retained for the WiX template
-and previously distributed versions. Previously granted licenses remain in effect.
+## License
 
-This code license does not establish a new license for the Capsule Process
-Model's theoretical documents.
-
-| Material | Terms |
-|---|---|
-| Project-authored code | [MPL-2.0](LICENSE) |
-| CLI Apache text retained for WiX and previously distributed versions | [apps/cli/LICENSE-APACHE](apps/cli/LICENSE-APACHE) |
-| Third-party fixtures, templates, workflows and skills | their own notices, retained in place |
-| Theory draft and specification documents | no new license is established by the code license; the original terms apply |
+Project-authored code is licensed under the
+[Mozilla Public License 2.0](LICENSE) (`MPL-2.0`). Third-party code,
+fixtures, templates and materials with their own notices retain their
+respective terms. The code license does not establish a new license for the
+theory and specification documents. See [Licensing](docs/licensing.md) for the
+per-material index.
 
 <!-- Compatibility anchors from the previous documentation entry. -->
 <a id="main-use-cases"></a><a id="design-principle-everything-can-be-a-capsule"></a>
@@ -186,4 +257,4 @@ Model's theoretical documents.
 <a id="the-computation-theory-behind-it"></a><a id="basic-lifecycle"></a>
 <a id="capsuletoml-example"></a><a id="project-scope"></a><a id="current-implementation-status"></a>
 <a id="capsule-run-replay-continue"></a><a id="core-kernel-and-adapter"></a>
-<a id="why-ato"></a><a id="try-atorun"></a>
+<a id="why-ato"></a><a id="try-atorun"></a><a id="license"></a>
