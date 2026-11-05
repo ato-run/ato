@@ -76,6 +76,26 @@ dependencies are admission checks. There is no bundled application catalogue;
 discovery is an ato.run feature. A bundle can be built with `ato pack` when the
 source matches the current authoring schema.
 
+## How software becomes a capsule
+
+There are two current ways to produce a `.capsule`:
+
+- **Authored input.** Write `capsule.toml` (`ato.capsule/2`) declaring the
+  observations and at least one Derivation, then run
+  `ato pack <source> -o app.capsule`.
+- **Source formation.** Run `ato form <source> --runtime local ...`. Formation
+  applies a preset when the project matches one (`single-html/v1`,
+  `static-files/v1`, `node-static/v1`, `single-jsx/v1`), builds and launches a
+  candidate, and verifies it against K.
+
+Formation is not a universal builder and does not invent K from a failed build.
+A successful build is not acceptance: the verifier decides. A failed attempt is
+recorded as evidence, and the next step is a different D, not a weaker K. The
+normal path has no planner, automatic best-D choice or implicit fallback. See
+[Formation](docs/concepts/formation.md), the
+[Formation guide](docs/guides/formation.md) and the
+[exploration draft](docs/rfcs/draft/FORMATION_EXPLORATION_MODEL.md).
+
 ## Quick start
 
 No account is required. Install the Rust toolchain declared in

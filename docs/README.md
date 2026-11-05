@@ -54,6 +54,8 @@ authority for normative behavior.
 - [Capsule and Run](concepts/capsule.md): immutable continuation and active evaluation.
 - [Contract K, Derivation D and Source](concepts/application-contracts.md):
   profile-specific identity and explicit realization.
+- [Formation](concepts/formation.md): the search model, authority boundaries and
+  current status.
 - [Formation, Verification and Receipt](concepts/formation-verification.md):
   frozen expectations, observations and evidence.
 - [Instance, Run, Lease and State Continuity](concepts/state-continuity.md).
