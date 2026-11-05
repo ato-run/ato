@@ -1,7 +1,8 @@
 # Wakerun staging adapter work
 
 This is work toward running [Wakerun](https://github.com/mikaneco/wakerun) on
-ato.run; it is **not yet an app or a staging deployment**. The inspected
+ato.run. A browser-only staging preview is published; it is not a verified
+replacement for the original application. The inspected
 upstream revision is `e372df3972373fca1209c9b68a476ad06df265e5`, whose README
 states MIT licensing. Wakerun is a Tauri desktop application using SQLite; its
 database contains private accounting information, and may contain a My Number
@@ -84,5 +85,20 @@ explanation](https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2072.htm),
 but this is not a complete tax or accounting review. The software must not be
 presented as validated for current-year tax filing. Its source distribution,
 license notices, all routes, browser persistence, failures and isolation,
-backup compatibility, and hosted behavior require verification before it is
-published as usable.
+backup compatibility, and hosted behavior require further verification before
+it is presented as usable for real accounting.
+
+On 2026-11-05, the static browser preview was imported on staging as Instance
+`cinst_01M6NF5G57B1SB74WH2M9T0P9H` and listed as Discover app
+`dapp_01M6NFCN9FKSCSRYP6N7FBW11Y`. Its bundle SHA-256 is
+`c158220fef051e1e0cf4ee1307e3b18dcdb7dac197396683ec86aef40a2272d1`,
+ContractRef is `c43fdad728b3b1ee174d8723b6ef085f9b8ae1bb4c734358e7253684f24bbb4e`,
+and DerivationRef is `feb167ba0096eb87bdc5c2026cc789d05ca02960186889ba8669be771eccf504`.
+The local receipt and staging UI both confirmed the Contract. In the staging
+owner Instance, setup and a synthetic expense succeeded and survived reload;
+the source page listed 188 files and the license page opened. The Discover
+source tab reported that the files were unavailable; the app embeds its own
+source page, and the listing discloses this limitation. A source ZIP download,
+an added copy and the public trial were not verified. The listing explicitly
+prohibits real data and tax filing and notes local-only storage and old-backup
+incompatibility.
