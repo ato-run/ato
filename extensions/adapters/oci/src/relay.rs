@@ -186,7 +186,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 enum RelayInput {
     Child(Arc<Mutex<Option<ChildStdin>>>),
     /// Only the tests reach this: it drives the same multiplexer over a socket
-    /// pair instead of a child process.
+    /// pair instead of a child process. Unix sockets, so unix only.
+    #[cfg(unix)]
     #[cfg_attr(not(test), allow(dead_code))]
     Socket(Arc<Mutex<std::os::unix::net::UnixStream>>),
 }
@@ -396,6 +397,7 @@ impl DaemonRelay {
                 stdin.write_all(&encoded)?;
                 stdin.flush()?;
             }
+            #[cfg(unix)]
             RelayInput::Socket(socket) => {
                 let mut guard = socket
                     .lock()
@@ -480,6 +482,7 @@ impl DaemonRelay {
 
     /// Only for tests: drive the same multiplexer over a socket pair instead of
     /// a child process, so the framing is testable without Docker.
+    #[cfg(unix)]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_stream(
         client: DockerClient,
@@ -681,6 +684,7 @@ impl DaemonRelay {
     fn clone_sender(&self) -> OutboundFrame {
         OutboundFrame(match &self.input {
             RelayInput::Child(stdin) => Outbound::Child(Arc::clone(stdin)),
+            #[cfg(unix)]
             RelayInput::Socket(socket) => Outbound::Socket(Arc::clone(socket)),
         })
     }
@@ -692,6 +696,7 @@ struct OutboundFrame(Outbound);
 
 enum Outbound {
     Child(Arc<Mutex<Option<ChildStdin>>>),
+    #[cfg(unix)]
     Socket(Arc<Mutex<std::os::unix::net::UnixStream>>),
 }
 
@@ -709,6 +714,7 @@ impl OutboundFrame {
                 stdin.write_all(&encoded)?;
                 stdin.flush()
             }
+            #[cfg(unix)]
             Outbound::Socket(socket) => {
                 let mut guard = socket
                     .lock()
@@ -974,6 +980,7 @@ fn load_image(client: &DockerClient, architecture: &str) -> Result<RelayImage> {
 
 /// Only the pieces of `DockerClient` the relay needs, kept behind a function so
 /// the module does not depend on the adapter's construction details.
+#[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn client_from(executable: std::path::PathBuf) -> DockerClient {
     DockerClient::ambient(executable)
@@ -982,8 +989,10 @@ pub(crate) fn client_from(executable: std::path::PathBuf) -> DockerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
 
+    #[cfg(unix)]
     fn fake_relay(mut stream: UnixStream) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             Frame::Hello {
@@ -1026,6 +1035,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_connection_is_multiplexed_over_the_stream_and_half_close_is_kept() {
         let (host, relay) = UnixStream::pair().unwrap();
@@ -1048,6 +1058,7 @@ mod tests {
         let _ = server.join();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_undeclared_destination_is_refused_by_the_relay() {
         let (host, relay) = UnixStream::pair().unwrap();
