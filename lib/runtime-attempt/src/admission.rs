@@ -379,6 +379,7 @@ mod tests {
             runtimes: [("node".to_owned(), version.to_owned())].into(),
             state: Vec::new(),
             bindings: Vec::new(),
+            peer_ports: Vec::new(),
         }
     }
 
