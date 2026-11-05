@@ -29,7 +29,9 @@ status = 200
 body_digest = "sha256:61f5c9794034f1c3d13776c08abcda0672ddad9fb2b9f9c0523b045b425ce52d"
 
 # The proxy attempts a destination its D did not declare. The sandbox must
-# refuse it with EPERM; anything else (including a timeout) is not a refusal.
+# refuse it (EPERM on macOS, EACCES on Linux); anything else, including a
+# timeout, is not a refusal. The fixture normalizes both refusals to the same
+# body so K does not depend on the operating system.
 [[contract.observation]]
 id = "external-egress-denied"
 use = "ato.contract.http@1"

@@ -13,9 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use ato_adapter_process::{
-    ProcessAdapter, ProcessHandle, ProcessSpec, force_kill_process_tree, process_group_is_alive,
-};
+use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec, StopBudget};
 
 /// How long one service may take to accept TCP on its first Port.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -143,11 +141,11 @@ impl ProcessServiceGroup {
     pub fn stop(mut self) -> Result<()> {
         let mut failures = Vec::new();
         for service in self.services.iter_mut().rev() {
-            if let Err(error) = stop_handle(&service.name, &mut service.handle) {
+            if let Err(error) = stop_group(&service.name, &mut service.handle) {
                 failures.push(format!("{error:#}"));
             }
             for helper in service.helpers.iter_mut().rev() {
-                if let Err(error) = stop_handle(&helper.name, &mut helper.handle) {
+                if let Err(error) = stop_group(&helper.name, &mut helper.handle) {
                     failures.push(format!("{error:#}"));
                 }
             }
@@ -210,11 +208,11 @@ impl ProcessServiceGroup {
     fn stop_owned(&mut self) -> Result<()> {
         let mut failures = Vec::new();
         for service in self.services.iter_mut().rev() {
-            if let Err(error) = stop_handle(&service.name, &mut service.handle) {
+            if let Err(error) = stop_group(&service.name, &mut service.handle) {
                 failures.push(format!("{error:#}"));
             }
             for helper in service.helpers.iter_mut().rev() {
-                if let Err(error) = stop_handle(&helper.name, &mut helper.handle) {
+                if let Err(error) = stop_group(&helper.name, &mut helper.handle) {
                     failures.push(format!("{error:#}"));
                 }
             }
@@ -231,41 +229,10 @@ impl ProcessServiceGroup {
     }
 }
 
-/// Stop one process group, escalate once, and require that it is gone.
-fn stop_handle(name: &str, handle: &mut ProcessHandle) -> Result<()> {
-    if handle.try_wait()?.is_some() {
-        return Ok(());
-    }
-    let pid = handle.pid();
-    let process_group = handle.process_group();
-    handle.terminate()?;
-    let deadline = Instant::now() + STOP_GRACE;
-    while Instant::now() < deadline {
-        if handle.try_wait()?.is_some() {
-            return confirm_gone(name, process_group);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    force_kill_process_tree(pid, process_group)?;
-    for _ in 0..200 {
-        if handle.try_wait()?.is_some() {
-            return confirm_gone(name, process_group);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    bail!("process `{name}` (pid {pid}) was not reaped after SIGKILL")
-}
-
-fn confirm_gone(name: &str, process_group: u32) -> Result<()> {
-    if process_group != 0 && process_group_is_alive(process_group) {
-        bail!("process group of `{name}` is still alive after stop");
-    }
-    Ok(())
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use ato_adapter_process::process_group_is_alive;
     use std::net::TcpListener;
 
     fn free_port() -> u16 {
@@ -325,6 +292,135 @@ mod tests {
         assert!(TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, second)).is_ok());
     }
 
+    /// A service that binds, leaves a child running, and keeps running itself.
+    fn service_with_child(
+        name: &str,
+        port: u16,
+        seconds: u64,
+        pid_file: &std::path::Path,
+    ) -> ServiceSpec {
+        ServiceSpec {
+            name: name.to_owned(),
+            command: vec![
+                "python3".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    "import socket,subprocess,time\n\
+                     s=socket.socket()\n\
+                     s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n\
+                     s.bind(('127.0.0.1',{port}))\n\
+                     s.listen()\n\
+                     child=subprocess.Popen(['sleep','30'])\n\
+                     open({pid_file:?},'w').write(str(child.pid))\n\
+                     time.sleep({seconds})\n",
+                    pid_file = pid_file.display().to_string()
+                ),
+            ],
+            cwd: PathBuf::from("."),
+            environment: BTreeMap::new(),
+            readiness: (std::net::Ipv4Addr::LOCALHOST, port).into(),
+            helpers: Vec::new(),
+        }
+    }
+
+    fn wait_for_pid(path: &std::path::Path) -> u32 {
+        for _ in 0..500 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{} was never written", path.display());
+    }
+
+    fn pid_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// The supervisor stops a group, not a process: a service that forked a
+    /// child is not stopped by stopping only the leader.
+    #[test]
+    fn stopping_the_group_reclaims_children_of_its_services() {
+        let workspace = tempfile::tempdir().unwrap();
+        let port = free_port();
+        let pid_file = workspace.path().join("child.pid");
+        let group = ProcessServiceGroup::start(
+            workspace.path(),
+            vec![service_with_child("with-child", port, 30, &pid_file)],
+        )
+        .expect("the group starts");
+        let child = wait_for_pid(&pid_file);
+        assert!(pid_alive(child));
+        let pids = group.pids();
+        group.stop().expect("the group stops");
+        assert_reaped(&pids);
+        assert!(
+            !pid_alive(child),
+            "the service's child (pid {child}) survived the group stop"
+        );
+    }
+
+    /// A leader that exits is not the workload stopping: the child it left is
+    /// still in the group, and the supervisor's stop must reclaim it.
+    #[test]
+    fn a_leader_that_exits_leaving_a_child_is_reclaimed_by_the_group_stop() {
+        let workspace = tempfile::tempdir().unwrap();
+        let port = free_port();
+        let pid_file = workspace.path().join("orphan.pid");
+        let child_code = format!(
+            "import socket,time\n\
+             s=socket.socket()\n\
+             s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n\
+             s.bind(('127.0.0.1',{port}))\n\
+             s.listen()\n\
+             time.sleep(30)\n"
+        );
+        let mut group = ProcessServiceGroup::start(
+            workspace.path(),
+            vec![ServiceSpec {
+                name: "orphaning-leader".to_owned(),
+                command: vec![
+                    "python3".to_owned(),
+                    "-c".to_owned(),
+                    format!(
+                        "import subprocess,time\n\
+                         child=subprocess.Popen(['python3','-c',{child_code:?}])\n\
+                         open({pid_file:?},'w').write(str(child.pid))\n\
+                         time.sleep(0.5)\n",
+                        pid_file = pid_file.display().to_string()
+                    ),
+                ],
+                cwd: PathBuf::from("."),
+                environment: BTreeMap::new(),
+                readiness: (std::net::Ipv4Addr::LOCALHOST, port).into(),
+                helpers: Vec::new(),
+            }],
+        )
+        .expect("the group starts");
+        let child = wait_for_pid(&pid_file);
+        // The leader exits on its own; the child it left keeps the group alive.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while group.exited().expect("exited() is readable").is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "the leader never exited; the test cannot exercise an exited leader"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        group.stop().expect("the group stops");
+        assert!(
+            !pid_alive(child),
+            "the child left by the exited leader (pid {child}) survived stop"
+        );
+    }
+
     #[test]
     fn one_service_exit_is_reported_for_the_whole_group() {
         let workspace = tempfile::tempdir().unwrap();
@@ -379,4 +475,18 @@ mod tests {
         // reaped, not abandoned.
         assert!(TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, first)).is_ok());
     }
+}
+
+/// Stop one process group through the process adapter's single implementation.
+///
+/// The supervisor owns *which* processes to stop and in what order; how a
+/// group is signalled, reaped and proven empty is the adapter's one function.
+/// A leader that already exited is not evidence that its children are gone.
+fn stop_group(name: &str, handle: &mut ProcessHandle) -> Result<()> {
+    handle
+        .stop_group(StopBudget {
+            grace: STOP_GRACE,
+            reap: Duration::from_secs(2),
+        })
+        .with_context(|| format!("stopping process group of `{name}`"))
 }

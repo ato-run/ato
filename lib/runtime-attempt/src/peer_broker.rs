@@ -80,6 +80,12 @@ impl PeerBroker {
             while !stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // A socket accepted from a non-blocking listener
+                        // inherits that flag on macOS, and every read/write
+                        // below would fail with EAGAIN the moment the peer
+                        // had not written yet. The listener polls for accepts;
+                        // the accepted connection is blocking.
+                        let _ = stream.set_nonblocking(false);
                         let routes = routes.clone();
                         std::thread::spawn(move || {
                             let _ = handle_broker_connection(stream, &routes);
@@ -203,6 +209,9 @@ pub fn serve_shim(
     while !stopped.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Same inheritance as the broker's listener: macOS carries
+                // the listener's non-blocking flag into the accepted socket.
+                let _ = stream.set_nonblocking(false);
                 let broker = broker.to_path_buf();
                 let token = token.to_owned();
                 std::thread::spawn(move || {
