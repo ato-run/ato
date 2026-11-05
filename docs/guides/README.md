@@ -16,6 +16,8 @@ owned by the [ato.run documentation](https://ato.run/docs/); see the
   interpret the result.
 - [Derivation transformation](derivation-transformation.md): verify a changed
   implementation against a frozen Contract.
+- [Contract and derivation formats](contract-and-derivation-format.md):
+  authoring input, canonical K/D JSON, bundle references and receipts.
 - [Computation lifecycle](../run.md): init, stop, resume and export a local
   computation branch.
 - [Runner and Hosting](runner-hosting.md): select local execution, a Connected

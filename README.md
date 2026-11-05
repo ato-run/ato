@@ -96,6 +96,47 @@ flowchart LR
     OBS -->|"recorded in"| REC["Receipt"]
 ```
 
+### What K and D look like
+
+K and D are canonical JSON objects. The examples below are abbreviated from
+the supplied static bundle
+([`samples/interop-static.capsule`](samples/interop-static.capsule)); keys are in
+JCS canonical order (the order the digest covers) and hashes are shortened.
+
+```json
+{
+  "requirements": [
+    {"body_digest": "sha256:5ec8...", "id": "app-proof", "method": "GET",
+     "path": "/proof.txt", "port": "app.http", "status": 200,
+     "verifier": "ato.contract.http@1"},
+    {"digest": "sha256:923c...", "id": "source-identity", "input": "workspace",
+     "verifier": "ato.contract.workspace@1"}
+  ],
+  "schema": "ato.contract/1"
+}
+```
+
+```json
+{
+  "effects": "pure",
+  "inputs": [{"content_ref": "sha256:923c...", "id": "workspace",
+              "protocol": "ato.workspace@1"}],
+  "ports": [{"from": "site", "id": "app.http", "protocol": "ato.http@1"}],
+  "schema": "ato.derivation/1",
+  "state": [],
+  "steps": [{"entry": "index.html", "id": "site", "op": "serve",
+             "protocol": "ato.browser@1", "source": "workspace",
+             "spa_fallback": false}]
+}
+```
+
+`ContractRef` and `DerivationRef` are the SHA-256 digests of the canonical
+bytes of these objects: here `sha256:b565…` (416 bytes) is
+`root_contract_ref` and `sha256:87a0…` (397 bytes) is the first entry of
+`derivations`. The authoring input (`capsule.toml`), the authoring-to-canonical
+field map, a process route and a receipt are in
+[Contract and derivation formats](docs/guides/contract-and-derivation-format.md).
+
 The rule that matters is: freeze K, change D, and verify against the same
 conditions. That separates changing the realization from changing the
 requirements. A realization does not have to be byte-identical to the previous
