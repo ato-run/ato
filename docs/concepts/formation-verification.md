@@ -15,7 +15,9 @@ or one HTTP 200 is insufficient unless it satisfies the declared observations.
 
 **Receipt** is evidence of that comparison. The shared Rust type
 [`ContractVerificationReceipt`](../../lib/formation/src/verify.rs) owns the
-`ato.contract-verification-receipt/1` schema. It names K, the selected D,
+receipt schema: base `ato.contract-verification-receipt/1`, `/2` when a
+portability profile is recorded, and `/3` when TLS evidence is present. It names
+K, the selected D,
 verification target, observations and overall result, with execution evidence
 where supplied by that path. `bundle_sha256` is optional: Formation before
 packaging has no bundle bytes to hash. Do not fabricate transport or attempt
