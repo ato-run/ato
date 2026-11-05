@@ -1,0 +1,62 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "OpenVal"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "page"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+
+[[contract.observation]]
+id = "cashflow-api"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/api/cashflow"
+status = 200
+
+[[contract.observation]]
+id = "parse-api"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/api/parse_workbook"
+status = 200
+
+[[contract.observation]]
+id = "export-api"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/api/export_workbook"
+status = 200
+
+[[derivation]]
+id = "python-process"
+use = "ato.process@1"
+argv = ["python3", "-B", "bootstrap.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12.8" }
+
+[derivation.startup]
+port = "app.http"
+path = "/api/cashflow"
+timeout_ms = 120000
+expect_status = 200
+
+[effects]
+default = "pure"
