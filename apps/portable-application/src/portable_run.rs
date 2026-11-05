@@ -61,6 +61,11 @@ pub struct PortableRunContext<'a> {
     pub sandbox_shim: &'a Path,
     /// The subcommand that applies a portable sandbox policy.
     pub sandbox_subcommand: &'a str,
+    /// What this host can do, measured once by the caller. `None` means the
+    /// executor probes for itself at admission time; a caller that already
+    /// probed (the CLI) passes its own so `ato pack` and `ato run` cannot
+    /// disagree.
+    pub host: Option<&'a ato_host_facts::HostFacts>,
 }
 
 /// Project a validated native OCI route into the existing Runner wire contract.
@@ -179,6 +184,54 @@ pub struct PortableBundleExecutor<'a> {
     pub context: &'a PortableRunContext<'a>,
 }
 
+impl PortableBundleExecutor<'_> {
+    /// What this route needs from the host, read from the selected Derivation.
+    pub fn execution_requirements(&self) -> ato_host_facts::ExecutionRequirements {
+        execution_requirements_for(self.validated, self.runtime_root)
+    }
+}
+
+/// What a validated route needs from this host.
+///
+/// Read from the D that was selected: the platform the route's images are
+/// pinned to, whether it declares filesystem state, and the one path this Run
+/// will hand the daemon. Nothing here is derived from argv.
+pub fn execution_requirements_for(
+    validated: &ValidatedPortableApplication,
+    runtime_root: &Path,
+) -> ato_host_facts::ExecutionRequirements {
+    let derivation = &validated.derivation;
+    let mut requirements = match validated.realization {
+        PortableRealizationKind::StaticWeb => ato_host_facts::ExecutionRequirements::default(),
+        PortableRealizationKind::LocalProcess => ato_host_facts::ExecutionRequirements::process(),
+        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+            ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
+        }
+    };
+    if !derivation.state.is_empty() {
+        requirements = requirements.with_state();
+    }
+    requirements.binding(runtime_root)
+}
+
+/// The `os/arch` platform this route's containers are pinned to.
+///
+/// A service group states it on the Derivation; a single service states it on
+/// its serving step. A route that states none returns `None`, and a platform
+/// that was not declared is not guessed.
+fn route_platform(derivation: &ato_formation::authoring::BoundDerivation) -> Option<String> {
+    derivation
+        .runtimes
+        .get(OCI_PLATFORM_RUNTIME)
+        .cloned()
+        .or_else(|| {
+            derivation
+                .steps
+                .iter()
+                .find_map(|step| step.runtimes.get(OCI_PLATFORM_RUNTIME).cloned())
+        })
+}
+
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     Some(AttemptFailure {
         code: code.to_owned(),
@@ -207,35 +260,49 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 );
             }
         }
-        match self.validated.realization {
-            PortableRealizationKind::StaticWeb => None,
-            PortableRealizationKind::LocalProcess => {
-                if !self.validated.derivation.state.is_empty() && !cfg!(target_os = "linux") {
-                    return refused(
-                        "state_needs_linux_sandbox",
-                        "local process runtime admission failed: declared filesystem state \
-                         requires a Linux bubblewrap sandbox",
-                    );
-                }
-                None
+        // The capability question is answered from observed host facts, not
+        // from the OS this binary was compiled for: a container route can run
+        // on a VM-backed or rootless daemon through the Run's connector, and
+        // the facts are what decide which connector that is.
+        let requirements = self.execution_requirements();
+        let probed;
+        let host = match self.context.host {
+            Some(host) => host,
+            None => {
+                probed = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
+                &probed
             }
-            // The adapter forwards a container's Port from its internal
-            // bridge, which Docker Desktop keeps inside its VM.
-            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup
-                if !cfg!(target_os = "linux") =>
-            {
-                refused(
-                    "oci_needs_native_linux",
-                    format!(
-                        "{} routes require a native Linux Docker host",
-                        self.validated.realization.label()
-                    ),
-                )
-            }
-            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
-                None
-            }
+        };
+        let status = ato_host_facts::execution_status(host, &requirements);
+        if status.state != ato_host_facts::CapabilityState::Advertised {
+            let reason = status
+                .reasons
+                .iter()
+                .find(|reason| !reason.code.is_warning())
+                .or_else(|| status.reasons.first());
+            let (code, detail) = match reason {
+                Some(reason) => (reason.code.as_str(), reason.message.clone()),
+                None => ("execution_unavailable", status.describe()),
+            };
+            return refused(
+                code,
+                format!(
+                    "{} runtime admission failed on this host: {detail}",
+                    self.validated.realization.label()
+                ),
+            );
         }
+        if requirements.needs_container && host.connector_choice().is_none() {
+            return refused(
+                "oci_connector_unavailable",
+                format!(
+                    "{} runtime admission failed: no connector reaches this daemon \
+                     (a remote daemon cannot receive this Run's workspace)",
+                    self.validated.realization.label()
+                ),
+            );
+        }
+        None
     }
 
     fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
@@ -1634,6 +1701,10 @@ pub struct PortableBundleAttempt<'a> {
     pub run_id: Option<&'a str>,
     pub binding_environment: &'a BTreeMap<String, String>,
     pub interrupt: Option<&'a std::sync::atomic::AtomicBool>,
+    /// What the caller already measured about this host. `None` probes at
+    /// admission time; a caller that probed passes its answer so one Run
+    /// cannot report two different capabilities.
+    pub host: Option<&'a ato_host_facts::HostFacts>,
 }
 
 /// Run one already-built portable bundle through the Runtime's common attempt:
@@ -1667,6 +1738,7 @@ pub fn run_portable_bundle_attempt(
         cache_root: request.cache_root,
         sandbox_shim: request.sandbox_shim,
         sandbox_subcommand: request.sandbox_subcommand,
+        host: request.host,
     };
     let executor = PortableBundleExecutor {
         bundle: request.bundle,

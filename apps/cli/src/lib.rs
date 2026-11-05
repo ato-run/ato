@@ -863,7 +863,111 @@ fn pack(args: PackArgs) -> Result<()> {
     for derivation in &bundle.index.derivations {
         println!("derivation_ref={derivation}");
     }
+    report_route_capabilities(&bundle);
     Ok(())
+}
+
+/// Print whether each declared Derivation can run on this host, and why.
+///
+/// `ato pack` still succeeds: the bundle is immutable and this host's
+/// capabilities are not part of it. This is the diagnosis `ato run` acts on,
+/// produced from the same observed facts, so the two cannot disagree.
+fn report_route_capabilities(bundle: &ato_objects::PortableApplicationBundle) {
+    let mut routes = Vec::new();
+    for derivation in &bundle.index.derivations {
+        match ato_portable_application::validate_bundle_for_derivation(bundle, derivation) {
+            Ok(validated) => {
+                // The path a Run of this route would bind: the Run scratch
+                // under the CLI's own home, which is what the daemon has to
+                // be able to see. A relative "." proves nothing about file
+                // sharing and would report a false refusal.
+                let runtime_root = ato_home()
+                    .map(|home| home.join("runs"))
+                    .unwrap_or_else(|_| PathBuf::from("."));
+                let requirements =
+                    ato_portable_application::portable_run::execution_requirements_for(
+                        &validated,
+                        &runtime_root,
+                    );
+                routes.push((derivation.clone(), validated, requirements));
+            }
+            Err(error) => println!(
+                "capability derivation_ref={derivation} runnable=unknown reason=bundle_invalid message={error}"
+            ),
+        }
+    }
+    let requirements: Vec<_> = routes
+        .iter()
+        .map(|(_, _, requirements)| requirements.clone())
+        .collect();
+    let host = ato_host_facts::HostFacts::probe(&requirements);
+    for (derivation, validated, requirement) in &routes {
+        let status = ato_host_facts::execution_status(&host, requirement);
+        let connector = match validated.realization {
+            ato_portable_application::PortableRealizationKind::StaticWeb => "not-applicable",
+            ato_portable_application::PortableRealizationKind::LocalProcess => "process",
+            _ => host
+                .connector_choice()
+                .map(|choice| choice.as_str())
+                .unwrap_or("none"),
+        };
+        let platform = validated
+            .derivation
+            .runtimes
+            .get(ato_portable_application::OCI_PLATFORM_RUNTIME)
+            .or_else(|| {
+                validated.derivation.steps.iter().find_map(|step| {
+                    step.runtimes
+                        .get(ato_portable_application::OCI_PLATFORM_RUNTIME)
+                })
+            })
+            .map(String::as_str)
+            .unwrap_or("none");
+        for line in capability_lines(
+            derivation,
+            validated.realization.label(),
+            platform,
+            connector,
+            &status,
+        ) {
+            println!("{line}");
+        }
+    }
+}
+
+/// The lines `ato pack` prints for one Derivation.
+///
+/// Kept as a pure function so the wording is snapshot-tested rather than
+/// assembled in three places.
+fn capability_lines(
+    derivation: &str,
+    route: &str,
+    platform: &str,
+    connector: &str,
+    status: &ato_host_facts::CapabilityStatus,
+) -> Vec<String> {
+    let runnable = if status.state == ato_host_facts::CapabilityState::Advertised {
+        "yes"
+    } else {
+        "no"
+    };
+    let mut lines = vec![format!(
+        "capability derivation_ref={derivation} route={route} platform={platform} connector={connector} runnable={runnable} state={:?}",
+        status.state
+    )];
+    for reason in &status.reasons {
+        let kind = if reason.code.is_warning() {
+            "warning"
+        } else {
+            "reason"
+        };
+        lines.push(format!(
+            "capability {kind}={} message={}",
+            reason.code.as_str(),
+            reason.message
+        ));
+    }
+    lines
 }
 
 fn native_bundle(args: NativeBundleArgs) -> Result<()> {
@@ -3007,6 +3111,10 @@ fn start_portable_attempt(
         cache_root: &cache_root,
         sandbox_shim: &sandbox_shim,
         sandbox_subcommand: "__portable-sandbox-exec",
+        // Admission probes this host with the selected route's own
+        // requirements; `ato run` refuses before realization on the same
+        // decision `ato pack` reported.
+        host: None,
     };
     let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
     // A local Instance's Run is the attempt; `ato run` starts a new one.
@@ -3413,6 +3521,56 @@ fn runtime_binding_values(bindings: Vec<(String, String)>) -> Result<BTreeMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The words `ato pack` prints are part of what an operator acts on, so
+    /// they are pinned here: a reason code and its message, or a warning and
+    /// its message, but never a bare "unavailable".
+    #[test]
+    fn pack_capability_lines_are_stable() {
+        let emulated = ato_host_facts::CapabilityStatus {
+            capability: "route:execution".to_owned(),
+            state: ato_host_facts::CapabilityState::Advertised,
+            reasons: vec![ato_host_facts::Reason::new(
+                ato_host_facts::ReasonCode::PlatformEmulated,
+                "linux/amd64 runs through emulation on this host (a qemu-amd64 binfmt handler is registered on this kernel); it works and it is slower, so the receipt records the emulation rather than refusing the Run",
+            )],
+        };
+        assert_eq!(
+            capability_lines(
+                "sha256:abc",
+                "OCI Service Group",
+                "linux/amd64",
+                "relay",
+                &emulated
+            ),
+            vec![
+                "capability derivation_ref=sha256:abc route=OCI Service Group platform=linux/amd64 connector=relay runnable=yes state=Advertised".to_owned(),
+                "capability warning=platform_emulated message=linux/amd64 runs through emulation on this host (a qemu-amd64 binfmt handler is registered on this kernel); it works and it is slower, so the receipt records the emulation rather than refusing the Run".to_owned(),
+            ]
+        );
+
+        let refused = ato_host_facts::CapabilityStatus {
+            capability: "route:execution".to_owned(),
+            state: ato_host_facts::CapabilityState::Unavailable,
+            reasons: vec![ato_host_facts::Reason::new(
+                ato_host_facts::ReasonCode::DockerDaemonUnreachable,
+                "the docker CLI is installed but no daemon answered (Cannot connect to the Docker daemon); start Docker Desktop or Docker Engine and re-run",
+            )],
+        };
+        assert_eq!(
+            capability_lines(
+                "sha256:def",
+                "OCI Container",
+                "linux/arm64",
+                "none",
+                &refused
+            ),
+            vec![
+                "capability derivation_ref=sha256:def route=OCI Container platform=linux/arm64 connector=none runnable=no state=Unavailable".to_owned(),
+                "capability reason=docker_daemon_unreachable message=the docker CLI is installed but no daemon answered (Cannot connect to the Docker daemon); start Docker Desktop or Docker Engine and re-run".to_owned(),
+            ]
+        );
+    }
 
     fn receipt_with(
         observations: Vec<ato_formation::verify::ReceiptObservation>,
