@@ -467,6 +467,32 @@ impl ModelCache {
         Ok(())
     }
 
+    /// Take a cache lock, retrying an interrupted syscall.
+    ///
+    /// `flock` can return `EINTR` when a signal lands on the requesting
+    /// thread — a busy test process with many children does that — and only
+    /// `EWOULDBLOCK` means another writer actually holds the lock. Treating
+    /// the two the same reported "busy" for a lock nobody held.
+    fn lock_retrying(file: File, exclusive: bool, busy: &'static str) -> Result<File> {
+        loop {
+            let result = if exclusive {
+                FileExt::try_lock_exclusive(&file)
+            } else {
+                FileExt::try_lock_shared(&file)
+            };
+            match result {
+                Ok(()) => return Ok(file),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(error).context(format!("model_cache_busy: {busy}"));
+                }
+                Err(error) => {
+                    return Err(error).context(format!("model_cache_lock_failed: {busy}"));
+                }
+            }
+        }
+    }
+
     fn object_lock(&self, digest: &str, exclusive: bool) -> Result<File> {
         let lock_path = self.markers.join(format!("{}.lock", hex_of(digest)?));
         let mut options = OpenOptions::new();
@@ -477,13 +503,7 @@ impl ModelCache {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let lock = options.open(lock_path)?;
-        if exclusive {
-            FileExt::try_lock_exclusive(&lock)
-        } else {
-            FileExt::try_lock_shared(&lock)
-        }
-        .context("model_cache_busy: object hydration is active")?;
-        Ok(lock)
+        Self::lock_retrying(lock, exclusive, "object hydration is active")
     }
 
     fn mutation_lock(&self, exclusive: bool) -> Result<File> {
@@ -495,13 +515,7 @@ impl ModelCache {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let file = options.open(self.root.join("mutation.lock"))?;
-        if exclusive {
-            FileExt::try_lock_exclusive(&file)
-        } else {
-            FileExt::try_lock_shared(&file)
-        }
-        .context("model_cache_busy: another cache import/download is active")?;
-        Ok(file)
+        Self::lock_retrying(file, exclusive, "another cache import/download is active")
     }
 
     /// Logical object/partial bytes, excluding marker and range control files.
