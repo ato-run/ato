@@ -61,6 +61,41 @@ flowchart LR
     OBS -->|"記録"| REC["Receipt"]
 ```
 
+### KとDの実際の形式
+
+KとDは正規化されたJSONオブジェクトです。同梱の静的bundle（[`samples/interop-static.capsule`](samples/interop-static.capsule)）から抜粋します（ハッシュは短縮）。
+
+キーはJCSの正規順（ダイジェストが対象とする順）で、ハッシュは短縮しています。
+
+```json
+{
+  "requirements": [
+    {"body_digest": "sha256:5ec8...", "id": "app-proof", "method": "GET",
+     "path": "/proof.txt", "port": "app.http", "status": 200,
+     "verifier": "ato.contract.http@1"},
+    {"digest": "sha256:923c...", "id": "source-identity", "input": "workspace",
+     "verifier": "ato.contract.workspace@1"}
+  ],
+  "schema": "ato.contract/1"
+}
+```
+
+```json
+{
+  "effects": "pure",
+  "inputs": [{"content_ref": "sha256:923c...", "id": "workspace",
+              "protocol": "ato.workspace@1"}],
+  "ports": [{"from": "site", "id": "app.http", "protocol": "ato.http@1"}],
+  "schema": "ato.derivation/1",
+  "state": [],
+  "steps": [{"entry": "index.html", "id": "site", "op": "serve",
+             "protocol": "ato.browser@1", "source": "workspace",
+             "spa_fallback": false}]
+}
+```
+
+`ContractRef` と `DerivationRef` は、これらのオブジェクトの正規化バイト列のSHA-256です。このbundleでは `sha256:b565…`（416バイト）が `root_contract_ref`、`sha256:87a0…`（397バイト）が `derivations` の先頭です。作成時の入力（`capsule.toml`）、authoringから正規形への対応表、process route、receiptは[Contract and derivation formats](docs/guides/contract-and-derivation-format.md)にあります。
+
 重要なルールは、Kを固定したままDを変え、同じ条件で検証することです。これにより、実現方法の変更と要求そのものの変更を区別できます。実現が以前とバイト単位で同一である必要はなく、Kは観測していない状態まで記述するものではありません。
 
 Kを満たすことは、Runから得られた観測についての判定です。その実現が同じComputationであることや、Capsuleの参照が同一であることを意味しません。computation-rootとportable applicationのprofileは異なる参照root（`ComputationRef` と `ContractRef`）を使い、相互に読み替えられません。境界の詳細は[研究ツアー](docs/guides/research-tour.md)と[アプリケーション契約](docs/concepts/application-contracts.md)を参照してください。
