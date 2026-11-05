@@ -31,6 +31,11 @@ appointment = create('Service Appointment', {
     'items': [{'item_code': 'SYNTHETIC-SERVICE', 'item_name': 'Synthetic Service',
                'qty': 1, 'uom': 'Nos', 'rate': 100, 'amount': 100}],
 })
+invoice = create('Sales Invoice', {'customer': 'Synthetic Customer', 'company': 'Synthetic Field Company',
+    'posting_date': '2026-11-06', 'due_date': '2026-12-01', 'currency': 'USD',
+    'custom_reference_service_doctype': 'Service Appointment',
+    'custom_reference_service_document': appointment,
+    'items': [{'item_code': 'SYNTHETIC-SERVICE', 'qty': 1, 'rate': 100}]})
 email = 'synthetic-appointment-viewer-' + suffix + '@example.invalid'
 password = secrets.token_urlsafe(32)
 create('User', {'email': email, 'first_name': 'Synthetic Viewer', 'user_type': 'Website User',
@@ -42,16 +47,24 @@ ordinary = viewer.get(base + '/api/resource/Service%20Appointment/' + appointmen
 prefix = base + '/api/method/beveren_fsm.field_service_management.api.service_appointment.'
 one = viewer.get(prefix + 'get_appointment', params={'name': appointment}, timeout=20)
 listing = viewer.get(prefix + 'get_appointments', timeout=20)
+invoice_list = viewer.get(prefix + 'get_invoices_for_appointment',
+                          params={'appointment_name': appointment}, timeout=20)
+invoice_visible = invoice_list.status_code == 200 and any(x.get('name') == invoice
+    for x in invoice_list.json().get('message', []))
 visible = listing.status_code == 200 and any(x.get('name') == appointment for x in listing.json().get('message', []))
 print('Restricted user: standard appointment HTTP', ordinary.status_code,
       '; custom single HTTP', one.status_code, '; custom list HTTP', listing.status_code,
-      '; unrelated appointment in list:', visible)
+      '; unrelated appointment in list:', visible, '; invoice visible:', invoice_visible)
 assert ordinary.status_code in (401, 403)
 assert one.status_code in (401, 403) and not visible, 'Appointment API exposes a restricted document'
+assert not invoice_visible, 'Appointment invoice API exposes a restricted invoice'
 admin_one = admin.get(prefix + 'get_appointment', params={'name': appointment}, timeout=20)
 admin_list = admin.get(prefix + 'get_appointments', timeout=20)
 assert admin_one.status_code == 200 and admin_one.json()['message']['name'] == appointment
 assert admin_list.status_code == 200 and any(x.get('name') == appointment for x in admin_list.json()['message'])
+admin_invoices = admin.get(prefix + 'get_invoices_for_appointment',
+    params={'appointment_name': appointment}, timeout=20)
+assert admin_invoices.status_code == 200 and any(x.get('name') == invoice for x in admin_invoices.json()['message'])
 shared = admin.post(base + '/api/method/frappe.share.add', json={'doctype': 'Service Appointment',
     'name': appointment, 'user': email, 'read': 1, 'notify': 0}, timeout=20)
 assert shared.status_code == 200, (shared.status_code, shared.json().get('exc_type'))
@@ -59,4 +72,16 @@ one = viewer.get(prefix + 'get_appointment', params={'name': appointment}, timeo
 listing = viewer.get(prefix + 'get_appointments', timeout=20)
 assert one.status_code == 200 and one.json()['message']['name'] == appointment
 assert listing.status_code == 200 and any(x.get('name') == appointment for x in listing.json()['message'])
-print('Administrator and explicitly shared user could read the appointment through both endpoints.')
+invoice_list = viewer.get(prefix + 'get_invoices_for_appointment',
+                          params={'appointment_name': appointment}, timeout=20)
+assert invoice_list.status_code in (401, 403), invoice_list.status_code
+shared = admin.post(base + '/api/method/frappe.share.add', json={'doctype': 'Sales Invoice',
+    'name': invoice, 'user': email, 'read': 1, 'notify': 0}, timeout=20)
+assert shared.status_code == 200, (shared.status_code, shared.json().get('exc_type'))
+invoice_list = viewer.get(prefix + 'get_invoices_for_appointment',
+                          params={'appointment_name': appointment}, timeout=20)
+assert invoice_list.status_code == 200 and any(x.get('name') == invoice for x in invoice_list.json()['message'])
+mismatched = admin.get(prefix + 'get_invoices_for_appointment',
+    params={'appointment_name': appointment, 'service_order': 'SVC-ORD-2026-99999'}, timeout=20)
+assert mismatched.status_code == 403, mismatched.status_code
+print('Administrator and explicitly shared user could read the appointment and shared invoice; unrelated order rejected.')

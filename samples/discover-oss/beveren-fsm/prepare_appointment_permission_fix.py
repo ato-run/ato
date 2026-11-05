@@ -43,6 +43,19 @@ def main():
                         'except Exception:\n\t\t\t\t\t\tservice_area_name = None\n\t\t\t\t\t\t# Silently skip if Service Area', 1)
     text = text.replace('except Exception:\n\t\t\t\t\t# Silently skip if Service Area',
                         'except Exception:\n\t\t\t\t\tservice_area_name = None\n\t\t\t\t\t# Silently skip if Service Area', 1)
+    start = text.index('def get_invoices_for_appointment(')
+    section = text[start:]
+    section = replace_once(section, '\tfields = [\n',
+        '\tappointment = frappe.get_doc("Service Appointment", appointment_name)\n'
+        '\tappointment.check_permission("read")\n'
+        '\tif service_order:\n'
+        '\t\tif service_order != appointment.service_order:\n'
+        '\t\t\tfrappe.throw("Service Order does not match appointment", frappe.PermissionError)\n'
+        '\t\tfrappe.get_doc("Service Order", service_order).check_permission("read")\n\n'
+        '\tfields = [\n')
+    section = replace_once(section, 'return frappe.get_all("Sales Invoice",',
+                           'return frappe.get_list("Sales Invoice",')
+    text = text[:start] + section
     compile(text, args.upstream.name, "exec")
     result = text.encode("utf-8")
     with args.output.open("xb") as output:
