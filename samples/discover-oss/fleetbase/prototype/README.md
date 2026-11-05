@@ -30,8 +30,7 @@ limits, the forwarded-proto trust boundary and the generated instance origin
 also need hosted validation. The supervisor restricts the socket to the configured
 application hostname and port, forces authenticated `enforce` mode, and disables
 upstream polling that could override those settings from the console. Browser
-origin filtering was tested locally; hosted proxy and authenticated end-to-end
-websocket behavior remain unverified.
+origin filtering was tested locally; hosted proxy behavior remains unverified.
 
 The upstream Laravel compromised-password check fails open on network errors.
 `api/patch_breach_verifier.py` checks the upstream file digest and generates a
@@ -72,6 +71,21 @@ Discover publication all remain unverified or incomplete.
 Relay tests: `PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.tmp" python3 -m unittest
 discover -s samples/discover-oss/fleetbase/prototype/breach_proxy -p 'test_*.py'
 -v` from the repository root.
+
+On 2026-11-06, `run-socket-roundtrip.sh` exercised the local arm64 prototype
+on an internal Docker network with a newly initialized state volume, generated
+synthetic credentials and a test-only mock breach checker. Through the console
+nginx proxy, it created two accounts in separate synthetic organizations, obtained a real API-minted socket
+token, verified the allowed and a disallowed websocket Origin, and checked
+denial of an anonymous subscription and a subscription to the other organization's user channel.
+The authenticated client subscribed to its own API-authorized test channel;
+the API's signed publish reached that client and ignored an attempted channel
+override. This exercised `socketcluster-client` in Node, not a rendered browser
+or a hosted Runner, and did not use real users or business data. The script
+uses `volume-nocopy`: Docker's default volume population copies the image's
+`/data/caddy` into an otherwise new volume, causing the supervisor to reject
+the nonempty state as designed. The proof removes its own containers, network
+and synthetic volume on exit.
 
 ## Composer source and notice inventory
 
