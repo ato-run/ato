@@ -34,7 +34,7 @@ Atoとato.runは責務が異なります。オープンソースの中核がサ�
 必要なソフトウェアを動かせる計算機を、すでに持っているかもしれません。
 
 - **自分のハードウェアを使う。** ローカルPC、自宅サーバー、ワークステーション、管理下のリモートマシンで動かせます。
-- **データの管理を保つ。** ローカル実行とInstanceはCLIのデータディレクトリ（`ATO_HOME`）配下に書き込みます。外部接続はBindingとして宣言します。
+- **データの管理を保つ。** Atoが管理するローカルInstanceのメタデータと保存データは、既定でCLIのデータディレクトリ（`ATO_HOME`）配下に保持されます。`--verification-receipt` のような明示的な出力先や、宣言した外部Bindingへの書き込みは別です。
 - **既存のツールを使う。** Docker、Nix、通常のプロセス、VMスナップショットは有効な実現手段です。Atoはそれらを置き換えません。
 - **実現の前に条件を記述する。** Contractが満たすべき条件を宣言し、Derivationがその実現方法を宣言します。1つのbundleに複数のDerivationを宣言できます。
 - **動いたことを検証する。** 検証器は観測結果をreceiptに記録し、`fully_satisfied` は宣言した全観測が満たされた場合だけtrueになります。
@@ -76,6 +76,8 @@ source-identity: satisfied
 
 **Computation** は、ある地点から継続できる計算であり、ファイルやプロセスそのものではありません。**Capsule** は、封印された、不変で参照可能な継続地点です。Capsuleを再開すると**Run**が開始され、計算を進められます。Runの現在地点は再び新しいCapsuleとして封印でき、同じCapsuleから複数のRunを開始すれば、Capsuleを変更せずに分岐できます。
 
+これは概念モデルです。現在のCLIでは、再封印のライフサイクル（`init` / `resume` / `stop` / `encap`）はcomputation-root profileで実装されています。portable applicationの `ato run` は一時的なRunであり、durableなローカルInstanceは新しいCapsuleを封印するのではなく、Instanceのライフサイクルでデータを保持します。
+
 ```mermaid
 flowchart LR
     C["Computation C"] -->|"interaction"| C2["Computation C'"]
@@ -109,7 +111,7 @@ ato.runは発見・共有・Runner接続を提供します。ユーザー所有�
 
 ## セキュリティと制限
 
-- NacelleはOSネイティブの隔離を適用します：macOSはSeatbelt、LinuxはBubblewrapとLandlockです。開発モードはセキュリティ境界ではなく、コンテナやVMと同等の境界でもありません。
+- `ato` CLI、ローカルランタイム、Connected Workerは、リポジトリ内の `ato-sandbox` 実装を通じてOSネイティブのプロセス隔離を適用します。LinuxはLandlock（kernel 5.13+）、macOSはSeatbeltで、起動経路が提供する場合はBubblewrap containmentも使います。開発モードは適用をスキップし、セキュリティ境界ではありません。コンテナやVMと同等の境界でもありません。
 - 未信頼のアプリケーションは、manifestが宣言する最小のfilesystem/networkポリシーで実行してください。機密パスは既定で拒否されますが、明示的に許可した一覧外のパスは設計上許可されます。
 - ホスト間の一般的な状態復元、任意のプロセスメモリ復元、Hosted saved-dataのround-trip証明は現在提供していません。
 - Contractの一致は、セキュリティ、ライセンス遵守、副作用の安全性を保証しません。
