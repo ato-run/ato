@@ -138,6 +138,106 @@ fn byte_identical_fixture_runs_and_emits_a_fully_satisfied_cli_receipt() {
 }
 
 #[test]
+fn authored_startup_condition_is_observed_before_contract_verification() {
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("app");
+    fs::create_dir_all(&source).unwrap();
+    fs::copy(
+        authored_multi_process_fixture().join("app.py"),
+        source.join("app.py"),
+    )
+    .unwrap();
+    let mut contract_ref = None;
+    for (index, startup_path) in ["/", "/missing"].into_iter().enumerate() {
+        let manifest = format!(
+            r#"schema = "ato.capsule/2"
+[application]
+title = "Startup observation fixture"
+surface_path = "/"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[contract]
+mode = "all"
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+[[derivation]]
+id = "python"
+use = "ato.process@1"
+argv = ["python3", "-B", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = {{ python = "3.12" }}
+[derivation.startup]
+port = "app.http"
+path = "{startup_path}"
+timeout_ms = 1000
+expect_status = 200
+[effects]
+default = "pure"
+"#
+        );
+        fs::write(source.join("capsule.toml"), manifest).unwrap();
+        let bundle_path = work.path().join(format!("startup-{index}.capsule"));
+        ato()
+            .args(["pack"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&bundle_path)
+            .assert()
+            .success();
+        let bundle = match decode_capsule_bundle_document(&fs::read(&bundle_path).unwrap()).unwrap()
+        {
+            CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
+            other => panic!("pack must emit portable v3, got {other:?}"),
+        };
+        match &contract_ref {
+            Some(previous) => assert_eq!(previous, &bundle.index.root_contract_ref),
+            None => contract_ref = Some(bundle.index.root_contract_ref.clone()),
+        }
+        let home = tempfile::tempdir().unwrap();
+        let receipt_path = work.path().join(format!("receipt-{index}.json"));
+        let run = ato_with_home(home.path())
+            .arg("run")
+            .arg(&bundle_path)
+            .arg("--no-open")
+            .arg("--verification-receipt")
+            .arg(&receipt_path)
+            .output()
+            .unwrap();
+        if index == 0 {
+            if !succeeded_or_rejected_by_runtime_admission(&run, &receipt_path) {
+                return;
+            }
+            let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+            assert_eq!(receipt["fully_satisfied"], true);
+            assert_eq!(receipt["contract_ref"], bundle.index.root_contract_ref);
+            assert_eq!(receipt["derivation_ref"], bundle.index.derivations[0]);
+        } else {
+            assert!(
+                !run.status.success(),
+                "unready startup unexpectedly succeeded"
+            );
+            assert!(
+                !receipt_path.exists(),
+                "unready startup published a receipt"
+            );
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(
+                stderr.contains("startup") || stderr.contains("readiness"),
+                "{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
 fn one_byte_bundle_tamper_fails_before_running() {
     let output = tempfile::tempdir().unwrap();
     let tampered = output.path().join("tampered.capsule");

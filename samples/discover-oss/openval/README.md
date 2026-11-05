@@ -39,20 +39,21 @@ offline, hash-checked install. The assembled tree also passed that sequence in
 a Linux x86-64 container with a read-only filesystem, no network, a non-root
 user and a temporary writable directory; the Python base image was
 `python@sha256:2199a62885a12290dc9c5be3ca0681d367576ab7bf037da120e564723292a2f0`.
-These were **not** Ato Runner executions and produced no verification receipt.
-Local `ato run` refused the requested D with
-`execution_authority_required`; no hosted Run or receipt exists. The npm
-audit of the upstream lock reported vulnerabilities, including a critical one;
+With the startup-admission correction in this branch, local `ato run` also
+produced a `cli-local` receipt with `fully_satisfied = true` for the page and
+all three HTTP API health observations. The workbook round-trip above was
+tested separately, not by that receipt. No hosted Run or receipt exists. The
+npm audit of the upstream lock reported vulnerabilities, including a critical one;
 their applicability to the static export still needs review. Do not publish
 as usable until the Runner, admission, security findings and real browser
 workflow have been verified. This pre-alpha software must not be represented
 as verified financial advice or production-ready underwriting.
 
-The declared startup gate makes the D's execution requirements non-empty;
-the current normal-execution admission rejects such requirements without a
-separate authorization. The gate gives the offline dependency installation
-up to 120 seconds to become ready and must not be removed merely to obtain a
-passing result. The hosted failure mode has not been tested for this bundle.
+Without the startup-admission correction in this branch, the declared startup
+gate makes the D's execution requirements non-empty and normal execution is
+refused. The gate gives the offline dependency installation up to 120 seconds
+to become ready and must not be removed merely to obtain a passing result.
+The hosted failure mode has not been tested for this bundle.
 
 The locally assembled 67 MiB candidate has bundle SHA-256
 `142eeae345e790bbb838c253cbabdb21b6d645bff809c73384110e84aa85a6e9`,

@@ -208,7 +208,12 @@ pub(crate) fn admit_with_model_delivery(
                 );
             }
         }
-        _ if !spec.derivation.requirements.is_empty() => {
+        // Readiness is an observation of an already declared Port, not a
+        // capability grant. Host conditions were refused above; neither one
+        // makes requested network or authority capabilities implicitly safe.
+        _ if !spec.derivation.requirements.network.is_empty()
+            || !spec.derivation.requirements.authority.is_empty() =>
+        {
             return refused(
                 "execution_authority_required",
                 "requirements in D do not grant normal execution; risk assessment and authorization for this D digest are required",
@@ -424,13 +429,119 @@ mod tests {
                     .as_deref(),
                 expected
             );
-            assert_eq!(
-                admit(&spec, EffectAuthorization::Unattended, None)
-                    .map(|f| f.code)
-                    .as_deref(),
-                Some("execution_authority_required")
-            );
+            for authorization in [
+                EffectAuthorization::Unattended,
+                EffectAuthorization::UserInvoked {
+                    derivation_ref: "sha256:d",
+                },
+            ] {
+                assert_eq!(
+                    admit(&spec, authorization, None).map(|f| f.code).as_deref(),
+                    Some("execution_authority_required")
+                );
+            }
         }
+    }
+
+    #[test]
+    fn startup_condition_alone_needs_no_capability_grant() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".into(),
+            requirements: vec![],
+        };
+        let mut d = derivation(EffectClass::Pure);
+        d.requirements = serde_json::from_value(serde_json::json!({
+            "startup": {"port":"app.http", "path":"/health", "timeout_ms":120000}
+        }))
+        .unwrap();
+        for authorization in [
+            EffectAuthorization::Unattended,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+        ] {
+            let spec = AttemptSpec {
+                contract: &contract,
+                contract_ref: "sha256:k",
+                derivation: &d,
+                derivation_ref: "sha256:d",
+                shape: CandidateShape::Process,
+                input_refs: Default::default(),
+                instance_snapshot_ref: None,
+                scenarios: vec![],
+            };
+            assert_eq!(admit(&spec, authorization, None).map(|f| f.code), None);
+        }
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &d,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: vec![],
+        };
+        assert_eq!(
+            admit(
+                &spec,
+                EffectAuthorization::UserInvoked {
+                    derivation_ref: "sha256:other"
+                },
+                None,
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("authorization_mismatch")
+        );
+        for requirement in [
+            serde_json::json!({"network":[{"phase":"runtime","host":"example.com","port":443}], "startup":{"port":"app.http","path":"/health","timeout_ms":120000}}),
+            serde_json::json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"bind"}], "startup":{"port":"app.http","path":"/health","timeout_ms":120000}}),
+        ] {
+            d.requirements = serde_json::from_value(requirement).unwrap();
+            let spec = AttemptSpec {
+                contract: &contract,
+                contract_ref: "sha256:k",
+                derivation: &d,
+                derivation_ref: "sha256:d",
+                shape: CandidateShape::Process,
+                input_refs: Default::default(),
+                instance_snapshot_ref: None,
+                scenarios: vec![],
+            };
+            for authorization in [
+                EffectAuthorization::Unattended,
+                EffectAuthorization::UserInvoked {
+                    derivation_ref: "sha256:d",
+                },
+            ] {
+                assert_eq!(
+                    admit(&spec, authorization, None).map(|f| f.code).as_deref(),
+                    Some("execution_authority_required")
+                );
+            }
+        }
+        d.requirements = serde_json::from_value(serde_json::json!({
+            "host": {"os":"linux", "arch":"x86_64"},
+            "startup": {"port":"app.http", "path":"/health", "timeout_ms":120000}
+        }))
+        .unwrap();
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &d,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: vec![],
+        };
+        assert_eq!(
+            admit(&spec, EffectAuthorization::Unattended, None)
+                .map(|f| f.code)
+                .as_deref(),
+            Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
+        );
     }
 
     #[test]
