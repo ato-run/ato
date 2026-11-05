@@ -385,6 +385,20 @@ impl ValidatorAgent {
                 failure_code: code.to_owned(),
             });
         }
+        // Publication has a separate ingress-protection gate. Ask the control
+        // plane to probe this exact live Run while this claim is still held;
+        // it persists the result independently of the Contract receipt. Older
+        // control planes may not implement the endpoint, and a failed probe
+        // must not change an otherwise valid private Run's Contract verdict.
+        if point.receipt.fully_satisfied
+            && job.run_id.is_some()
+            && job.lease_id.is_some()
+            && deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(10)
+        {
+            if let Err(error) = self.api.probe_ingress_protection(&job) {
+                eprintln!("[validator] ingress protection was not recorded: {error}");
+            }
+        }
         self.api.ack_runtime(&job, &point.receipt)?;
         Ok(ValidatorRunOutcome::HostedVerified {
             bundle_id: job.bundle_id,
@@ -1590,6 +1604,31 @@ impl HttpValidatorApi {
                 response.status()
             );
         }
+        Ok(())
+    }
+
+    /// Request independent, server-owned publication evidence. The response
+    /// body is deliberately not treated as a Contract observation or as proof:
+    /// only the control plane's persisted evidence can satisfy publication.
+    fn probe_ingress_protection(&self, job: &ValidationJob) -> Result<()> {
+        let path = format!(
+            "/v1/capsule-bundles/runtime-verification-jobs/{}/ingress-protection",
+            job.job_id
+        );
+        let response = self
+            .claimed(
+                self.client
+                    .post(self.url(&path))
+                    .timeout(Duration::from_secs(8)),
+                &job.claim_id,
+            )
+            .send()
+            .map_err(|_| anyhow::anyhow!("probe transport failed"))?;
+        ensure!(
+            response.status().is_success(),
+            "probe returned {}",
+            response.status()
+        );
         Ok(())
     }
 
