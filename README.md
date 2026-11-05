@@ -137,6 +137,12 @@ bytes of these objects: here `sha256:b565…` (416 bytes) is
 field map, a process route and a receipt are in
 [Contract and derivation formats](docs/guides/contract-and-derivation-format.md).
 
+K is a partial specification: it guarantees only the observations it declares.
+Equal `ContractRef` values mean equal canonical K bytes, not behavioral
+equivalence, and a satisfied K does not make two Runs the same Computation. The
+verifier list, the guarantees and the limits of identity assurance are in the
+format guide.
+
 The rule that matters is: freeze K, change D, and verify against the same
 conditions. That separates changing the realization from changing the
 requirements. A realization does not have to be byte-identical to the previous

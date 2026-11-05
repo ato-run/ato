@@ -268,7 +268,106 @@ A verification receipt is emitted for a Run. This is a trimmed real receipt:
   They are never part of K or D, and a Formation attempt may omit
   `bundle_sha256` because no `.capsule` exists yet.
 
-## 6. What the formats do not contain
+## 6. What K can express today
+
+K is a set of requirements, and every requirement is required: `mode = "all"`
+is the only authoring mode. Each requirement names a verifier. The verifiers in
+the current tree are:
+
+| Verifier | Fields | What it checks | What it does not check |
+|---|---|---|---|
+| `ato.contract.http@1` | `port`, `method` (default GET), `path`, `status`, optional `body_digest` | One HTTP response at a logical Port: the status, and the whole-body SHA-256 when declared. | Headers, JSON structure, other paths or methods, timing, or behavior after the response. |
+| `ato.contract.workspace@1` | `input`, `digest` | The exact content reference resolved for that input, i.e. the source closure. | Behavior. A behavioral K omits this requirement. |
+| `ato.contract.scenario@1` | The `ato.scenario/1` object pinned by digest; verifier version 1 | An ordered HTTP scenario with status, body and JSON assertions, captures and `fresh_instance` isolation. | Exhaustive API coverage, concurrency, timing, or effects outside the scenario's HTTP steps. |
+| `ato.contract.tls@1` | `port`, `server_name`, `start` | The certificate presented on the Port covers the name, is inside its validity window, validates to a public root, and the handshake completes. | Certificate serial or byte pinning; client certificates; policy beyond the chain check. |
+| `ato.contract.instance-snapshot@1` | `digest` | The exact restored saved-data snapshot. | Arbitrary files, process memory, or external databases. |
+
+Authoring and binding constraints:
+
+- Requirement ids are unique, and the canonical requirement set is sorted by
+  id. Duplicate ids are refused when the document is parsed.
+- The authoring grammars accept only the verifier names they know. A verifier
+  this build does not know is reported as `verifier_unknown` at verification,
+  never silently treated as satisfied.
+- `ato.capsule/2` can author HTTP, scenario and TLS observations. A workspace
+  identity observation is authored with `ato.capsule/1` (see §1).
+- K is sealed at formation. A Run does not recapture or rewrite it. Adding,
+  removing or changing a requirement produces different canonical bytes, a
+  different `ContractRef`, and therefore a different Capsule identity in this
+  profile.
+
+## 7. What identity assurance is guaranteed
+
+These guarantees follow from the format and the verifier, not from a claim that
+K describes the whole application:
+
+- **Content addressing.** `ContractRef` is the SHA-256 of the JCS-canonical K
+  bytes. Given collision resistance and the same canonicalization, equal refs
+  mean an equal requirement set; the bundle file bytes, the chosen D, Instance
+  IDs and storage paths do not enter that comparison.
+- **Validated closure.** Before realization, the bundle reader checks the
+  profile, canonical encoding, descriptor digests and the reachable object
+  closure. A payload that does not match its reference, an unknown profile or
+  an unreachable required object is rejected rather than partially used.
+- **Frozen verification.** A receipt names the `contract_ref` it was verified
+  against. The verifier compares a Run with that frozen K; it does not replace
+  the expectations with whatever the Run returned.
+- **All-or-nothing satisfaction.** `fully_satisfied` is true only when every
+  required observation is `satisfied` from actual evidence. `deferred` and
+  `failed` do not qualify, and a deferred observation names the gate that must
+  decide it later.
+- **Source binding when declared.** A K that includes
+  `ato.contract.workspace@1` is source-bound: a different source closure fails
+  with `input_identity_mismatch`. A behavioral K deliberately allows a different
+  source to satisfy the same K.
+- **Saved-data binding when declared.** A v4 snapshot requirement binds the
+  restored snapshot digest. Different saved data fails with
+  `instance_snapshot_mismatch`.
+- **Profile separation.** A portable-application `ContractRef` is not a
+  computation-root `ComputationRef`. Satisfying K does not turn one profile's
+  reference into the other.
+
+## 8. Limits of that assurance
+
+- **K equality is not behavioral equivalence.** There is no bisimulation or
+  semantic solver here. Two realizations can satisfy the same K while differing
+  in unobserved behavior, performance, resource use, security properties or
+  side effects.
+- **Two different Ks can be satisfied by the same behavior.** `ContractRef`
+  equality tells you the declared conditions match, not that one K is "more
+  complete" than another. To compare preservation, compare the canonical
+  requirement sets, not the refs alone.
+- **K is partial by construction.** Anything not written as a requirement is
+  not guaranteed: unobserved endpoints, concurrency, timing, headers, JSON
+  shape beyond the scenario assertions, and behavior after the response.
+- **K does not bind D.** A bundle may declare several Ds; the receipt names the
+  selected one. Another D may satisfy the same K, and D membership, order or
+  failure never enters `ContractRef`.
+- **Satisfying K is not the same Computation.** A Run that satisfies K is not
+  thereby the same Computation or the same Capsule reference as another Run.
+  This is the identity boundary described in the README and
+  [application contracts](../concepts/application-contracts.md).
+- **No continuity guarantee for user data.** Snapshot observation covers the
+  declared saved resources only. Restart persistence, volume transfer, browser
+  state flush from a live Hosted Instance and a proven Hosted round-trip are
+  separate, and some remain unproven (see
+  [state continuity](../concepts/state-continuity.md)).
+- **Evidence is Run-specific.** HTTP observations are tied to a Port and a
+  dynamic endpoint; TLS validity depends on the current clock; execution
+  evidence belongs to that Run. A receipt from one host does not certify another
+  host or a later Run.
+- **Formation can defer.** Scenario, TLS and body-digest checks need a running
+  candidate, so a formation-time result may be `deferred`. Only a runtime
+  receipt with all observations satisfied is `fully_satisfied`.
+- **Canonicalization matters.** The digest covers JCS bytes, not a pretty-printed
+  copy. Reformatting, changing key order, or adding whitespace changes the bytes
+  you hash even though it does not change the JSON meaning.
+- **K is not a security or license attestation.** Contract satisfaction says
+  nothing about sandbox strength, permissions, vulnerability status, license
+  compliance, or the safety of side effects. Those are separate boundaries.
+
+## 9. What the formats do not contain
+
 
 - K does not contain the list of Ds, their order, whether they succeeded, an
   Instance or Asset ID, storage paths, grants, signed URLs, secrets, or
