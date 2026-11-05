@@ -25,8 +25,12 @@ CHILDREN = []
 stopping = False
 
 
+class LocalProofError(Exception):
+    """A fixed diagnostic that does not contain user-provided values."""
+
+
 def fail(message):
-    raise RuntimeError(message)
+    raise LocalProofError(message)
 
 
 def handle_signal(_signum, _frame):
@@ -182,14 +186,18 @@ def main():
         fail('Local state volume is missing')
     lock = os.open(DATA / '.local-proof.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail('The local state volume is already in use')
         if (DATA / 'private').is_symlink() or (DATA / 'private/initialized').is_symlink():
             fail('Unexpected local private state')
         first = not (DATA / 'private/initialized').is_file()
         if first:
-            if (not password or not 16 <= len(password) <= 256 or '\x00' in password
-                    or any(item.name != '.local-proof.lock' for item in DATA.iterdir())):
-                fail('Initial binding or empty local state is required')
+            if not password or not 16 <= len(password) <= 256 or '\x00' in password:
+                fail('An initial administrator binding of 16–256 characters is required')
+            if any(item.name != '.local-proof.lock' for item in DATA.iterdir()):
+                fail('The initial local state volume is not empty')
             prepare_layout()
             marker(DATA / 'private/initializing')
             result = subprocess.run(['/usr/bin/mariadb-install-db', '--no-defaults', '--datadir=/data/db',
@@ -248,6 +256,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except LocalProofError as error:
+        print(f'Local synthetic supervisor stopped: {error}', file=sys.stderr)
+        raise SystemExit(1) from None
     except Exception as error:
         print(f'Local synthetic supervisor stopped: {type(error).__name__}', file=sys.stderr)
         raise SystemExit(1) from None
