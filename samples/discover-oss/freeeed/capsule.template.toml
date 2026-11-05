@@ -1,0 +1,56 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "FreeEed Processing Preview"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "surface"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+
+[[contract.observation]]
+id = "tika-health"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+status = 200
+
+[[derivation]]
+id = "oci-service-group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "tika"
+runtimes = { "oci.image" = "docker.io/apache/tika@sha256:ffab324253edc54706e8882dd28190b1e6559c344b5315ae8a74b9efda9e7291", "oci.workspace_mount" = "/capsule", "oci.memory_bytes" = "1073741824", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "128" }
+argv = ["--port", "9998"]
+env = { JAVA_TOOL_OPTIONS = "-Djava.io.tmpdir=/dev/shm", TMPDIR = "/dev/shm" }
+ports = [{ id = "tika.tcp", guest_port = 9998 }]
+
+[[derivation.service]]
+id = "preview"
+runtimes = { "oci.image" = "docker.io/library/eclipse-temurin@sha256:43338b737d0f75d6883d3c4563bc66974113ca8ac296e82f39d161fb3d398f0d", "oci.workspace_mount" = "/capsule", "oci.memory_bytes" = "2147483648", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256", "oci.entrypoint" = "/bin/sh" }
+argv = ["/capsule/start.sh"]
+ports = [{ id = "app.http", guest_port = 8080 }]
+state = ["data"]
+depends_on = ["tika"]
+
+[effects]
+default = "pure"
