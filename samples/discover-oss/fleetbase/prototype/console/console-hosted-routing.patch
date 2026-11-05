@@ -1,0 +1,5 @@
+--- a/console/app/components/onboarding/form.js
++++ b/console/app/components/onboarding/form.js
+@@ -41 +41 @@
+-    @tracked hostedRouting = true;
++    @tracked hostedRouting = false;
