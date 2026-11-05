@@ -1732,13 +1732,23 @@ fn portable_peer_shim_command(
     let runtime_root = runtime_root
         .canonicalize()
         .context("canonicalize portable service runtime")?;
+    // The broker may live outside this service's runtime root: when the Run
+    // root is too deep for `sun_path`, it moves to a short directory under the
+    // platform temp dir. The shim still has to resolve that path, which needs
+    // metadata lookup on its ancestors, so the socket's directory is readable
+    // as well as the socket itself.
+    let broker_root = broker_socket.parent().map(Path::to_path_buf);
+    let read_only = [
+        Some(workspace.clone()),
+        Some(sandbox_shim.to_path_buf()),
+        broker_root,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(portable_system_roots());
     let policy = SandboxPolicy::new()
         .allow_read_write([runtime_root.clone()])
-        .allow_read_only(
-            [workspace, sandbox_shim.to_path_buf()]
-                .into_iter()
-                .chain(portable_system_roots()),
-        )
+        .allow_read_only(read_only)
         .with_network(false)
         .allow_tcp_bind([shim_port])
         .with_ipc_socket_paths([broker_socket.to_path_buf()]);
@@ -2910,7 +2920,17 @@ mod process_group_policy_tests {
         let policy = policy(&policy_path);
         assert_eq!(policy.allowed_bind_tcp_ports, [43102]);
         assert!(policy.allowed_connect_tcp_ports.is_empty());
-        assert_eq!(policy.ipc_socket_paths, [broker]);
+        assert_eq!(policy.ipc_socket_paths, [broker.clone()]);
         assert!(!policy.allow_network);
+        // A broker outside the service runtime (the short-path fallback under
+        // the platform temp directory) still has to be traversable: path
+        // resolution needs metadata on its ancestors, and without them
+        // connect() fails with EPERM.
+        let broker_root = broker.parent().unwrap().to_path_buf();
+        assert!(
+            policy.read_only_paths.contains(&broker_root),
+            "the shim policy must let the shim reach the broker's directory: {:?}",
+            policy.read_only_paths
+        );
     }
 }
