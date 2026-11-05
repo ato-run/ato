@@ -15,8 +15,8 @@ fn sample(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn the_native_process_group_binds_one_route_with_its_declared_edge() {
-    let (bytes, bundle) = build_authored_bundle_v2(&sample("native-process-group"))
-        .expect("the sample packs");
+    let (bytes, bundle) =
+        build_authored_bundle_v2(&sample("native-process-group")).expect("the sample packs");
     assert!(!bytes.is_empty());
     let routes = validate_all_derivations(&bundle).expect("the route is admitted");
     let [route] = routes.as_slice() else {
@@ -40,10 +40,7 @@ fn the_native_process_group_binds_one_route_with_its_declared_edge() {
             .iter()
             .map(|port| (port.id.as_str(), port.protocol.as_str()))
             .collect::<Vec<_>>(),
-        [
-            ("backend.http", "ato.tcp@1"),
-            ("app.http", "ato.http@1"),
-        ]
+        [("backend.http", "ato.tcp@1"), ("app.http", "ato.http@1"),]
     );
     // K observes the responses the author declared; the group adds no
     // topology, internal reachability, or process observation to it.
@@ -60,16 +57,13 @@ fn the_native_process_group_binds_one_route_with_its_declared_edge() {
 
 #[test]
 fn the_oci_service_group_still_admits_unchanged() {
-    let (_, bundle) = build_authored_bundle_v2(&sample("oci-service-group-proof"))
-        .expect("the sample packs");
+    let (_, bundle) =
+        build_authored_bundle_v2(&sample("oci-service-group-proof")).expect("the sample packs");
     let routes = validate_all_derivations(&bundle).expect("the OCI group is admitted");
     let [route] = routes.as_slice() else {
         panic!("one route");
     };
-    assert_eq!(
-        route.realization,
-        PortableRealizationKind::OciServiceGroup
-    );
+    assert_eq!(route.realization, PortableRealizationKind::OciServiceGroup);
     assert!(
         route
             .derivation
