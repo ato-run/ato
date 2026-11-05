@@ -28,8 +28,10 @@ The console's entrypoint requires `ATO_BINDING_CONSOLE_ORIGIN`; the API
 supervisor separately requires `ATO_BINDING_APP_ORIGIN`. Both must contain the
 same canonical origin. A service-group Binding may be delivered to only one
 service, so one shared Binding cannot supply both values. Automatic, consistent
-delivery of the hosted Instance's actual origin is not yet implemented or
-verified; a deployable candidate must solve that without embedding a physical
+delivery of the hosted Instance's actual origin has a proposed implementation
+in draft API PR https://github.com/ato-run/ato-api/pull/1136, but is not yet
+deployed or verified on staging; a deployable candidate must do that without
+embedding a physical
 origin in the Contract or Derivation. Nginx sets the upstream Host, scheme and port from the
 Binding and removes client-supplied forwarding headers. It accepts an internal
 Host so Ato's readiness and Contract observations can reach the application;
