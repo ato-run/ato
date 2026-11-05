@@ -34,3 +34,23 @@ The current staging API source dispatches volume maintenance only through the
 operator-managed pool, while this Instance runs on a personal Runner. That is
 a concrete incompatibility, but the error alone does not establish whether
 other Runner capabilities or availability would also prevent a checkpoint.
+
+## Alternative owner bootstrap candidate
+
+`secret-bootstrap/` is a separate, unverified staging candidate. It declares
+an `initial_admin_password` secret Binding and maps its per-run environment
+projection to PicPeak's supported `ADMIN_PASSWORD` startup path. No secret is
+included in the Capsule. For a new database, PicPeak creates the initial
+`admin@example.com` account, marks its password for change, and writes the
+initial password to `/data/db/ADMIN_CREDENTIALS.txt` with owner-only mode.
+The owner must choose a unique temporary password, enter it in the Ato binding
+prompt themselves, then change it in PicPeak. The initial password must not be
+reused elsewhere. The data and initial credentials file live on the selected
+Runner's volume. Binding persistence and credential-file lifecycle must be
+reviewed before broader use or publication.
+
+A local synthetic-credential Docker test on 2026-11-05 used the pinned image,
+a read-only container root, no network, a non-root UID, and a dedicated
+writable volume. Admin login returned 200 before and after a container restart.
+This is not a hosted verification; the candidate must not replace or mutate
+the earlier Instance without explicit state and credential handling.
