@@ -1,0 +1,52 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "FreeEed Text Processing Preview"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "surface"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+
+[[contract.observation]]
+id = "text-extractor-health"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+status = 200
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["/capsule/start-single-text.sh"]
+cwd = "."
+guest_port = 8080
+runtimes = { "oci.image" = "docker.io/library/eclipse-temurin@sha256:43338b737d0f75d6883d3c4563bc66974113ca8ac296e82f39d161fb3d398f0d", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/bin/sh", "oci.workspace_mount" = "/capsule", "oci.working_dir" = "/capsule", "oci.memory_bytes" = "2147483648", "oci.cpu_limit_millis" = "2000", "oci.pids_limit" = "256" }
+
+[derivation.startup]
+port = "app.http"
+path = "/health"
+timeout_ms = 120000
+expect_status = 200
+
+[effects]
+default = "pure"

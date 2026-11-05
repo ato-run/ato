@@ -19,7 +19,10 @@ def main() -> None:
     parser.add_argument("build", type=Path, help="patched Maven source/build tree")
     parser.add_argument("output", type=Path, help="new directory beneath .tmp")
     parser.add_argument("--engine", type=Path, help="explicit text-only preview JAR")
+    parser.add_argument("--single-text", action="store_true", help="use the local text extractor and a single OCI service")
     args = parser.parse_args()
+    if args.single_text and not args.engine:
+        parser.error("--single-text requires an explicitly trimmed --engine")
     upstream = args.upstream.resolve(strict=True)
     build = args.build.resolve(strict=True)
     output = args.output.resolve()
@@ -49,18 +52,21 @@ def main() -> None:
     if not index or index > 99:
         raise ValueError("unexpected engine size")
     (output / "engine.sha256").write_text(digest.hexdigest() + "\n")
-    shutil.copyfile(local / "capsule.template.toml", output / "capsule.toml")
-    shutil.copyfile(local / "start.sh", output / "start.sh")
+    manifest = "single-text.capsule.toml" if args.single_text else "capsule.template.toml"
+    startup = "start-single-text.sh" if args.single_text else "start.sh"
+    shutil.copyfile(local / manifest, output / "capsule.toml")
+    shutil.copyfile(local / startup, output / startup)
     preview = output / "preview"
     preview.mkdir()
     subprocess.run(["javac", "--release", "17", "-d", str(preview),
-                    str(local / "ProcessingPreview.java")], check=True)
+                    str(local / "ProcessingPreview.java"), str(local / "TextOnlyExtractor.java")], check=True)
     source = output / "source"
     source.mkdir()
     shutil.copyfile(sources, source / "freeeed-processing-sources.jar")
     for name in ("ProcessingPreview.java", "patch_upstream.py", "assemble_candidate.py",
                  "trim_text_preview.py", "make_dependency_inventory.py", "dependency-inventory.json",
-                 "synthetic_check.py", "test_preview.py", "start.sh", "capsule.template.toml", "README.md"):
+                 "synthetic_check.py", "test_preview.py", "start.sh", "capsule.template.toml", "README.md",
+                 "TextOnlyExtractor.java", "start-single-text.sh", "single-text.capsule.toml"):
         shutil.copyfile(local / name, source / name)
     for filename in ("LICENSE", "freeeed-processing/NOTICE", "pom.xml", "freeeed-processing/pom.xml"):
         target = source / filename

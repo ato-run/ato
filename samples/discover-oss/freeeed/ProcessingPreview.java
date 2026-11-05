@@ -35,6 +35,7 @@ public final class ProcessingPreview {
         <main><h1>FreeEed processing preview</h1>
         <p>Experimental: synthetic files only. This preview does not include review,
         search, OCR, or a verified production workflow.</p>
+        __EXTRACTOR_NOTICE__
         <p><a href="/source">Adapter and processing source</a> (dependency notices are incomplete).</p>
         <form><label>Text file (TXT; maximum 10 MiB)
         <input type="file" required accept=".txt"></label>
@@ -89,7 +90,10 @@ public final class ProcessingPreview {
             String path = exchange.getRequestURI().getPath();
             String method = exchange.getRequestMethod();
             if (path.equals("/") && method.equals("GET")) {
-                send(exchange, 200, "text/html; charset=utf-8", PAGE.getBytes(StandardCharsets.UTF_8));
+                String notice = Boolean.getBoolean("freeeed.preview.directText")
+                        ? "<p>Only UTF-8 text is supported; a local text adapter is used instead of Apache Tika.</p>"
+                        : "";
+                send(exchange, 200, "text/html; charset=utf-8", PAGE.replace("__EXTRACTOR_NOTICE__", notice).getBytes(StandardCharsets.UTF_8));
             } else if (path.equals("/health") && method.equals("GET")) {
                 boolean healthy = health();
                 send(exchange, healthy ? 200 : 503, "text/plain", (healthy ? "ok\n" : "unavailable\n").getBytes(StandardCharsets.UTF_8));

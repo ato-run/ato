@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the local preview with real FreeEed and Tika processes on macOS."""
+"""Exercise the local preview with FreeEed and a local extractor on macOS."""
 
 import argparse
 import io
@@ -36,6 +36,7 @@ def main() -> None:
     parser.add_argument("engine", type=Path)
     parser.add_argument("tika", type=Path)
     parser.add_argument("test_root", type=Path)
+    parser.add_argument("--text-only", action="store_true", help="use the bounded text extractor instead of Tika")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("this test currently requires macOS sandbox-exec")
@@ -51,7 +52,8 @@ def main() -> None:
     classes = run / "classes"
     classes.mkdir()
     source = Path(__file__).with_name("ProcessingPreview.java").resolve(strict=True)
-    subprocess.run(["javac", "--release", "17", "-d", str(classes), str(source)], check=True)
+    extractor = Path(__file__).with_name("TextOnlyExtractor.java").resolve(strict=True)
+    subprocess.run(["javac", "--release", "17", "-d", str(classes), str(source), str(extractor)], check=True)
     tika_port, web_port = unused_port(), unused_port()
     tika_url = f"http://127.0.0.1:{tika_port}"
     preview_url = f"http://127.0.0.1:{web_port}"
@@ -59,10 +61,11 @@ def main() -> None:
     env = {**os.environ, "TMPDIR": str(run)}
     tika_log = (run / "tika.log").open("wb")
     preview_log = (run / "preview.log").open("wb")
+    extractor_args = (["-cp", str(classes), "TextOnlyExtractor", str(tika_port)] if args.text_only else
+                      ["-jar", str(tika), "--noFork", "--host", "127.0.0.1", "--port", str(tika_port)])
     tika_process = subprocess.Popen(
         ["sandbox-exec", "-p", f"(version 1)(allow default)(deny network-outbound){writable}",
-         "java", f"-Djava.io.tmpdir={run}", f"-Duser.home={run}", "-jar", str(tika),
-         "--noFork", "--host", "127.0.0.1", "--port", str(tika_port)],
+         "java", f"-Djava.io.tmpdir={run}", f"-Duser.home={run}", *extractor_args],
         cwd=run, env=env, stdout=tika_log, stderr=subprocess.STDOUT,
     )
     preview_process = None
@@ -81,7 +84,8 @@ def main() -> None:
                    f'(require-not (remote ip "localhost:{tika_port}"))){writable}')
         preview_process = subprocess.Popen(
             ["sandbox-exec", "-p", profile, "java", f"-Djava.io.tmpdir={run}",
-             f"-Duser.home={run}", "-Djava.net.preferIPv4Stack=true", "-cp", str(classes),
+             f"-Duser.home={run}", "-Djava.net.preferIPv4Stack=true",
+             f"-Dfreeeed.preview.directText={str(args.text_only).lower()}", "-cp", str(classes),
              "ProcessingPreview", str(engine), str(jobs), "127.0.0.1", str(web_port), tika_url, str(source_zip)],
             cwd=run, env=env, stdout=preview_log, stderr=subprocess.STDOUT,
         )
@@ -99,6 +103,9 @@ def main() -> None:
             time.sleep(0.25)
 
         content = b"Synthetic test document for FreeEed.\nReference: staging fixture only.\n"
+        status, page = request("/")
+        assert status == 200
+        assert (b"instead of Apache Tika" in page) == args.text_only
         status, source_data = request("/source")
         assert status == 200
         with zipfile.ZipFile(io.BytesIO(source_data)) as archive:
