@@ -15,6 +15,9 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+// Process-group teardown only exists on unix; the Windows build has no
+// group to stop and no crate symbol to import.
+#[cfg(unix)]
 use ato_adapter_process::{
     StopBudget as ProcessStopBudget, process_group_is_alive, stop_child_and_group,
 };
