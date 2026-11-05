@@ -1,19 +1,33 @@
 # Ato
 
+Software changes. The work built on it should not disappear when an implementation
+changes, a machine is replaced, or someone else takes over.
+
+It is becoming easier to generate and rewrite software. Carrying forward the
+data, state and behavior that made the work usable is still mostly specific to
+each application.
+
 Ato is an experimental computing interface for treating diverse applications,
 data and work state through one **Computation** model: preserving, sharing,
 running and continuing them. The central idea is to separate *what must be
 maintained* from *how it is realized*, so that changing an implementation does
 not silently change the requirements.
 
-- [ato.run](https://ato.run/) is the web service built on Ato for discovering,
-  trying, saving and sharing runnable software.
-- [About Ato](https://ato.run/about/) describes the background and the intent.
-- [日本語](README.ja.md) is the Japanese overview; this repository's current
-  technical documentation is in English ([documentation index](docs/README.md)).
+[ato.run](https://ato.run/) · [About Ato](https://ato.run/about/) · [日本語](README.ja.md) · [Technical documentation](docs/README.md)
 
-This repository contains the computation model, runtime, CLI, adapters and
-supporting tools.
+## Why: rebuilding an environment is not continuing the work
+
+Someone you know made a small tool for their own use. You want to use it with
+your data, change one thing about it, and still open it next week, on another
+machine, after the original author has moved on. What should be handed over is
+not only the source: it is the behavior, the data and work state, the
+connections to external services, the history so far, and the ability to
+continue from there.
+
+Rebuilding a source tree, image or environment can reproduce a starting point.
+It does not guarantee that accumulated data, external connections, in-progress
+state, or the required behavior are restored and verified. **Being able to start
+the software again is not the same as being able to continue the work.**
 
 ## One model for different kinds of software
 
@@ -23,185 +37,130 @@ data and external services. Ato does not fix each of these as a separate kind
 with its own lifecycle.
 
 A **Computation** is the work that can continue from a point, not a file or a
-process. Sealing that point yields an immutable, addressable **Capsule**;
-resuming it yields a mutable **Run**. Runs can diverge, and saving the next
-point again yields a Capsule. Files, applications, runtime state and operation
-history are handled within that one lifecycle, with the physical realization
-kept separate from the point's identity.
+process. A **Capsule** is a sealed, immutable, addressable continuation point.
+Resuming a Capsule starts a **Run**; the Run advances the computation, and its
+current point can be sealed again as a new Capsule. Starting several Runs from
+the same Capsule lets work branch into different futures without mutating the
+Capsule.
 
 ```mermaid
 flowchart LR
-    C["Computation C"] -->|"α"| C2["Computation C'"]
-    C -->|"seal"| CAP["Capsule κ<br/>immutable, addressable"]
-    CAP -->|"resume"| RUN["Run<br/>mutable evaluation"]
-    K["Contract K<br/>required conditions"] -.->|"checked against"| RUN
-    D["Derivation D<br/>declared realization"] -->|"realizes"| CAP
-    RUN -->|"observations"| REC["Receipt"]
+    C["Computation C"] -->|"interaction"| C2["Computation C'"]
+    C -->|"seal"| CAP["Capsule κ"]
+    CAP -->|"resume"| RUN["Run"]
+    RUN -->|"seal current point"| CAP2["Capsule κ'"]
+    CAP -->|"resume"| RUN2["Run (another future)"]
 ```
 
-The diagram is a concept map, not an internal data structure. A Capsule's
-identity does not depend on the realization, and satisfying K is a judgment
-about a Run, not a proof that two references are the same.
+This figure describes the continuation lifecycle only. Contract verification is
+a separate relation, shown below.
 
-## What is lost when only the environment is preserved
+## Concepts
 
-Someone you know made a small tool for their own use. You want to use it with
-your data, change one thing about it, and still open it next week, on another
-machine, after the original author has moved on. What should be handed over is
-not only the source: it is the behavior, the data and work state, the
-connections to external services, the history so far, and the ability to
-continue from there. Software is increasingly generated and modified
-continuously, so the question of what may change and what must be preserved
-comes up sooner and more often.
+| Concept | Meaning |
+|---|---|
+| **Computation** | Work that can continue from its current point |
+| **Capsule** | A sealed, immutable, addressable continuation point |
+| **Run** | An active evaluation started from a Capsule that advances the computation |
+| **Contract (K)** | The conditions a realization must satisfy |
+| **Derivation (D)** | One declared way to realize a Contract |
+| **Receipt** | Recorded observations and the verification result for a Run |
+| **Port / Binding** | A typed interaction boundary, and the Run-specific mapping to a physical resource; permissions and admission are separate from that mapping |
 
-Rebuilding a source tree, image or environment can reproduce a starting point,
-but it does not necessarily preserve what made the work usable. **Being able to
-start the software again is not the same as being able to continue the work.**
+See [Computation](docs/concepts/computation.md) and the
+[glossary](docs/glossary-reference.md) for the full vocabulary.
 
-## From environment reproducibility to computation continuity
+## Contracts and derivations: what to reproduce, and how
 
-Cloud-native practice already provides many ways to prepare an execution
-environment. Docker packages an application and its dependencies; Nix improves
-the reproducibility of builds and environments; VMs and snapshots preserve
-broader execution state. Ato does not replace them.
+The conditions that count as reproduction differ by application and by purpose.
+One task may need byte-identical output; another may need only the same
+behavior. Continuing an editing session needs the data *and* a state that is
+still editable. Ato makes those requirements explicit as a Contract instead of
+leaving them implicit in the implementation.
 
-The remaining question is what must be preserved when the realization changes.
-Ato abstracts the conditions that have to survive a realization, not the
-hardware or runtime differences themselves.
+- **Contract K** declares what a realization must satisfy. It can hold an HTTP
+  response, a data digest, a semantic condition such as "the item list contains
+  these entries in this order", or an editable-state requirement.
+- **Derivation D** declares one concrete way to realize K: what input is used,
+  which runtime and Ports are needed, and how the execution is carried out. A
+  bundle can declare several Ds; the caller selects one explicitly.
+- A verification **receipt** records the selected D and each observation as
+  satisfied, deferred or failed; `fully_satisfied` is true only when every
+  required observation was satisfied. Deferred means a named gate decides later.
+
+```mermaid
+flowchart LR
+    CAP["Capsule κ"] -->|"selected declared route (D)"| RUN["Run"]
+    RUN -->|"observations"| OBS["Observed results"]
+    K["Contract K (required conditions)"] -.->|"evaluated against"| OBS
+    OBS -->|"recorded in"| REC["Receipt"]
+```
+
+The rule that matters is: freeze K, change D, and verify against the same
+conditions. That separates changing the realization from changing the
+requirements. A realization does not have to be byte-identical to the previous
+one, and K does not describe state that was not observed.
+
+Satisfying K is a judgment about observations from a Run. It does not mean the
+realization is the same Computation, or that two Capsule references are
+identical. The computation-root and portable-application profiles use different
+reference roots (`ComputationRef` and `ContractRef`) and must not be read as
+each other; the [research tour](docs/guides/research-tour.md) and
+[application contracts](docs/concepts/application-contracts.md) cover that
+boundary.
+
+## Heterogeneous execution
+
+Ato aims to realize computations on Runners with different capabilities. Each
+Runner has its own available environments and resources, and checks the
+conditions a declared D requires.
+
+Selection is explicit: the caller chooses a declared D, and no general
+automatic optimizer or implicit fallback is provided. A Runner is a resource
+for realizing a Computation; it does not define the Computation's identity. See
+[Runner and Hosting](docs/guides/runner-hosting.md).
 
 ## Example: handing off the same work in different ways
 
 Suppose you draw a diagram in a whiteboard application and want to continue
-editing it on another computer. There are several candidate ways to restore the
-work:
+editing it on another computer. There are several candidate ways to reconstruct
+the state:
 
-| Candidate | What it restores |
+| Realization | How the state is reconstructed |
 |---|---|
-| Replay | Re-execute the drawing and editing operations from an initial state |
-| Stored revision | Fetch the saved document at a specific revision — for example through a Git-based source fetch — and open it |
-| Snapshot | Restore saved filesystem or execution state |
+| Operation replay | Apply the recorded operations to an initial state |
+| Loading stored data | Fetch the data at a specific revision — for example from a Git-managed history — and open it |
+| Snapshot restore | Restore saved filesystem or execution state |
 
-These store different material and restore it differently. If the requirement
-is "the blue rectangle and the red arrow are at these positions and remain
-individually editable", any of them can be a candidate realization. Generating
-a PNG with the same appearance is not enough: the shapes could no longer be
-edited individually. If undo history is required, it has to be part of the
-requirement and needs a matching restore and verification path.
+If the requirement is "the blue rectangle and the red arrow are at these
+positions and remain individually editable", any of them can be a candidate
+realization. Generating a PNG with the same appearance is not enough: the
+shapes could no longer be edited individually. If undo history is required, it
+has to be part of the requirement and needs a matching restore and
+verification path.
 
 These are concept-level candidates, not a claim that every one is implemented
-for every application. See [what has been verified](#research-and-evidence) and
-[Materialization](docs/concepts/materialization.md) for the current status.
+for every application. See [Materialization](docs/concepts/materialization.md)
+for the current status.
 
-## Contracts and derivations, and what identity means
-
-Ato separates the conditions from the means of realization:
-
-- **Contract K** declares what a realization must satisfy. It can range from an
-  HTTP observation and a data digest to a semantic condition such as "the item
-  list contains these entries in this order".
-- **Derivation D** declares one concrete way to realize K: what input is used,
-  which runtime and Ports it needs, and how the execution is carried out.
-- A verification **receipt** records what was observed for the Run, which D
-  was selected, and what was not satisfied.
-
-The important rule is to freeze K and change D, then verify against the same
-conditions. That distinguishes changing the realization from changing the
-requirements. A realization does not need to be byte-identical to the previous
-one, and K does not describe unobserved state.
-
-This does **not** mean that the same K implies the same Computation. Ato keeps
-three different notions apart:
-
-| Notion | Meaning |
-|---|---|
-| `ComputationRef` | The reference identity of a computation, in the computation-root profile |
-| `ContractRef` | The identity rooted at a declared Contract, in the portable-application profile |
-| Contract satisfaction | The judgment that one realization satisfies K |
-
-Satisfying K is a judgment about an observation of a realization. It does not
-assert that the realization is the same Computation, or that either Capsule
-reference is identical. The two reference domains are not interchangeable.
-See [application contracts](docs/concepts/application-contracts.md) for the
-profile map and the decisions that remain open.
-
-## A recorded example: same K, a different source
+## Verified results: a contract-preserving transformation
 
 The archived transformation v0 experiment is the smallest concrete check of the
-rule above. It ran in Linux CI, not on every platform, and it was not
-re-executed for this README.
+rule above. It ran in Linux CI with a recorded fixture; it was not re-executed
+for this README.
 
-Prerequisites: Linux with bubblewrap and Python 3.12.7 at
-`/opt/ato/toolchains/python/3.12.7` (the CI fixture), and a CLI built from this
-repository.
+| Check | Recorded result |
+|---|---|
+| Frozen K, different source and D | PASS: K preserved, new Derivation and source closure, receipt `fully_satisfied` |
+| Frozen K, required behavior broken | REJECT: `k_preserved` true, `fully_satisfied` false |
+| Continuation of persisted state across a restart | Not tested in this experiment |
 
-```sh
-cargo build -p ato-cli --bin ato --locked
-mkdir -p .tmp/transformation-v0
-target/debug/ato pack apps/cli/tests/fixtures/transformation-v0/source-a \
-  -o .tmp/transformation-v0/bundle-a.capsule
-target/debug/ato run .tmp/transformation-v0/bundle-a.capsule --no-open \
-  --verification-receipt .tmp/transformation-v0/receipt-a.json
-target/debug/ato reform .tmp/transformation-v0/bundle-a.capsule \
-  apps/cli/tests/fixtures/transformation-v0/source-b \
-  --out .tmp/transformation-v0/candidate
-```
-
-Expected, from the recorded evidence:
-
-- `.tmp/transformation-v0/candidate/report.json` has `k_preserved: true` and
-  `fully_satisfied: true`, and its `frozen_contract_ref` equals the baseline
-  receipt's `contract_ref`;
-- `.tmp/transformation-v0/candidate/receipt.json` names a different
-  `derivation_ref` and source closure, and is `fully_satisfied: true`;
-- `candidate.capsule` roots at the frozen `ContractRef` while its transport
-  hash differs, and the baseline bundle and receipt stay byte-identical.
-
-A negative case is part of the same record: `source-b-broken` returns a
-`degraded` body, and `reform` rejects it with `k_preserved: true` and
-`fully_satisfied: false`
-([evidence](docs/archive/2026/ops/contract-preserving-transformation-v0.md)).
-What this shows is that the source and the realization changed while K stayed
+What it shows is that the source and the realization changed while K stayed
 frozen. It does not show restart persistence, hosted execution or a safe
-rollout; see [Derivation transformation](docs/guides/derivation-transformation.md)
-for the full command list and the non-claims.
-
-## Heterogeneous execution, with declared derivations
-
-Ato is meant to realize computations on Runners with different operating
-systems, runtimes and hardware. The point of that network is not to make every
-Runner look like one machine. It is to run a **declared** derivation on a
-Runner whose capabilities admit it, and to keep the conditions separate from
-the environment that happens to be available.
-
-Selection stays explicit in the current design: the caller chooses a declared
-D, and a Runner's advertised capabilities are admission checks. There is no
-automatic best-D optimizer, capability inference or implicit fallback. General
-cross-host state restoration and heterogeneous scheduling remain research
-targets. See [Runner and Hosting](docs/guides/runner-hosting.md).
-
-**The execution environment is a means to realize a Computation, not the
-Computation's identity.**
-
-## Current status
-
-Ato is experimental. The current tree includes computation and Capsule objects,
-lifecycle commands, adapters, portable bundle handling, a limited static
-verification path, and explicit selection among declared Derivations.
-
-The following remain research or development work, not finished guarantees:
-
-- general state restoration across different hosts;
-- restoration of arbitrary process memory;
-- general state continuity across heterogeneous realizations;
-- autonomous AI Formation;
-- general automatic selection or optimization across Runners.
-
-Python, OCI, GPU, persistent state and external services need their own
-declared routes and host admission. Their presence in the code does not
-establish availability on ato.run production. A matching Contract alone does
-not guarantee state continuity or safe side effects. See
-[compatibility](docs/concepts/compatibility.md) and
-[state continuity](docs/concepts/state-continuity.md).
+rollout. Commands, fixtures, receipts, prerequisites and non-claims are in
+[Derivation transformation](docs/guides/derivation-transformation.md); the
+[archived evidence](docs/archive/2026/ops/contract-preserving-transformation-v0.md)
+is the original record.
 
 ## Quick start
 
@@ -233,9 +192,9 @@ app-proof: satisfied
 source-identity: satisfied
 ```
 
-`fully_satisfied` means that the observations declared by this Contract were
-satisfied for this Run. It does not demonstrate general cross-host
-portability, restoration of process memory, or continuity of user data. See
+`fully_satisfied` covers the observations declared by this Contract for this
+Run. It does not demonstrate general cross-host portability, restoration of
+process memory, or continuity of user data. See
 [Getting started](docs/guides/getting-started.md) for the expected output,
 other routes and failure boundaries. Published CLI artifacts are listed in
 [GitHub Releases](https://github.com/ato-run/ato/releases).
@@ -247,20 +206,25 @@ Explore public software on [ato.run](https://ato.run/) or
 your browser. ato.run is a separate product surface; the local example above
 does not require it.
 
-## Concepts
+## Current status
 
-| Concept | Meaning |
-|---|---|
-| **Computation** | Work that can continue from its current point |
-| **Capsule** | A sealed, immutable, addressable continuation point |
-| **Run** | An active evaluation started from a Capsule that advances the computation |
-| **Contract (K)** | The conditions a realization must satisfy |
-| **Derivation (D)** | One declared way to realize a Contract |
-| **Receipt** | Recorded observations and the verification result for a Run |
-| **Port / Binding** | A typed interaction boundary, and its mapping to a physical resource at run time |
+Ato is experimental. The current tree includes computation and Capsule objects,
+lifecycle commands, adapters, portable bundle handling, a limited static
+verification path, and explicit selection among declared Derivations.
 
-See [Computation](docs/concepts/computation.md) and the
-[glossary](docs/glossary-reference.md) for the full vocabulary.
+The following remain research or development work, not finished guarantees:
+
+- general state restoration across different hosts;
+- restoration of arbitrary process memory;
+- general state continuity across heterogeneous realizations;
+- autonomous AI Formation.
+
+Python, OCI, GPU, persistent state and external services need their own
+declared routes and host admission. Their presence in the code does not
+establish availability on ato.run production. A matching Contract alone does
+not guarantee state continuity or safe side effects. See
+[compatibility](docs/concepts/compatibility.md) and
+[state continuity](docs/concepts/state-continuity.md).
 
 ## Research and evidence
 

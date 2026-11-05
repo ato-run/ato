@@ -46,7 +46,9 @@ production availability claim.
 | Negative cases | Behavior break rejected (`k_preserved: true`, `fully_satisfied: false`); contract change refused before build (`candidate_contract_mismatch`, no `candidate.capsule` or `receipt.json`); source-bound K refused (`frozen_contract_is_source_bound`); a candidate manifest without `[contract]` is built and accepted. | Behavior break rejected (`k_preserved: true`, `fully_satisfied: false`, candidate written with a failed receipt); K redefinition refused before build (`candidate_contract_mismatch`, nothing written); baseline bundle and receipt SHA-256 unchanged after every case. |
 | Non-claims | No publish, activate, switch or rollout; no Hosted or ato-api E2E; no scenario verifier; equal K is not equal functionality; a frozen v4 bundle carrying an Instance snapshot is refused (`frozen_instance_snapshot_unsupported`) and v0 candidate transport is v3; Linux local Runtime only, macOS and Windows execution unverified. | No persistence across a process restart — the scenario is fresh-instance only; scenario coverage is representative CRUD, authorization and input-error paths, not exhaustive; equal K is not equal functionality or security; no Hosted, ato-api or staging execution, Linux local Runtime CLI E2E only; no portability or generality claim for the fixtures. |
 
-Both records therefore cover a fresh CLI-local Run only. Neither proves
-restart persistence, Hosted execution or a deployment state, and neither was
-re-measured here. Read [compatibility](../concepts/compatibility.md) before
+Both records were produced by the commands above on Linux. Re-running them
+locally requires the same prerequisites; macOS and Windows execution was not
+verified, and the integration tests are Linux-only. Both cover a fresh
+CLI-local Run only. Neither proves restart persistence, Hosted execution or a
+deployment state, and neither was re-measured here. Read [compatibility](../concepts/compatibility.md) before
 using the result to justify an upgrade.
