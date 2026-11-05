@@ -207,6 +207,7 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
         run_id: None,
         binding_environment: &Default::default(),
         interrupt: None,
+        host: None,
     };
     let permit = request
         .permit

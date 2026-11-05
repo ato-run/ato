@@ -294,6 +294,7 @@ fn actual_geany_common_formation_attempt_verifies_original_contract_and_cleans_u
             run_id: None,
             binding_environment: &binding_environment,
             interrupt: None,
+            host: None,
         },
         owner.clone(),
         helper,
