@@ -86,7 +86,7 @@ def main():
     by_coordinate = {entry["coordinate"]: entry for entry in dependencies}
     if set(provenance["dependency_coordinates"]) - set(by_coordinate):
         raise ValueError("a retained class lacks a dependency notice entry")
-    if {d["coordinate"] for d in dependencies if not d["pom_licenses"]} != MISSING_POM_LICENSE:
+    if {d["coordinate"] for d in dependencies if not d["pom_licenses"]} - MISSING_POM_LICENSE:
         raise ValueError("unexpected dependencies without POM license metadata")
     source_index = {entry["coordinate"]: entry for entry in json.loads((args.sources / "inventory.json").read_text())}
     tmp = (Path.cwd() / ".tmp").resolve(strict=True)

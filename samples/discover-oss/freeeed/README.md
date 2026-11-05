@@ -194,14 +194,18 @@ For a smaller text-only candidate, `trim_text_preview.py` accepts
 `--single-text-extractor` and removes additional mail, PDF, XML and other
 unused classes. This intentionally further narrows the application. The
 resulting pinned engine SHA-256 is
-`86a59cf6a6587ab6d89f260985ab959d96c93d48885414633802bff56a543f64`.
+`57f3e39f0cfe4aa9b85bcec4411b91db69706386f27fe2b280c0f82b48327d1a`.
 The synthetic success, malformed-input and extractor-failure tests passed.
-`single-text-inventory.json` records 105 candidate dependencies. The separate
-`audit_trimmed_provenance.py` matched all 23,565 retained non-metadata files
+The preview replaces SQLite JDBC with 3.41.2.2, Guava with 33.8.0-jre and
+failureaccess 1.0.3, and Commons IO with 2.14.0. Their downloads are pinned
+by `fetch_replacement_jars.py`. Unused classes are removed and merged service
+registrations are rewritten to retain only providers present in the preview.
+`single-text-inventory.json` records 91 candidate dependencies. The separate
+`audit_trimmed_provenance.py` matched all 17,556 retained non-metadata files
 and metadata class files to the pinned application or Maven JARs; the report
 does not claim that merged non-class `META-INF` files were independently
-attributed. Three POMs lack license metadata, but their distributed binary
-notices identify Apache 2.0.
+attributed. All 91 candidate POMs contain license metadata. This is not a
+complete security audit; the preview remains restricted to synthetic text.
 
 `collect_dependency_sources.py` downloads pinned-version Maven source
 artifacts, and `fetch_extra_licenses.py` retrieves hash-checked upstream

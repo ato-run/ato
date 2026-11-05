@@ -88,7 +88,7 @@ def main() -> None:
                  "synthetic_check.py", "test_preview.py", "start.sh", "capsule.template.toml", "README.md",
                  "TextOnlyExtractor.java", "start-single-text.sh", "single-text.capsule.toml",
                  "audit_trimmed_provenance.py", "package_dependency_notices.py", "collect_dependency_sources.py",
-                 "fetch_extra_licenses.py"):
+                 "fetch_extra_licenses.py", "replace_sqlite_inventory.py", "fetch_replacement_jars.py"):
         shutil.copyfile(local / name, source / name)
     for filename in ("LICENSE", "freeeed-processing/NOTICE", "pom.xml", "freeeed-processing/pom.xml"):
         target = source / filename

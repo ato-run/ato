@@ -4,12 +4,12 @@
 The output is evidence for license review, not a conclusion of compliance.
 """
 
+import argparse
 import concurrent.futures
 import hashlib
 import json
 from pathlib import Path
 import re
-import sys
 import urllib.error
 import urllib.request
 from zipfile import BadZipFile, ZipFile
@@ -20,14 +20,16 @@ PART = re.compile(r"^[A-Za-z0-9_.+-]+$")
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: collect_dependency_sources.py NEW_OUTPUT_DIRECTORY")
-    root = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--inventory", type=Path, default=Path(__file__).with_name("retained-inventory.json"))
+    args = parser.parse_args()
+    root = args.output.resolve()
     tmp = (Path.cwd() / ".tmp").resolve(strict=True)
     if not root.is_relative_to(tmp) or root == tmp:
         raise ValueError("output must be a new directory under .tmp")
     root.mkdir(parents=True, exist_ok=False)
-    deps = json.loads(Path(__file__).with_name("retained-inventory.json").read_text())["dependencies"]
+    deps = json.loads(args.inventory.read_text())["dependencies"]
 
     def fetch(dep):
         group, artifact, version = dep["coordinate"].split(":")
