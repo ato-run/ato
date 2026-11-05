@@ -242,10 +242,28 @@ pub fn run_shim(broker: &Path, token: &str, port: u16) -> Result<()> {
 }
 
 fn handle_shim_connection(tcp: TcpStream, broker: &Path, token: &str) -> Result<()> {
-    let mut unix = UnixStream::connect(broker)
-        .with_context(|| format!("connect peer broker {}", broker.display()))?;
-    unix.write_all(format!("{PEER_BROKER_PROTOCOL} {token}\n").as_bytes())?;
-    relay(unix, tcp)
+    // A shim is the only component between the consumer and the broker, so a
+    // failure here must say what it was: the consumer sees a reset, not a
+    // reason.
+    let mut unix = match UnixStream::connect(broker) {
+        Ok(unix) => unix,
+        Err(error) => {
+            eprintln!(
+                "ato peer shim: cannot connect the broker {}: {error}",
+                broker.display()
+            );
+            return Err(error).with_context(|| format!("connect peer broker {}", broker.display()));
+        }
+    };
+    if let Err(error) = unix.write_all(format!("{PEER_BROKER_PROTOCOL} {token}\n").as_bytes()) {
+        eprintln!("ato peer shim: cannot present its token to the broker: {error}");
+        return Err(error.into());
+    }
+    if let Err(error) = relay(unix, tcp) {
+        eprintln!("ato peer shim: relay failed: {error:#}");
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn relay(mut unix: UnixStream, mut tcp: TcpStream) -> Result<()> {
