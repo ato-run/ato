@@ -102,3 +102,12 @@ source page, and the listing discloses this limitation. A source ZIP download,
 an added copy and the public trial were not verified. The listing explicitly
 prohibits real data and tax filing and notes local-only storage and old-backup
 incompatibility.
+
+A separate local browser test on the same assembled preview exercised two
+simultaneous synthetic expense writes in separate tabs, reloaded and observed
+both, downloaded a `.wakerun` backup, added a third expense, and restored the
+file through the browser's file input. The two saved expenses survived the
+restore and reload, and the later expense was absent. A browser download from
+the compiled static source page produced a ZIP whose 188 filenames and bytes
+matched the source manifest. These are local browser tests; they do not verify
+staging Discover's source tab, the public trial, or an added copy.
