@@ -189,3 +189,91 @@ The binaries are committed because the CLI embeds them with `include_bytes!`.
   失敗する。
 - Linux native Docker での同一 bundle 実行は、検証機に docker が無く
   ディスクも満杯のため **未検証**。
+
+## Review response (round 2)
+
+The first draft of this change was reviewed. These are the findings and what
+changed.
+
+### R1 — a direct Run must keep the receipt stg produced
+
+`execution.connector` was recorded for every Run, so every OCI Service Group
+receipt became schema `/4`, while `accept_receipt` and the hosted validator
+still accepted only `/1`–`/3`. Now:
+
+- Connector evidence (connector, relay image digest, relay container id,
+  platform emulated) is recorded **only for the relay materialization**. A
+  direct Run's receipt is the receipt stg produced.
+- The schema is one decision, highest statement first: connector `/4`,
+  certificate `/3`, portability profile `/2`, base `/1`. A certificate no
+  longer downgrades a `/4`.
+- `accept_receipt` accepts `/4` and rejects connector evidence on `/1`–`/3`.
+- Regression tests: `a_direct_service_group_receipt_keeps_the_stg_schema`,
+  `a_relayed_receipt_is_v4_and_certificate_evidence_does_not_lower_it`,
+  `a_relayed_receipt_is_v4_and_accepted`, `connector_evidence_requires_v4`.
+- ato-api: a Draft PR teaches the hosted receipt schema `/4`
+  (`ato-run/ato-api#1134`). Its CI could not start (billing), see below.
+
+### R3 — layering
+
+`arch-check` refused `ato-adapter-oci (adapter)` → `ato-host-facts (lib)` and
+→ `ato-oci-relay (lib)`. Both are gone:
+
+- The adapter normalises the daemon architecture itself; the caller passes the
+  observation. No adapter depends on host facts.
+- The relay wire format is the contract between the CLI and the relay
+  container, so its crate is classified `adapter-api` (an adapter may depend on
+  an adapter API) rather than `lib`. The rule itself was not relaxed.
+
+### R4 — the embedded relay binaries have provenance
+
+- `extensions/adapters/oci/relay-bin/SHA256SUMS` records the hash of both
+  binaries; a test hashes what `include_bytes!` embedded and refuses a match
+  that disagrees.
+- `scripts/build-oci-relay.sh` pins the toolchain (1.96.0) and zig (0.15.2).
+- The `relay-binaries` CI job rebuilds from source on the runner that defines
+  the canonical bytes and fails unless the rebuilt SHA256SUMS equals the
+  committed one. A binary built on another host is equivalent but not
+  byte-identical, so the committed binaries are the ones this job produced.
+
+### R9 — the tests that looked flaky
+
+- `lib/runtime-attempt/src/data_plane.rs` reported `model_cache_busy` for any
+  `flock` error, including `EINTR`. Only `EWOULDBLOCK` is contention now; an
+  interrupted syscall is retried and other errors keep their own code.
+- The Chrome/CDP tests (`native_probe_owner`, the worker's browser e2e) passed
+  on the same branch at another commit and failed on Windows/Linux runs; the
+  reruns and their run ids are recorded in the PR bodies.
+
+## Linux direct acceptance (the other materialization)
+
+`apps/cli/tests/oci_service_group_direct.rs` runs the same sample on a native
+Linux Docker daemon and pins the macOS identity:
+
+```text
+direct E2E ok: bundle=sha256:2c88d86cc1c10039a9454b57ad0962986fabb0aa951970af9567c6b4dcb0a902
+               contract=sha256:68228e9bf2bcadc375cc70747bb23e672290a1a16774d2ed6df387488db5e529
+               derivation=sha256:a6ff45c1fb10cb349003b0703a0b4fdf7633879a7af361b9e04997514108148c
+               schema="ato.contract-verification-receipt/1"
+```
+
+Same bundle bytes, same `ContractRef`, same `DerivationRef`; the receipt is the
+pre-/4 schema because a direct Run records no connector. The CI Linux job runs
+it with `ATO_REQUIRE_DOCKER_E2E=1`, so a runner without Docker fails instead of
+skipping.
+
+## macOS acceptance, re-run after the fixes
+
+The relay binaries changed (CI-built), so the acceptance was re-run:
+
+```text
+fully_satisfied: true
+schema: ato.contract-verification-receipt/4
+connector: relay
+relay_image_digest: sha256:2449d4dbbb436911cca8ef7f8d3a657004b4f0b8997354b6fba97a95deea0ea3
+```
+
+`accept_receipt` was run against that exact file with the bundle's own Contract
+and the Run's attempt id; it is accepted. No internal Port was published and no
+container or network remained after the stop (same checks as above; the run's
+receipt is `.tmp/1690/mac.json`).
