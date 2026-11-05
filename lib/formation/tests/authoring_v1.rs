@@ -146,7 +146,12 @@ fn a_step_without_peer_edges_does_not_serialize_the_new_field() {
     // `BoundStep.peer_ports` existed, so the field is omitted when empty.
     let dir = tree(&[("index.html", "<!doctype html><p>hi")]);
     let (_, derivation) = bound(&preset_draft(dir.path()), SOURCE_A);
-    assert!(derivation.steps.iter().all(|step| step.peer_ports.is_empty()));
+    assert!(
+        derivation
+            .steps
+            .iter()
+            .all(|step| step.peer_ports.is_empty())
+    );
     let text = String::from_utf8(serde_jcs::to_vec(&derivation).expect("canonical D"))
         .expect("canonical D is UTF-8");
     assert!(

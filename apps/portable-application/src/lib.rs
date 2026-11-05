@@ -1890,8 +1890,7 @@ fn build_routes_bundle(
                     runtimes: service.execution.runtimes.clone(),
                     state: service.state.clone(),
                     bindings: service.bindings.clone(),
-                    peer_ports: if route.realization
-                        == PortableRealizationKind::ProcessServiceGroup
+                    peer_ports: if route.realization == PortableRealizationKind::ProcessServiceGroup
                     {
                         service.connect.clone()
                     } else {

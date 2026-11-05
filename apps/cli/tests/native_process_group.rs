@@ -114,10 +114,7 @@ fn the_native_process_group_satisfies_its_contract_and_leaves_no_process() {
         .iter()
         .map(|observation| observation["id"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        ids,
-        ["external-egress-denied", "surface", "through-proxy"]
-    );
+    assert_eq!(ids, ["external-egress-denied", "surface", "through-proxy"]);
     for observation in receipt["observations"].as_array().unwrap() {
         assert_eq!(observation["outcome"], "satisfied");
     }
