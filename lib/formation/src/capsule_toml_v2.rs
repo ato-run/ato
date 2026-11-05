@@ -98,6 +98,9 @@ pub struct PortableBindingDraftV2 {
 pub struct PortableStateDraftV2 {
     pub id: String,
     pub mount: String,
+    /// `Some(false)` when the author says the slot does not need a fixed
+    /// mount. `None` is the pre-existing fixed-mount declaration.
+    pub mount_required: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +265,12 @@ struct State {
     protocol: String,
     mount: String,
     access: String,
+    /// `false` says the workload locates the slot through
+    /// `ATO_STATE_PATH_<ID>`, so a host without a mount namespace can deliver
+    /// it by path. Omitted, and never written when omitted, keeps every
+    /// existing capsule's canonical bytes exactly as they were.
+    #[serde(default)]
+    mount_required: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,9 +580,16 @@ fn parse_capsule_toml_v2_impl(
             {
                 return Err(invalid("state.mount", "must be an absolute non-/app mount"));
             }
+            if state.mount_required == Some(true) {
+                return Err(invalid(
+                    "state.mount_required",
+                    "must be false when present; omit it when the slot needs a fixed mount",
+                ));
+            }
             Ok(PortableStateDraftV2 {
                 id: state.id,
                 mount: state.mount,
+                mount_required: state.mount_required,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1401,6 +1417,41 @@ default = "pure"
         assert_eq!(route.services[0].cwd, ".");
         assert_eq!(route.services[1].ports[0].id, "app.http");
         assert_eq!(draft.effects, EffectClass::Pure);
+    }
+
+    #[test]
+    fn a_state_slot_may_say_it_needs_no_fixed_mount() {
+        let mut document: toml::Value = SERVICE_GROUP.parse().unwrap();
+        document["state"][0]
+            .as_table_mut()
+            .unwrap()
+            .insert("mount_required".into(), toml::Value::Boolean(false));
+        let text = toml::to_string(&document).unwrap();
+        let draft = parse_capsule_toml_v2(&text).unwrap();
+        let [slot] = draft.state.as_slice() else {
+            panic!("one state slot");
+        };
+        assert_eq!(slot.mount_required, Some(false));
+
+        let omitted = parse_capsule_toml_v2(SERVICE_GROUP).unwrap();
+        assert_eq!(
+            omitted.state[0].mount_required, None,
+            "omission is the pre-existing fixed-mount declaration"
+        );
+    }
+
+    #[test]
+    fn mount_required_true_is_refused_instead_of_being_a_second_spelling() {
+        let mut document: toml::Value = SERVICE_GROUP.parse().unwrap();
+        document["state"][0]
+            .as_table_mut()
+            .unwrap()
+            .insert("mount_required".into(), toml::Value::Boolean(true));
+        let error = parse_capsule_toml_v2(&toml::to_string(&document).unwrap()).unwrap_err();
+        assert!(
+            error.to_string().contains("state.mount_required"),
+            "{error}"
+        );
     }
 
     #[test]
