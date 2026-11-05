@@ -394,10 +394,9 @@ impl ValidatorAgent {
             && job.run_id.is_some()
             && job.lease_id.is_some()
             && deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(10)
+            && let Err(error) = self.api.probe_ingress_protection(&job)
         {
-            if let Err(error) = self.api.probe_ingress_protection(&job) {
-                eprintln!("[validator] ingress protection was not recorded: {error}");
-            }
+            eprintln!("[validator] ingress protection was not recorded: {error}");
         }
         self.api.ack_runtime(&job, &point.receipt)?;
         Ok(ValidatorRunOutcome::HostedVerified {
