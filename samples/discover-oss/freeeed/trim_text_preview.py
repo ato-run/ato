@@ -20,6 +20,20 @@ REMOVED_PREFIXES = (
     "com/google/protobuf/", "META-INF/native/", "text/",
 )
 SQLITE_NATIVES = ("org/sqlite/native/Linux/x86_64/", "org/sqlite/native/Mac/aarch64/")
+SINGLE_TEXT_REMOVED_PREFIXES = (
+    "com/lowagie/", "org/bouncycastle/", "com/sun/mail/", "javax/mail/",
+    "javax/activation/", "com/sun/activation/", "com/sun/xml/", "javax/xml/bind/",
+    "org/junit/", "junit/", "org/hamcrest/", "org/jvnet/hk2/", "com/sun/istack/",
+    "javax/json/", "jakarta/ws/rs/", "jakarta/annotation/", "javax/xml/",
+    "javax/servlet/", "org/aopalliance/", "com/sun/research/", "javassist/", "jersey/repackaged/", "nu/xom/", "mozilla/",
+    "META-INF/maven/", "META-INF/native-image/", "META-INF/proguard/",
+    "META-INF/versions/9/javax/xml/bind/", "META-INF/versions/21/org/glassfish/jersey/",
+    "org/w3c/", "org/xml/sax/", "org/apache/xmlcommons/", "license/",
+)
+SINGLE_TEXT_REMOVED_FILES = frozenset({
+    "LICENSE-junit.txt", "jetty-dir.css", "about.html", "krb5-template.conf", "krb5_udp-template.conf",
+    "META-INF/versions/9/module-info.class", "META-INF/versions/11/module-info.class",
+})
 
 
 def sha256(path: Path) -> str:
@@ -34,6 +48,8 @@ def main() -> None:
     parser.add_argument("output", type=Path, help="new file beneath .tmp")
     parser.add_argument("--engine-sha256", required=True)
     parser.add_argument("--lucene-sha256", required=True)
+    parser.add_argument("--single-text-extractor", action="store_true",
+                        help="also remove PDF, mail, crypto and other unsupported libraries")
     args = parser.parse_args()
     engine, lucene = args.engine.resolve(strict=True), args.lucene_core.resolve(strict=True)
     output = args.output.resolve()
@@ -44,12 +60,15 @@ def main() -> None:
         raise ValueError("input JAR digest mismatch")
     with ZipFile(lucene) as core:
         core_names = set(core.namelist())
-    counts = {prefix: 0 for prefix in REMOVED_PREFIXES}
+    prefixes = REMOVED_PREFIXES + (SINGLE_TEXT_REMOVED_PREFIXES if args.single_text_extractor else ())
+    counts = {prefix: 0 for prefix in prefixes}
     kept = 0
     with ZipFile(engine) as source, ZipFile(output, "x", compression=ZIP_DEFLATED, allowZip64=True) as target:
         for entry in source.infolist():
             name = entry.filename
-            removed = next((prefix for prefix in REMOVED_PREFIXES if name.startswith(prefix)), None)
+            if args.single_text_extractor and name in SINGLE_TEXT_REMOVED_FILES:
+                continue
+            removed = next((prefix for prefix in prefixes if name.startswith(prefix)), None)
             if removed is not None:
                 counts[removed] += 1
                 continue

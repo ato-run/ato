@@ -24,6 +24,8 @@ java -Djava.io.tmpdir="$base/jobs" -Duser.home="$base/jobs" \
   -cp /capsule/preview TextOnlyExtractor 9998 &
 extractor_pid=$!
 trap 'kill "$extractor_pid" 2>/dev/null || true' EXIT HUP INT TERM
+notices=false
+if [ -s /capsule/source/third-party-notices.zip ]; then notices=true; fi
 java -Djava.io.tmpdir="$base/jobs" -Duser.home="$base/jobs" \
-  -Dfreeeed.preview.directText=true -cp /capsule/preview ProcessingPreview \
+  -Dfreeeed.preview.directText=true -Dfreeeed.preview.noticesIncluded="$notices" -cp /capsule/preview ProcessingPreview \
   "$engine" "$base/jobs" 0.0.0.0 8080 http://127.0.0.1:9998 /capsule/source.zip

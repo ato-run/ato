@@ -36,7 +36,7 @@ public final class ProcessingPreview {
         <p>Experimental: synthetic files only. This preview does not include review,
         search, OCR, or a verified production workflow.</p>
         __EXTRACTOR_NOTICE__
-        <p><a href="/source">Adapter and processing source</a> (dependency notices are incomplete).</p>
+        <p><a href="/source">Adapter and processing source</a> __NOTICES_STATUS__</p>
         <form><label>Text file (TXT; maximum 10 MiB)
         <input type="file" required accept=".txt"></label>
         <button>Process</button></form><p role="status" id="status"></p></main>
@@ -93,7 +93,11 @@ public final class ProcessingPreview {
                 String notice = Boolean.getBoolean("freeeed.preview.directText")
                         ? "<p>Only UTF-8 text is supported; a local text adapter is used instead of Apache Tika.</p>"
                         : "";
-                send(exchange, 200, "text/html; charset=utf-8", PAGE.replace("__EXTRACTOR_NOTICE__", notice).getBytes(StandardCharsets.UTF_8));
+                String notices = Boolean.getBoolean("freeeed.preview.noticesIncluded")
+                        ? "(third-party notices and pinned source links included)."
+                        : "(dependency notices are incomplete).";
+                send(exchange, 200, "text/html; charset=utf-8", PAGE.replace("__EXTRACTOR_NOTICE__", notice)
+                        .replace("__NOTICES_STATUS__", notices).getBytes(StandardCharsets.UTF_8));
             } else if (path.equals("/health") && method.equals("GET")) {
                 boolean healthy = health();
                 send(exchange, healthy ? 200 : 503, "text/plain", (healthy ? "ok\n" : "unavailable\n").getBytes(StandardCharsets.UTF_8));
