@@ -44,3 +44,14 @@ processes, preserve authentication, and prove stop/restart and backup behavior
 within the profile or use a separately reviewed general runtime extension.
 Building the necessary image, connecting a suitable runner, including complete
 source/notices, and an actual staging import and acceptance remain outstanding.
+
+An additional arm64 local feasibility experiment combined the pinned API and
+MySQL binaries into one image. With a read-only root filesystem, no network,
+and a non-root UID, MySQL initialized with a generated password and Laravel
+connected to it through a private Unix socket. After the upstream
+`mysql:createdb` command created all required databases, the main Laravel
+migrations completed. A storage symlink to the same writable test state let
+Laravel write a synthetic public file; the file and a database marker survived
+a database-container restart. This tests the storage arrangement only: it is
+not a complete image, supervisor, authenticated Fleet-Ops workflow, backup,
+staging-compatible bundle, or source/license distribution.
