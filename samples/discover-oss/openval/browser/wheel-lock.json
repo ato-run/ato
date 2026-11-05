@@ -1,0 +1,86 @@
+[
+  {
+    "filename": "annotated_types-0.7.0-py3-none-any.whl",
+    "sha256": "6a8e8a10986f2f73bf3aa1e63eb807c845bdf97a0fa436dfda1d4e8a81603fb0",
+    "size": 11963,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/annotated_types-0.7.0-py3-none-any.whl"
+  },
+  {
+    "filename": "numpy-2.2.5-cp313-cp313-pyemscripten_2025_0_wasm32.whl",
+    "sha256": "800c98edc0c864dfa49f07005680c699b4b42b84eae1f8cb19d35b3634e7f05c",
+    "size": 2823762,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/numpy-2.2.5-cp313-cp313-pyemscripten_2025_0_wasm32.whl"
+  },
+  {
+    "filename": "pandas-2.3.3-cp313-cp313-pyemscripten_2025_0_wasm32.whl",
+    "sha256": "2579a3d8e9f040421836365ccf7886fc4054c87381d4d481840a97785cd78923",
+    "size": 4493372,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pandas-2.3.3-cp313-cp313-pyemscripten_2025_0_wasm32.whl"
+  },
+  {
+    "filename": "pydantic-2.12.5-py3-none-any.whl",
+    "sha256": "453523330094d7d47780b540c12580e8e743ea34c5aa4205e43577655c39ca23",
+    "size": 463581,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pydantic-2.12.5-py3-none-any.whl"
+  },
+  {
+    "filename": "pydantic_core-2.41.5-cp313-cp313-pyemscripten_2025_0_wasm32.whl",
+    "sha256": "bd76fcb1cc8e93de5c6cb4d0fa0754382d4cbb6d726a1643ce174e1785c40b75",
+    "size": 1437921,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pydantic_core-2.41.5-cp313-cp313-pyemscripten_2025_0_wasm32.whl"
+  },
+  {
+    "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+    "sha256": "1fe3a0346ef21bc85b295227256d6aed72aa8116178b019fc5ae5d57fbd213cf",
+    "size": 229892,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/python_dateutil-2.9.0.post0-py2.py3-none-any.whl"
+  },
+  {
+    "filename": "pytz-2025.2-py2.py3-none-any.whl",
+    "sha256": "d7fb2f11cf7f8dd17e652d5494189f520ee086e9fc71aef4cbb978f5dcfc2878",
+    "size": 509225,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pytz-2025.2-py2.py3-none-any.whl"
+  },
+  {
+    "filename": "six-1.17.0-py2.py3-none-any.whl",
+    "sha256": "bc830cfdc71a224b6d0e4337183a87ea53f21b6623deca5771ee3bc866fd8da2",
+    "size": 11050,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/six-1.17.0-py2.py3-none-any.whl"
+  },
+  {
+    "filename": "typing_extensions-4.15.0-py3-none-any.whl",
+    "sha256": "42190f892f6219350c50e107954f57cb6196acac818fece4a7d21689c94f71de",
+    "size": 44613,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/typing_extensions-4.15.0-py3-none-any.whl"
+  },
+  {
+    "filename": "typing_inspection-0.4.2-py3-none-any.whl",
+    "sha256": "a00e8bbec6999ab79272b06aaacbeee737ff3c15cb8785b34fd189d35b0c24e0",
+    "size": 14610,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/typing_inspection-0.4.2-py3-none-any.whl"
+  },
+  {
+    "filename": "xlrd-2.0.1-py2.py3-none-any.whl",
+    "sha256": "c8a0ec79f15d497714e6c980c826687121d7d14595f06444f1ee0ae126048830",
+    "size": 96531,
+    "source": "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/xlrd-2.0.1-py2.py3-none-any.whl"
+  },
+  {
+    "filename": "numpy_financial-1.0.0-py3-none-any.whl",
+    "sha256": "bae534b357516f12258862d1f0181d911032d0467f215bfcd1c264b4da579047",
+    "size": 14025,
+    "source": "https://files.pythonhosted.org/packages/6a/be/d07585e440d58835bad8f1c9ca7823b5252ffeda4c797e653a20215fca65/numpy_financial-1.0.0-py3-none-any.whl"
+  },
+  {
+    "filename": "openpyxl-3.1.5-py2.py3-none-any.whl",
+    "sha256": "5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2",
+    "size": 250910,
+    "source": "https://files.pythonhosted.org/packages/c0/da/977ded879c29cbd04de313843e76868e6e13408a94ed6b987245dc7c8506/openpyxl-3.1.5-py2.py3-none-any.whl"
+  },
+  {
+    "filename": "et_xmlfile-2.0.0-py3-none-any.whl",
+    "sha256": "7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa",
+    "size": 18059,
+    "source": "https://files.pythonhosted.org/packages/c1/8b/5fe2cc11fee489817272089c4203e679c63b570a5aaeb18d852ae3cbba6a/et_xmlfile-2.0.0-py3-none-any.whl"
+  }
+]
