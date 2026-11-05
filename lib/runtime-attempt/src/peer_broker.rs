@@ -72,6 +72,12 @@ impl PeerBroker {
         let listener = UnixListener::bind(&socket)
             .with_context(|| format!("bind peer broker {}", socket.display()))?;
         set_owner_only(&socket)?;
+        // A sandboxed shim is allowed to connect to this path, and the seatbelt
+        // filter matches the string it connects with. `temp_dir()` on macOS is
+        // `/var/folders/...`, which is a symlink to `/private/var/...`: report
+        // the canonical path so the policy and the connection name the same
+        // file.
+        let socket = socket.canonicalize().unwrap_or(socket);
         listener.set_nonblocking(true)?;
         let stopped = Arc::new(AtomicBool::new(false));
         let routes = Arc::new(routes);
@@ -306,6 +312,30 @@ mod tests {
             }
         });
         (address, stopped)
+    }
+
+    #[test]
+    fn the_broker_reports_the_canonical_socket_path() {
+        // The shim's seatbelt rule is built from this path and the shim
+        // connects with it; a `/var` vs `/private/var` mismatch makes the
+        // connect fail with EPERM inside the sandbox.
+        let (peer, peer_stop) = echo_server();
+        let root = tempfile::tempdir().unwrap();
+        // A path in the platform temp dir, as the short-path fallback uses.
+        let short = std::env::temp_dir().join(format!("ato-peer-canonical-{}", std::process::id()));
+        std::fs::create_dir_all(&short).unwrap();
+        let broker = PeerBroker::start(&short, BTreeMap::from([("edge".to_owned(), peer)]))
+            .expect("broker starts");
+        let path = broker.socket_path();
+        assert_eq!(
+            path,
+            path.canonicalize().expect("the socket exists"),
+            "the broker must report the canonical socket path"
+        );
+        drop(broker);
+        let _ = peer_stop;
+        let _ = std::fs::remove_dir_all(&short);
+        let _ = root;
     }
 
     #[test]
