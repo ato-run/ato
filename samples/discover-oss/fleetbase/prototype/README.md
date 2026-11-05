@@ -207,3 +207,43 @@ This evidence does not prove the release images were built from these trees,
 and it does not include every third-party dependency or constitute a complete
 corresponding-source distribution. Those checks, notice coverage and hosted
 acceptance remain open.
+
+## API image source comparison
+
+On 2026-11-06, `provenance/compare_api_source.py` compared the arm64 API
+image's installed files with the verified source archives above. The root API
+comparison excludes `vendor`, `.composer` and mutable `storage`: 105 source
+files matched byte-for-byte, two Git metadata files were absent from the image,
+and four image files had no root-source counterpart (`.fleetbase-id`,
+`bootstrap/cache/packages.php`, `bootstrap/cache/services.php` and `crontab`).
+Those four have not been independently attributed by this comparison.
+
+For seven installed Fleetbase Composer packages whose source commits match the
+release's submodule pins, all 8,498 installed regular files matched their
+complete source archives; 1,062 additional source files were absent from the
+installed packages. No installed symlinks or differing shared files were
+observed in these paths. `provenance/api-source-comparison.json` records the
+individual paths and archive hashes. The comparison detects altered shared
+files, rejects archive digest mismatches and unsafe entries, and reports source
+and installed files that do not have counterparts. It compares bytes only; it
+does not verify modes, other Composer packages, operating-system packages,
+container build steps, generated files or corresponding source for the console
+and socket images. The image digest is selected by the caller, not verified
+from inside the container. This evidence does not make the candidate ready for
+distribution or deployment.
+
+From the repository root, with the root and submodule archives described above
+present under `.tmp`, reproduce the comparison with the pinned image:
+
+```sh
+docker run --rm --network none --read-only \
+  --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/compare_api_source.py",dst=/compare.py,readonly \
+  --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/fleetbase-source-trees.json",dst=/input/fleetbase-source-trees.json,readonly \
+  --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/composer-inventory.json",dst=/input/composer-inventory.json,readonly \
+  --mount type=bind,src="$PWD/.tmp/fleetbase-v0.7.75-source.tar.gz",dst=/input/root.tar.gz,readonly \
+  --mount type=bind,src="$PWD/.tmp/fleetbase-submodule-sources",dst=/input/submodules,readonly \
+  --entrypoint python3 \
+  fleetbase/fleetbase-api@sha256:ccd1f9d4ee93625edd9f9aa446e8655cbc2ffbe7c249387bdf52169967933572 \
+  /compare.py > .tmp/fleetbase-api-source-comparison.json
+cmp .tmp/fleetbase-api-source-comparison.json samples/discover-oss/fleetbase/prototype/provenance/api-source-comparison.json
+```
