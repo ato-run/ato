@@ -80,6 +80,7 @@ services:
       - ./patched-api/service_request.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_request.py:ro
       - ./patched-api/service_order.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_order.py:ro
       - ./patched-api/service_appointment.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_appointment.py:ro
+      - ./patched-api/schedule.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/schedule.py:ro
       - ./patched-doctype/service_order.py:/home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/doctype/service_order/service_order.py:ro
     networks: [test]
     depends_on:
