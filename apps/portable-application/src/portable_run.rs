@@ -217,8 +217,7 @@ pub fn execution_requirements_for(
     let derivation = &validated.derivation;
     let mut requirements = match validated.realization {
         PortableRealizationKind::StaticWeb => ato_host_facts::ExecutionRequirements::default(),
-        PortableRealizationKind::LocalProcess
-        | PortableRealizationKind::ProcessServiceGroup => {
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup => {
             ato_host_facts::ExecutionRequirements::process()
         }
         PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
