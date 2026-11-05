@@ -131,6 +131,9 @@ and refused automatic restart after a forced stop. The scheduler process runs,
 but the synthetic site's scheduler remained disabled; periodic execution has
 not been established. The candidate deliberately has no automated recovery
 for an interrupted initialization or forced stop.
+The synthetic lifecycle proof also passed with a 2 GiB memory limit, two CPUs
+and a 256-process limit on the emulated host. These limits and timings still
+need verification on the selected hosted Runner.
 
 After building the patched image above, the local image and proof can be run:
 
@@ -146,6 +149,15 @@ The proof supplies only a generated synthetic secret, uses no network, and
 removes its resources after success. It intentionally sets `CI` on the test
 container to check that the supervisor does not propagate Frappe's test mode
 to its background workers.
+
+`prepare_capsule_candidate.py` prepares a separate authoring directory with
+only the supervisor, bootstrap and WSGI scripts, a required secret binding, a
+single persistent state slot, and login and API readiness observations. It
+requires a digest-pinned image reference and refuses an existing output
+directory. The current locally built image is not available from a registry;
+this is a local-only candidate, not a hosted import or distribution. Parsing
+the authored TOML is not proof that a Capsule has been packed, admitted or
+executed by an Ato Runner.
 
 This result does not establish a stg Runner-compatible package. The manually
 started proof used a development server and ephemeral Redis; the supervisor
