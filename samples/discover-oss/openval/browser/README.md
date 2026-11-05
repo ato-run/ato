@@ -60,4 +60,11 @@ On 2026-11-05, staging Instance `cinst_01M6NMVJ1KMY4R5TSGBG83FPRW` showed a
 verified Static Web Contract; its owner view displayed the warning and the
 upstream sample workbook's cashflow report. The current listing is:
 https://stg-app.ato.run/?view=discover&detail=discover%3Adapp_01M6NMXH157ETDNT2HTNMJPY51
-The separate public trial and staging workbook download remain unverified.
+The separate public trial remained unverified.
+
+On 2026-11-06, the owner reopened this staging Instance with the upstream
+synthetic sample loaded and used Download workbook. The browser saved an XLSX
+whose ZIP integrity check passed, whose XML parts parsed, and whose twelve
+worksheets included the sample property. This verifies export of that sample;
+the resulting workbook was not reimported in this staging run. The public
+trial remains unverified.
