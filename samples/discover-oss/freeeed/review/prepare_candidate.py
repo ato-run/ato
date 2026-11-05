@@ -131,7 +131,10 @@ import java.nio.file.attribute.PosixFilePermission;''')
                 throw error;
             }''')
     users = replace_once(users, '''            userCache.remove(username);
-            storeUsers();''', '''            User previous = userCache.remove(username);
+            storeUsers();''', '''            if ("admin".equals(username)) {
+                throw new IllegalArgumentException("The initial administrator cannot be deleted");
+            }
+            User previous = userCache.remove(username);
             try {
                 storeUsers();
             } catch (RuntimeException error) {
@@ -199,6 +202,11 @@ import java.nio.file.attribute.PosixFilePermission;''')
             log.info("No stored users yet; starting with an empty user cache.");
         } catch (Exception e) {
             throw new IllegalStateException("Unable to load user store", e);''')
+    users = replace_once(users, '''            ois = new ObjectInputStream(fis);
+            ''', '''            if (Files.size(store) > 1048576) throw new IOException("User store exceeds size limit");
+            ois = new ObjectInputStream(fis);
+            ois.setObjectInputFilter(new UserStoreFilter());
+            ''')
     users = replace_once(users, '''            if (data != null) {
                 userCache = data;
             }''', '''            if (data == null) throw new IllegalStateException("User store is empty or invalid");
@@ -237,6 +245,8 @@ import java.nio.file.attribute.PosixFilePermission;''')
     (destination / 'src/main/resources/paContext.xml').write_text(xml)
     (destination / relative_case).write_text(text)
     (destination / user_path).write_text(users)
+    shutil.copy2(Path(__file__).with_name('UserStoreFilter.java'),
+                 destination / 'src/main/java/org/freeeed/search/web/dao/user/UserStoreFilter.java')
     (destination / left_path).write_text(left)
     shutil.copyfile(Path(__file__).with_name('PasswordVerifier.java'),
         destination / 'src/main/java/org/freeeed/search/web/dao/user/PasswordVerifier.java')

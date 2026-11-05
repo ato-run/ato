@@ -308,7 +308,11 @@ per-Instance binding and lifecycle for that token, rather than putting it in a
 Capsule or logs. Test-only instrumentation confirmed that repeated requests
 were dispatched to different controller objects. Other shared objects and the
 full authentication and file-upload paths have not been audited. In particular,
-rate limiting, CSRF, serialized user-store input, dependency vulnerabilities,
-legacy credential migration, and backup and recovery still require work. The
-prototype fails closed if an existing user store has no administrator; deleting
-that administrator therefore requires a recovery design before release.
+rate limiting, CSRF, dependency vulnerabilities, legacy credential migration,
+and backup and recovery still require work. A prototype Java serialization
+filter limits the accepted user-store classes, graph and file size; a synthetic
+probe rejected an unexpected class before its deserializer executed and rejected
+an oversized array. Reloading the previously saved synthetic store and reviewing
+its indexed document succeeded. Deleting the initial administrator is rejected
+(currently as HTTP 500); an existing store without that administrator fails
+closed. Recovery and a usable deletion error remain to be designed.
