@@ -648,6 +648,29 @@ pub struct BoundState {
     pub protocol: String,
     pub mount: String,
     pub access: StateAccess,
+    /// Whether a host must give this slot a fixed mount at `mount`.
+    ///
+    /// Absent means yes: the slot is materialized at `mount`, and a host that
+    /// cannot bind-mount it refuses the route. `false` says the route locates
+    /// the slot through `ATO_STATE_PATH_<ID>` instead, so a host without a
+    /// mount namespace (macOS Seatbelt) can hand the workload the real host
+    /// path and allow writes to exactly that path.
+    ///
+    /// Omitted from canonical bytes when unset, so every Derivation formed
+    /// before this field existed keeps the same bytes and `DerivationRef`. A
+    /// runtime that predates the field rejects a Derivation that carries it
+    /// (`deny_unknown_fields`), which is the safe direction: it must not run
+    /// a declaration it cannot honour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_required: Option<bool>,
+}
+
+impl BoundState {
+    /// The slot is materialized at `mount`, so the host needs a mount
+    /// namespace for it. Absent and `Some(true)` both mean this.
+    pub fn requires_fixed_mount(&self) -> bool {
+        self.mount_required != Some(false)
+    }
 }
 
 /// One executable route, addressable and reusable.
@@ -737,6 +760,18 @@ impl BoundDerivation {
             != self.requirements
         {
             return Err(malformed("requirements", "requirements must be canonical"));
+        }
+        // `true` and absence would be the same declaration in two byte forms,
+        // so only the affirmative relaxation is expressible.
+        if self
+            .state
+            .iter()
+            .any(|slot| slot.mount_required == Some(true))
+        {
+            return Err(malformed(
+                "state.mount_required",
+                "must be false when present; omit it when the slot needs a fixed mount",
+            ));
         }
         digest_of(self)
     }
@@ -964,6 +999,9 @@ pub fn bind_derivation(
             protocol: slot.protocol.clone(),
             mount: slot.mount.clone(),
             access: slot.access,
+            // The v1 authored grammar has no way to say the workload finds
+            // its state by path, so binding keeps the fixed-mount semantics.
+            mount_required: None,
         });
     }
     state.sort_by(|a, b| a.id.cmp(&b.id));
