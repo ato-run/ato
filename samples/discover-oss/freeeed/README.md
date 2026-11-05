@@ -71,6 +71,35 @@ the hosted Runner, reviewed for hostile files or concurrency, or published.
 The complete source and dependency notices, all supported formats, stronger
 failure reporting, and the upstream review/search workflow remain outstanding.
 
+## Local OCI service-group candidate
+
+`assemble_candidate.py` assembles an **unpublished** candidate under `.tmp`
+from the pinned upstream Git checkout and a previously patched Maven build. It
+splits the processing JAR into files below the portable-workspace per-file
+limit and includes the patched engine source JAR, POMs, Apache license, NOTICE
+and adapter sources. This is not yet a complete dependency-license inventory.
+`start.sh` verifies the reassembled engine digest before using it; the engine
+cache and per-job files are inside the declared `/data` slot.
+
+On 2026-11-05 the candidate packed successfully as a 248,111,386-byte Capsule
+with bundle SHA-256 `c6a0e0b0fbb008673b269701522825d64d312c23113b246082f712591faa7ba0`,
+ContractRef `7ea9030861cc59692a70ac22d59cfea1cecc93991220aaf807a2ae1e402f157a`
+and DerivationRef `ab7001c69e603f8b413559e8fad27e1e9986568ccf71c80a4e90998dd423ad0b`.
+It requires the direct-upload path because it exceeds the 32 MiB Worker
+upload limit. A local Docker Desktop test used the two digest-pinned linux/amd64
+images, a private internal network, non-root users, read-only container roots,
+resource limits and a writable data directory. Through a loopback-only test
+forwarder, health passed and the synthetic text document produced the expected
+original and extracted text; the job directory was removed. This is Docker
+evidence, not an ato Runner receipt. On the macOS test host, `ato run` refused
+the route because OCI service groups require a native Linux Docker host.
+
+This candidate has not been imported or published on staging. Its preview
+does not provide FreeEed Review, search, OCR, or a complete eDiscovery
+workflow. Do not treat this experiment as a safe place for real evidence or
+confidential documents. The large cached engine also makes saved-data and
+checkpoint behavior an explicit outstanding test.
+
 The upstream FastAPI example is not ready to expose directly. It uses an
 uploaded filename and project name in server paths, accepts a custom project
 file path, and queues work without a durable completion result. Its JSON
