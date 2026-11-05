@@ -1,6 +1,6 @@
 # Single-volume feasibility experiment
 
-Status: synthetic local experiment on Docker Desktop arm64, **not** a
+Status: synthetic local experiments on Docker Desktop arm64 and emulated amd64, **not** a
 deployable artifact. The `Dockerfile` extends the parent experiment's locally
 built `beveren-fsm-local-proof:20261106`, whose image ID was
 `sha256:e55374d33a975d5d1bd3757e2e08075db1c6fe08d3ef98aba1099a2e13d84c7f`.
@@ -25,6 +25,30 @@ manually restarting the Frappe development server, the same login could read
 the request, order and attachment. `persist_probe.py` performs the upload and
 verification portions of that test. No real customer data was used.
 
+The same fresh initialization, setup, upload and restart check also passed on
+an emulated linux/amd64 image on Docker Desktop. `Dockerfile.amd64` uses the
+separately built local base `beveren-fsm-amd64-local-proof:20261106` (image ID
+`sha256:84a9a9e9e8b3871448d4be30643536c447a33660fab8407fb5bb9556dc52811e`).
+After building that base as described in the parent README, build this test
+image and run the proof from the repository root:
+
+```sh
+docker build --platform linux/amd64 --network none \
+  -f samples/discover-oss/beveren-fsm/local-test/single-volume/Dockerfile.amd64 \
+  -t beveren-fsm-single-amd64-proof:20261106 \
+  samples/discover-oss/beveren-fsm/local-test/single-volume
+samples/discover-oss/beveren-fsm/local-test/single-volume/run-amd64-proof.sh
+```
+
+The script creates uniquely named synthetic resources on an internal Docker
+network and removes them on success; if it fails or `BEVEREN_KEEP_TEST=1` is
+set, it prints their names for inspection. It keeps only generated test
+credentials in that test volume, not in the repository or command output.
+One fresh patched-image initialization took approximately 81 seconds between
+creation of the bench app list and the end of app installation on that
+emulated host. This exceeds the existing 60-second service-group readiness
+limit, but does not predict native Runner timing.
+
 An additional isolated Gunicorn experiment used `wsgi_single.py` with two
 workers and two threads against that site. An administrator could sign in,
 list synthetic requests, load the scheduling HTML and its JavaScript, and read
@@ -34,6 +58,31 @@ has not been validated as a supported or secure hosted entrypoint. In a
 separate synthetic request an untrusted `X-Frappe-Site-Name` header did not
 change the selected site.
 
+A separate local amd64 image incorporated the digest-checked list,
+appointment, schedule and order patches and the single-site WSGI wrapper.
+After mounting the previously created synthetic volume, it passed the
+unshared/shared-role checks, order-to-purchase mapping checks, and appointment
+creation and rescheduling probes; an anonymous request for the private file
+again returned HTTP 403. This verifies only those paths against synthetic data,
+not the rest of the application or the hosting boundary.
+
+The local-only patched image context can be reproduced from the pinned source
+checkout after the unpatched amd64 test image above is built:
+
+```sh
+python3 samples/discover-oss/beveren-fsm/local-test/single-volume/prepare_patched_image.py \
+  .tmp/beveren-fsm-source .tmp/beveren-patched-image
+docker build --platform linux/amd64 --network none \
+  -t beveren-fsm-single-amd64-patched-proof:20261106 .tmp/beveren-patched-image
+BEVEREN_TEST_IMAGE=beveren-fsm-single-amd64-patched-proof:20261106 \
+  BEVEREN_TEST_PATCHED=1 \
+  samples/discover-oss/beveren-fsm/local-test/single-volume/run-amd64-proof.sh
+```
+
+The preparation command checks the original file digests and refuses an
+existing output directory. The optional extra probes cover only the paths named
+above. The resulting image remains private to the local Docker daemon.
+
 Using the separate Redis and a one-shot `bench worker --queue short --burst`,
 the `enqueue_probe.py` / `synthetic_job.py` fixture executed one synthetic job
 and wrote its marker under the site's private files. This exercises a worker,
@@ -41,6 +90,10 @@ not queue persistence, restart recovery or sustained load. A due synthetic
 `frappe.ping` scheduled-job record was also enqueued using its normal job-type
 method, run by a one-shot default worker, and observed as `Complete` in the
 site's job log. The periodic scheduler daemon itself was not exercised.
+
+The patched image also passed the scripted proof from an empty synthetic amd64
+volume, including setup, restart, private attachment, the restricted/shared
+roles and a scheduled appointment; the script then removed its test resources.
 
 This result does not establish a stg Runner-compatible package. The proof used
 an interactive development server for the restart test, did not supervise its
