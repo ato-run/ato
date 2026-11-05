@@ -329,6 +329,7 @@ impl ValidatorAgent {
                     portability_profile: None,
                     embedded_oci_image_loaded: None,
                     services: Vec::new(),
+                    ..Default::default()
                 });
         execution.endpoint = job.endpoint.clone();
         execution.lease_id = job.lease_id.clone();
@@ -1122,6 +1123,7 @@ fn validated_routes(
                     }
                     PortableRealizationKind::OciContainer => "oci",
                     PortableRealizationKind::OciServiceGroup => "oci_service_group",
+                    PortableRealizationKind::ProcessServiceGroup => "process_service_group",
                 },
                 runtimes: route.derivation.runtimes.clone(),
                 argv: step.argv.clone(),
