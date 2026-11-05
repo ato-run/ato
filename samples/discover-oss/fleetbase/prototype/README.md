@@ -220,10 +220,16 @@ The image's `crontab` matches `docker/crontab` elsewhere in the pinned root
 source archive. The other three have no byte-identical regular file in that
 archive and are not independently attributed by this comparison.
 
-For seven installed Fleetbase Composer packages whose source commits match the
-release's submodule pins, all 8,498 installed regular files matched their
-complete source archives; 1,062 additional source files were absent from the
-installed packages. No installed symlinks or differing shared files were
+For all 12 installed Fleetbase-named Composer packages, all 11,192 installed
+regular files matched their pinned complete source archives; 1,070 additional
+source files were absent from the installed packages. Seven package commits
+match the release submodule pins. The other five are recorded in
+`provenance/extra-source-trees.json`: their commit/tree identities were read
+from the upstream GitHub API, and the archives were checked against the entire
+Git tree with `verify_git_tree_archive.py`. The `laravel-twilio` codeload
+archive omitted eight export-ignored files, so its complete archive was
+reconstructed from the pinned Git objects using `archive_git_tree.py` and
+independently checked against the tree. No installed symlinks or differing shared files were
 observed in these paths. `provenance/api-source-comparison.json` records the
 individual paths and archive hashes. The comparison detects altered shared
 files, rejects archive digest mismatches and unsafe entries, and reports source
@@ -241,9 +247,11 @@ present under `.tmp`, reproduce the comparison with the pinned image:
 docker run --rm --network none --read-only \
   --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/compare_api_source.py",dst=/compare.py,readonly \
   --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/fleetbase-source-trees.json",dst=/input/fleetbase-source-trees.json,readonly \
+  --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/extra-source-trees.json",dst=/input/extra-source-trees.json,readonly \
   --mount type=bind,src="$PWD/samples/discover-oss/fleetbase/prototype/provenance/composer-inventory.json",dst=/input/composer-inventory.json,readonly \
   --mount type=bind,src="$PWD/.tmp/fleetbase-v0.7.75-source.tar.gz",dst=/input/root.tar.gz,readonly \
   --mount type=bind,src="$PWD/.tmp/fleetbase-submodule-sources",dst=/input/submodules,readonly \
+  --mount type=bind,src="$PWD/.tmp/fleetbase-extra-sources",dst=/input/extra-sources,readonly \
   --entrypoint python3 \
   fleetbase/fleetbase-api@sha256:ccd1f9d4ee93625edd9f9aa446e8655cbc2ffbe7c249387bdf52169967933572 \
   /compare.py > .tmp/fleetbase-api-source-comparison.json

@@ -1,0 +1,55 @@
+{
+  "schema": "ato.fleetbase-extra-source-trees/1",
+  "packages": [
+    {
+      "name": "fleetbase/countries",
+      "repository": "https://github.com/fleetbase/countries.git",
+      "commit": "0ea7476fd12b4d9254e9e6b387880d96a07b3119",
+      "tree": "e7714b1b8138d8da89f08d3aa55fc63a3a5c43fe",
+      "archive": "countries-0ea7476fd12b4d9254e9e6b387880d96a07b3119.tar.gz",
+      "archive_sha256": "0670949fdf1585acd4c48f7265ad4cb45f66f0614c9b142bf0934976143b5715",
+      "prefix": "countries-0ea7476fd12b4d9254e9e6b387880d96a07b3119/",
+      "files": 2405
+    },
+    {
+      "name": "fleetbase/laravel-mysql-spatial",
+      "repository": "https://github.com/fleetbase/laravel-mysql-spatial.git",
+      "commit": "0fb5bb91295028df1f46d80cb6ccb05838a17f11",
+      "tree": "1064c745f0c1e3ec73141d21c5598acfa953e6ac",
+      "archive": "laravel-mysql-spatial-0fb5bb91295028df1f46d80cb6ccb05838a17f11.tar.gz",
+      "archive_sha256": "a03d74950d47213266b9cd416ccb5cbad0c85da997ebf8d4e3447a5104c4d22a",
+      "prefix": "laravel-mysql-spatial-0fb5bb91295028df1f46d80cb6ccb05838a17f11/",
+      "files": 74
+    },
+    {
+      "name": "fleetbase/twilio",
+      "repository": "https://github.com/fleetbase/laravel-twilio.git",
+      "commit": "1f7f411d6c5b5071a0d7353bb6432f6e71aa9d87",
+      "tree": "1c23015160def7a3acd6ea29fdac450f251310c2",
+      "archive": "laravel-twilio-1f7f411d6c5b5071a0d7353bb6432f6e71aa9d87.full.tar.gz",
+      "archive_sha256": "0984b3daae1a68981d35e3a014adecc5cd31d5f3afbee67e1a32146128d07bd7",
+      "prefix": "source/",
+      "files": 25
+    },
+    {
+      "name": "fleetbase/valhalla-api",
+      "repository": "https://github.com/fleetbase/valhalla.git",
+      "commit": "7be6021ae9418debcc265ed89e0518777a05ea22",
+      "tree": "b23e193d4d5f3ad5edc7684b9a2466a2f7b9afba",
+      "archive": "valhalla-7be6021ae9418debcc265ed89e0518777a05ea22.tar.gz",
+      "archive_sha256": "310dd242906520e61e99d972e40ed7ee93934839827817c53cb9b9736ee650ed",
+      "prefix": "valhalla-7be6021ae9418debcc265ed89e0518777a05ea22/",
+      "files": 101
+    },
+    {
+      "name": "fleetbase/vroom-api",
+      "repository": "https://github.com/fleetbase/vroom.git",
+      "commit": "e758becbb92a2cd2997462184f02e87d9436d2e1",
+      "tree": "8254634d1c8fa830e2632d1f9596e522e53fb3eb",
+      "archive": "vroom-e758becbb92a2cd2997462184f02e87d9436d2e1.tar.gz",
+      "archive_sha256": "3c49db50ed73bbffa9fcaf359ef10a5b35fb2a9f6803d04cff745ae6c28fcbf8",
+      "prefix": "vroom-e758becbb92a2cd2997462184f02e87d9436d2e1/",
+      "files": 97
+    }
+  ]
+}

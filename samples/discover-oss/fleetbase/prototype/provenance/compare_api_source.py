@@ -24,6 +24,8 @@ PACKAGES = {
     'packages/registry-bridge': 'fleetbase/registry-bridge',
     'packages/storefront': 'fleetbase/storefront-api',
 }
+EXTRA_PACKAGES = {'fleetbase/countries', 'fleetbase/laravel-mysql-spatial',
+                  'fleetbase/twilio', 'fleetbase/valhalla-api', 'fleetbase/vroom-api'}
 MAX_FILE_SIZE = 50 * 1024 * 1024
 
 
@@ -121,6 +123,7 @@ def find_archive_matches(archive, expected_digest, targets):
 
 def main():
     source_info = json.loads(Path('/input/fleetbase-source-trees.json').read_text())
+    extra_sources = json.loads(Path('/input/extra-source-trees.json').read_text())
     composer = json.loads(Path('/input/composer-inventory.json').read_text())
     submodules = {entry['path']: entry for entry in source_info['submodules']}
     installed_packages = {entry['name']: entry for entry in composer['packages']}
@@ -144,6 +147,24 @@ def main():
         # different top-level directory names.
         prefix = 'source/' if pin['method'] == 'complete-git-tree' else f"{path.split('/')[-1]}-{pin['commit']}/"
         expected = archive_files(archive, pin['archive_sha256'], prefix)
+        actual, links = installed_files(api / 'vendor' / name)
+        report['packages'][name] = {'commit': pin['commit'], 'archive_sha256': pin['archive_sha256'],
+                                    **comparison(expected, actual, links)}
+    if extra_sources.get('schema') != 'ato.fleetbase-extra-source-trees/1':
+        raise ValueError('Unexpected extra source metadata')
+    extras = extra_sources['packages']
+    if len(extras) != len(EXTRA_PACKAGES) or {pin['name'] for pin in extras} != EXTRA_PACKAGES:
+        raise ValueError('Unexpected extra source packages')
+    for pin in extras:
+        name = pin['name']
+        package = installed_packages[name]
+        if (pin['commit'] != package['source_commit'] or pin['repository'] != package['source_url']
+                or Path(pin['archive']).name != pin['archive']):
+            raise ValueError('Installed source reference differs from extra source: ' + name)
+        archive = Path('/input/extra-sources') / pin['archive']
+        expected = archive_files(archive, pin['archive_sha256'], pin['prefix'])
+        if len(expected) != pin['files']:
+            raise ValueError('Unexpected source file count: ' + name)
         actual, links = installed_files(api / 'vendor' / name)
         report['packages'][name] = {'commit': pin['commit'], 'archive_sha256': pin['archive_sha256'],
                                     **comparison(expected, actual, links)}

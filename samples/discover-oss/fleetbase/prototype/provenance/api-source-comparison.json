@@ -1170,6 +1170,70 @@
       ],
       "installed_only": [],
       "installed_symlinks": []
+    },
+    "fleetbase/countries": {
+      "commit": "0ea7476fd12b4d9254e9e6b387880d96a07b3119",
+      "archive_sha256": "0670949fdf1585acd4c48f7265ad4cb45f66f0614c9b142bf0934976143b5715",
+      "source_files": 2405,
+      "installed_files": 2405,
+      "matching": 2405,
+      "mismatches": [],
+      "source_only": [],
+      "installed_only": [],
+      "installed_symlinks": []
+    },
+    "fleetbase/laravel-mysql-spatial": {
+      "commit": "0fb5bb91295028df1f46d80cb6ccb05838a17f11",
+      "archive_sha256": "a03d74950d47213266b9cd416ccb5cbad0c85da997ebf8d4e3447a5104c4d22a",
+      "source_files": 74,
+      "installed_files": 74,
+      "matching": 74,
+      "mismatches": [],
+      "source_only": [],
+      "installed_only": [],
+      "installed_symlinks": []
+    },
+    "fleetbase/twilio": {
+      "commit": "1f7f411d6c5b5071a0d7353bb6432f6e71aa9d87",
+      "archive_sha256": "0984b3daae1a68981d35e3a014adecc5cd31d5f3afbee67e1a32146128d07bd7",
+      "source_files": 25,
+      "installed_files": 17,
+      "matching": 17,
+      "mismatches": [],
+      "source_only": [
+        ".gitattributes",
+        ".gitignore",
+        ".travis.yml",
+        "LICENSE",
+        "README.md",
+        "phpunit.xml",
+        "tests/TwilioCallCommandTest.php",
+        "tests/TwilioSmsCommandTest.php"
+      ],
+      "installed_only": [],
+      "installed_symlinks": []
+    },
+    "fleetbase/valhalla-api": {
+      "commit": "7be6021ae9418debcc265ed89e0518777a05ea22",
+      "archive_sha256": "310dd242906520e61e99d972e40ed7ee93934839827817c53cb9b9736ee650ed",
+      "source_files": 101,
+      "installed_files": 101,
+      "matching": 101,
+      "mismatches": [],
+      "source_only": [],
+      "installed_only": [],
+      "installed_symlinks": []
+    },
+    "fleetbase/vroom-api": {
+      "commit": "e758becbb92a2cd2997462184f02e87d9436d2e1",
+      "archive_sha256": "3c49db50ed73bbffa9fcaf359ef10a5b35fb2a9f6803d04cff745ae6c28fcbf8",
+      "source_files": 97,
+      "installed_files": 97,
+      "matching": 97,
+      "mismatches": [],
+      "source_only": [],
+      "installed_only": [],
+      "installed_symlinks": []
     }
   }
 }
