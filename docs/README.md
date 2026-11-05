@@ -86,6 +86,8 @@ not permission to rewrite either side during documentation maintenance.
   K and D JSON, bundle references and receipts.
 - [Sample K and D objects](guides/contract-derivation-samples.md): decoded examples
   from the committed bundles.
+- [Research Q&A](guides/research-qa.md): comparisons, failure handling, LLM
+  tuning and the limits of K.
 - [Research tour](guides/research-tour.md): problem, model, profiles, data
   identity, verified results, independence, prior work and open questions.
 - [Theory draft](theory/capsule-process-model.md): research background, not an
