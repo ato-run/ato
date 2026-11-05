@@ -1,0 +1,11 @@
+FROM redis@sha256:987c376c727652f99625c7d205a1cba3cb2c53b92b0b62aade2bd48ee1593232 AS redis
+FROM beveren-fsm-single-amd64-patched-proof:20261106
+USER root
+COPY --from=redis /usr/local/bin/redis-server /opt/redis/redis-server
+COPY --from=redis /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+COPY --from=redis /usr/lib/libstdc++.so.6 /opt/redis-libs/libstdc++.so.6
+COPY --from=redis /usr/lib/libgcc_s.so.1 /opt/redis-libs/libgcc_s.so.1
+COPY --from=redis /usr/lib/libssl.so.3 /opt/redis-libs/libssl.so.3
+COPY --from=redis /usr/lib/libcrypto.so.3 /opt/redis-libs/libcrypto.so.3
+RUN LD_LIBRARY_PATH=/opt/redis-libs /opt/redis/redis-server --version
+USER frappe

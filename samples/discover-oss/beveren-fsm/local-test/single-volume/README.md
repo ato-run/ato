@@ -120,11 +120,38 @@ not authenticate as `frappe` or `root`, while the site-scoped database account
 had no global privileges or grant option. The same restart and functional
 checks passed using that site account.
 
-This result does not establish a stg Runner-compatible package. The proof used
-an interactive development server for the restart test, did not supervise its
-processes or exercise the scheduler, and did not make Redis durable. It has no safe
-production initialization or credential handoff, no crash recovery or complete
-backup, and no portable Capsule or hosted receipt. Initialization still gives
+An additional local image adds Redis to the patched image and uses its AOF on
+the same volume. `supervisor.py` is a local-only candidate that starts Redis,
+MariaDB, Gunicorn, workers and the scheduler process, consumes an initial
+administrator binding only on first initialization, removes database setup
+users before serving, and refuses concurrent use of the same volume. In an
+isolated synthetic test it served the app, ran a worker job, retained a private
+attachment and Redis value across a normal restart without the initial binding,
+and refused automatic restart after a forced stop. The scheduler process runs,
+but the synthetic site's scheduler remained disabled; periodic execution has
+not been established. The candidate deliberately has no automated recovery
+for an interrupted initialization or forced stop.
+
+After building the patched image above, the local image and proof can be run:
+
+```sh
+docker build --platform linux/amd64 --network none \
+  -f samples/discover-oss/beveren-fsm/local-test/single-volume/Dockerfile.redis \
+  -t beveren-fsm-single-amd64-redis-proof:20261106 \
+  samples/discover-oss/beveren-fsm/local-test/single-volume
+samples/discover-oss/beveren-fsm/local-test/single-volume/run-supervisor-proof.sh
+```
+
+The proof supplies only a generated synthetic secret, uses no network, and
+removes its resources after success. It intentionally sets `CI` on the test
+container to check that the supervisor does not propagate Frappe's test mode
+to its background workers.
+
+This result does not establish a stg Runner-compatible package. The manually
+started proof used a development server and ephemeral Redis; the supervisor
+candidate remains local and does not establish scheduled execution or a safe
+production credential handoff. It has no crash recovery or complete backup,
+and no portable Capsule or hosted receipt. Initialization still gives
 the app UID a privileged database socket account until setup finishes; failure
 handling and recovery for that window need security review. The base image,
 dependency notices, source distribution and the remaining application
