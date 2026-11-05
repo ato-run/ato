@@ -1,0 +1,9 @@
+FROM beveren-fsm-single-amd64-proof:20261106
+USER root
+COPY --chown=frappe:frappe api/service_request.py /home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_request.py
+COPY --chown=frappe:frappe api/service_order.py /home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_order.py
+COPY --chown=frappe:frappe api/service_appointment.py /home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/service_appointment.py
+COPY --chown=frappe:frappe api/schedule.py /home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/api/schedule.py
+COPY --chown=frappe:frappe service_order.py /home/frappe/frappe-bench/apps/beveren_fsm/beveren_fsm/field_service_management/doctype/service_order/service_order.py
+COPY --chown=frappe:frappe wsgi_single.py /opt/ato-proof/wsgi_single.py
+USER frappe
