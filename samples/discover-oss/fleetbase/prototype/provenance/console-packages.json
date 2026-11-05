@@ -1,0 +1,45 @@
+{
+  "schema": "ato.fleetbase-console-packages/1",
+  "lock_sha256": "6b8965ebb1f995209944138c2639456c54bd0645f0d0dc680dc90ff185e912ad",
+  "packages": [
+    {
+      "name": "@fleetbase/ember-core",
+      "version": "0.3.26",
+      "sha256": "e28ffc4dbe1daf40f93c66169259c2d08aa55093467cebd7f91fe30337e5fee1",
+      "sha512_integrity": "sha512-MFnYa/KwiMx9e5Ac7LuaelBWivA9O/rr38Vo3ouhuGri3q0A09WUsjdCX8/j/NkwFWT5gL9Ko469C1XKKyRiXg==",
+      "declared_license": "AGPL-3.0-or-later",
+      "repository": "https://github.com/fleetbase/ember-core",
+      "license_file": {
+        "path": "package/LICENSE.md",
+        "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998"
+      },
+      "regular_files": 340
+    },
+    {
+      "name": "@fleetbase/fleetops-data",
+      "version": "0.2.3",
+      "sha256": "aca236c991b3b21a6cc3e96e0c7074edaafa4bd6899dd041513f1063bcc51a0c",
+      "sha512_integrity": "sha512-brLYiGHZCKMDaZcyy2bJHY7SHsOTgNk8+XSpdqgmuoTT466xOg4qTPP56LxZbcp2uHyPiUvgNRb5K843gNtJww==",
+      "declared_license": "AGPL-3.0-or-later",
+      "repository": "https://github.com/fleetbase/fleetops-data",
+      "license_file": {
+        "path": "package/LICENSE.md",
+        "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998"
+      },
+      "regular_files": 408
+    },
+    {
+      "name": "@fleetbase/fleetops-engine",
+      "version": "0.6.75",
+      "sha256": "f4399342a1b72e0abe80f0591c8a34d6a22f4af7bc3b12c610fc986eb9712951",
+      "sha512_integrity": "sha512-grz600vzO1LCvF3/4cTKwghEtVOiXGWYZjnDd9vOSr4m/WJCpK+NlLU4+BGWIiJSysuwbl1hKB3juFf5H/7BtA==",
+      "declared_license": "AGPL-3.0-or-later",
+      "repository": "https://github.com/fleetbase/fleetops",
+      "license_file": {
+        "path": "package/LICENSE.md",
+        "sha256": "cf968c541adcfbd924d29c5a39d380908eb64b962160c885e800ec32d6663998"
+      },
+      "regular_files": 4441
+    }
+  ]
+}
