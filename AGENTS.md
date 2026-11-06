@@ -153,77 +153,31 @@ cargo test
 cargo run --manifest-path xtask/Cargo.toml -- bundle --target darwin-arm64
 ```
 
-## Branching Model
+## Branching model
 
-### Long-lived branches
-
-```
-main          — latest stable release only (every commit = a published vX.Y.Z tag)
-dev           — normal development integration; next stable candidate
-nightly       — 0.7.0 MVP / experimental integration
-release/0.6   — 0.6.x maintenance branch
-release/0.5   — 0.5.x maintenance branch (limited / security-only support)
-```
-
-Future: `release/0.7` is created when 0.7.0 ships; `nightly` then advances to 0.8 work.
-
-### Feature branch naming
-
-Short-lived, one issue per branch: `feat/*`, `fix/*`, `hotfix/*`.
-
-### Development flows
+Every change except an exceptional hotfix follows one release path:
 
 ```
-0.7 new features:
-  feat/0.7-* ──PR──▶ nightly ──▶ dev ──▶ main
-
-0.6 patch:
-  fix/0.6-* ──PR──▶ release/0.6 ──▶ main
-                               ↘ cherry-pick / forward-port ──▶ dev ──▶ nightly
-
-0.5 patch:
-  fix/0.5-* ──PR──▶ release/0.5 ──▶ main
-                               ↘ forward-port ──▶ release/0.6 ──▶ dev ──▶ nightly
-
-Urgent hotfix:
-  hotfix/* from main ──▶ main
-                      ↘ cherry-pick ──▶ affected release branches / dev / nightly
+feat/* | fix/* ──PR──▶ dev ──PR──▶ stg ──release PR──▶ main
+                         │
+                         └─ nightly = dev + feature-flagged work (rebased onto dev)
+feat/* (feature flag only) ──PR──▶ nightly
 ```
 
-**Forward-port rule — always flow fixes oldest → newest:**
-`release/0.5` → `release/0.6` → `dev` → `nightly`
+| Branch | Role | Rules |
+|--------|------|-------|
+| `dev` | Integration of all new work. Default PR base. | PR only, merge commits, no force push / deletion. |
+| `stg` | Staging candidate; shared Staging E2E. Updated by `dev → stg` PRs. | PR only, merge commits, no force push / deletion. |
+| `main` | Release-approved code. Updated only by `stg → main` release PRs. Merging ≠ production deploy. | PR only, merge commits, no force push / deletion. |
+| `nightly` | `dev` plus work that ships behind a feature flag. | Rebased onto `dev` continuously with `--force-with-lease`; never deleted. Nothing flows from `nightly` to `stg`/`main`; flagged work graduates by a normal PR to `dev`. |
 
-Never backport from `nightly` to `release/*`.
-
-### Base branch per work type
-
-| Work type | Base branch |
-|-----------|-------------|
-| 0.7 new feature / experiment | `nightly` |
-| 0.6.x patch or regression fix | `release/0.6` |
-| 0.5.x critical / security fix | `release/0.5` |
-| Normal dev (non-version-specific) | `dev` |
-| Urgent hotfix from stable | `main` |
-
-### Branch protection
-
-| Branch | Policy |
-|--------|--------|
-| `main` | No direct push. Release PR only. Full CI + manual smoke. |
-| `release/0.6` | No direct push. Patch / security / regression only. No new features. |
-| `release/0.5` | No direct push. Critical / security only. Limited support. |
-| `dev` | Normal integration. CI required. |
-| `nightly` | 0.7 experimental. Compile + test required. AODD degraded OK — log reason. |
-
-### Versioning
-
-| Branch | Version scheme |
-|--------|----------------|
-| `release/0.5` | `v0.5.x` |
-| `release/0.6` | `v0.6.x` |
-| `nightly` | `v0.7.0-nightly.YYYYMMDD+sha` |
-| `dev` | `v0.7.0-dev` (unreleased) |
-| `main` | stable tags only (`vX.Y.Z`) |
+- Base new work on `origin/dev` and open the PR against `dev`. Only work that is
+  gated behind a feature flag may target `nightly` instead.
+- Hotfix (exceptional only): `hotfix/*` from `main` → PR to `main`, then
+  immediately back-merge `main` into `stg` and `dev` (nightly picks it up on its
+  next rebase). Record why the normal path was skipped in the PR.
+- After a PR merges, delete its branch. Long-lived branches are exactly
+  `main`, `stg`, `dev`, `nightly`.
 
 ---
 
