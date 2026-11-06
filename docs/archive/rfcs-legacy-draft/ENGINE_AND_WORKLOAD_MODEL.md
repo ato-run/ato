@@ -45,8 +45,8 @@ related:
 
 ### 1.2 関連する既存 RFC との差分
 
-- [`NACELLE_SPEC.md`](../accepted/NACELLE_SPEC.md) — nacelle **単体**の仕様。`engine internal exec` 契約は nacelle 固有として定義されている。
-- [`RUNTIME_AND_BUILD_MODEL.md`](../accepted/RUNTIME_AND_BUILD_MODEL.md) — Smart Build / Dumb Runtime の責務分離。「実行時 = nacelle」を前提にしている。
+- [`NACELLE_SPEC.md`](../rfcs-legacy-accepted/NACELLE_SPEC.md) — nacelle **単体**の仕様。`engine internal exec` 契約は nacelle 固有として定義されている。
+- [`RUNTIME_AND_BUILD_MODEL.md`](../rfcs-legacy-accepted/RUNTIME_AND_BUILD_MODEL.md) — Smart Build / Dumb Runtime の責務分離。「実行時 = nacelle」を前提にしている。
 - [`UNIFIED_EXECUTION_MODEL.md`](./UNIFIED_EXECUTION_MODEL.md) — Pipeline × Runtime 統一。Runtime 側は `RuntimeProvisioner` trait（**Provider Toolchain 層**の抽象）で、Engine 層の抽象には踏み込んでいない。
 
 → **本 RFC は "Engine 層の抽象" を埋める**。Provider Toolchain でも Pipeline でもない、`ato-cli` ↔ サンドボックス実行基盤の境界を定義する。
@@ -118,7 +118,7 @@ Workload は Engine と **直接のプロトコル契約を持たない**。Prov
 
 ### 3.1 現状の nacelle 契約（`engine internal` プロトコル）
 
-nacelle のみが実装している JSON-over-stdio 契約（[NACELLE_SPEC.md §3](../accepted/NACELLE_SPEC.md) 参照）:
+nacelle のみが実装している JSON-over-stdio 契約（[NACELLE_SPEC.md §3](../rfcs-legacy-accepted/NACELLE_SPEC.md) 参照）:
 
 ```
 ato-cli ──► exec <engine> internal features ──► JSON response（ケイパビリティ）
@@ -198,7 +198,7 @@ Web              →   Static Executor        →   (なし)           →   ind
 - **契約**: `engine internal features` / `engine internal exec` v1.0 実装済み
 - **サンドボックス**: Landlock (Linux) / Seatbelt (macOS) / eBPF（オプション）
 - **SSOT**: `apps/nacelle/`
-- **参照**: [`NACELLE_SPEC.md`](../accepted/NACELLE_SPEC.md)
+- **参照**: [`NACELLE_SPEC.md`](../rfcs-legacy-accepted/NACELLE_SPEC.md)
 
 ### 5.2 OCI Executor
 
@@ -295,8 +295,8 @@ HourglassPipeline
 
 ## 10. 参考
 
-- [NACELLE_SPEC.md](../accepted/NACELLE_SPEC.md) — nacelle 単体仕様
-- [RUNTIME_AND_BUILD_MODEL.md](../accepted/RUNTIME_AND_BUILD_MODEL.md) — Smart Build / Dumb Runtime
+- [NACELLE_SPEC.md](../rfcs-legacy-accepted/NACELLE_SPEC.md) — nacelle 単体仕様
+- [RUNTIME_AND_BUILD_MODEL.md](../rfcs-legacy-accepted/RUNTIME_AND_BUILD_MODEL.md) — Smart Build / Dumb Runtime
 - [UNIFIED_EXECUTION_MODEL.md](./UNIFIED_EXECUTION_MODEL.md) — Pipeline × Runtime 統一（Provider Toolchain 層）
 - [glossary-reference.md](../../glossary-reference.md) — Engine / Workload / Provider Toolchain 用語定義
 - SSOT: `apps/ato-cli/core/src/engine.rs`, `apps/ato-cli/core/src/executors/`, `apps/ato-cli/core/src/runtime/`

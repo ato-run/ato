@@ -198,6 +198,40 @@ impl OciUserV1 {
 /// Maximum serialized opaque native launch declaration; no domain semantics.
 pub const MAX_NATIVE_LAUNCH_DECLARATION_BYTES: usize = 256 * 1024;
 
+/// The largest readiness response body a spec may ask a Runner to read.
+pub const MAX_READINESS_BODY_BYTES: u32 = 1024 * 1024;
+const MAX_READINESS_POINTER_BYTES: usize = 512;
+const MAX_READINESS_EQUALS_TEXT_BYTES: usize = 256;
+
+/// The same rules the formation domain applies to a startup condition, stated
+/// here because the wire crate cannot depend on that domain.
+fn validate_readiness_condition(
+    condition: &ReadinessJsonConditionV1,
+) -> Result<(), RuntimeLaunchSpecError> {
+    let pointer_valid = condition.pointer.len() <= MAX_READINESS_POINTER_BYTES
+        && (condition.pointer.is_empty()
+            || (condition.pointer.starts_with('/')
+                && !condition
+                    .pointer
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control())));
+    let single_comparison = condition.gte.is_some() ^ condition.equals.is_some();
+    let gte_valid = condition
+        .gte
+        .as_ref()
+        .is_none_or(|value| matches!(value, ReadinessJsonScalarV1::Integer(0..)));
+    let equals_valid = condition.equals.as_ref().is_none_or(|value| match value {
+        ReadinessJsonScalarV1::Text(text) => text.len() <= MAX_READINESS_EQUALS_TEXT_BYTES,
+        _ => true,
+    });
+    if !pointer_valid || !single_comparison || !gte_valid || !equals_valid {
+        return Err(RuntimeLaunchSpecError::ForbiddenField {
+            field: "readiness.json".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OciRealizationV1 {
@@ -395,6 +429,17 @@ pub enum ReadinessV1 {
         endpoint_name: String,
         path: String,
         timeout_ms: u64,
+        /// The exact status that counts as ready. Absent means any 2xx, which
+        /// keeps every spec formed before this field existed byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_status: Option<u16>,
+        /// A condition on the bounded response body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        json: Option<ReadinessJsonConditionV1>,
+        /// Upper bound on the bytes read to evaluate `json`. Absent means the
+        /// executor's declared default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_body_bytes: Option<u32>,
     },
     Tcp {
         endpoint_name: String,
@@ -403,6 +448,33 @@ pub enum ReadinessV1 {
     /// The workload is ready once its process is up. Weakest useful signal;
     /// only correct where the workload has no reachable endpoint.
     Process { timeout_ms: u64 },
+}
+
+/// A bounded condition over a JSON readiness response.
+///
+/// The shape mirrors `ato_formation::requirements::StartupJsonCondition`. The
+/// wire crate is the DAG root of the type system, so it cannot depend on the
+/// formation domain and states the shape itself; each side validates its own
+/// owner's instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessJsonConditionV1 {
+    /// RFC 6901 JSON Pointer into the response body. Empty names the body.
+    pub pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gte: Option<ReadinessJsonScalarV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<ReadinessJsonScalarV1>,
+}
+
+/// A JSON scalar, never a float: a readiness threshold is discrete, and a
+/// float comparison would depend on binary representation on both sides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReadinessJsonScalarV1 {
+    Bool(bool),
+    Integer(i64),
+    Text(String),
 }
 
 impl ReadinessV1 {
@@ -688,6 +760,26 @@ impl RuntimeLaunchSpecV1 {
             return Err(RuntimeLaunchSpecError::InvalidLifecycle {
                 field: "readiness.timeout_ms".to_owned(),
             });
+        }
+        if let ReadinessV1::Http {
+            expect_status,
+            json,
+            max_body_bytes,
+            ..
+        } = &self.readiness
+        {
+            if expect_status.is_some_and(|status| !(100..=599).contains(&status))
+                || max_body_bytes.is_some_and(|bytes| !(1..=MAX_READINESS_BODY_BYTES).contains(&bytes))
+                // A bound nothing reads is a requirement nothing enforces.
+                || (max_body_bytes.is_some() && json.is_none())
+            {
+                return Err(RuntimeLaunchSpecError::ForbiddenField {
+                    field: "readiness".to_owned(),
+                });
+            }
+            if let Some(json) = json {
+                validate_readiness_condition(json)?;
+            }
         }
         // Zero would mean "kill immediately", making the graceful bound a lie.
         if self.lifecycle.graceful_shutdown_ms == 0 {

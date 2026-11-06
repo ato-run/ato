@@ -16,11 +16,12 @@ use std::collections::BTreeSet;
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    SCENARIO_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
 };
 use crate::scenario::is_scenario_ref;
 use crate::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
+    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4,
     ContractVerificationReceipt, ReceiptObservation, ReceiptOutcome,
 };
 
@@ -48,6 +49,17 @@ fn reject(code: &'static str, detail: impl Into<String>) -> ReceiptRejection {
     }
 }
 
+/// A certificate serial as `ato.contract.tls@1` evidence states it: the DER
+/// INTEGER content as lowercase hex bytes, no separators.
+fn is_serial_hex(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value.len().is_multiple_of(2)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Parse and check a receipt received as JSON.
 pub fn accept_receipt_json(
     assignment: &ReceiptAssignment<'_>,
@@ -65,10 +77,46 @@ pub fn accept_receipt(
     assignment: &ReceiptAssignment<'_>,
     receipt: &ContractVerificationReceipt,
 ) -> Result<(), ReceiptRejection> {
-    if receipt.schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA
-        && receipt.schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2
-    {
+    let schema = receipt.schema.as_str();
+    let known = [
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA,
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3,
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4,
+    ];
+    if !known.contains(&schema) {
         return Err(reject("receipt_schema_unknown", receipt.schema.clone()));
+    }
+    let carries_tls = receipt.observations.iter().any(|observation| {
+        observation
+            .evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.tls.is_some())
+    });
+    // Certificate evidence needs /3 or /4. A /1 or /2 receipt carrying it is
+    // malformed rather than merely newer.
+    if carries_tls
+        && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3
+        && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4
+    {
+        return Err(reject(
+            "receipt_tls_evidence_schema",
+            "certificate evidence requires ato.contract-verification-receipt/3 or /4",
+        ));
+    }
+    // Connector evidence is exactly what /4 exists for. An older schema that
+    // carries it would be a receipt whose fields and version disagree.
+    let carries_connector = receipt.execution.as_ref().is_some_and(|execution| {
+        execution.connector.is_some()
+            || execution.relay_image_digest.is_some()
+            || execution.relay_container_id.is_some()
+            || execution.platform_emulated.is_some()
+    });
+    if carries_connector && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4 {
+        return Err(reject(
+            "receipt_connector_evidence_schema",
+            "connector evidence requires ato.contract-verification-receipt/4",
+        ));
     }
     if receipt.contract_ref != assignment.contract_ref {
         return Err(reject(
@@ -227,6 +275,42 @@ fn check_observation(
         INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => {
             if evidence.digest != requirement.digest {
                 return inconsistent("the restored snapshot is not the one K requires");
+            }
+        }
+        TLS_CONTRACT_VERIFIER => {
+            let Some(tls) = evidence.tls.as_ref() else {
+                return inconsistent("a satisfied TLS verdict carries no certificate evidence");
+            };
+            if tls.server_name != requirement.server_name.as_deref().unwrap_or_default()
+                || Some(tls.start) != requirement.start
+            {
+                return inconsistent("the evidence is of a different TLS observation than K names");
+            }
+            if evidence.method.is_some()
+                || evidence.path.is_some()
+                || evidence.status.is_some()
+                || evidence.body_sha256.is_some()
+                || evidence.input.is_some()
+                || evidence.digest.is_some()
+            {
+                return inconsistent(
+                    "TLS evidence carries only the certificate facts, not request fields",
+                );
+            }
+            if !is_serial_hex(&tls.presented_serial) {
+                return inconsistent("the presented serial is not a lowercase hex integer");
+            }
+            // A satisfied TLS verdict states that a public port serves a
+            // currently valid, publicly rooted certificate over a completed
+            // handshake. Anything else cannot have satisfied K.
+            if tls.trust_anchor != crate::verify::TLS_TRUST_ANCHOR_PUBLIC_ROOTS {
+                return inconsistent("a satisfied TLS verdict is not anchored in public roots");
+            }
+            if tls.days_remaining < 0 {
+                return inconsistent("a satisfied TLS verdict is already expired");
+            }
+            if !tls.handshake_completed {
+                return inconsistent("a satisfied TLS verdict has no completed handshake");
             }
         }
         SCENARIO_CONTRACT_VERIFIER => {
@@ -467,6 +551,9 @@ mod tests {
                     body_digest: None,
                     input: None,
                     digest: None,
+
+                    server_name: None,
+                    start: None,
                 },
                 BoundRequirement {
                     id: "source".to_owned(),
@@ -478,6 +565,9 @@ mod tests {
                     body_digest: None,
                     input: Some("workspace".to_owned()),
                     digest: Some("sha256:tree".to_owned()),
+
+                    server_name: None,
+                    start: None,
                 },
             ],
         }
@@ -492,6 +582,8 @@ mod tests {
             )],
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
+
+            tls: Vec::new(),
         };
         let mut receipt = ContractVerificationReceipt::from_attempt(
             "sha256:k",
@@ -517,6 +609,7 @@ mod tests {
             portability_profile: None,
             embedded_oci_image_loaded: None,
             services: Vec::new(),
+            ..Default::default()
         });
         receipt
     }
@@ -545,6 +638,47 @@ mod tests {
         let failing = issued(500);
         assert!(!failing.fully_satisfied);
         assert_eq!(check(&failing), Ok(()));
+    }
+
+    fn relay_evidence(receipt: &mut ContractVerificationReceipt) {
+        let execution = receipt.execution.as_mut().unwrap();
+        execution.connector = Some("relay".to_owned());
+        execution.relay_image_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        execution.relay_container_id = Some("b".repeat(64));
+        execution.platform_emulated = Some(true);
+    }
+
+    #[test]
+    fn a_relayed_receipt_is_v4_and_accepted() {
+        let mut receipt = issued(200);
+        relay_evidence(&mut receipt);
+        receipt.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4.to_owned();
+        assert_eq!(check(&receipt), Ok(()));
+        // A v4 receipt that carries no connector evidence is still readable:
+        // the version says what it may carry, not what it must.
+        let mut plain = issued(200);
+        plain.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4.to_owned();
+        assert_eq!(check(&plain), Ok(()));
+    }
+
+    #[test]
+    fn connector_evidence_requires_v4() {
+        // The /1, /2 and /3 receipts predate connector evidence. A receipt of
+        // one of those versions carrying it is malformed, not merely newer.
+        let mut v1 = issued(200);
+        relay_evidence(&mut v1);
+        assert_eq!(code(&v1), "receipt_connector_evidence_schema");
+
+        let mut v2 = issued(200);
+        v2.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
+        v2.execution.as_mut().unwrap().relay_image_digest =
+            Some(format!("sha256:{}", "c".repeat(64)));
+        assert_eq!(code(&v2), "receipt_connector_evidence_schema");
+
+        let mut v3 = issued(200);
+        v3.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3.to_owned();
+        v3.execution.as_mut().unwrap().platform_emulated = Some(true);
+        assert_eq!(code(&v3), "receipt_connector_evidence_schema");
     }
 
     #[test]
@@ -671,6 +805,9 @@ mod tests {
                     "sha256:1111111111111111111111111111111111111111111111111111111111111111"
                         .to_owned(),
                 ),
+
+                server_name: None,
+                start: None,
             }],
         }
     }
@@ -709,6 +846,7 @@ mod tests {
             portability_profile: None,
             embedded_oci_image_loaded: None,
             services: Vec::new(),
+            ..Default::default()
         });
         receipt
     }

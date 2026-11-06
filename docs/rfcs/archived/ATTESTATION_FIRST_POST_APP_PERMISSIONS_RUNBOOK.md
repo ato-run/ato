@@ -1,5 +1,7 @@
 # Attestation-First Runbook（GitHub App権限有効化後）
 
+Status: Archived.
+
 最終更新: 2026-02-12
 
 このドキュメントは、GitHub App 権限（`contents:write`, `pull_requests:write`）を有効化した後に必要な残手順を、実行順でまとめたものです。

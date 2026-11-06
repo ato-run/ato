@@ -40,11 +40,12 @@ use crate::authoring::{
     InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
     PortDraft, RequirementDraft, RuntimeDraft, SCENARIO_CONTRACT_VERIFIER,
     STATE_FILESYSTEM_PROTOCOL, ScenarioRequirement, StateAccess, StateDraft, StepDraft,
-    StepNetwork, WORKSPACE_PROTOCOL, malformed,
+    StepNetwork, TLS_CONTRACT_VERIFIER, TlsRequirement, TlsStart, WORKSPACE_PROTOCOL, malformed,
+    validate_tls_server_name,
 };
 use crate::native_surface::{
-    NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, TERMINAL_PORT_PROTOCOL,
-    terminal_size_in_bounds,
+    NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, PIXEL_PORT_PROTOCOL,
+    TERMINAL_PORT_PROTOCOL, terminal_size_in_bounds,
 };
 
 /// The file an author writes, at the root of the source they upload.
@@ -61,6 +62,7 @@ pub const LEGACY_STORE_SCHEMA_KEY: &str = "schema_version";
 const USE_HTTP_CONTRACT: &str = "ato.contract.http@1";
 const USE_WORKSPACE_CONTRACT: &str = "ato.contract.workspace@1";
 const USE_SCENARIO_CONTRACT: &str = SCENARIO_CONTRACT_VERIFIER;
+const USE_TLS_CONTRACT: &str = TLS_CONTRACT_VERIFIER;
 
 /// The only address a workload may bind for anything outside to reach it.
 const REQUIRED_BIND: &str = "0.0.0.0";
@@ -200,6 +202,14 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
         .get("derive")
         .and_then(Value::as_table)
         .is_some_and(|derive| derive.contains_key("native_surface"));
+    let native_pixel_port = table
+        .get("derive")
+        .and_then(Value::as_table)
+        .and_then(|derive| derive.get("native_surface"))
+        .and_then(Value::as_table)
+        .filter(|native| native.get("kind").and_then(Value::as_str) == Some("pixel_stream"))
+        .and_then(|native| native.get("port"))
+        .and_then(Value::as_str);
 
     for (key, value) in table {
         match key.as_str() {
@@ -211,7 +221,7 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
                 derivation.steps = steps;
                 derivation.native_surface = native_surface;
             }
-            "port" => derivation.ports = read_ports(value, native_declared)?,
+            "port" => derivation.ports = read_ports(value, native_declared, native_pixel_port)?,
             "state" => derivation.state = read_state(value)?,
             "contract" => {
                 let (identity, requirements) = read_contract(value)?;
@@ -288,7 +298,8 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
     let requirements: Vec<_>=draft.contract.requirements.iter().map(|r|match &r.requirement {
         RequirementDraft::Http(h)=>json!({"id":r.id,"use":USE_HTTP_CONTRACT,"port":h.port,"method":h.method,"path":h.path,"expect":{"status":h.status,"body_digest":h.body_digest.as_ref().map(&observed)}}),
         RequirementDraft::InputIdentity(i)=>json!({"id":r.id,"use":USE_WORKSPACE_CONTRACT,"input":i.input,"expect":{"digest":observed(&i.digest)}}),
-        RequirementDraft::Scenario(s)=>json!({"id":r.id,"use":USE_SCENARIO_CONTRACT,"port":s.port,"scenario":observed(&s.scenario)})
+        RequirementDraft::Scenario(s)=>json!({"id":r.id,"use":USE_SCENARIO_CONTRACT,"port":s.port,"scenario":observed(&s.scenario)}),
+        RequirementDraft::Tls(t)=>json!({"id":r.id,"use":USE_TLS_CONTRACT,"port":t.port,"server_name":t.server_name,"start":t.start.as_str()})
     }).collect();
     let mut contract_doc = json!({"require":requirements});
     // Only an explicit identity is written. A document that never stated one
@@ -353,6 +364,40 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
 fn render_native_surface(
     native: &NativeSurfaceAdapter,
 ) -> Result<serde_json::Value, CapsuleTomlError> {
+    if let NativePresentation::PixelStream {
+        port,
+        width,
+        height,
+    } = &native.surface
+    {
+        let [
+            NativeProbeOperation::PixelKeyFrame {
+                path,
+                keysyms,
+                max_frame_bytes,
+                timeout_ms,
+                settle_ms,
+            },
+        ] = native.operations.as_slice()
+        else {
+            return Err(malformed(
+                "derive.native_surface",
+                "this grammar represents exactly one pixel_key_frame operation",
+            )
+            .into());
+        };
+        let mut table = serde_json::json!({
+            "kind": native.surface.kind(), "profile": native.surface.profile(),
+            "width": width, "height": height, "port": port,
+            "probe_port": native.probe_port, "probe_path": path,
+            "probe_keysyms": keysyms, "probe_max_frame_bytes": max_frame_bytes,
+            "probe_timeout_ms": timeout_ms,
+        });
+        if *settle_ms != 0 {
+            table["probe_settle_ms"] = (*settle_ms).into();
+        }
+        return Ok(table);
+    }
     let NativePresentation::Terminal { port, cols, rows } = &native.surface else {
         return Err(malformed(
             "derive.native_surface",
@@ -367,6 +412,7 @@ fn render_native_surface(
             output_delimiter,
             max_output_bytes,
             timeout_ms,
+            ready_output,
         },
     ] = native.operations.as_slice()
     else {
@@ -384,7 +430,7 @@ fn render_native_surface(
             ))
         })
     };
-    Ok(serde_json::json!({
+    let mut table = serde_json::json!({
         "kind": native.surface.kind(),
         "profile": native.surface.profile(),
         "cols": cols,
@@ -396,7 +442,11 @@ fn render_native_surface(
         "probe_output_delimiter": text("probe_output_delimiter", output_delimiter)?,
         "probe_max_output_bytes": max_output_bytes,
         "probe_timeout_ms": timeout_ms,
-    }))
+    });
+    if !ready_output.is_empty() {
+        table["probe_ready_output"] = text("probe_ready_output", ready_output)?.into();
+    }
+    Ok(table)
 }
 
 // ─────────────────────────────────────────────────────────────────── the tables
@@ -537,15 +587,18 @@ fn read_platforms(value: &Value) -> Result<Vec<PlatformDraft>, AuthoringError> {
         .collect()
 }
 
-/// `[derive.native_surface]`: the one Terminal Adapter this grammar authors.
+/// `[derive.native_surface]`: one bounded Terminal or Pixel Adapter.
 ///
-/// The wire type is deliberately richer (Pixel, several probe operations), but
+/// The wire type is deliberately richer (several probe operations), but
 /// a key that promised what this frontend cannot render would be a decision the
 /// author only believed they made.
 fn read_native_surface(
     table: &toml::map::Map<String, Value>,
 ) -> Result<NativeSurfaceAdapter, AuthoringError> {
     const WHAT: &str = "derive.native_surface";
+    if required_str(table, "kind", WHAT)? == "pixel_stream" {
+        return read_pixel_surface(table);
+    }
     only(
         table,
         WHAT,
@@ -561,6 +614,7 @@ fn read_native_surface(
             "probe_output_delimiter",
             "probe_max_output_bytes",
             "probe_timeout_ms",
+            "probe_ready_output",
         ],
     )?;
     let integer = |field: &str| -> Result<i64, AuthoringError> {
@@ -628,6 +682,95 @@ fn read_native_surface(
             output_delimiter: required_str(table, "probe_output_delimiter", WHAT)?.into_bytes(),
             max_output_bytes,
             timeout_ms,
+            ready_output: match table.get("probe_ready_output") {
+                None => Vec::new(),
+                Some(_) => required_str(table, "probe_ready_output", WHAT)?.into_bytes(),
+            },
+        }],
+    };
+    adapter
+        .validate_catalog()
+        .map_err(|error| malformed(WHAT, error))?;
+    Ok(adapter)
+}
+
+fn read_pixel_surface(
+    table: &toml::map::Map<String, Value>,
+) -> Result<NativeSurfaceAdapter, AuthoringError> {
+    const WHAT: &str = "derive.native_surface";
+    only(
+        table,
+        WHAT,
+        &[
+            "kind",
+            "profile",
+            "width",
+            "height",
+            "port",
+            "probe_port",
+            "probe_path",
+            "probe_keysyms",
+            "probe_max_frame_bytes",
+            "probe_timeout_ms",
+            "probe_settle_ms",
+        ],
+    )?;
+    let integer = |field: &str| {
+        table
+            .get(field)
+            .and_then(Value::as_integer)
+            .ok_or_else(|| malformed(format!("{WHAT}.{field}"), "expected an integer"))
+    };
+    let width =
+        u16::try_from(integer("width")?).map_err(|_| malformed(WHAT, "invalid pixel width"))?;
+    let height =
+        u16::try_from(integer("height")?).map_err(|_| malformed(WHAT, "invalid pixel height"))?;
+    let surface = NativePresentation::PixelStream {
+        port: required_str(table, "port", WHAT)?,
+        width,
+        height,
+    };
+    if required_str(table, "profile", WHAT)? != surface.profile() {
+        return Err(malformed(
+            format!("{WHAT}.profile"),
+            "invalid pixel Surface profile",
+        ));
+    }
+    let keysyms = table
+        .get("probe_keysyms")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed(format!("{WHAT}.probe_keysyms"), "expected an integer array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    malformed(
+                        format!("{WHAT}.probe_keysyms"),
+                        "expected unsigned integers",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let max_frame_bytes = u32::try_from(integer("probe_max_frame_bytes")?)
+        .map_err(|_| malformed(WHAT, "invalid frame bound"))?;
+    let timeout_ms = u64::try_from(integer("probe_timeout_ms")?)
+        .map_err(|_| malformed(WHAT, "invalid timeout"))?;
+    let settle_ms = match table.get("probe_settle_ms") {
+        None => 0,
+        Some(_) => u64::try_from(integer("probe_settle_ms")?)
+            .map_err(|_| malformed(WHAT, "invalid settle time"))?,
+    };
+    let adapter = NativeSurfaceAdapter {
+        surface,
+        probe_port: required_str(table, "probe_port", WHAT)?,
+        operations: vec![NativeProbeOperation::PixelKeyFrame {
+            path: required_str(table, "probe_path", WHAT)?,
+            keysyms,
+            max_frame_bytes,
+            timeout_ms,
+            settle_ms,
         }],
     };
     adapter
@@ -833,7 +976,11 @@ fn read_derive(
     Ok((steps, native_surface))
 }
 
-fn read_ports(value: &Value, native_declared: bool) -> Result<Vec<PortDraft>, AuthoringError> {
+fn read_ports(
+    value: &Value,
+    native_declared: bool,
+    native_pixel_port: Option<&str>,
+) -> Result<Vec<PortDraft>, AuthoringError> {
     array_of_tables(value, "port")?
         .into_iter()
         .map(|table| {
@@ -844,12 +991,14 @@ fn read_ports(value: &Value, native_declared: bool) -> Result<Vec<PortDraft>, Au
             // Every other Port this grammar exports is logical HTTP.
             if protocol != HTTP_PROTOCOL
                 && !(native_declared && protocol == TERMINAL_PORT_PROTOCOL)
+                && !(protocol == PIXEL_PORT_PROTOCOL && native_pixel_port == Some(id.as_str()))
             {
                 return Err(malformed(
                     format!("port.{id}.use"),
                     format!(
                         "{protocol:?} is not a port protocol this build exports; use \
-                         {HTTP_PROTOCOL}, or {TERMINAL_PORT_PROTOCOL} beside a declared native Surface"
+                         {HTTP_PROTOCOL}, {TERMINAL_PORT_PROTOCOL} beside a declared native Surface, \
+                         or {PIXEL_PORT_PROTOCOL} for the declared Pixel Surface Port"
                     ),
                 ));
             }
@@ -958,7 +1107,16 @@ fn read_contract(
                 require,
                 "contract.require",
                 &[
-                    "id", "use", "port", "method", "path", "input", "expect", "scenario",
+                    "id",
+                    "use",
+                    "port",
+                    "method",
+                    "path",
+                    "input",
+                    "expect",
+                    "scenario",
+                    "server_name",
+                    "start",
                 ],
             )?;
             let id = required_str(require, "id", "contract.require")?;
@@ -977,6 +1135,12 @@ fn read_contract(
                         return Err(malformed(
                             what.clone(),
                             "an HTTP requirement does not take `scenario`",
+                        ));
+                    }
+                    if require.contains_key("server_name") || require.contains_key("start") {
+                        return Err(malformed(
+                            what.clone(),
+                            "only a TLS requirement names `server_name` or `start`",
                         ));
                     }
                     only(
@@ -1040,6 +1204,8 @@ fn read_contract(
                     if require.contains_key("method")
                         || require.contains_key("path")
                         || require.contains_key("input")
+                        || require.contains_key("server_name")
+                        || require.contains_key("start")
                     {
                         return Err(malformed(
                             what.clone(),
@@ -1060,11 +1226,55 @@ fn read_contract(
                         scenario: Observed::Stated(raw),
                     })
                 }
+                USE_TLS_CONTRACT => {
+                    // A certificate requirement observes a port, the name the
+                    // certificate must cover, and how TLS starts there. It
+                    // states no expected value: the serial changes on every
+                    // renewal and is evidence, never identity.
+                    if require.contains_key("method")
+                        || require.contains_key("path")
+                        || require.contains_key("input")
+                        || require.contains_key("scenario")
+                    {
+                        return Err(malformed(
+                            what.clone(),
+                            "a TLS requirement states only `port`, `server_name` and `start`",
+                        ));
+                    }
+                    only(expect, &format!("{what}.expect"), &[])?;
+                    let server_name = required_str(require, "server_name", &what)?;
+                    validate_tls_server_name(&server_name)
+                        .map_err(|detail| malformed(format!("{what}.server_name"), detail))?;
+                    let start = match optional_str(require, "start", &what)? {
+                        None | Some("implicit") => TlsStart::Implicit,
+                        Some("smtp-starttls") => TlsStart::SmtpStarttls,
+                        Some(other) => {
+                            return Err(malformed(
+                                format!("{what}.start"),
+                                format!(
+                                    "{other:?} is not a TLS start mode; use implicit or \
+                                     smtp-starttls"
+                                ),
+                            ));
+                        }
+                    };
+                    RequirementDraft::Tls(TlsRequirement {
+                        port: required_str(require, "port", &what)?,
+                        server_name,
+                        start,
+                    })
+                }
                 USE_WORKSPACE_CONTRACT => {
                     if require.contains_key("scenario") {
                         return Err(malformed(
                             what.clone(),
                             "a workspace requirement does not take `scenario`",
+                        ));
+                    }
+                    if require.contains_key("server_name") || require.contains_key("start") {
+                        return Err(malformed(
+                            what.clone(),
+                            "only a TLS requirement names `server_name` or `start`",
                         ));
                     }
                     only(expect, &format!("{what}.expect"), &["digest"])?;
@@ -1089,8 +1299,8 @@ fn read_contract(
                         format!("{what}.use"),
                         format!(
                             "{other:?} is not a verifier this build can decide; \
-                             use {USE_HTTP_CONTRACT}, {USE_WORKSPACE_CONTRACT} or \
-                             {USE_SCENARIO_CONTRACT}"
+                             use {USE_HTTP_CONTRACT}, {USE_WORKSPACE_CONTRACT}, \
+                             {USE_SCENARIO_CONTRACT} or {USE_TLS_CONTRACT}"
                         ),
                     ));
                 }
@@ -1262,5 +1472,80 @@ mod tests {
     fn a_source_tree_without_a_capsule_toml_reads_as_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(read_capsule_toml(dir.path()), Ok(None));
+    }
+
+    #[test]
+    fn a_tls_requirement_parses_and_renders_without_losing_its_fields() {
+        let doc = r#"schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+entry = "index.html"
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+
+[[contract.require]]
+id = "imaps"
+use = "ato.contract.tls@1"
+port = "app.http"
+server_name = "mail.example"
+start = "smtp-starttls"
+"#;
+        let draft = parse_capsule_toml(doc).unwrap();
+        let requirement = draft
+            .contract
+            .requirements
+            .iter()
+            .find(|requirement| requirement.id == "imaps")
+            .expect("the tls requirement is parsed");
+        match &requirement.requirement {
+            RequirementDraft::Tls(tls) => {
+                assert_eq!(tls.port, "app.http");
+                assert_eq!(tls.server_name, "mail.example");
+                assert_eq!(tls.start, TlsStart::SmtpStarttls);
+            }
+            other => panic!("expected a TLS requirement, got {other:?}"),
+        }
+        let rendered = render_capsule_toml(&draft).unwrap();
+        assert!(rendered.contains("ato.contract.tls@1"));
+        assert!(rendered.contains("server_name = \"mail.example\""));
+        let reparsed = parse_capsule_toml(&rendered).unwrap();
+        assert_eq!(reparsed.contract, draft.contract);
+
+        // A TLS requirement states only its own three keys, and no other
+        // requirement may borrow them.
+        for (what, text) in [
+            (
+                "unknown start",
+                doc.replace("start = \"smtp-starttls\"", "start = \"opportunistic\""),
+            ),
+            (
+                "expectation",
+                doc.replace(
+                    "start = \"smtp-starttls\"",
+                    "start = \"smtp-starttls\"\n[contract.require.expect]\nstatus = 200",
+                ),
+            ),
+            (
+                "tls keys on an http requirement",
+                doc.replace(
+                    "use = \"ato.contract.tls@1\"\nport = \"app.http\"",
+                    "use = \"ato.contract.http@1\"\nport = \"app.http\"",
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml(&text).is_err(), "{what}");
+        }
     }
 }

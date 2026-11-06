@@ -1,0 +1,52 @@
+{
+  "reviewed_head": "e5ebda3a605c775b650066457246fa8d617bc1e0",
+  "base": "0c93d81a7f86140868fbe84efb63538360a9cba1",
+  "head_and_base_command": "cargo check -p ato-runtime-attempt --tests --locked",
+  "head_exit_code": 101,
+  "base_exit_code": 101,
+  "same_compile_errors": [
+    "lib/runtime-attempt/src/ephemeral.rs:993 missing StateAttachmentV1.backing",
+    "lib/runtime-attempt/src/state_bindings.rs:210 missing StateAttachmentV1.backing"
+  ],
+  "jobs": [
+    {
+      "id": 121512884854,
+      "scope": "workspace Ubuntu check/clippy",
+      "result": "failure",
+      "url": "https://github.com/ato-run/ato/actions/runs/40305324588/job/121512884854"
+    },
+    {
+      "id": 121512885389,
+      "scope": "workspace macOS check/clippy",
+      "result": "failure",
+      "url": "https://github.com/ato-run/ato/actions/runs/40305324588/job/121512885389"
+    },
+    {
+      "id": 121512885506,
+      "scope": "workspace Windows check/clippy and worker regressions",
+      "result": "failure",
+      "url": "https://github.com/ato-run/ato/actions/runs/40305324588/job/121512885506"
+    },
+    {
+      "id": 121512888042,
+      "scope": "CLI Ubuntu scenario receipt search",
+      "result": "failure; tracked #1578",
+      "url": "https://github.com/ato-run/ato/actions/runs/40305324544/job/121512888042"
+    },
+    {
+      "id": 121512888043,
+      "scope": "CLI macOS Activity MCP",
+      "result": "failure; cause unresolved",
+      "url": "https://github.com/ato-run/ato/actions/runs/40305324544/job/121512888043"
+    },
+    {
+      "id": 121512886956,
+      "scope": "CLI Windows attempt journal compile",
+      "result": "failure",
+      "url": "https://github.com/ato-run/ato/actions/runs/40305324544/job/121512886956"
+    }
+  ],
+  "not_billing_only": true,
+  "code_or_test_fixes_in_docs_pr": false,
+  "code_ci_passed": false
+}

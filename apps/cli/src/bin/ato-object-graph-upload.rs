@@ -5,15 +5,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_cli::{
-    HttpObjectTransportApi, UploadConfig, upload_http_object_graph,
+    HttpObjectTransportApi, UploadConfig, auth_device, upload_http_object_graph,
     upload_staging_negative_test_object_graph, vm_capture_receipt_refs,
 };
 use ato_objects::FsObjectStore;
 use ato_runtime_object_graph::{ObjectGraphIndexV1, VisibilityPolicy, standard_reference_registry};
-use base64::Engine;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -59,25 +57,6 @@ struct AuthHandoff {
     session_token: String,
 }
 
-#[derive(Deserialize)]
-struct DeviceInit {
-    session_id: String,
-    user_code: String,
-    poll_interval_sec: u64,
-}
-
-#[derive(Deserialize)]
-struct DevicePoll {
-    code: String,
-    auth_code: Option<String>,
-    poll_interval_sec: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct DeviceExchange {
-    access_token: String,
-}
-
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PostCreateRequest {
@@ -109,7 +88,17 @@ struct CreatedPost {
 fn main() -> Result<()> {
     let args = Args::parse();
     let token = if args.device_login {
-        device_login(&args.api_url)?
+        auth_device::device_login(
+            &args.api_url,
+            &format!("ato-object-graph-upload/{}", env!("CARGO_PKG_VERSION")),
+            |prompt| {
+                eprintln!(
+                    "Open and approve this staging device login in Chrome:\n{}\nVerification code: {}",
+                    prompt.activate_url, prompt.user_code
+                );
+            },
+        )?
+        .access_token
     } else {
         load_auth_handoff(&args.auth_handoff_binary, &args.api_url)?
     };
@@ -210,96 +199,6 @@ fn main() -> Result<()> {
     write_receipt(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
     println!("{} {}", receipt.bundle_id, receipt.root_computation_ref);
     Ok(())
-}
-
-fn device_login(api_url: &str) -> Result<String> {
-    let parsed = reqwest::Url::parse(api_url).context("invalid device-login API URL")?;
-    ensure!(
-        parsed.scheme() == "https" || parsed.host_str() == Some("localhost"),
-        "device login requires HTTPS (except localhost)"
-    );
-    ensure!(
-        parsed.query().is_none() && parsed.fragment().is_none(),
-        "device-login API URL cannot contain a query or fragment"
-    );
-    let base_url = api_url.trim_end_matches('/');
-    let mut entropy = [0_u8; 32];
-    getrandom::fill(&mut entropy)
-        .map_err(|error| anyhow::anyhow!("generate PKCE verifier entropy: {error}"))?;
-    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(entropy);
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(Sha256::digest(verifier.as_bytes()));
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("construct device-login HTTP client")?;
-    let init_response = client
-        .post(format!("{base_url}/v1/auth/bridge/init"))
-        .json(&serde_json::json!({
-            "code_challenge": challenge,
-            "method": "S256",
-            "device_info": format!("ato-object-graph-upload/{}", env!("CARGO_PKG_VERSION"))
-        }))
-        .send()
-        .context("initialize device login")?;
-    ensure!(
-        init_response.status().is_success(),
-        "device login init failed with HTTP {}",
-        init_response.status()
-    );
-    let init: DeviceInit = init_response
-        .json()
-        .context("decode device login init response")?;
-    eprintln!(
-        "Open and approve this staging device login in Chrome:\n{base_url}/v1/auth/bridge/activate?session_id={}\nVerification code: {}",
-        init.session_id, init.user_code
-    );
-
-    let auth_code = (0..200)
-        .find_map(|_| {
-            let response = client
-                .post(format!("{base_url}/v1/auth/bridge/poll"))
-                .json(&serde_json::json!({
-                    "session_id": init.session_id,
-                    "code_verifier": verifier
-                }))
-                .send()
-                .ok()?;
-            let status = response.status();
-            let poll: DevicePoll = response.json().ok()?;
-            if status.is_success() && poll.code == "SUCCESS" {
-                return poll.auth_code;
-            }
-            std::thread::sleep(Duration::from_secs(
-                poll.poll_interval_sec
-                    .unwrap_or(init.poll_interval_sec)
-                    .max(1),
-            ));
-            None
-        })
-        .context("device login was not approved before the polling limit")?;
-    let exchange_response = client
-        .post(format!("{base_url}/v1/auth/bridge/exchange"))
-        .json(&serde_json::json!({
-            "session_id": init.session_id,
-            "auth_code": auth_code,
-            "code_verifier": verifier
-        }))
-        .send()
-        .context("exchange approved device login")?;
-    ensure!(
-        exchange_response.status().is_success(),
-        "device login exchange failed with HTTP {}",
-        exchange_response.status()
-    );
-    let exchange: DeviceExchange = exchange_response
-        .json()
-        .context("decode device login exchange response")?;
-    ensure!(
-        exchange.access_token.starts_with("ato_dev_"),
-        "device login did not return a device credential"
-    );
-    Ok(exchange.access_token)
 }
 
 fn publish_staging_post(
