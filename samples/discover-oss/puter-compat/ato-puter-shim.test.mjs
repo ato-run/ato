@@ -8,13 +8,17 @@ const j = (x) => JSON.parse(JSON.stringify(x));
 
 function load() {
   const data = new Map();
+  // Same key rule as ato-api claude_storage.ts validKey().
+  const checkKey = (k) => assert.ok(k.length > 0 && !/[\s\\/'"]/.test(k), `invalid storage key: ${k}`);
   const storage = {
     async get(key, shared) {
+      checkKey(key);
       assert.equal(shared, true);
       if (!data.has(key)) throw Object.assign(new Error('not found'), { code: 'not_found' });
       return { key, value: data.get(key), shared };
     },
     async set(key, value, shared) {
+      checkKey(key);
       assert.equal(shared, true);
       assert.equal(typeof value, 'string');
       data.set(key, value);
@@ -79,6 +83,16 @@ test('fs write/read/stat/readdir/delete round-trip bytes', async () => {
   assert.deepEqual(j((await puter.fs.readdir('Property Management/att')).map((e) => e.name)), ['1']);
   await puter.fs.delete('Property Management/att');
   await assert.rejects(puter.fs.read('Property Management/att/1/a.txt'), /not found/);
+});
+
+test('keys with spaces, slashes and quotes are stored under valid keys', async () => {
+  const { puter, data } = load();
+  await puter.kv.set('pm1:settings', 1);
+  assert.ok(data.has('puter1:kv:pm1:settings'), 'already-valid keys are unchanged');
+  await puter.fs.write("contract-manager/docs/a b/it's \"x\".pdf", 'hi');
+  assert.equal(await (await puter.fs.read("contract-manager/docs/a b/it's \"x\".pdf")).text(), 'hi');
+  assert.deepEqual(j((await puter.fs.readdir('contract-manager/docs')).map((e) => e.name)), ['a b']);
+  assert.deepEqual(j(await puter.kv.list('pm1:')), ['pm1:settings']);
 });
 
 test('fs refuses files over the limit and workers report unsupported', async () => {

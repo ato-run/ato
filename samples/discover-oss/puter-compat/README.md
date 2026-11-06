@@ -41,6 +41,19 @@ Preconditions; if one does not hold, keep the app's own sign-in:
 Not suitable: apps where several people need separate data, or where outside
 people sign in (customer portals, client galleries, booking forms).
 
+Keys: ato.run storage keys may not contain whitespace, `/`, `\`, `'` or `"`;
+the shim escapes only those characters (and `%`) as `%xx`, so keys that were
+already valid are stored unchanged.
+
+## Apps built
+
+`build-app.sh <app> <out.html>` builds `property-management`, `crm`,
+`contracts` or `invoicing`. `signatures` is not built: its purpose is outside
+signers, which the sign-in policy excludes. Features that need Puter servers
+fail with "… is not available on ato.run": AI (crm, contracts), the calendar
+feed (contracts, `puter.hosting`), and emailing invoices or share links
+(invoicing, `puter.workers` / `puter.hosting`).
+
 Tests: `node --test samples/discover-oss/puter-compat/ato-puter-shim.test.mjs`.
 
 ## Staging check, 2026-11-07
@@ -56,3 +69,24 @@ with sequential reads, before the eight-way parallel read was added; the
 uploaded build predates that change. Records beyond the initial setup (property,
 lease, payment), attachments, a second device and sharing were not tested.
 Only synthetic data was used.
+
+## Staging check of crm, contracts and invoicing, 2026-11-07
+
+Uploaded as private apps through the stg Studio "新規作成" page, synthetic data
+only. Each opened signed in without a Puter prompt.
+
+- crm (`cinst_01M6S06R8YG2J9DBJDWH7KY6PY`): a lead was saved to
+  `puter1:kv:crm:contacts:v1` and was listed again after deleting the page's
+  IndexedDB and localStorage and reloading.
+- contracts: the first build failed with `claude_storage_key` because its data
+  lives in files (`contract-manager/contacts.json`) and `/` is not allowed in
+  keys. After the key escaping, a rebuilt upload
+  (`cinst_01M6S0EP2410DSHJZVFANNKH77`) saved a contact to
+  `puter1:fs:%2fcontract-manager%2fcontacts.json` and showed it after the same
+  clear-and-reload.
+- invoicing (`cinst_01M6S08M7T20YCNAHG0RY1XNMQ`): a client was saved to
+  `puter1:kv:invc:clients:v1`; clear-and-reload was not repeated.
+
+The crm and invoicing uploads predate the key escaping, so their attachment and
+file features are expected to fail until re-uploaded. Contracts with documents,
+invoices, a second device and sharing were not tested.
