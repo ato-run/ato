@@ -18,7 +18,8 @@ use ato_formation::authoring::{
 };
 use ato_formation::scenario::ScenarioObservation;
 use ato_formation::verify::{
-    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3,
+    CONTRACT_VERIFICATION_RECEIPT_SCHEMA, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
+    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4,
     ContractVerification, ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
     RuntimeTlsObservation, VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
 };
@@ -275,19 +276,27 @@ pub fn verify_observed_candidate(
     );
     execution.run_id = context.run_id.map(str::to_owned);
     if let Some(profile) = context.portability_profile {
-        receipt.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
         execution.portability_profile = Some(profile.to_owned());
     }
-    // Certificate evidence is the strongest statement a receipt can carry, so
-    // a receipt that has it is /3 whatever else it also carries.
-    if receipt.observations.iter().any(|observation| {
+    // The schema is the highest thing the receipt actually carries, and one
+    // decision rather than an order of overwrites: connector evidence (/4),
+    // then certificate evidence (/3), then a portability profile (/2), then
+    // the base schema. A /3 must never carry connector fields.
+    let carries_tls = receipt.observations.iter().any(|observation| {
         observation
             .evidence
             .as_ref()
             .is_some_and(|evidence| evidence.tls.is_some())
-    }) {
-        receipt.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3.to_owned();
-    }
+    });
+    receipt.schema = if execution.connector.is_some() {
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4.to_owned()
+    } else if carries_tls {
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3.to_owned()
+    } else if context.portability_profile.is_some() {
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned()
+    } else {
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA.to_owned()
+    };
     receipt.execution = Some(execution);
     VerificationPoint {
         verification,
@@ -532,6 +541,140 @@ mod tests {
             point.receipt.fully_satisfied,
             point.verification.fully_satisfied()
         );
+    }
+
+    /// A receipt is accepted only when its schema and its fields agree.
+    fn accepts(receipt: &ContractVerificationReceipt) {
+        let (contract, _) = (contract(), derivation());
+        ato_formation::receipt::accept_receipt(
+            &ato_formation::receipt::ReceiptAssignment {
+                contract: &contract,
+                contract_ref: "sha256:k",
+                derivation_ref: "sha256:d",
+                attempt_id: "attempt-1",
+                request_id: None,
+            },
+            receipt,
+        )
+        .expect("the receipt is internally consistent");
+    }
+
+    fn relayed_execution() -> VerificationExecutionEvidence {
+        let mut execution = execution();
+        execution.connector = Some("relay".to_owned());
+        execution.relay_image_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        execution.relay_container_id = Some("b".repeat(64));
+        execution.platform_emulated = Some(true);
+        execution
+    }
+
+    /// A direct Run's receipt must stay the receipt stg produced: same schema,
+    /// same fields, accepted by the same `accept_receipt`. The connector
+    /// evidence is for the relay materialization only.
+    #[test]
+    fn a_direct_service_group_receipt_keeps_the_stg_schema() {
+        let (contract, derivation) = (contract(), derivation());
+        let spec = spec(&contract, &derivation, TREE, None);
+        let point = verify_observed_candidate(
+            &spec,
+            served(200, PROOF),
+            Vec::new(),
+            Vec::new(),
+            execution(),
+            &hosted(),
+        );
+        assert_eq!(point.receipt.schema, CONTRACT_VERIFICATION_RECEIPT_SCHEMA);
+        let evidence = point.receipt.execution.as_ref().unwrap();
+        assert!(evidence.connector.is_none());
+        assert!(evidence.relay_image_digest.is_none());
+        assert!(evidence.platform_emulated.is_none());
+        accepts(&point.receipt);
+
+        let profile = ReceiptContext {
+            portability_profile: Some("offline"),
+            ..hosted()
+        };
+        let point = verify_observed_candidate(
+            &spec,
+            served(200, PROOF),
+            Vec::new(),
+            Vec::new(),
+            execution(),
+            &profile,
+        );
+        assert_eq!(
+            point.receipt.schema,
+            CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2
+        );
+        accepts(&point.receipt);
+    }
+
+    #[test]
+    fn a_relayed_receipt_is_v4_and_certificate_evidence_does_not_lower_it() {
+        let (contract, derivation) = (contract(), derivation());
+        let route = spec(&contract, &derivation, TREE, None);
+        let relayed = verify_observed_candidate(
+            &route,
+            served(200, PROOF),
+            Vec::new(),
+            Vec::new(),
+            relayed_execution(),
+            &hosted(),
+        );
+        assert_eq!(
+            relayed.receipt.schema,
+            CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4
+        );
+        assert_eq!(
+            relayed
+                .receipt
+                .execution
+                .as_ref()
+                .unwrap()
+                .connector
+                .as_deref(),
+            Some("relay")
+        );
+        accepts(&relayed.receipt);
+
+        // A relayed Run that also observed a certificate is still /4: the
+        // higher statement wins, and one schema carries both field sets.
+        let tls_contract = tls_contract(tls_requirement(
+            "imaps",
+            "app.http",
+            "mail.example",
+            TlsStart::Implicit,
+        ));
+        let tls_spec = spec(&tls_contract, &derivation, TREE, None);
+        let relayed_tls = verify_observed_candidate(
+            &tls_spec,
+            Vec::new(),
+            Vec::new(),
+            vec![tls_facts("imaps", "app.http", "mail.example")],
+            relayed_execution(),
+            &hosted(),
+        );
+        assert_eq!(
+            relayed_tls.receipt.schema,
+            CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4
+        );
+        assert!(
+            relayed_tls.receipt.observations[0]
+                .evidence
+                .as_ref()
+                .unwrap()
+                .tls
+                .is_some()
+        );
+        let assignment = ato_formation::receipt::ReceiptAssignment {
+            contract: &tls_contract,
+            contract_ref: "sha256:k",
+            derivation_ref: "sha256:d",
+            attempt_id: "attempt-1",
+            request_id: None,
+        };
+        ato_formation::receipt::accept_receipt(&assignment, &relayed_tls.receipt)
+            .expect("the relayed TLS receipt is internally consistent");
     }
 
     #[test]

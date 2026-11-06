@@ -16,6 +16,7 @@ members = [
     "lib/runtime-attempt",
     "lib/objects",
     "lib/sandbox",
+    "lib/ato-host-facts",
     "lib/tls-observe",
     "extensions/adapters/api",
     "extensions/adapters/process",
