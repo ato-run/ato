@@ -140,6 +140,31 @@ fn a_single_html_file_needs_no_toml_and_still_gets_a_contract() {
 }
 
 #[test]
+fn a_step_without_peer_edges_does_not_serialize_the_new_field() {
+    // D's canonical bytes are what `DerivationRef` hashes. A route that
+    // declares no native peer edge must digest exactly as it did before
+    // `BoundStep.peer_ports` existed, so the field is omitted when empty.
+    let dir = tree(&[("index.html", "<!doctype html><p>hi")]);
+    let (_, derivation) = bound(&preset_draft(dir.path()), SOURCE_A);
+    assert!(
+        derivation
+            .steps
+            .iter()
+            .all(|step| step.peer_ports.is_empty())
+    );
+    let text = String::from_utf8(serde_jcs::to_vec(&derivation).expect("canonical D"))
+        .expect("canonical D is UTF-8");
+    assert!(
+        !text.contains("peer_ports"),
+        "an absent peer edge must not reach canonical D: {text}"
+    );
+    assert_eq!(
+        derivation.derivation_ref().expect("digest"),
+        "sha256:31a38beca78d89ecfb8e004bdd5a0f5e07467a034a9d198e20222a006ad29649"
+    );
+}
+
+#[test]
 fn an_equivalent_hand_written_document_is_the_same_capsule_and_the_same_route() {
     // The claim the whole Preset unification rests on. Two frontends, one
     // canonical pair: a person who writes out what the Preset would have

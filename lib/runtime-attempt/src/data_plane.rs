@@ -467,6 +467,43 @@ impl ModelCache {
         Ok(())
     }
 
+    /// Take a cache lock, retrying an interrupted syscall.
+    ///
+    /// `flock` can return `EINTR` when a signal lands on the requesting
+    /// thread — a busy test process with many children does that — and only
+    /// `EWOULDBLOCK` means another writer actually holds the lock. Treating
+    /// the two the same reported "busy" for a lock nobody held.
+    fn lock_retrying(file: File, exclusive: bool, busy: &'static str) -> Result<File> {
+        Self::lock_retrying_with(file, busy, |file| {
+            if exclusive {
+                FileExt::try_lock_exclusive(file)
+            } else {
+                FileExt::try_lock_shared(file)
+            }
+        })
+    }
+
+    /// The classification `lock_retrying` applies, with the syscall injected so
+    /// that an interrupted attempt can be exercised without a signal.
+    fn lock_retrying_with(
+        file: File,
+        busy: &'static str,
+        mut attempt: impl FnMut(&File) -> std::io::Result<()>,
+    ) -> Result<File> {
+        loop {
+            match attempt(&file) {
+                Ok(()) => return Ok(file),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(error).context(format!("model_cache_busy: {busy}"));
+                }
+                Err(error) => {
+                    return Err(error).context(format!("model_cache_lock_failed: {busy}"));
+                }
+            }
+        }
+    }
+
     fn object_lock(&self, digest: &str, exclusive: bool) -> Result<File> {
         let lock_path = self.markers.join(format!("{}.lock", hex_of(digest)?));
         let mut options = OpenOptions::new();
@@ -477,13 +514,7 @@ impl ModelCache {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let lock = options.open(lock_path)?;
-        if exclusive {
-            FileExt::try_lock_exclusive(&lock)
-        } else {
-            FileExt::try_lock_shared(&lock)
-        }
-        .context("model_cache_busy: object hydration is active")?;
-        Ok(lock)
+        Self::lock_retrying(lock, exclusive, "object hydration is active")
     }
 
     fn mutation_lock(&self, exclusive: bool) -> Result<File> {
@@ -495,13 +526,7 @@ impl ModelCache {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let file = options.open(self.root.join("mutation.lock"))?;
-        if exclusive {
-            FileExt::try_lock_exclusive(&file)
-        } else {
-            FileExt::try_lock_shared(&file)
-        }
-        .context("model_cache_busy: another cache import/download is active")?;
-        Ok(file)
+        Self::lock_retrying(file, exclusive, "another cache import/download is active")
     }
 
     /// Logical object/partial bytes, excluding marker and range control files.
@@ -1348,6 +1373,43 @@ mod tests {
                 .unwrap()
                 .cache,
             "hit"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_lock_is_retried_and_other_errors_keep_their_code() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = ModelCache::open(root.path()).unwrap();
+        let lock_path = cache.root.join("mutation.lock");
+        let file = std::fs::File::create(&lock_path).unwrap();
+        let mut attempts = 0;
+        let locked = ModelCache::lock_retrying_with(file, "test", |_| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            } else {
+                Ok(())
+            }
+        })
+        .expect("an interrupted attempt is retried");
+        assert_eq!(attempts, 3);
+        drop(locked);
+
+        let file = std::fs::File::open(&lock_path).unwrap();
+        let busy = ModelCache::lock_retrying_with(file, "test", |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        })
+        .unwrap_err();
+        assert!(busy.to_string().contains("model_cache_busy"), "{busy:#}");
+
+        let file = std::fs::File::open(&lock_path).unwrap();
+        let failed = ModelCache::lock_retrying_with(file, "test", |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert!(
+            failed.to_string().contains("model_cache_lock_failed"),
+            "{failed:#}"
         );
     }
 

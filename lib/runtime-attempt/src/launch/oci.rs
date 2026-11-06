@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciNetwork, OciOwner, OciResourceLimits,
-    OciServiceGroup, OciSpec, OciUser, SpawnCleanupUnconfirmed, StopBudget, StopOutcome,
+    OciServiceGroup, OciSpec, OciUser, RelayDestination, SpawnCleanupUnconfirmed, StopBudget,
+    StopOutcome,
 };
 use ato_ipc::runtime_launch::{OciRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1};
 use ato_ipc::runtime_launch_v2::{
@@ -346,6 +347,18 @@ pub fn wait_until_container_ready(
 // ── a service group ─────────────────────────────────────────────────────────
 
 /// One service to start in a group, prepared by the caller.
+/// The relay a Run needs when its daemon keeps the container network out of
+/// reach. The group starts it on the same internal network, after the network
+/// exists and before the first service, and owns it from then.
+pub struct RelayStart {
+    /// The service names and guest ports the relay may reach. Only these.
+    pub destinations: Vec<(String, u16)>,
+    /// The daemon's architecture, as observed by the caller.
+    pub architecture: Option<String>,
+    /// A label that makes the relay container's name stable per Run.
+    pub label: String,
+}
+
 pub struct ServiceStart {
     pub name: String,
     pub adapter: DockerOciAdapter,
@@ -369,11 +382,44 @@ pub struct ServiceStart {
 pub fn start_service_group(
     network: OciNetwork,
     workspace: &Path,
-    services: Vec<ServiceStart>,
+    mut services: Vec<ServiceStart>,
     budget: StopBudget,
+    relay: Option<RelayStart>,
     ready: &mut dyn FnMut(&str, &OciServiceGroup) -> Result<()>,
 ) -> Result<OciServiceGroup> {
     let mut group = OciServiceGroup::new(network);
+    if let Some(relay) = relay {
+        // The relay is started before any service: it joins the group's own
+        // internal network and every service's Port is reached through it, so
+        // the group's service adapters all get the same connector.
+        let destinations = relay
+            .destinations
+            .iter()
+            .map(|(service, port)| RelayDestination::new(service.clone(), *port))
+            .collect::<Vec<_>>();
+        let Some(first) = services.first() else {
+            return Err(abandon_group(
+                group,
+                budget,
+                anyhow::anyhow!("a relay needs at least one service to reach"),
+            ));
+        };
+        match first.adapter.start_relay(
+            group.network().name(),
+            &destinations,
+            relay.architecture.as_deref(),
+            &relay.label,
+        ) {
+            Ok(daemon) => {
+                let shared: ato_adapter_oci::SharedConnector = daemon.clone();
+                for service in &mut services {
+                    service.adapter.attach_connector(shared.clone());
+                }
+                group.set_relay(daemon);
+            }
+            Err(error) => return Err(abandon_group(group, budget, error)),
+        }
+    }
     for service in services {
         let handle = match service.adapter.spawn_in_network(
             workspace,
@@ -535,6 +581,10 @@ pub fn launch_service_group(
         context.workspace_root(),
         starts,
         budget,
+        // A hosted Runner's daemon is native Linux: its container network is
+        // reachable directly. A relay is a Run-level choice, never a Runner
+        // default.
+        None,
         &mut |name, group| {
             let service = group_spec
                 .services
@@ -1389,6 +1439,7 @@ time.sleep(30)
                     graceful: Duration::from_millis(50),
                     force: Duration::from_millis(50),
                 },
+                None,
                 &mut |name, group| {
                     for (service, handle) in group.services() {
                         std::fs::write(root.join(format!("id-{service}")), handle.container_id())?;

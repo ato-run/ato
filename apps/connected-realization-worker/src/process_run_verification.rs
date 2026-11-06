@@ -246,6 +246,7 @@ pub(super) fn report(
         portability_profile: None,
         embedded_oci_image_loaded: None,
         services: Vec::new(),
+        ..Default::default()
     };
     let receipt = verify_observed_candidate(
         &spec,
@@ -385,6 +386,7 @@ mod tests {
                 portability_profile: None,
                 embedded_oci_image_loaded: None,
                 services: Vec::new(),
+                ..Default::default()
             };
             let point = verify_observed_candidate(
                 &spec,
@@ -497,6 +499,7 @@ mod tests {
             portability_profile: None,
             embedded_oci_image_loaded: None,
             services: Vec::new(),
+            ..Default::default()
         };
         let result = verify_observed_candidate(
             &spec,

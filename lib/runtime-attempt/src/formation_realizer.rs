@@ -626,6 +626,7 @@ fn execution_evidence(
         portability_profile: None,
         embedded_oci_image_loaded: None,
         services: Vec::new(),
+        ..Default::default()
     }
 }
 
