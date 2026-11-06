@@ -18,9 +18,9 @@ name: desktop-tauri-ci
 
 on:
   push:
-    branches: [main, dev, nightly]
+    branches: [main, stg, dev, nightly]
   pull_request:
-    branches: [main, dev, nightly]
+    branches: [main, stg, dev, nightly]
   workflow_dispatch:
 
 permissions:
