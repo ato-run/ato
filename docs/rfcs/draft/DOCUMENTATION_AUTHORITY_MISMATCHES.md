@@ -8,6 +8,11 @@ This register does not amend accepted specifications, wire formats or code.
 It records decisions to make separately. “Implemented” describes source at the
 audit baseline, not deployment or feature availability.
 
+Where surfaced: the current [profile map](../../concepts/application-contracts.md#profile-map)
+and the [data identity example](../../concepts/state-continuity.md#data-and-identity-one-json-object)
+restate the profile boundary and the saved-data example. They do not decide the
+questions below, and the decisions are unchanged.
+
 ## M1 — Capsule identity across profiles
 
 The accepted [Computation Architecture](../accepted/COMPUTATION_ARCHITECTURE.md)
@@ -62,13 +67,15 @@ issuers against it. Keep optional fields and existing schemas unchanged here.
 
 ## M5 — Snapshot implementation-status claims
 
-Older concept pages describe every VM checkpoint as future work. The
+Older concept pages described every VM checkpoint as future work. The
 [VM materializer](../../../extensions/materializers/vm-snapshot/src/lib.rs)
 reports restore support through a backend and RunnerCapabilities; workspace
-snapshots remain verify-only. This is a stale explanatory status claim, rather
-than grounds for promising universal capture/restore. The snapshot overview
-now distinguishes these paths. The [VM RFC](VM_SNAPSHOT_MATERIALIZATION.md)
-still requires formal adoption.
+snapshots remain verify-only. This was a stale explanatory status claim, not
+grounds for promising universal capture/restore. On 2026-11-04 the theory,
+materialization and snapshot pages were aligned to the single status table in
+[Snapshot materialization](../../snapshot.md); the detection is resolved on the
+documentation side. The [VM RFC](VM_SNAPSHOT_MATERIALIZATION.md) still requires
+formal adoption.
 
 ## M6 — Retired commands and unverified release instructions
 

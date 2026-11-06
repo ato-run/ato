@@ -103,6 +103,11 @@ Computation — the compiler's error text, the file diff between `C42` and
 view, or protocol state can be useful without becoming the identity of the
 Computation.
 
+A worked example of one stored document as identity, realization, Port and
+Binding is in [state continuity](state-continuity.md#data-and-identity-one-json-object);
+the [research tour](../guides/research-tour.md) is the shorter path through the
+model for a reviewer.
+
 ## Implementation note
 
 The computation-root implementation represents a sealed point as

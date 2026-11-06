@@ -4,6 +4,12 @@ This file records user-visible changes to the ato CLI, newest first. Release
 tags v<version> must match apps/cli/Cargo.toml; cargo-dist refuses a tag whose
 version is behind an already-published one.
 
+The latest published release is
+[v0.8.0](https://github.com/ato-run/ato/releases/tag/v0.8.0) (2026-07-28).
+The 0.8.1 section below is **unreleased**: it describes work on `main` and
+exists in no published artifact. The release index is
+[GitHub Releases](https://github.com/ato-run/ato/releases).
+
 ## 0.8.1 — unreleased
 
 ### Added
