@@ -10,9 +10,10 @@
 //! `ATO_REQUIRE_DOCKER_E2E=1` (the Linux CI job) a missing daemon is a
 //! failure: a skipped acceptance is not a passing one.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use assert_cmd::Command as AtoCommand;
@@ -37,6 +38,51 @@ fn docker_available() -> bool {
 
 fn require_docker() -> bool {
     std::env::var("ATO_REQUIRE_DOCKER_E2E").as_deref() == Ok("1")
+}
+
+/// `docker <arguments>` output, one trimmed non-empty line per entry.
+fn docker_lines(arguments: &[&str]) -> Vec<String> {
+    let output = Command::new("docker")
+        .args(arguments)
+        .output()
+        .expect("docker runs");
+    assert!(
+        output.status.success(),
+        "docker {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn docker_text(arguments: &[&str]) -> String {
+    let output = Command::new("docker")
+        .args(arguments)
+        .output()
+        .expect("docker runs");
+    assert!(
+        output.status.success(),
+        "docker {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// `id name` pairs, as `docker ps`/`docker network ls` print them.
+fn docker_pairs(arguments: &[&str]) -> Vec<(String, String)> {
+    docker_lines(arguments)
+        .into_iter()
+        .map(|line| {
+            let (id, name) = line
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("docker printed no name: {line}"));
+            (id.to_owned(), name.to_owned())
+        })
+        .collect()
 }
 
 fn field(stdout: &str, name: &str) -> String {
@@ -104,18 +150,90 @@ fn the_sample_runs_directly_on_a_linux_docker_host() {
     assert_eq!(contract_ref, MACOS_CONTRACT_REF, "K moved");
     assert_eq!(derivation_ref, MACOS_DERIVATION_REF, "the selected D moved");
 
-    let run = ato()
+    // The Run owns containers and a network while it is up. Watch them while it
+    // runs: a direct Run must not publish a container Port, and nothing may
+    // survive the stop. Both are checked against this Run's own names, so a
+    // parallel test's containers cannot be mistaken for ours.
+    let derivation_hex = derivation_ref
+        .strip_prefix("sha256:")
+        .expect("the derivation ref is a sha256 ref");
+    let owned_prefix = format!("ato-sha256{}", &derivation_hex[..20]);
+    let containers_before = docker_pairs(&["ps", "-a", "--format", "{{.ID}} {{.Names}}"]);
+
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin("ato"))
+        .env("ATO_HOME", &home)
         .arg("run")
         .arg(&capsule)
         .args(["--no-open", "--verification-receipt"])
         .arg(&receipt_path)
-        .output()
-        .expect("run runs");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run starts");
+    let mut published = Vec::new();
+    let mut inspected = BTreeSet::new();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("run is waited for") {
+            break status;
+        }
+        for (id, name) in docker_pairs(&["ps", "--format", "{{.ID}} {{.Names}}"]) {
+            let ours = name.starts_with(&owned_prefix)
+                || (name.starts_with("ato-relay-")
+                    && !containers_before.iter().any(|(before, _)| before == &id));
+            if !ours || !inspected.insert(id.clone()) {
+                continue;
+            }
+            let ports = docker_text(&["port", &id]);
+            let bindings = docker_text(&[
+                "inspect",
+                "--format",
+                "{{json .HostConfig.PortBindings}}",
+                &id,
+            ]);
+            if !ports.trim().is_empty() || bindings.trim() != "{}" {
+                published.push(format!(
+                    "{name}: docker port={:?} PortBindings={}",
+                    ports.trim(),
+                    bindings.trim()
+                ));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let output = child.wait_with_output().expect("run output");
     assert!(
-        run.status.success(),
+        status.success(),
         "run failed: {}\n{}",
-        String::from_utf8_lossy(&run.stderr),
-        String::from_utf8_lossy(&run.stdout)
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        published.is_empty(),
+        "a direct Run must not publish a container Port: {published:#?}"
+    );
+    let containers_after = docker_pairs(&["ps", "-a", "--format", "{{.ID}} {{.Names}}"]);
+    let networks_after = docker_pairs(&["network", "ls", "--format", "{{.ID}} {{.Name}}"]);
+    let leftover_containers: Vec<&str> = containers_after
+        .iter()
+        .filter(|(id, name)| {
+            name.starts_with(&owned_prefix)
+                || (name.starts_with("ato-relay-")
+                    && !containers_before.iter().any(|(before, _)| before == id))
+        })
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert!(
+        leftover_containers.is_empty(),
+        "containers left after the Run: {leftover_containers:?}"
+    );
+    let leftover_networks: Vec<&str> = networks_after
+        .iter()
+        .filter(|(_, name)| name.starts_with(&owned_prefix))
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert!(
+        leftover_networks.is_empty(),
+        "networks left after the Run: {leftover_networks:?}"
     );
     let receipt: Value =
         serde_json::from_slice(&fs::read(&receipt_path).expect("receipt")).expect("receipt json");
