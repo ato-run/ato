@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use crate::relay_protocol::{Frame, MAX_FRAME_PAYLOAD};
 use anyhow::{Context, Result, bail, ensure};
-use ato_oci_relay::{Frame, MAX_FRAME_PAYLOAD};
 
 use crate::DockerClient;
 use crate::connector::{ConnectorKind, PortConnection, PortConnector, PortRead, PortWrite};
@@ -996,7 +996,7 @@ mod tests {
     fn fake_relay(mut stream: UnixStream) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             Frame::Hello {
-                version: ato_oci_relay::PROTOCOL.to_owned(),
+                version: crate::relay_protocol::PROTOCOL.to_owned(),
             }
             .write_to(&mut stream)
             .unwrap();
