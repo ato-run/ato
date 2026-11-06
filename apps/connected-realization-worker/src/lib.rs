@@ -166,6 +166,7 @@ fn advertised_capabilities(
     mut capabilities: Vec<&'static str>,
     host_boundary: bool,
     has_accelerator: bool,
+    private_resource_bounded: bool,
 ) -> Vec<&'static str> {
     if host_boundary {
         capabilities.retain(|capability| *capability != NAMESPACE_ISOLATION_CAPABILITY);
@@ -181,7 +182,7 @@ fn advertised_capabilities(
     if has_accelerator {
         capabilities.push(GPU_CAPABILITY);
     }
-    if !host_boundary {
+    if !host_boundary && private_resource_bounded {
         capabilities.push(runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE);
     }
     capabilities
@@ -5098,6 +5099,7 @@ impl HttpRunnerApi {
                 ),
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
+                config.max_slots == 1 && ato_runtime_attempt::resource_boundary::verify_current().is_ok(),
             ), config.require_explicit_runtime_placement),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
@@ -7454,7 +7456,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(base.contains(&"isolation=untrusted-v1"));
         assert!(base.contains(&"isolation:runtime_launch=untrusted-v1"));
 
-        let host_boundary = advertised_capabilities(base.clone(), true, false);
+        let host_boundary = advertised_capabilities(base.clone(), true, false, true);
         assert!(host_boundary.contains(&"isolation=host-boundary-v1"));
         assert!(!host_boundary.contains(&"isolation=untrusted-v1"));
         assert!(!host_boundary.contains(&"isolation:runtime_launch=untrusted-v1"));
@@ -7462,16 +7464,20 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(!host_boundary.contains(&"gpu"));
 
         assert!(!host_boundary.contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE));
-        let namespace = advertised_capabilities(base.clone(), false, false);
+        let namespace = advertised_capabilities(base.clone(), false, false, true);
         assert!(namespace.contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE));
         assert!(base.iter().all(|capability| namespace.contains(capability)));
+        assert!(
+            !advertised_capabilities(base.clone(), false, false, false)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE)
+        );
     }
 
     #[test]
     fn gpu_is_advertised_only_when_a_device_answered() {
         let base = runner_capabilities(false, false, false, false, false);
-        assert!(advertised_capabilities(base.clone(), false, true).contains(&"gpu"));
-        assert!(!advertised_capabilities(base, false, false).contains(&"gpu"));
+        assert!(advertised_capabilities(base.clone(), false, true, true).contains(&"gpu"));
+        assert!(!advertised_capabilities(base, false, false, true).contains(&"gpu"));
     }
 
     #[test]
@@ -7482,6 +7488,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                     runner_capabilities(false, oci, false, false, false),
                     host,
                     false,
+                    true,
                 );
                 assert_eq!(
                     capabilities.contains(&"runtime_feature=oci_data_plane_v1"),

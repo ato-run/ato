@@ -351,6 +351,10 @@ pub fn run_claimed_job_with_ledger(
     // Check the admission mode before either frontend can start work. A
     // private source must never fall through to another realization profile.
     let private_isolated = private_isolation_policy(job)?;
+    if private_isolated {
+        ato_runtime_attempt::resource_boundary::verify_current()
+            .context("private Formation requires bounded worker resources")?;
+    }
     // ── schema routing ──────────────────────────────────────────────────────
     // `ato.capsule/2` has a frontend of its own: it declares a portable
     // application instead of intent to plan. Reading only the discriminator

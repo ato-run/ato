@@ -154,6 +154,15 @@ fn attempt(
     continuation: Continuation,
     network: NetworkPolicy,
 ) -> AttemptOutcome {
+    attempt_with_private(fixture, continuation, network, false)
+}
+
+fn attempt_with_private(
+    fixture: &Fixture,
+    continuation: Continuation,
+    network: NetworkPolicy,
+    private: bool,
+) -> AttemptOutcome {
     let shim = PathBuf::from(env!("CARGO_BIN_EXE_ato-formation-worker"));
     let attempt_root = fixture.scratch.path().join("attempt");
     let spec = fixture.planned.attempt_spec();
@@ -185,10 +194,42 @@ fn attempt(
             },
             shim: &shim,
             network,
-            require_private_isolation: false,
+            require_private_isolation: private,
         },
         &AttemptJournal::new(fixture.scratch.path().join("records")),
     )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires bounded cgroup v2, bubblewrap and the preinstalled pinned Python"]
+fn private_offline_formation_observes_a_real_process_and_emits_a_receipt() {
+    ato_runtime_attempt::resource_boundary::verify_current().unwrap();
+    assert!(
+        Path::new(TOOLCHAIN_ROOT)
+            .join("python/3.12.7/bin/python3")
+            .is_file()
+    );
+    let app = fixture(&[("server.py", SERVER)], PROCESS_ROUTE);
+    let outcome = attempt_with_private(&app, Continuation::Stop, NetworkPolicy::Denied, true);
+    assert_eq!(
+        outcome.attempt.status,
+        AttemptStatus::Verified,
+        "{:?}",
+        outcome.attempt.failure
+    );
+    assert!(
+        outcome
+            .attempt
+            .receipt
+            .as_ref()
+            .expect("Formation receipt")
+            .fully_satisfied
+    );
+    assert_eq!(
+        outcome.attempt.outcomes.cleanup.state,
+        OutcomeState::Succeeded
+    );
 }
 
 fn get(url: &str) -> Option<u16> {
