@@ -1,5 +1,9 @@
 //! The wire format between a Run and its relay container.
 //!
+//! This module is compiled twice: as part of the adapter (the Run's end) and
+//! by the relay binary itself (`src/bin/ato-oci-relay.rs`), which includes the
+//! file directly so that the static binary does not link the adapter.
+//!
 //! A Run whose Docker daemon keeps the container network out of reach (a
 //! VM-backed daemon, or a rootless one) cannot dial a container's IP. It can
 //! still reach the network from *inside* it, through one relay container it

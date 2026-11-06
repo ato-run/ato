@@ -19,7 +19,14 @@ use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ato_oci_relay::{AllowedDestination, Frame, PROTOCOL, resolve_ipv4};
+// The framing source is included directly rather than through the adapter
+// crate: the relay is a static binary that must not link the adapter (and the
+// adapter embeds this binary, so linking it would embed the relay in itself).
+#[path = "../relay_protocol.rs"]
+#[allow(dead_code)] // the adapter's end uses the rest of the module
+mod relay_protocol;
+
+use relay_protocol::{AllowedDestination, Frame, PROTOCOL, resolve_ipv4};
 
 fn main() {
     let mut allowed = Vec::new();
