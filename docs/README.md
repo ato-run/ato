@@ -76,6 +76,8 @@ not permission to rewrite either side during documentation maintenance.
   hosting, contribution and component instructions.
 - [Architecture](architecture/README.md): library boundaries, shared portable
   execution, Hosted Formation and Scenario verification.
+- [Execution pipeline](architecture/execution-pipeline.md): the portable-bundle
+  run path derived from the source.
 - [Capsule bundle overview](capsule.md) and [computation lifecycle](run.md).
 - [Snapshot materialization](snapshot.md) and [COOP](coop.md).
 - [Theory draft](theory/capsule-process-model.md): research background, not an
