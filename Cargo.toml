@@ -90,6 +90,12 @@ authors = ["ato-run"]
 inherits = "release"
 lto = "thin"
 
+# Keep local debug/test caches small: line tables keep backtraces usable
+# while dropping full debuginfo, and incremental artifacts are not kept.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
 [profile.release]
 opt-level = "s"
 lto = true
