@@ -183,7 +183,6 @@ name = "ato-adapter-oci"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ato-oci-relay",
  "rustix",
  "serde",
  "serde_json",
@@ -707,10 +706,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
 ]
-
-[[package]]
-name = "ato-oci-relay"
-version = "0.1.0"
 
 [[package]]
 name = "ato-player"
