@@ -11,7 +11,9 @@
 
 use ato_formation::authoring::EffectClass;
 use ato_formation::request::AttemptFailure;
-use ato_formation::requirements::ExecutionRequirements;
+use ato_formation::requirements::{
+    AuthorityRequirement, ExecutionPhase, ExecutionRequirements, ResourceOperation,
+};
 
 use crate::browser_verify::BrowserVerification;
 use crate::spec::{AttemptSpec, CandidateShape};
@@ -48,6 +50,9 @@ pub enum EffectAuthorization<'a> {
     /// Nobody is present: a Formation attempt, a Runtime Network ticket, a
     /// hosted job. Only disposable effect classes run.
     Unattended,
+    /// Platform-admitted private Formation: isolated, bounded, no egress.
+    /// This grants only the fixed logical HTTP bind, never ordinary Run rights.
+    PrivateIsolatedFormation,
     /// A person started a Run of exactly this Derivation in the foreground
     /// (`ato run <capsule>`). It authorizes running that D; it is not a
     /// confirmation of effects the D declares beyond the disposable ones,
@@ -72,10 +77,25 @@ impl EffectAuthorization<'_> {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Unattended => "unattended",
+            Self::PrivateIsolatedFormation => "private_isolated_formation",
             Self::UserInvoked { .. } => "user_invoked",
             Self::Exploration { .. } => "exploration",
             Self::FunctionalVerification { .. } => "functional_verification",
         }
+    }
+}
+
+/// Fixed platform ceiling for the private, stateless, isolated HTTP profile.
+/// It is not inferred from an authored manifest and carries no egress rights.
+pub fn private_http_bind_ceiling() -> ExecutionRequirements {
+    ExecutionRequirements {
+        authority: vec![AuthorityRequirement {
+            phase: ExecutionPhase::Runtime,
+            protocol: "ato.http@1".into(),
+            resource: "app.http".into(),
+            operation: ResourceOperation::Bind,
+        }],
+        ..Default::default()
     }
 }
 
@@ -93,7 +113,7 @@ pub fn admit(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
 ) -> Option<AttemptFailure> {
-    admit_with_model_delivery(spec, authorization, browser, false)
+    admit_with_model_delivery(spec, authorization, browser, false, None)
 }
 
 pub(crate) fn admit_with_model_delivery(
@@ -101,12 +121,35 @@ pub(crate) fn admit_with_model_delivery(
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,
     delivers_model_sets: bool,
+    native_surface_binding: Option<(&str, &str)>,
 ) -> Option<AttemptFailure> {
-    if spec.derivation.native_surface.is_some() {
-        return refused(
-            "native_surface_unavailable",
-            "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
-        );
+    if let Some(native) = &spec.derivation.native_surface {
+        if native_surface_binding.map(|binding| binding.0) != Some(native.surface.profile()) {
+            return refused(
+                "native_surface_unavailable",
+                "native Adapter declaration requires an explicitly capable native Runner; this runtime cannot execute it",
+            );
+        }
+        if native
+            .validate(&spec.derivation.ports, &spec.derivation.steps)
+            .is_err()
+        {
+            return refused(
+                "native_surface_invalid",
+                "native Adapter declaration is invalid",
+            );
+        }
+        let canonical_d = spec.derivation.derivation_ref();
+        let canonical_k = spec.contract.contract_ref();
+        if canonical_d.ok().as_deref() != Some(spec.derivation_ref)
+            || native_surface_binding.map(|binding| binding.1) != Some(spec.derivation_ref)
+            || canonical_k.ok().as_deref() != Some(spec.contract_ref)
+        {
+            return refused(
+                "native_assignment_mismatch",
+                "native attempt K or D differs from the selected realizer and canonical objects",
+            );
+        }
     }
     // No entry into this attempt path measures its host against a route's
     // host condition, so none may run such a route. The route is not wrong;
@@ -131,6 +174,19 @@ pub(crate) fn admit_with_model_delivery(
         );
     }
     match authorization {
+        EffectAuthorization::PrivateIsolatedFormation => {
+            if spec
+                .derivation
+                .requirements
+                .within(&private_http_bind_ceiling())
+                .is_err()
+            {
+                return refused(
+                    "execution_authority_required",
+                    "private Formation permits only its isolated HTTP bind",
+                );
+            }
+        }
         EffectAuthorization::Exploration {
             derivation_ref,
             grant,
@@ -323,6 +379,58 @@ mod tests {
             runtimes: [("node".to_owned(), version.to_owned())].into(),
             state: Vec::new(),
             bindings: Vec::new(),
+            peer_ports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn private_formation_grants_only_the_isolated_http_bind() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".into(),
+            requirements: vec![],
+        };
+        for (requirements, expected) in [
+            (
+                serde_json::json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"bind"}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"app.http","operation":"execute"}]}),
+                Some("execution_authority_required"),
+            ),
+            (
+                serde_json::json!({"authority":[{"phase":"runtime","protocol":"ato.http@1","resource":"other","operation":"bind"}]}),
+                Some("execution_authority_required"),
+            ),
+            (
+                serde_json::json!({"network":[{"phase":"runtime","host":"example.com","port":443}]}),
+                Some("execution_authority_required"),
+            ),
+        ] {
+            let mut d = derivation(EffectClass::Pure);
+            d.requirements = serde_json::from_value(requirements).unwrap();
+            let spec = AttemptSpec {
+                contract: &contract,
+                contract_ref: "sha256:k",
+                derivation: &d,
+                derivation_ref: "sha256:d",
+                shape: CandidateShape::Process,
+                input_refs: Default::default(),
+                instance_snapshot_ref: None,
+                scenarios: vec![],
+            };
+            assert_eq!(
+                admit(&spec, EffectAuthorization::PrivateIsolatedFormation, None)
+                    .map(|f| f.code)
+                    .as_deref(),
+                expected
+            );
+            assert_eq!(
+                admit(&spec, EffectAuthorization::Unattended, None)
+                    .map(|f| f.code)
+                    .as_deref(),
+                Some("execution_authority_required")
+            );
         }
     }
 
@@ -478,8 +586,137 @@ mod tests {
                 admit(&spec, authorization, None).map(|f| f.code).as_deref(),
                 Some(MODEL_SET_UNAVAILABLE)
             );
-            assert!(admit_with_model_delivery(&spec, authorization, None, true).is_none());
+            assert!(admit_with_model_delivery(&spec, authorization, None, true, None).is_none());
         }
+    }
+
+    #[test]
+    fn native_admission_requires_the_exact_trusted_profile_and_keeps_other_gates() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let mut d = derivation(EffectClass::Pure);
+        d.steps = serde_json::from_value(serde_json::json!([
+            {"id":"serve", "protocol":"ato.oci@1", "op":"serve"}
+        ]))
+        .unwrap();
+        d.ports = serde_json::from_value(serde_json::json!([
+            {"id":"app.native", "protocol":"ato.tcp@1", "from":"serve"},
+            {"id":"app.probe", "protocol":"ato.http@1", "from":"serve"}
+        ]))
+        .unwrap();
+        d.native_surface = Some(
+            serde_json::from_value(serde_json::json!({
+                "surface":{"kind":"pixel_stream", "port":"app.native", "width":640, "height":480},
+                "probe_port":"app.probe",
+                "operations":[{"kind":"pixel_key_frame", "path":"/result", "keysyms":[103],
+                    "max_frame_bytes":1228800, "timeout_ms":1000}]
+            }))
+            .unwrap(),
+        );
+        let contract_ref = contract.contract_ref().unwrap();
+        let derivation_ref = d.derivation_ref().unwrap();
+        let make_spec = |derivation| AttemptSpec {
+            contract: &contract,
+            contract_ref: &contract_ref,
+            derivation,
+            derivation_ref: &derivation_ref,
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: Vec::new(),
+        };
+        let spec = make_spec(&d);
+        for profile in [
+            None,
+            Some(("ato.terminal-surface.v1", derivation_ref.as_str())),
+        ] {
+            assert_eq!(
+                admit_with_model_delivery(
+                    &spec,
+                    EffectAuthorization::Unattended,
+                    None,
+                    false,
+                    profile
+                )
+                .map(|f| f.code)
+                .as_deref(),
+                Some("native_surface_unavailable")
+            );
+        }
+        assert!(
+            admit_with_model_delivery(
+                &spec,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some(("ato.pixel-stream.v1", &derivation_ref))
+            )
+            .is_none()
+        );
+        assert_eq!(
+            admit_with_model_delivery(
+                &spec,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some(("ato.pixel-stream.v1", "sha256:other"))
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("native_assignment_mismatch")
+        );
+        let wrong_k = AttemptSpec {
+            contract_ref: "sha256:other",
+            ..make_spec(&d)
+        };
+        assert_eq!(
+            admit_with_model_delivery(
+                &wrong_k,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some(("ato.pixel-stream.v1", &derivation_ref))
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("native_assignment_mismatch")
+        );
+        let mut invalid_d = d.clone();
+        invalid_d.ports[0].from = "other".into();
+        let invalid = make_spec(&invalid_d);
+        assert_eq!(
+            admit_with_model_delivery(
+                &invalid,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some(("ato.pixel-stream.v1", &derivation_ref))
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("native_surface_invalid")
+        );
+        let mut external_d = d.clone();
+        external_d.effects = EffectClass::RequiresConfirmation;
+        let external_ref = external_d.derivation_ref().unwrap();
+        let external = AttemptSpec {
+            derivation_ref: &external_ref,
+            ..make_spec(&external_d)
+        };
+        assert_eq!(
+            admit_with_model_delivery(
+                &external,
+                EffectAuthorization::Unattended,
+                None,
+                false,
+                Some(("ato.pixel-stream.v1", &external_ref))
+            )
+            .map(|f| f.code)
+            .as_deref(),
+            Some("effect_policy")
+        );
     }
 
     #[test]
@@ -524,7 +761,7 @@ mod tests {
                 Some(COMPATIBLE_RUNTIME_UNAVAILABLE)
             );
             assert_eq!(
-                admit_with_model_delivery(&spec, authorization, None, true)
+                admit_with_model_delivery(&spec, authorization, None, true, None)
                     .map(|f| f.code)
                     .as_deref(),
                 Some(COMPATIBLE_RUNTIME_UNAVAILABLE)

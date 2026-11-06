@@ -186,6 +186,8 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
 ]
 
@@ -259,8 +261,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-cert-export"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "ato-cli"
-version = "0.7.9"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -278,6 +291,7 @@ dependencies = [
  "ato-contracts",
  "ato-formation",
  "ato-formation-worker",
+ "ato-host-facts",
  "ato-ipc",
  "ato-kernel",
  "ato-local-execution",
@@ -356,6 +370,7 @@ dependencies = [
  "ato-computation",
  "ato-contracts",
  "ato-formation",
+ "ato-host-facts",
  "ato-ipc",
  "ato-kernel",
  "ato-materializer-api",
@@ -371,6 +386,7 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "clap",
+ "ed25519-dalek",
  "fs2",
  "hex",
  "hmac",
@@ -455,6 +471,7 @@ dependencies = [
  "ato-adapter-api",
  "ato-adapter-oci",
  "ato-adapter-process",
+ "ato-connected-realization-worker",
  "ato-formation",
  "ato-ipc",
  "ato-materializer-static-web",
@@ -485,6 +502,16 @@ dependencies = [
  "libc",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-host-facts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -699,11 +726,13 @@ dependencies = [
  "ato-adapter-process",
  "ato-computation",
  "ato-formation",
+ "ato-host-facts",
  "ato-ipc",
  "ato-materializer-static-web",
  "ato-objects",
  "ato-runtime-attempt",
  "ato-sandbox",
+ "ato-tls-observe",
  "base64 0.22.1",
  "clap",
  "flate2",
@@ -768,6 +797,7 @@ dependencies = [
  "ato-ipc",
  "ato-materializer-static-web",
  "ato-sandbox",
+ "ato-tls-observe",
  "base64 0.22.1",
  "fs2",
  "hex",
@@ -833,6 +863,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "ato-tls-observe"
+version = "0.1.0"
+dependencies = [
+ "rustls 0.23.40",
+ "rustls-pki-types",
+ "thiserror 2.0.18",
+ "time",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]

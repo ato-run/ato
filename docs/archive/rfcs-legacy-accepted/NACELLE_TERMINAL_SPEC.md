@@ -12,6 +12,11 @@ related:
 
 # Nacelle Terminal Spec — Interactive PTY Execution for ato-desktop
 
+> Historical reference: this document describes a past design, experiment or
+> component version. Its unresolved references are recorded in the
+> [acceptance review](../2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> before applying any command or contract here.
+
 ## 1. 概要
 
 nacelle に Interactive PTY モードを追加し、ato-desktop の WebView 内で対話的シェルセッションを実行可能にする。
@@ -637,7 +642,7 @@ nacelle は nono を crate 依存として追加しない。コードパター�
 
 - [NACELLE_SPEC.md](NACELLE_SPEC.md) — nacelle エンジン仕様
 - [DESKTOP_SPEC.md](DESKTOP_SPEC.md) — ato-desktop 仕様
-- [ADR-005: Secrets Management](../../specs/ADR-005-secrets-management-architecture.md) — シークレット管理
+- [ADR-005: Secrets Management](ADR-005-secrets-management-architecture.md) — シークレット管理
 - [CAPSULE_SPEC.md](CAPSULE_SPEC.md) — Capsule 仕様（capsule.toml）
 - [CAPSULE_IPC_SPEC.md](CAPSULE_IPC_SPEC.md) — IPC 仕様
 

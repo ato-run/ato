@@ -1,5 +1,7 @@
 # DeepSeek D3 preregistration boundary
 
+Status: Draft.
+
 D2-C #1427 is merged (`8980ab8aef353cd5e33dadce4a8dbf7367f4afa2`).
 This follow-up does **not** authorize live execution. The first PR records inputs
 and adds operational guards; no migration, receiver change or authority expansion.

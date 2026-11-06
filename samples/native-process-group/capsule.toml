@@ -1,0 +1,64 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Native process group"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "surface"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/healthz"
+status = 200
+body_digest = "sha256:4b3d04d4ad537d122a3e0efb6f60c3b2700a00c24972ee31a989c2573083d101"
+
+[[contract.observation]]
+id = "through-proxy"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+body_digest = "sha256:61f5c9794034f1c3d13776c08abcda0672ddad9fb2b9f9c0523b045b425ce52d"
+
+# The proxy attempts a destination its D did not declare. The sandbox must
+# refuse it (EPERM on macOS, EACCES on Linux); anything else, including a
+# timeout, is not a refusal. The fixture normalizes both refusals to the same
+# body so K does not depend on the operating system.
+[[contract.observation]]
+id = "external-egress-denied"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/egress"
+status = 200
+body_digest = "sha256:ad9c44baa1b750f4391d73516cd9d55019fbf44f552efde461f9965d598d7640"
+
+[[derivation]]
+id = "native-group"
+use = "ato.process@1"
+runtimes = {}
+
+[[derivation.service]]
+id = "backend"
+argv = ["python3", "backend.py"]
+cwd = "."
+runtimes = { python = "3.12" }
+ports = [{ id = "backend.http", guest_port = 8081 }]
+
+[[derivation.service]]
+id = "web"
+argv = ["python3", "proxy.py"]
+cwd = "."
+runtimes = { python = "3.12" }
+ports = [{ id = "app.http", guest_port = 8080 }]
+connect = ["backend.http"]
+
+[effects]
+default = "pure"

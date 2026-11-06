@@ -55,6 +55,7 @@ fn main() -> Result<()> {
         filesystem_state: Some(PortableFilesystemStateSpec {
             id: "data".to_owned(),
             mount: "/data".to_owned(),
+            mount_required: None,
         }),
         bindings: Vec::new(),
         requirements: vec![PortableHttpRequirementSpec {

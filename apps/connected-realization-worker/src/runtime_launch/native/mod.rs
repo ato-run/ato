@@ -1,6 +1,7 @@
 //! Runner-owned Native startup and cleanup. Kept behind dispatch admission:
 //! transport readiness never authorizes publication or satisfies Contract K.
 mod dispatch;
+pub mod formation;
 pub mod pixel;
 mod pixel_controls;
 mod producer;
@@ -70,6 +71,7 @@ pub struct OwnedNativeTerminalRun {
     execution: super::lease::RuntimeExecutionEvidence,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<NativeCompletion>>,
+    ended_by: Arc<std::sync::OnceLock<&'static str>>,
 }
 /// Physical termination evidence; it never supplies a Contract verdict.
 pub struct NativeCompletion {
@@ -95,6 +97,12 @@ impl OwnedNativeTerminalRun {
     }
     pub fn is_finished(&self) -> bool {
         self.task.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    /// The program in the Terminal exited by itself (for a CLI, the user
+    /// typed `exit`). That ends the session normally; every other end of a
+    /// live lifecycle is a failure.
+    pub fn ended_by_workload_exit(&self) -> bool {
+        self.ended_by.get() == Some(&"workload_exit")
     }
     pub fn execution_evidence(&self) -> &super::lease::RuntimeExecutionEvidence {
         &self.execution
@@ -499,6 +507,8 @@ fn finish_owned_run(
         })
         .collect();
     let (stop, mut stopped) = oneshot::channel();
+    let ended_by = Arc::new(std::sync::OnceLock::new());
+    let record_end = Arc::clone(&ended_by);
     let task = tokio::spawn(async move {
         let cause = loop {
             tokio::select! {
@@ -517,6 +527,7 @@ fn finish_owned_run(
                 }
             }
         };
+        let _ = record_end.set(cause);
         NativeCompletion {
             stop: parts.shutdown().await,
             cause,
@@ -529,5 +540,6 @@ fn finish_owned_run(
         execution,
         stop: Some(stop),
         task: Some(task),
+        ended_by,
     }
 }

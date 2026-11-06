@@ -138,6 +138,9 @@ fn start_process(root: &Path) -> Candidate {
             endpoint_name: "web".into(),
             path: "/".into(),
             timeout_ms: 10_000,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let endpoint = EndpointV1 {
             name: "web".into(),
@@ -253,6 +256,7 @@ struct HostedJob {
     requirement_ids: Vec<String>,
     route_realization: String,
     contract_ref: String,
+    ingress_probe_status: u16,
 }
 
 #[derive(Default)]
@@ -265,6 +269,7 @@ struct Recorded {
     observe_503_left: u32,
     /// Typed failure reports the verifier sent instead of an ack.
     failure_reports: Vec<Value>,
+    ingress_probes_before_ack: u32,
 }
 
 struct HostedApi {
@@ -536,6 +541,20 @@ fn route(
             recorded.lock().unwrap().failure_reports.push(body);
             json_body(json!({ "reported": true }))
         }
+        ("POST", path) if path == format!("{job_path}/ingress-protection") => {
+            if fenced() {
+                return (409, "application/json", br#"{"error":"fenced"}"#.to_vec());
+            }
+            let mut recorded = recorded.lock().unwrap();
+            if recorded.ack.is_none() {
+                recorded.ingress_probes_before_ack += 1;
+            }
+            (
+                hosted.ingress_probe_status,
+                "application/json",
+                br#"{"evidence_status":"failed"}"#.to_vec(),
+            )
+        }
         ("POST", path) if path == format!("{job_path}/ack") => {
             if fenced() {
                 return (409, "application/json", br#"{"error":"fenced"}"#.to_vec());
@@ -675,6 +694,7 @@ fn realization_name(kind: PortableRealizationKind) -> &'static str {
         PortableRealizationKind::LocalProcess => "local_process",
         PortableRealizationKind::OciContainer => "oci_container",
         PortableRealizationKind::OciServiceGroup => "oci_service_group",
+        PortableRealizationKind::ProcessServiceGroup => "process_service_group",
     }
 }
 
@@ -694,6 +714,7 @@ struct JobShape {
     observe_503: u32,
     /// The control plane's computed retry budget for this attempt.
     retry_budget_ms: Option<u64>,
+    ingress_probe_status: u16,
 }
 
 impl JobShape {
@@ -704,6 +725,7 @@ impl JobShape {
             transport_digest: None,
             observe_503: 0,
             retry_budget_ms: None,
+            ingress_probe_status: 200,
         }
     }
 }
@@ -715,6 +737,7 @@ struct CaseResult {
     verification_status: Option<String>,
     observations: Vec<(String, String, String)>,
     endpoint: Option<String>,
+    ingress_probes_before_ack: u32,
 }
 
 fn run_case(name: &str, fixture: &Fixture, served: Served, shape: JobShape) -> CaseResult {
@@ -782,6 +805,7 @@ fn run_case(name: &str, fixture: &Fixture, served: Served, shape: JobShape) -> C
                 .collect(),
             route_realization: realization.to_owned(),
             contract_ref: fixture.route.contract_ref.to_string(),
+            ingress_probe_status: shape.ingress_probe_status,
         },
         candidate.clone(),
     );
@@ -802,6 +826,7 @@ fn run_case(name: &str, fixture: &Fixture, served: Served, shape: JobShape) -> C
         verification_status: recorded.verification_status,
         observations: recorded.observations,
         endpoint,
+        ingress_probes_before_ack: recorded.ingress_probes_before_ack,
     };
     write_normalized(name, &result);
     result
@@ -1067,6 +1092,7 @@ fn a_static_hosted_observation_is_verified() {
         JobShape::of(&fixture),
     );
     let receipt = assert_verified(&fixture, &result, "a_static");
+    assert_eq!(result.ingress_probes_before_ack, 0);
     let (_, proof) = outcome_of(&receipt, "app-proof");
     assert_eq!(proof["evidence"]["status"], 200);
     assert_eq!(
@@ -1085,8 +1111,45 @@ fn b_process_hosted_observation_is_verified() {
         JobShape::of(&fixture),
     );
     let receipt = assert_verified(&fixture, &result, "b_process");
+    assert_eq!(result.ingress_probes_before_ack, 1);
     assert!(receipt["execution"]["request_id"].is_null());
     assert_eq!(outcome_of(&receipt, "app-root").0, "satisfied");
+}
+
+#[test]
+fn ingress_probe_unavailability_does_not_change_the_contract_receipt() {
+    let fixture = multi_fixture(PortableRealizationKind::LocalProcess);
+    for status in [404, 503] {
+        let name = format!("ingress_probe_{status}");
+        let result = run_case(
+            &name,
+            &fixture,
+            Served::AsBundled,
+            JobShape {
+                ingress_probe_status: status,
+                ..JobShape::of(&fixture)
+            },
+        );
+        assert_eq!(result.ingress_probes_before_ack, 1);
+        let receipt = assert_verified(&fixture, &result, &name);
+        assert_eq!(receipt["fully_satisfied"], true);
+    }
+}
+
+#[test]
+fn ingress_probe_does_not_consume_the_last_verification_budget() {
+    let fixture = multi_fixture(PortableRealizationKind::LocalProcess);
+    let result = run_case(
+        "ingress_budget",
+        &fixture,
+        Served::AsBundled,
+        JobShape {
+            retry_budget_ms: Some(5_000),
+            ..JobShape::of(&fixture)
+        },
+    );
+    assert_eq!(result.ingress_probes_before_ack, 0);
+    assert_verified(&fixture, &result, "ingress_budget");
 }
 
 #[test]
@@ -1099,6 +1162,7 @@ fn c_http_status_mismatch_fails_the_observation() {
         JobShape::of(&fixture),
     );
     let receipt = assert_failed(&fixture, &result, "c_status");
+    assert_eq!(result.ingress_probes_before_ack, 0);
     let (outcome, proof) = outcome_of(&receipt, "app-proof");
     assert_eq!(outcome, "failed");
     assert_eq!(proof["evidence"]["status"], 404);

@@ -28,7 +28,7 @@ use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::request::{
     AttemptFailure, AttemptOutcomes, AttemptStatus, FormationAttempt, Outcome, RuntimeProfile,
 };
-use ato_formation::verify::{ContractVerification, RuntimeHttpObservation};
+use ato_formation::verify::{ContractVerification, RuntimeHttpObservation, RuntimeTlsObservation};
 
 use crate::admission::{EffectAuthorization, admit_with_model_delivery, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
@@ -43,8 +43,9 @@ use crate::realize::{
 use crate::spec::AttemptSpec;
 pub use crate::verification::ReceiptContext;
 use crate::verification::{
-    HTTP_OBSERVATION_METHOD, RequiredObservation, VerificationPoint, required_http_observations,
-    verify_observed_candidate,
+    HTTP_OBSERVATION_METHOD, RequiredObservation, RequiredTlsObservation, VerificationPoint,
+    probe_tls_start, required_http_observations, required_tls_observations,
+    runtime_tls_observation, verify_observed_candidate,
 };
 
 /// Bodies larger than this are not hashed into evidence.
@@ -53,6 +54,8 @@ const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const OBSERVATION_DEADLINE: Duration = Duration::from_secs(60);
 /// Per-request budget once it answers.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Per-attempt budget for one TLS handshake.
+const TLS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Everything one attempt needs, already decided by the caller.
 pub struct AttemptRequest<'a> {
@@ -208,11 +211,20 @@ pub fn run_reserved_attempt(
         }
     };
 
+    if spec.derivation.native_surface.is_some() && request.contract_ref != spec.contract_ref {
+        attempt.failure = Some(AttemptFailure {
+            code: "native_assignment_mismatch".to_owned(),
+            stage: "admission".to_owned(),
+            message: "native attempt must verify its selected original Contract".to_owned(),
+        });
+        return not_run(attempt, AttemptRecordState::NotStarted);
+    }
     if let Some(failure) = admit_with_model_delivery(
         spec,
         request.authorization,
         request.browser,
         realizer.delivers_model_sets(),
+        realizer.native_surface_binding(),
     )
     .or_else(|| realizer.admit(request.profile))
     {
@@ -437,6 +449,25 @@ fn realize_and_verify(
             return not_observable(attempt, error, Some(stopped));
         }
     };
+    // Certificates are read after the HTTP observations, from the same
+    // still-running candidate: one attempt, one set of facts.
+    let tls = match observe_tls(
+        candidate.as_mut(),
+        &required_tls_observations(spec),
+        request.interrupt,
+        request.control,
+    ) {
+        Ok(tls) => tls,
+        Err(error) => {
+            drop(verification_timing);
+            let _cleanup = request.control.map(|c| c.cleanup());
+            let stopped = candidate.stop();
+            if let Some(evidence) = attempt.realization.as_mut() {
+                evidence.destroyed = stopped.is_ok();
+            }
+            return not_observable(attempt, error, Some(stopped));
+        }
+    };
     // Contract scenarios run after the read-only GET observations, so their
     // state changes cannot affect what those observations measured, and before
     // the verification point, so the same verdict decides both.
@@ -479,6 +510,7 @@ fn realize_and_verify(
         spec,
         http,
         scenario_observations,
+        tls,
         execution,
         &request.receipt,
     );
@@ -635,10 +667,16 @@ fn wait_for_startup(
         let timeout = control.map_or(Ok(timeout), |c| {
             c.cap(crate::control::AttemptPhase::Launch, timeout)
         })?;
+        let condition = crate::startup::ProbeCondition::from(startup);
         crate::startup::wait_for_readiness(
             timeout,
             |budget| {
-                crate::startup::http_probe(&client, &format!("{base}{}", startup.path), budget)
+                crate::startup::http_probe_with(
+                    &client,
+                    &format!("{base}{}", startup.path),
+                    budget,
+                    Some(&condition),
+                )
             },
             || {
                 if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
@@ -721,6 +759,82 @@ fn observe_http(
             status,
             &body,
         ));
+    }
+    Ok(observed)
+}
+
+/// The address behind a candidate endpoint (`scheme://host:port`). A TLS
+/// observation connects to the resolved address and verifies the certificate
+/// against the name K states, not against the endpoint name.
+fn endpoint_address(base: &str) -> Option<std::net::SocketAddr> {
+    let authority = base.split_once("://").map_or(base, |(_, rest)| rest);
+    let authority = authority.split('/').next()?;
+    let (host, port) = authority.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    use std::net::ToSocketAddrs;
+    (host, port).to_socket_addrs().ok()?.next()
+}
+
+/// Read the certificate each TLS-observed port presents.
+///
+/// A connection or handshake that yields no certificate is not an observation:
+/// it waits within the bounded deadline, then the attempt reports that the
+/// candidate could not be observed. A certificate that was presented but fails
+/// a check is still recorded, with its facts, so the receipt states which
+/// certificate was served.
+fn observe_tls(
+    candidate: &mut dyn RunningCandidate,
+    required: &[RequiredTlsObservation],
+    interrupt: Option<&AtomicBool>,
+    control: Option<&crate::control::ExecutionControl>,
+) -> Result<Vec<RuntimeTlsObservation>> {
+    let deadline = Instant::now() + OBSERVATION_DEADLINE;
+    let mut observed = Vec::with_capacity(required.len());
+    for observation in required {
+        let Some(base) = candidate.endpoints().get(&observation.port_id).cloned() else {
+            continue;
+        };
+        let Some(address) = endpoint_address(&base) else {
+            continue;
+        };
+        let facts = loop {
+            if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                anyhow::bail!("interrupted before the Contract observations completed");
+            }
+            let timeout = match control {
+                Some(control) => control.cap(
+                    crate::control::AttemptPhase::Verification,
+                    TLS_OBSERVATION_TIMEOUT,
+                )?,
+                None => TLS_OBSERVATION_TIMEOUT,
+            };
+            match ato_tls_observe::observe_tls(
+                address,
+                &observation.server_name,
+                probe_tls_start(observation.start),
+                timeout,
+                ato_tls_observe::TrustAnchors::PublicRoots,
+            ) {
+                Ok(facts) => break facts,
+                Err(error) => {
+                    if let Some(exit) = candidate.exited()? {
+                        anyhow::bail!("the candidate exited before it could be observed: {exit}");
+                    }
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "no TLS certificate was presented on {} for {}: {error}",
+                            observation.port_id,
+                            observation.server_name
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        };
+        if let Some(control) = control {
+            control.remaining(crate::control::AttemptPhase::Verification)?;
+        }
+        observed.push(runtime_tls_observation(observation, facts));
     }
     Ok(observed)
 }
@@ -990,6 +1104,9 @@ mod tests {
                 body_digest: None,
                 input: None,
                 digest: None,
+
+                server_name: None,
+                start: None,
             }],
         };
         let runtime = RuntimeObservation {
@@ -999,6 +1116,8 @@ mod tests {
             )],
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
+
+            tls: Vec::new(),
         };
         let verification = verify_runtime(&contract, &runtime);
         let receipt = ContractVerificationReceipt::from_attempt(
@@ -1179,6 +1298,9 @@ mod tests {
                 body_digest: None,
                 input: None,
                 digest: None,
+
+                server_name: None,
+                start: None,
             }],
         };
         let derivation = serde_json::from_value(serde_json::json!({
@@ -1536,6 +1658,9 @@ mod tests {
                 body_digest: None,
                 input: Some("workspace".to_owned()),
                 digest: Some("sha256:tree".to_owned()),
+
+                server_name: None,
+                start: None,
             });
             contract.requirements.push(BoundRequirement {
                 id: "saved-state".to_owned(),
@@ -1547,6 +1672,9 @@ mod tests {
                 body_digest: None,
                 input: None,
                 digest: Some("sha256:snapshot".to_owned()),
+
+                server_name: None,
+                start: None,
             });
             let spec = AttemptSpec {
                 contract: &contract,
@@ -1598,6 +1726,7 @@ mod tests {
                 vec![RuntimeHttpObservation::from_response(
                     "app.http", "GET", "/", 200, b"ok",
                 )],
+                Vec::new(),
                 Vec::new(),
                 serde_json::from_value(serde_json::json!({
                     "realization": "test",
@@ -1820,6 +1949,9 @@ mod tests {
             path: "/preparation".into(),
             timeout_ms: 2000,
             abi: None,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         wait_for_startup(
             &mut candidate,
@@ -1864,6 +1996,8 @@ mod tests {
                 http: observed,
                 instance_snapshot_ref: None,
                 scenarios: Vec::new(),
+
+                tls: Vec::new(),
             },
         );
         assert!(!verdict.fully_satisfied());

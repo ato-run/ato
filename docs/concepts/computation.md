@@ -1,5 +1,11 @@
 # Computation
 
+Status: Current technical reference.
+
+A shorter, user-facing introduction is owned by
+[ato.run Core concepts](https://ato.run/docs/core-concepts/); this page is the
+technical model and vocabulary reference.
+
 Take a concrete example: Alice runs a build and hits `error[E0277]` at a
 point we call `C42`. Her shell is still sitting there, interactive, waiting
 for the next command.
@@ -12,6 +18,14 @@ build. That "what can still happen" is what Ato calls a **Computation**.
 A **Computation** is the work remaining from a current point, not a
 transcript of everything that happened before it. In process-theory terms
 this is an evolving *residual computation*.
+
+## A common Capsule interface
+
+“Everything can be a Capsule” is an architecture principle: a computation
+with a defined boundary, typed interactions, and continuation semantics can
+use the same Capsule interface. Applications, build work, and agent tasks can
+be described through this common model. This does not mean every object is
+automatically a Capsule or that all workloads can currently be restored.
 
 ## Evolution
 
@@ -91,7 +105,10 @@ Computation.
 
 ## Implementation note
 
-The current implementation represents a sealed point as
+The computation-root implementation represents a sealed point as
 `ComputationObject { semantics, boundary, residual }` and addresses its
 canonical bytes with a `ComputationRef`. See the accepted
 [Computation Architecture](../rfcs/accepted/COMPUTATION_ARCHITECTURE.md).
+
+The [portable application profile](application-contracts.md) has a distinct
+Contract-root identity. Its refs must not be substituted for a ComputationRef.

@@ -146,6 +146,52 @@ pub struct StartupRequirement {
     pub timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi: Option<ProcessAbiRequirement>,
+    /// The exact status that counts as started. Absent means any 2xx, which is
+    /// what every route formed before this field existed observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_status: Option<u16>,
+    /// A condition on the bounded response body. An application that answers
+    /// 200 while it is still loading can say so here; the route is started only
+    /// once the condition holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<StartupJsonCondition>,
+    /// Upper bound on the bytes read to evaluate `json`. Absent means
+    /// [`DEFAULT_STARTUP_BODY_MAX_BYTES`]; a body that exceeds it fails the
+    /// probe rather than being truncated into a false verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u32>,
+}
+
+/// A bounded condition over a JSON startup response.
+///
+/// This is a physical preparation signal, never a Contract observation: it
+/// informs when a Run may be treated as started, not whether K is satisfied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupJsonCondition {
+    /// RFC 6901 JSON Pointer into the response body (`/data/progress`).
+    /// The empty pointer names the whole body.
+    pub pointer: String,
+    /// The pointed scalar must be at least this integer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gte: Option<StartupJsonScalar>,
+    /// The pointed scalar must equal this value exactly, including its JSON
+    /// type: `100` is not `"100"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<StartupJsonScalar>,
+}
+
+/// A JSON scalar a startup condition compares against.
+///
+/// Floats are deliberately absent: a readiness threshold is a discrete
+/// progress value, and accepting `99.5` would make the comparison depend on
+/// binary floating point on both sides of the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StartupJsonScalar {
+    Bool(bool),
+    Integer(i64),
+    Text(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +212,21 @@ pub fn valid_abi_version(version: &str) -> bool {
         })
 }
 
+/// The default bound on a startup response body read for a JSON condition.
+pub const DEFAULT_STARTUP_BODY_MAX_BYTES: u32 = 64 * 1024;
+/// The largest body a route may ask to read. A startup probe is a signal, not
+/// a document capture.
+pub const MAX_STARTUP_BODY_BYTES: u32 = 1024 * 1024;
+const MAX_STARTUP_POINTER_BYTES: usize = 512;
+const MAX_STARTUP_EQUALS_TEXT_BYTES: usize = 256;
+
 impl StartupRequirement {
+    /// The number of body bytes a probe may read to evaluate `json`.
+    pub fn body_max_bytes(&self) -> u32 {
+        self.max_body_bytes
+            .unwrap_or(DEFAULT_STARTUP_BODY_MAX_BYTES)
+    }
+
     pub fn validate(&self) -> Result<(), RequirementError> {
         if self.port.is_empty()
             || self.port.len() > 160
@@ -181,7 +241,44 @@ impl StartupRequirement {
             || self.abi.as_ref().is_some_and(|abi| {
                 !valid_abi_version(&abi.glibc_min) || !valid_abi_version(&abi.glibcxx_min)
             })
+            || self
+                .expect_status
+                .is_some_and(|status| !(100..=599).contains(&status))
+            || self
+                .max_body_bytes
+                .is_some_and(|bytes| !(1..=MAX_STARTUP_BODY_BYTES).contains(&bytes))
+            // A size bound with nothing to read is a requirement nothing
+            // observes; refuse it instead of pretending it is enforced.
+            || (self.max_body_bytes.is_some() && self.json.is_none())
         {
+            return Err(RequirementError("startup_requirement_invalid"));
+        }
+        if let Some(json) = &self.json {
+            json.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl StartupJsonCondition {
+    pub fn validate(&self) -> Result<(), RequirementError> {
+        let pointer_bytes = self.pointer.as_bytes();
+        let pointer_valid = self.pointer.len() <= MAX_STARTUP_POINTER_BYTES
+            && (self.pointer.is_empty()
+                || (self.pointer.starts_with('/')
+                    && !pointer_bytes.iter().any(|byte| byte.is_ascii_control())));
+        // Exactly one comparison: "at least 100 AND equals \"ok\"" has no
+        // defined meaning for a scalar, and silently picking one is worse.
+        let single_comparison = self.gte.is_some() ^ self.equals.is_some();
+        let gte_valid = self
+            .gte
+            .as_ref()
+            .is_none_or(|value| matches!(value, StartupJsonScalar::Integer(0..)));
+        let equals_valid = self.equals.as_ref().is_none_or(|value| match value {
+            StartupJsonScalar::Text(text) => text.len() <= MAX_STARTUP_EQUALS_TEXT_BYTES,
+            _ => true,
+        });
+        if !pointer_valid || !single_comparison || !gte_valid || !equals_valid {
             return Err(RequirementError("startup_requirement_invalid"));
         }
         Ok(())
@@ -286,5 +383,108 @@ impl ExecutionRequirements {
             return Err(RequirementError("exploration_authority_exceeded"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn startup() -> StartupRequirement {
+        StartupRequirement {
+            port: "app.http".to_owned(),
+            path: "/health".to_owned(),
+            timeout_ms: 60_000,
+            abi: None,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
+        }
+    }
+
+    #[test]
+    fn q15_a_startup_without_the_new_fields_keeps_its_exact_bytes() {
+        let legacy = startup();
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert_eq!(
+            json,
+            r#"{"port":"app.http","path":"/health","timeout_ms":60000}"#
+        );
+        let parsed: StartupRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, legacy);
+        assert_eq!(legacy.body_max_bytes(), DEFAULT_STARTUP_BODY_MAX_BYTES);
+    }
+
+    #[test]
+    fn q15_a_startup_json_condition_is_bounded_and_unambiguous() {
+        let mut requirement = startup();
+        requirement.json = Some(StartupJsonCondition {
+            pointer: "/data/progress".to_owned(),
+            gte: Some(StartupJsonScalar::Integer(100)),
+            equals: None,
+        });
+        requirement.expect_status = Some(200);
+        requirement.max_body_bytes = Some(4096);
+        requirement.validate().unwrap();
+        assert_eq!(requirement.body_max_bytes(), 4096);
+
+        let round_trip: StartupRequirement =
+            serde_json::from_str(&serde_json::to_string(&requirement).unwrap()).unwrap();
+        assert_eq!(round_trip, requirement);
+
+        for (what, mutate) in [
+            (
+                "both comparisons",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.json.as_mut().unwrap().equals = Some(StartupJsonScalar::Bool(true));
+                }) as Box<dyn Fn(&mut StartupRequirement)>,
+            ),
+            (
+                "no comparison",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.json.as_mut().unwrap().gte = None;
+                }),
+            ),
+            (
+                "boolean threshold",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.json.as_mut().unwrap().gte = Some(StartupJsonScalar::Bool(true));
+                }),
+            ),
+            (
+                "negative threshold",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.json.as_mut().unwrap().gte = Some(StartupJsonScalar::Integer(-1));
+                }),
+            ),
+            (
+                "relative pointer",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.json.as_mut().unwrap().pointer = "data/progress".to_owned();
+                }),
+            ),
+            (
+                "status out of range",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.expect_status = Some(99);
+                }),
+            ),
+            (
+                "size bound without a condition",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.json = None;
+                }),
+            ),
+            (
+                "unbounded body",
+                Box::new(|r: &mut StartupRequirement| {
+                    r.max_body_bytes = Some(MAX_STARTUP_BODY_BYTES + 1);
+                }),
+            ),
+        ] {
+            let mut candidate = requirement.clone();
+            mutate(&mut candidate);
+            assert!(candidate.validate().is_err(), "{what}");
+        }
     }
 }

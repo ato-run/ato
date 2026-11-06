@@ -1,9 +1,9 @@
 # Ato Home Layout
 
-**Status:** Draft decision note  
-**Date:** 2026-05-02  
-**Scope:** `~/.ato` の local storage layout、lifetime 境界、desktop/system capsule の trust class、既存 layout からの移行方針  
-**Related:** [CAPSULE_FOUNDATION_RESOURCE_STATE_MEMO.md](CAPSULE_FOUNDATION_RESOURCE_STATE_MEMO.md), [FOUNDATION_PROFILE_AND_PLACEMENT.md](../accepted/FOUNDATION_PROFILE_AND_PLACEMENT.md), [UNIFIED_EXECUTION_MODEL.md](UNIFIED_EXECUTION_MODEL.md)
+**Status:** Draft decision note
+**Date:** 2026-05-02
+**Scope:** `~/.ato` の local storage layout、lifetime 境界、desktop/system capsule の trust class、既存 layout からの移行方針
+**Related:** [CAPSULE_FOUNDATION_RESOURCE_STATE_MEMO.md](CAPSULE_FOUNDATION_RESOURCE_STATE_MEMO.md), [FOUNDATION_PROFILE_AND_PLACEMENT.md](../rfcs-legacy-accepted/FOUNDATION_PROFILE_AND_PLACEMENT.md), [UNIFIED_EXECUTION_MODEL.md](UNIFIED_EXECUTION_MODEL.md)
 
 ## 1. 結論
 

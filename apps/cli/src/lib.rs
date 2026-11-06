@@ -14,6 +14,7 @@ mod portable_dependency;
 
 pub mod activity_client;
 pub mod activity_mcp;
+pub mod auth_device;
 pub mod formation_session_mcp;
 
 use std::collections::BTreeMap;
@@ -111,10 +112,15 @@ enum Commands {
     Encap(EncapArgs),
     /// Compile an ato.capsule/2 source directory into a portable Application.
     Pack(PackArgs),
-    /// Experimental: compile an ato.capsule/1 route that declares a Terminal
-    /// native Surface into a portable wire v3 `.capsule` bundle.
+    /// Experimental: compile an ato.capsule/1 route that declares a native
+    /// Terminal or Pixel Surface into a portable wire v3 `.capsule` bundle.
     #[command(name = "__native-bundle", hide = true)]
     NativeBundle(NativeBundleArgs),
+    /// Experimental: compile an ato.capsule/1 route that declares a browser
+    /// (Static Web) Surface into a portable wire v3 `.capsule` bundle from the
+    /// existing source tree, without running a build.
+    #[command(name = "__static-bundle", hide = true)]
+    StaticBundle(StaticBundleArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
     /// Derive and verify a candidate Derivation against an existing .capsule's
@@ -134,6 +140,8 @@ enum Commands {
     ExportPlan(ExportPlanArgs),
     /// Repack an existing portable application without changing K or D.
     Export(ExportArgs),
+    /// Authenticate this CLI with an Ato API using the browser device flow.
+    Login(LoginArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
     /// Form a local directory into a Capsule: build each candidate, observe it
@@ -184,6 +192,11 @@ enum Commands {
     },
     #[command(name = "__portable-sandbox-exec", hide = true)]
     PortableSandboxExec(PortableSandboxExecArgs),
+    /// Runtime-owned loopback shim for one declared peer edge of a native
+    /// process service group. Not a user surface.
+    #[cfg(unix)]
+    #[command(name = "__portable-peer-shim", hide = true)]
+    PortablePeerShim(PortablePeerShimArgs),
     #[command(name = "__portable-instance-worker", hide = true)]
     PortableInstanceWorker(PortableInstanceWorkerArgs),
     /// 6b-D2 experimental: build a frozen source's root Dockerfile with a
@@ -362,6 +375,22 @@ struct NativeBundleArgs {
 }
 
 #[derive(Debug, Args)]
+struct StaticBundleArgs {
+    /// The source directory whose tree the bundle carries.
+    #[arg(default_value = ".")]
+    source: PathBuf,
+    /// Application title, part of the bundled Application object.
+    #[arg(long)]
+    title: String,
+    /// New bundle file.
+    #[arg(short, long, default_value = "static.capsule")]
+    output: PathBuf,
+    /// Portable tree schema: v1 (default) or v2. v2 carries arbitrary binary media.
+    #[arg(long, default_value = "v1")]
+    tree_schema: String,
+}
+
+#[derive(Debug, Args)]
 struct PortableInstanceWorkerArgs {
     instance: String,
     run_id: String,
@@ -400,6 +429,20 @@ struct PortableSandboxExecArgs {
     command: Vec<String>,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Args)]
+struct PortablePeerShimArgs {
+    /// Runtime-owned broker socket.
+    #[arg(long)]
+    broker: PathBuf,
+    /// The one declared edge this shim may relay to.
+    #[arg(long)]
+    token: String,
+    /// Loopback port to listen on; 0 lets the OS choose.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+}
+
 #[derive(Debug, Args)]
 struct UploadArgs {
     selector: String,
@@ -407,8 +450,9 @@ struct UploadArgs {
     materializers: Vec<String>,
     #[arg(long, env = "ATO_API_URL")]
     api_url: String,
+    /// Bearer token; defaults to ATO_API_TOKEN, then a credential saved by `ato login`.
     #[arg(long, env = "ATO_API_TOKEN", hide_env_values = true)]
-    auth_token: String,
+    auth_token: Option<String>,
     #[arg(long, value_enum, default_value = "private")]
     visibility: VisibilityPolicy,
     #[arg(long)]
@@ -423,6 +467,16 @@ struct UploadArgs {
     validation_poll_ms: u64,
     #[arg(long, default_value = "object-upload-receipt.json")]
     receipt: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct LoginArgs {
+    /// Ato API origin to authenticate against.
+    #[arg(long, env = "ATO_API_URL", default_value = auth_device::DEFAULT_API_URL)]
+    api_url: String,
+    /// Print the approval URL and wait instead of opening a browser.
+    #[arg(long)]
+    headless: bool,
 }
 
 /// The request IS the whole statement: which directory, which Runtime
@@ -653,6 +707,7 @@ pub fn run() -> Result<()> {
         Commands::Encap(args) => encap(args),
         Commands::Pack(args) => pack(args),
         Commands::NativeBundle(args) => native_bundle(args),
+        Commands::StaticBundle(args) => static_bundle(args),
         Commands::Run(args) => run_capsule(args),
         Commands::Reform(args) => run_reform(args),
         Commands::ModelSet { command } => model_cache::execute(command),
@@ -665,6 +720,7 @@ pub fn run() -> Result<()> {
         },
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
+        Commands::Login(args) => login(args),
         Commands::Upload(args) => upload(args),
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
@@ -715,6 +771,8 @@ pub fn run() -> Result<()> {
             DesktopCommands::Inspect { project } => desktop_inspect(&project),
         },
         Commands::PortableSandboxExec(args) => portable_sandbox_exec(args),
+        #[cfg(unix)]
+        Commands::PortablePeerShim(args) => portable_peer_shim(args),
         Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
         Commands::SourceOciBuild(args) => source_oci_build(args),
         Commands::SourceOciAcquireBase(args) => source_oci_acquire_base(args),
@@ -732,13 +790,20 @@ fn source_oci_build(args: SourceOciBuildArgs) -> Result<()> {
     let materialized = source_oci_session_build(&prepared, &args)?;
     let provenance = serde_json::to_vec_pretty(&materialized.provenance)?;
     fs::write(args.out.join(PROVENANCE_FILE), &provenance)?;
-    let authored = args.out.join("authored");
-    fs::create_dir(&authored)?;
-    fs::write(authored.join("capsule.toml"), &materialized.capsule_toml)?;
-    fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+    let authored = if let Some(capsule_toml) = &materialized.capsule_toml {
+        let authored = args.out.join("authored");
+        fs::create_dir(&authored)?;
+        fs::write(authored.join("capsule.toml"), capsule_toml)?;
+        fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+        Some(authored)
+    } else {
+        None
+    };
     println!("image_reference={}", materialized.image_reference);
     println!("archive={}", materialized.archive.display());
-    println!("authored={}", authored.display());
+    if let Some(authored) = authored {
+        println!("authored={}", authored.display());
+    }
     Ok(())
 }
 
@@ -819,7 +884,111 @@ fn pack(args: PackArgs) -> Result<()> {
     for derivation in &bundle.index.derivations {
         println!("derivation_ref={derivation}");
     }
+    report_route_capabilities(&bundle);
     Ok(())
+}
+
+/// Print whether each declared Derivation can run on this host, and why.
+///
+/// `ato pack` still succeeds: the bundle is immutable and this host's
+/// capabilities are not part of it. This is the diagnosis `ato run` acts on,
+/// produced from the same observed facts, so the two cannot disagree.
+fn report_route_capabilities(bundle: &ato_objects::PortableApplicationBundle) {
+    let mut routes = Vec::new();
+    for derivation in &bundle.index.derivations {
+        match ato_portable_application::validate_bundle_for_derivation(bundle, derivation) {
+            Ok(validated) => {
+                // The path a Run of this route would bind: the Run scratch
+                // under the CLI's own home, which is what the daemon has to
+                // be able to see. A relative "." proves nothing about file
+                // sharing and would report a false refusal.
+                let runtime_root = ato_home()
+                    .map(|home| home.join("runs"))
+                    .unwrap_or_else(|_| PathBuf::from("."));
+                let requirements =
+                    ato_portable_application::portable_run::execution_requirements_for(
+                        &validated,
+                        &runtime_root,
+                    );
+                routes.push((derivation.clone(), validated, requirements));
+            }
+            Err(error) => println!(
+                "capability derivation_ref={derivation} runnable=unknown reason=bundle_invalid message={error}"
+            ),
+        }
+    }
+    let requirements: Vec<_> = routes
+        .iter()
+        .map(|(_, _, requirements)| requirements.clone())
+        .collect();
+    let host = ato_host_facts::HostFacts::probe(&requirements);
+    for (derivation, validated, requirement) in &routes {
+        let status = ato_host_facts::execution_status(&host, requirement);
+        let connector = match validated.realization {
+            ato_portable_application::PortableRealizationKind::StaticWeb => "not-applicable",
+            ato_portable_application::PortableRealizationKind::LocalProcess => "process",
+            _ => host
+                .connector_choice()
+                .map(|choice| choice.as_str())
+                .unwrap_or("none"),
+        };
+        let platform = validated
+            .derivation
+            .runtimes
+            .get(ato_portable_application::OCI_PLATFORM_RUNTIME)
+            .or_else(|| {
+                validated.derivation.steps.iter().find_map(|step| {
+                    step.runtimes
+                        .get(ato_portable_application::OCI_PLATFORM_RUNTIME)
+                })
+            })
+            .map(String::as_str)
+            .unwrap_or("none");
+        for line in capability_lines(
+            derivation,
+            validated.realization.label(),
+            platform,
+            connector,
+            &status,
+        ) {
+            println!("{line}");
+        }
+    }
+}
+
+/// The lines `ato pack` prints for one Derivation.
+///
+/// Kept as a pure function so the wording is snapshot-tested rather than
+/// assembled in three places.
+fn capability_lines(
+    derivation: &str,
+    route: &str,
+    platform: &str,
+    connector: &str,
+    status: &ato_host_facts::CapabilityStatus,
+) -> Vec<String> {
+    let runnable = if status.state == ato_host_facts::CapabilityState::Advertised {
+        "yes"
+    } else {
+        "no"
+    };
+    let mut lines = vec![format!(
+        "capability derivation_ref={derivation} route={route} platform={platform} connector={connector} runnable={runnable} state={:?}",
+        status.state
+    )];
+    for reason in &status.reasons {
+        let kind = if reason.code.is_warning() {
+            "warning"
+        } else {
+            "reason"
+        };
+        lines.push(format!(
+            "capability {kind}={} message={}",
+            reason.code.as_str(),
+            reason.message
+        ));
+    }
+    lines
 }
 
 fn native_bundle(args: NativeBundleArgs) -> Result<()> {
@@ -827,20 +996,42 @@ fn native_bundle(args: NativeBundleArgs) -> Result<()> {
         args.source
             .join(ato_formation::capsule_toml::CAPSULE_FILE_NAME)
     });
-    let (bytes, bundle) = ato_portable_application::build_native_terminal_bundle(
-        &args.source,
-        &manifest,
-        &args.title,
-    )
-    .with_context(|| {
-        format!(
-            "compile native bundle from {} and {}",
-            manifest.display(),
-            args.source.display()
-        )
-    })?;
+    let (bytes, bundle) =
+        ato_portable_application::build_native_bundle(&args.source, &manifest, &args.title)
+            .with_context(|| {
+                format!(
+                    "compile native bundle from {} and {}",
+                    manifest.display(),
+                    args.source.display()
+                )
+            })?;
     fs::write(&args.output, &bytes)
         .with_context(|| format!("write native bundle {}", args.output.display()))?;
+    println!("Packed: {}", args.output.display());
+    println!("bundle_sha256={}", bundle_sha256(&bytes));
+    println!("contract_ref={}", bundle.index.root_contract_ref);
+    for derivation in &bundle.index.derivations {
+        println!("derivation_ref={derivation}");
+    }
+    Ok(())
+}
+
+/// Compile an `ato.capsule/1` static Web route into a portable wire v3 bundle
+/// with no build: the packer hashes the tree this route already declares.
+fn static_bundle(args: StaticBundleArgs) -> Result<()> {
+    let schema = match args.tree_schema.as_str() {
+        "v1" => "ato.portable-tree/1",
+        "v2" => "ato.portable-tree/2",
+        other => anyhow::bail!("unknown --tree-schema {other}"),
+    };
+    let (bytes, bundle) = ato_portable_application::build_static_bundle_with_schema(
+        &args.source,
+        &args.title,
+        schema,
+    )
+    .with_context(|| format!("compile static bundle from {}", args.source.display()))?;
+    fs::write(&args.output, &bytes)
+        .with_context(|| format!("write static bundle {}", args.output.display()))?;
     println!("Packed: {}", args.output.display());
     println!("bundle_sha256={}", bundle_sha256(&bytes));
     println!("contract_ref={}", bundle.index.root_contract_ref);
@@ -877,6 +1068,11 @@ fn portable_sandbox_exec(args: PortableSandboxExecArgs) -> Result<()> {
         let _ = (program, arguments);
         bail!("portable process sandbox is unavailable on this platform")
     }
+}
+
+#[cfg(unix)]
+fn portable_peer_shim(args: PortablePeerShimArgs) -> Result<()> {
+    ato_runtime_attempt::peer_broker::run_shim(&args.broker, &args.token, args.port)
 }
 
 fn desktop_inspect(project: &str) -> Result<()> {
@@ -1397,6 +1593,7 @@ fn encode_materializations(
 }
 
 fn upload(args: UploadArgs) -> Result<()> {
+    let token = auth_device::resolve_token(args.auth_token, &args.api_url)?;
     let selector: CapsuleSelector = args.selector.parse()?;
     let project = project_path(&selector.capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
@@ -1461,7 +1658,7 @@ fn upload(args: UploadArgs) -> Result<()> {
     if !(16..=160).contains(&idempotency_key.len()) {
         bail!("idempotency key must contain between 16 and 160 bytes");
     }
-    let api = HttpObjectTransportApi::new(&args.api_url, args.auth_token)?;
+    let api = HttpObjectTransportApi::new(&args.api_url, token)?;
     let (vm_materialization_descriptor_ref, record_frontier_ref) =
         object_transport::vm_capture_receipt_refs(&index, repository.objects())?;
     let mut receipt = upload_http_object_graph(
@@ -1481,6 +1678,32 @@ fn upload(args: UploadArgs) -> Result<()> {
     receipt.record_frontier_ref = record_frontier_ref;
     ato_local_execution::atomic_write(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
     println!("{} {}", receipt.bundle_id, receipt.root_computation_ref);
+    Ok(())
+}
+
+fn login(args: LoginArgs) -> Result<()> {
+    let credential = auth_device::device_login(
+        &args.api_url,
+        &format!("ato/{}", env!("CARGO_PKG_VERSION")),
+        |prompt| {
+            eprintln!(
+                "Open this URL in a browser to approve the login:\n{}\nVerification code: {}",
+                prompt.activate_url, prompt.user_code
+            );
+            if !args.headless
+                && let Err(error) = open_browser(&prompt.activate_url)
+            {
+                eprintln!("could not open a browser: {error:#}");
+            }
+        },
+    )?;
+    let stored = auth_device::StoredCredential::from(credential);
+    let path = auth_device::save_credential(&args.api_url, &stored)?;
+    match stored.handle.as_deref().filter(|handle| !handle.is_empty()) {
+        Some(handle) => println!("Logged in as {handle} ({})", stored.registry_url),
+        None => println!("Logged in ({})", stored.registry_url),
+    }
+    println!("Credential saved to {}", path.display());
     Ok(())
 }
 
@@ -1790,7 +2013,13 @@ fn stop_local_instance(instance_id: &str) -> Result<()> {
     let mut acknowledged = None;
     let mut worker_exited = false;
     for _ in 0..250 {
-        if let Ok(value) = fs::read_to_string(&ack) {
+        // The worker creates the acknowledgement with `fs::write`, which
+        // truncates before it writes. A reader in that window sees an empty
+        // file, not an empty answer: keep polling instead of treating it as a
+        // failed cleanup.
+        if let Ok(value) = fs::read_to_string(&ack)
+            && !value.trim().is_empty()
+        {
             acknowledged = Some(value);
             break;
         }
@@ -2914,6 +3143,10 @@ fn start_portable_attempt(
         cache_root: &cache_root,
         sandbox_shim: &sandbox_shim,
         sandbox_subcommand: "__portable-sandbox-exec",
+        // Admission probes this host with the selected route's own
+        // requirements; `ato run` refuses before realization on the same
+        // decision `ato pack` reported.
+        host: None,
     };
     let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
     // A local Instance's Run is the attempt; `ato run` starts a new one.
@@ -3055,6 +3288,7 @@ fn start_portable_attempt(
         PortableRealizationKind::LocalProcess => "local process",
         PortableRealizationKind::OciContainer => "OCI container",
         PortableRealizationKind::OciServiceGroup => "OCI service group",
+        PortableRealizationKind::ProcessServiceGroup => "native process group",
     };
     let base_url = live
         .endpoint()
@@ -3065,8 +3299,11 @@ fn start_portable_attempt(
             live,
             base_url,
             label,
-            stops_when_a_service_exits: validated.realization
-                == PortableRealizationKind::OciServiceGroup,
+            stops_when_a_service_exits: matches!(
+                validated.realization,
+                PortableRealizationKind::OciServiceGroup
+                    | PortableRealizationKind::ProcessServiceGroup
+            ),
         },
         receipt,
     })
@@ -3321,6 +3558,56 @@ fn runtime_binding_values(bindings: Vec<(String, String)>) -> Result<BTreeMap<St
 mod tests {
     use super::*;
 
+    /// The words `ato pack` prints are part of what an operator acts on, so
+    /// they are pinned here: a reason code and its message, or a warning and
+    /// its message, but never a bare "unavailable".
+    #[test]
+    fn pack_capability_lines_are_stable() {
+        let emulated = ato_host_facts::CapabilityStatus {
+            capability: "route:execution".to_owned(),
+            state: ato_host_facts::CapabilityState::Advertised,
+            reasons: vec![ato_host_facts::Reason::new(
+                ato_host_facts::ReasonCode::PlatformEmulated,
+                "linux/amd64 runs through emulation on this host (a qemu-amd64 binfmt handler is registered on this kernel); it works and it is slower, so the receipt records the emulation rather than refusing the Run",
+            )],
+        };
+        assert_eq!(
+            capability_lines(
+                "sha256:abc",
+                "OCI Service Group",
+                "linux/amd64",
+                "relay",
+                &emulated
+            ),
+            vec![
+                "capability derivation_ref=sha256:abc route=OCI Service Group platform=linux/amd64 connector=relay runnable=yes state=Advertised".to_owned(),
+                "capability warning=platform_emulated message=linux/amd64 runs through emulation on this host (a qemu-amd64 binfmt handler is registered on this kernel); it works and it is slower, so the receipt records the emulation rather than refusing the Run".to_owned(),
+            ]
+        );
+
+        let refused = ato_host_facts::CapabilityStatus {
+            capability: "route:execution".to_owned(),
+            state: ato_host_facts::CapabilityState::Unavailable,
+            reasons: vec![ato_host_facts::Reason::new(
+                ato_host_facts::ReasonCode::DockerDaemonUnreachable,
+                "the docker CLI is installed but no daemon answered (Cannot connect to the Docker daemon); start Docker Desktop or Docker Engine and re-run",
+            )],
+        };
+        assert_eq!(
+            capability_lines(
+                "sha256:def",
+                "OCI Container",
+                "linux/arm64",
+                "none",
+                &refused
+            ),
+            vec![
+                "capability derivation_ref=sha256:def route=OCI Container platform=linux/arm64 connector=none runnable=no state=Unavailable".to_owned(),
+                "capability reason=docker_daemon_unreachable message=the docker CLI is installed but no daemon answered (Cannot connect to the Docker daemon); start Docker Desktop or Docker Engine and re-run".to_owned(),
+            ]
+        );
+    }
+
     fn receipt_with(
         observations: Vec<ato_formation::verify::ReceiptObservation>,
     ) -> ContractVerificationReceipt {
@@ -3538,6 +3825,25 @@ mod tests {
     }
 
     #[test]
+    fn login_supplies_the_upload_token_when_no_flag_is_given() {
+        assert!(Cli::try_parse_from(["ato", "login"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "login",
+                "--api-url",
+                "https://staging.api.ato.run",
+                "--headless",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["ato", "upload", "value", "--api-url", "https://api.ato.run"])
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn formation_inspection_requires_a_paired_contract_and_derivation() {
         assert!(Cli::try_parse_from(["ato", "form-inspect", "."]).is_ok());
         assert!(
@@ -3615,7 +3921,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(!help.contains("__worker"));
         assert!(!help.contains("__desktop"));
-        for public in ["init", "resume", "stop", "encap", "run"] {
+        for public in ["init", "resume", "stop", "encap", "run", "login"] {
             assert!(help.contains(public));
         }
     }
