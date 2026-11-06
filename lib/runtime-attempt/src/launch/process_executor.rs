@@ -532,6 +532,17 @@ fn launch_process_inner(
 
     let mut environment = super::sandbox::guest_environment(context);
     if scoped.is_some() {
+        // Isolated workloads see their declared guest port, while the host
+        // ingress listener remains on the Runner-allocated port.
+        for endpoint in context.endpoints() {
+            environment.insert(
+                super::sandbox::endpoint_port_env_name(&endpoint.name),
+                endpoint
+                    .guest_port
+                    .unwrap_or(endpoint.host_port)
+                    .to_string(),
+            );
+        }
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
             environment.insert(
                 key.into(),
@@ -787,23 +798,40 @@ pub fn wait_until_ready(
     launched: &mut LaunchedProcess,
     probe: &dyn ReadinessProbe,
 ) -> Result<()> {
-    let (timeout_ms, target) = match &spec.readiness {
+    let (timeout_ms, target, condition) = match &spec.readiness {
         ReadinessV1::Http {
             endpoint_name,
             path,
             timeout_ms,
-        } => (
-            *timeout_ms,
-            Some((host_port_for(context, endpoint_name)?, path.clone())),
-        ),
+            expect_status,
+            json,
+            max_body_bytes,
+        } => {
+            // A readiness that states nothing beyond 2xx keeps handing the probe
+            // exactly what it was handed before this field existed.
+            let condition = (expect_status.is_some() || json.is_some()).then(|| {
+                crate::startup::ProbeCondition {
+                    expect_status: *expect_status,
+                    json: json.as_ref().map(crate::startup::JsonCondition::from),
+                    max_body_bytes: max_body_bytes
+                        .unwrap_or(ato_formation::requirements::DEFAULT_STARTUP_BODY_MAX_BYTES),
+                }
+            });
+            (
+                *timeout_ms,
+                Some((host_port_for(context, endpoint_name)?, path.clone())),
+                condition,
+            )
+        }
         ReadinessV1::Tcp {
             endpoint_name,
             timeout_ms,
         } => (
             *timeout_ms,
             Some((host_port_for(context, endpoint_name)?, String::new())),
+            None,
         ),
-        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
+        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None, None),
     };
 
     // A `process` readiness has nothing to poll: the workload is ready because
@@ -838,7 +866,7 @@ pub fn wait_until_ready(
                 });
             }
             probe
-                .observe(port, &path, budget)
+                .observe_with(port, &path, budget, condition.as_ref())
                 .map_err(anyhow::Error::msg)
         },
         || {
@@ -893,6 +921,23 @@ pub trait ReadinessProbe {
             }),
         }
     }
+    /// A probe handed a startup condition must evaluate it or refuse.
+    ///
+    /// The default refuses: a probe that quietly ignored the condition would
+    /// call a still-loading application started, which is the failure this
+    /// condition exists to prevent.
+    fn observe_with(
+        &self,
+        host_port: u16,
+        path: &str,
+        budget: Duration,
+        condition: Option<&crate::startup::ProbeCondition>,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        if condition.is_some() {
+            return Err("this probe cannot evaluate a startup condition".to_owned());
+        }
+        self.observe(host_port, path, budget)
+    }
 }
 
 /// Keeps preparation inside the caller's existing stop/authorization fence.
@@ -925,6 +970,16 @@ impl ReadinessProbe for ControlledReadinessProbe<'_> {
         budget: Duration,
     ) -> Result<crate::startup::ReadinessObservation, String> {
         self.inner.observe(port, path, budget)
+    }
+    fn observe_with(
+        &self,
+        port: u16,
+        path: &str,
+        budget: Duration,
+        condition: Option<&crate::startup::ProbeCondition>,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        self.check_control().map_err(|error| error.to_string())?;
+        self.inner.observe_with(port, path, budget, condition)
     }
 }
 
@@ -974,6 +1029,25 @@ impl ReadinessProbe for LoopbackReadinessProbe {
             .map_err(|error| error.to_string())?;
         let status = response.status();
         ensure_ready(status).map_err(|error| error.to_string())
+    }
+    fn observe_with(
+        &self,
+        host_port: u16,
+        path: &str,
+        budget: Duration,
+        condition: Option<&crate::startup::ProbeCondition>,
+    ) -> Result<crate::startup::ReadinessObservation, String> {
+        // A TCP readiness carries no response, so a condition never reaches it.
+        if path.is_empty() {
+            return self.observe(host_port, path, budget);
+        }
+        crate::startup::http_probe_with(
+            &self.client,
+            &format!("http://127.0.0.1:{host_port}{path}"),
+            budget,
+            condition,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -1090,6 +1164,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn scoped_policy_uses_guest_port_and_owner_socket_uses_host_port() {
+        if !super::super::sandbox::containment_available() {
+            return;
+        }
+        let fixture = context_with_state(StateAccessV1::ReadWrite);
+        let command = super::super::sandbox::sandboxed_command_scoped(
+            &fixture.context,
+            &["/usr/bin/true".into()],
+            std::path::Path::new("/usr/bin/true"),
+            std::path::Path::new("/policy"),
+            std::path::Path::new("/egress"),
+            std::path::Path::new("/ingress"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(command.policy.allowed_bind_tcp_ports, vec![8000]);
+        assert!(
+            command
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--ingress-port", "34567:8000"])
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     #[ignore = "requires a built connected Worker and a Linux namespace host"]
     fn isolated_process_serves_http_but_cannot_reach_host_or_control_credentials() {
         let fixture = context_with_state(StateAccessV1::ReadWrite);
@@ -1103,6 +1203,7 @@ s = socket.socket(); s.settimeout(0.2)
 assert s.connect_ex(('127.0.0.1', {host_port})) != 0, 'host network reachable'
 s.close()
 assert 'ATO_RUNNER_TOKEN' not in os.environ
+assert os.environ['ATO_ENDPOINT_WEB_PORT'] == '8000'
 assert not os.path.exists('/root/.ssh/authorized_keys')
 db = sqlite3.connect('/data/test.sqlite')
 db.execute('CREATE TABLE IF NOT EXISTS proof(value TEXT)')
@@ -1110,7 +1211,7 @@ db.execute('INSERT INTO proof VALUES (?)', ('isolated',)); db.commit()
 class H(BaseHTTPRequestHandler):
  def do_GET(self):
   self.send_response(200); self.end_headers(); self.wfile.write(b'isolated')
-HTTPServer(('127.0.0.1', 34567), H).serve_forever()
+HTTPServer(('127.0.0.1', 8000), H).serve_forever()
 "#
         );
         std::fs::write(fixture.context.workspace_root().join("probe.py"), code).unwrap();
@@ -1126,6 +1227,9 @@ HTTPServer(('127.0.0.1', 34567), H).serve_forever()
             endpoint_name: "web".into(),
             path: "/".into(),
             timeout_ms: 5000,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let runtime = tempfile::Builder::new()
             .prefix("isolated-")
@@ -1214,6 +1318,9 @@ HTTPServer(('127.0.0.1', 34567), H).serve_forever()
             endpoint_name: "nonexistent".to_owned(),
             path: "/health".to_owned(),
             timeout_ms: 10,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let mut launched = LaunchedProcess {
             #[cfg(unix)]
@@ -1306,6 +1413,9 @@ HTTPServer(('127.0.0.1', 34567), H).serve_forever()
             endpoint_name: "web".to_owned(),
             path: "/health".to_owned(),
             timeout_ms: 60,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let mut launched = LaunchedProcess {
             #[cfg(unix)]
@@ -1455,6 +1565,9 @@ HTTPServer(('127.0.0.1', 34567), H).serve_forever()
             endpoint_name: "web".into(),
             path: "/health".into(),
             timeout_ms: 180000,
+            expect_status: None,
+            json: None,
+            max_body_bytes: None,
         };
         let mut launched = LaunchedProcess {
             #[cfg(unix)]

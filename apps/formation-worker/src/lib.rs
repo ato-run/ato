@@ -42,5 +42,6 @@ pub mod operations;
 pub mod retained;
 
 pub mod metered_decision;
+pub mod native_runtime;
 pub mod source_archive;
 pub mod v2_frontend;

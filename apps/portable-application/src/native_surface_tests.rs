@@ -73,6 +73,9 @@ pub(crate) fn fixture(pixel: bool) -> PortableApplicationBundle {
         })),
         input: None,
         digest: None,
+
+        server_name: None,
+        start: None,
     });
     contract.requirements.sort_by(|a, b| a.id.cmp(&b.id));
     let mut derivation = route.derivation.clone();
@@ -107,6 +110,7 @@ pub(crate) fn fixture(pixel: bool) -> PortableApplicationBundle {
             output_delimiter: b"END".to_vec(),
             max_output_bytes: 4096,
             timeout_ms: 1000,
+            ready_output: Vec::new(),
         }
     };
     derivation.ports = vec![
@@ -225,6 +229,7 @@ fn native_k_requires_actual_probe_bytes_and_cannot_be_satisfied_by_surface_ready
                 body,
             )],
             Vec::new(),
+            Vec::new(),
             serde_json::from_value::<VerificationExecutionEvidence>(
                 serde_json::json!({"realization":"native-fixture"}),
             )
@@ -262,6 +267,7 @@ fn native_pixel_k_verifies_the_compact_measured_frame_response() {
                 200,
                 body,
             )],
+            Vec::new(),
             Vec::new(),
             serde_json::from_value::<VerificationExecutionEvidence>(
                 serde_json::json!({"realization":"native-fixture"}),
@@ -310,6 +316,7 @@ fn native_profile_refuses_missing_k_digest_unobserved_actions_and_unsupported_ro
                     output_delimiter: b"DONE".to_vec(),
                     max_output_bytes: 100,
                     timeout_ms: 1000,
+                    ready_output: Vec::new(),
                 },
             );
         },

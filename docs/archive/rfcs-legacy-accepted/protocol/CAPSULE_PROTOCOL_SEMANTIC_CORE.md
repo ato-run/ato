@@ -23,7 +23,7 @@ content-addressed. A Capsule is a sealed, addressable Computation; it is not a
 second Core primitive.
 
 This specification supersedes the five-element semantic model in
-[`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`](../../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
+[`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`](../../../rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
 
 ## 2. Sealing and identity
 
@@ -110,7 +110,7 @@ result has the same `ComputationObject` shape as every other sealed
 Computation. Core has no `Atomic | Composite` distinction.
 
 The small-step model and residual invariants are developed in
-[`CAPSULE_COMPOSE_SEMANTICS.md`](../../draft/CAPSULE_COMPOSE_SEMANTICS.md).
+[`CAPSULE_COMPOSE_SEMANTICS.md`](../../rfcs-legacy-draft/CAPSULE_COMPOSE_SEMANTICS.md).
 
 ## 6. Core exclusions
 

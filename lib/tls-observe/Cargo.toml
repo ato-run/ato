@@ -1,0 +1,24 @@
+[package]
+name = "ato-tls-observe"
+version = "0.1.0"
+edition = "2024"
+description = "Observe the TLS certificate a port presents: serial, SAN, validity, chain trust"
+license = "MPL-2.0"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "lib"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }

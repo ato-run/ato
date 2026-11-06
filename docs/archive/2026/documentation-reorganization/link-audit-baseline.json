@@ -1,0 +1,900 @@
+{
+  "snapshot": "0c93d81a7f86140868fbe84efb63538360a9cba1",
+  "markdown_files": 682,
+  "local_links_checked": 779,
+  "external_links_not_fetched": 1060,
+  "symbolic_links_not_resolved": 0,
+  "failures_by_scope": {
+    "active": 9,
+    "historical": 117
+  },
+  "failures": [
+    {
+      "source": "apps/desktop/docs/DESKTOP_TAB_SPEC.md",
+      "url": "DESKTOP_SPEC.md",
+      "target": "apps/desktop/docs/DESKTOP_SPEC.md",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "apps/desktop/docs/DESKTOP_TAB_SPEC.md",
+      "url": "DRAFT_LIFECYCLE.md",
+      "target": "apps/desktop/docs/DRAFT_LIFECYCLE.md",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "apps/desktop/docs/DESKTOP_TAB_SPEC.md",
+      "url": "APP_IN_APP.md",
+      "target": "apps/desktop/docs/APP_IN_APP.md",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "apps/desktop/docs/DESKTOP_TAB_SPEC.md",
+      "url": "DRAFT_CAPSULE_IPC.md",
+      "target": "apps/desktop/docs/DRAFT_CAPSULE_IPC.md",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/ADR-005-secrets-management-architecture.md",
+      "url": "../research_orchestrated_env_secrets_20260415/REPORT.md",
+      "target": "docs/archive/research_orchestrated_env_secrets_20260415/REPORT.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/CAPSULE_DEPENDENCY_CONTRACTS.md",
+      "url": "../../plan_capsule_dependency_contracts_20260504.md",
+      "target": "docs/plan_capsule_dependency_contracts_20260504.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/NACELLE_SPEC.md",
+      "url": "../nacelle/docs/ENGINE_INTERFACE_CONTRACT.md",
+      "target": "docs/archive/nacelle/docs/ENGINE_INTERFACE_CONTRACT.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/NACELLE_SPEC.md",
+      "url": "../nacelle/SECURITY.md",
+      "target": "docs/archive/nacelle/SECURITY.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/NACELLE_TERMINAL_SPEC.md",
+      "url": "DESKTOP_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-accepted/DESKTOP_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/NACELLE_TERMINAL_SPEC.md",
+      "url": "../../specs/ADR-005-secrets-management-architecture.md",
+      "target": "docs/specs/ADR-005-secrets-management-architecture.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/README.md",
+      "url": "../archived/CAPSULE_FORMAT_V2.md",
+      "target": "docs/archive/archived/CAPSULE_FORMAT_V2.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/README.md",
+      "url": "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/RUNTIME_AND_BUILD_MODEL.md",
+      "url": "../archived/CAPSULE_FORMAT_V2.md",
+      "target": "docs/archive/archived/CAPSULE_FORMAT_V2.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/SECURITY_AND_ISOLATION_MODEL.md",
+      "url": "../archived/CAPSULE_FORMAT_V2.md",
+      "target": "docs/archive/archived/CAPSULE_FORMAT_V2.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md",
+      "url": "../../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md",
+      "url": "../../draft/CAPSULE_COMPOSE_SEMANTICS.md",
+      "target": "docs/archive/draft/CAPSULE_COMPOSE_SEMANTICS.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/A1_SOURCE_TREE_PROFILE.md",
+      "url": "../accepted/A1_BLOB_HASH.md",
+      "target": "docs/archive/accepted/A1_BLOB_HASH.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/A1_SOURCE_TREE_PROFILE.md",
+      "url": "../accepted/A1_BLOB_HASH.md",
+      "target": "docs/archive/accepted/A1_BLOB_HASH.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/A1_SOURCE_TREE_PROFILE.md",
+      "url": "../accepted/A1_BLOB_HASH.md",
+      "target": "docs/archive/accepted/A1_BLOB_HASH.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md",
+      "url": "IDENTITY_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/IDENTITY_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md",
+      "url": "SYNC_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/SYNC_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md",
+      "url": "SCHEMA_REGISTRY.md",
+      "target": "docs/archive/rfcs-legacy-draft/SCHEMA_REGISTRY.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md",
+      "url": "SYNC_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/SYNC_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md",
+      "url": "SCHEMA_REGISTRY.md",
+      "target": "docs/archive/rfcs-legacy-draft/SCHEMA_REGISTRY.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md",
+      "url": "IDENTITY_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/IDENTITY_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ATO_HOME_LAYOUT.md",
+      "url": "../accepted/FOUNDATION_PROFILE_AND_PLACEMENT.md",
+      "target": "docs/archive/accepted/FOUNDATION_PROFILE_AND_PLACEMENT.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/BUILD_MATERIALIZATION.md",
+      "url": "../accepted/LIFECYCLE_SPEC.md",
+      "target": "docs/archive/accepted/LIFECYCLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/CAPSULE_CORE_MODEL.md",
+      "url": "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ENGINE_AND_WORKLOAD_MODEL.md",
+      "url": "../accepted/NACELLE_SPEC.md",
+      "target": "docs/archive/accepted/NACELLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ENGINE_AND_WORKLOAD_MODEL.md",
+      "url": "../accepted/RUNTIME_AND_BUILD_MODEL.md",
+      "target": "docs/archive/accepted/RUNTIME_AND_BUILD_MODEL.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ENGINE_AND_WORKLOAD_MODEL.md",
+      "url": "../accepted/NACELLE_SPEC.md",
+      "target": "docs/archive/accepted/NACELLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ENGINE_AND_WORKLOAD_MODEL.md",
+      "url": "../accepted/NACELLE_SPEC.md",
+      "target": "docs/archive/accepted/NACELLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ENGINE_AND_WORKLOAD_MODEL.md",
+      "url": "../accepted/NACELLE_SPEC.md",
+      "target": "docs/archive/accepted/NACELLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/ENGINE_AND_WORKLOAD_MODEL.md",
+      "url": "../accepted/RUNTIME_AND_BUILD_MODEL.md",
+      "target": "docs/archive/accepted/RUNTIME_AND_BUILD_MODEL.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md",
+      "url": "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md",
+      "url": "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md",
+      "url": "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md",
+      "url": "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md",
+      "url": "../archived/EXECUTION_IDENTITY_SPEC.md",
+      "target": "docs/archive/archived/EXECUTION_IDENTITY_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md",
+      "url": "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "target": "docs/archive/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md",
+      "url": "../accepted/A1_BLOB_HASH.md",
+      "target": "docs/archive/accepted/A1_BLOB_HASH.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/HASH_AND_PROVENANCE_POLICY.md",
+      "url": "../accepted/CAPSULE_HANDLE_SPEC.md",
+      "target": "docs/archive/accepted/CAPSULE_HANDLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/HASH_AND_PROVENANCE_POLICY.md",
+      "url": "../archived/CAPSULE_FORMAT_V2.md",
+      "target": "docs/archive/archived/CAPSULE_FORMAT_V2.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/HASH_AND_PROVENANCE_POLICY.md",
+      "url": "../archived/CAPSULE_FORMAT_V2.md",
+      "target": "docs/archive/archived/CAPSULE_FORMAT_V2.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/LICENSE_SPEC.md",
+      "url": "IDENTITY_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/IDENTITY_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/LICENSE_SPEC.md",
+      "url": "SYNC_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/SYNC_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/LICENSE_SPEC.md",
+      "url": "IDENTITY_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/IDENTITY_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/LICENSE_SPEC.md",
+      "url": "SYNC_SPEC.md",
+      "target": "docs/archive/rfcs-legacy-draft/SYNC_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/LICENSE_SPEC.md",
+      "url": "TRUST_AND_KEYS.md",
+      "target": "docs/archive/rfcs-legacy-draft/TRUST_AND_KEYS.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/REFACTOR_LAYER_PROPOSAL.md",
+      "url": "../../REFACTOR_TODO.md",
+      "target": "docs/REFACTOR_TODO.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../accepted/ATO_CLI_SPEC.md",
+      "target": "docs/archive/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../accepted/ATO_CLI_SPEC.md",
+      "target": "docs/archive/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../accepted/ATO_CLI_SPEC.md",
+      "target": "docs/archive/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../accepted/NACELLE_SPEC.md",
+      "target": "docs/archive/accepted/NACELLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../accepted/RUNTIME_AND_BUILD_MODEL.md",
+      "target": "docs/archive/accepted/RUNTIME_AND_BUILD_MODEL.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../accepted/EXECUTIONPLAN_ISOLATION_MODEL.md",
+      "target": "docs/archive/accepted/EXECUTIONPLAN_ISOLATION_MODEL.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../accepted/SECURITY_AND_ISOLATION_MODEL.md",
+      "target": "docs/archive/accepted/SECURITY_AND_ISOLATION_MODEL.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/UNIFIED_EXECUTION_MODEL.md",
+      "url": "../archived/CAPSULE_FORMAT_V2.md",
+      "target": "docs/archive/archived/CAPSULE_FORMAT_V2.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/run-install-semantics.md",
+      "url": "../../../crates/ato-cli/tests/run_install_semantics.rs",
+      "target": "crates/ato-cli/tests/run_install_semantics.rs",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/archive/rfcs-legacy-draft/run-install-semantics.md",
+      "url": "../../../crates/capsule/src/foundation/install_lifecycle/store.rs",
+      "target": "crates/capsule/src/foundation/install_lifecycle/store.rs",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/TODO.md",
+      "url": "docs/specs/IDENTITY_SPEC.md",
+      "target": "docs/internal/dashboards/docs/specs/IDENTITY_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/TODO.md",
+      "url": "docs/specs/LICENSE_SPEC.md",
+      "target": "docs/internal/dashboards/docs/specs/LICENSE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/TODO.md",
+      "url": "docs/specs/ASSOCIATION_SPEC.md",
+      "target": "docs/internal/dashboards/docs/specs/ASSOCIATION_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/TODO.md",
+      "url": "docs/specs/DESKTOP_TAB_SPEC.md",
+      "target": "docs/internal/dashboards/docs/specs/DESKTOP_TAB_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/v0.5-readiness-dashboard.md",
+      "url": "release-blockers/sandbox-network-decision.md",
+      "target": "docs/internal/dashboards/release-blockers/sandbox-network-decision.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/v0.5-readiness-dashboard.md",
+      "url": "release-blockers/deployment-checklist.md",
+      "target": "docs/internal/dashboards/release-blockers/deployment-checklist.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/v0.5-readiness-dashboard.md",
+      "url": "release-blockers/deployment-checklist.md",
+      "target": "docs/internal/dashboards/release-blockers/deployment-checklist.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/v0.5-readiness-dashboard.md",
+      "url": "release-blockers/deployment-checklist.md",
+      "target": "docs/internal/dashboards/release-blockers/deployment-checklist.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/v0.5-readiness-dashboard.md",
+      "url": "../tests/manual/SKIP_AUDIT.md",
+      "target": "docs/internal/tests/manual/SKIP_AUDIT.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/v0.5-readiness-dashboard.md",
+      "url": "release-blockers/beta-program.md",
+      "target": "docs/internal/dashboards/release-blockers/beta-program.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/dashboards/v0.5-readiness-dashboard.md",
+      "url": "v0.5-distribution-plan.md",
+      "target": "docs/internal/dashboards/v0.5-distribution-plan.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/plans/monorepo-consolidation-plan.md",
+      "url": "../../../docs/v0.5-distribution-plan.md",
+      "target": "docs/v0.5-distribution-plan.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/plans/monorepo-consolidation-plan.md",
+      "url": "specs/CCP_SPEC.md",
+      "target": "docs/internal/plans/specs/CCP_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md",
+      "target": "docs/internal/docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "target": "docs/internal/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md",
+      "target": "docs/internal/docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "target": "docs/internal/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "target": "docs/internal/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../samples/desky-mock-tauri/capsule.toml",
+      "target": "docs/internal/samples/desky-mock-tauri/capsule.toml",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../samples/desky-mock-wails/capsule.toml",
+      "target": "docs/internal/samples/desky-mock-wails/capsule.toml",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../samples/desky-mock-electron/capsule.toml",
+      "target": "docs/internal/samples/desky-mock-electron/capsule.toml",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../crates/ato-desktop/assets/preload/tauri.js",
+      "target": "docs/internal/crates/ato-desktop/assets/preload/tauri.js",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/rfcs/archived/DESKY_GUEST_CONTRACT.md",
+      "target": "docs/internal/docs/rfcs/archived/DESKY_GUEST_CONTRACT.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../samples/desky-mock-electron/capsule.toml",
+      "target": "docs/internal/samples/desky-mock-electron/capsule.toml",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../samples/desky-mock-electron/backend/server.py",
+      "target": "docs/internal/samples/desky-mock-electron/backend/server.py",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/rfcs/archived/DESKY_GUEST_CONTRACT.md",
+      "target": "docs/internal/docs/rfcs/archived/DESKY_GUEST_CONTRACT.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/TODO.md",
+      "target": "docs/internal/docs/TODO.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/ato-runtime-boundary-what-can-run.md",
+      "url": "../docs/TODO.md",
+      "target": "docs/internal/docs/TODO.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/capsule/src/foundation/types/manifest.rs",
+      "target": "docs/internal/crates/capsule/src/foundation/types/manifest.rs",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "target": "docs/internal/crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/capsule/src/engine/runtime/oci.rs",
+      "target": "docs/internal/crates/capsule/src/engine/runtime/oci.rs",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/capsule/src/foundation/types/manifest.rs",
+      "target": "docs/internal/crates/capsule/src/foundation/types/manifest.rs",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/ato-cli/samples/01-capabilities/oci-alpine-hello/README.md",
+      "target": "docs/internal/crates/ato-cli/samples/01-capabilities/oci-alpine-hello/README.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "target": "docs/internal/crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/ato-desktop/docs/rfcs/draft/",
+      "target": "docs/internal/crates/ato-desktop/docs/rfcs/draft",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "target": "docs/internal/crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/ato-cli/samples/01-capabilities/oci-alpine-hello/",
+      "target": "docs/internal/crates/ato-cli/samples/01-capabilities/oci-alpine-hello",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/capsulize-vikunja-memos-libretranslate.md",
+      "url": "../crates/ato-cli/samples/01-capabilities/persistent-workspace/",
+      "target": "docs/internal/crates/ato-cli/samples/01-capabilities/persistent-workspace",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/research/research_phase13a_sandbox_best_practices_20260429.md",
+      "url": "crates/nacelle/src/system/sandbox/linux.rs",
+      "target": "docs/internal/research/crates/nacelle/src/system/sandbox/linux.rs",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/internal/testing-isolation.md",
+      "url": "../../scripts/check-ato-home-paths.sh",
+      "target": "scripts/check-ato-home-paths.sh",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "docs/ready-state/backend-matrix.md",
+      "url": "../../crates/cli/src/application/desktop_runner/matching.rs",
+      "target": "crates/cli/src/application/desktop_runner/matching.rs",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/CAPSULE_FORMAT_V2.md",
+      "url": "../accepted/protocol/CAPSULE_BUNDLE_V1.md",
+      "target": "docs/rfcs/accepted/protocol/CAPSULE_BUNDLE_V1.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "url": "../accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md",
+      "target": "docs/rfcs/accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "url": "../draft/beyond-reproducible-build.md",
+      "target": "docs/rfcs/draft/beyond-reproducible-build.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "url": "../draft/CAPSULE_CORE_MODEL.md",
+      "target": "docs/rfcs/draft/CAPSULE_CORE_MODEL.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "url": "../draft/HASH_AND_PROVENANCE_POLICY.md",
+      "target": "docs/rfcs/draft/HASH_AND_PROVENANCE_POLICY.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md",
+      "url": "../accepted/ADR-002-signature-format-jcs.md",
+      "target": "docs/rfcs/accepted/ADR-002-signature-format-jcs.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/DESKY_SPEC.md",
+      "url": "DESKTOP_SPEC.md",
+      "target": "docs/rfcs/archived/DESKTOP_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/DESKY_SPEC.md",
+      "url": "NACELLE_SPEC.md",
+      "target": "docs/rfcs/archived/NACELLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/DESKY_SPEC.md",
+      "url": "../accepted/CAPSULE_IPC_SPEC.md",
+      "target": "docs/rfcs/accepted/CAPSULE_IPC_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/DESKY_SPEC.md",
+      "url": "DESKTOP_TAB_SPEC.md",
+      "target": "docs/rfcs/archived/DESKTOP_TAB_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/EXECUTION_IDENTITY_SPEC.md",
+      "url": "../draft/A1_SOURCE_TREE_PROFILE.md",
+      "target": "docs/rfcs/draft/A1_SOURCE_TREE_PROFILE.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/EXECUTION_IDENTITY_SPEC.md",
+      "url": "../draft/HASH_AND_PROVENANCE_POLICY.md",
+      "target": "docs/rfcs/draft/HASH_AND_PROVENANCE_POLICY.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/EXECUTION_IDENTITY_SPEC.md",
+      "url": "../accepted/ADR-002-signature-format-jcs.md",
+      "target": "docs/rfcs/accepted/ADR-002-signature-format-jcs.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/EXECUTION_IDENTITY_SPEC.md",
+      "url": "../draft/A1_SOURCE_TREE_PROFILE.md",
+      "target": "docs/rfcs/draft/A1_SOURCE_TREE_PROFILE.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/IDENTITY_SPEC.md",
+      "url": "TRUST_AND_KEYS.md",
+      "target": "docs/rfcs/archived/TRUST_AND_KEYS.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/MULTI_WEBVIEW_SPEC.md",
+      "url": "DESKTOP_TAB_SPEC.md",
+      "target": "docs/rfcs/archived/DESKTOP_TAB_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/STORE_WEB_SPEC.md",
+      "url": "../ops/DOCK_ROUTING_RUNBOOK.md",
+      "target": "docs/rfcs/ops/DOCK_ROUTING_RUNBOOK.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/SYNC_SPEC.md",
+      "url": "../SIGNATURE_SPEC.md",
+      "target": "docs/rfcs/SIGNATURE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/SYNC_SPEC.md",
+      "url": "../SIGNATURE_SPEC.md",
+      "target": "docs/rfcs/SIGNATURE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/WASM_RUNTIME_SPEC.md",
+      "url": "./CAPSULE_SPEC.md",
+      "target": "docs/rfcs/archived/CAPSULE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "docs/rfcs/archived/WASM_RUNTIME_SPEC.md",
+      "url": "./NACELLE_SPEC.md",
+      "target": "docs/rfcs/archived/NACELLE_SPEC.md",
+      "reason": "missing target",
+      "scope": "historical"
+    },
+    {
+      "source": "extensions/providers/nacelle/README.md",
+      "url": "../docs/architecture/ARCHITECTURE_OVERVIEW.md",
+      "target": "extensions/providers/docs/architecture/ARCHITECTURE_OVERVIEW.md",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "extensions/providers/nacelle/samples/simple-todo/README.md",
+      "url": "../../uarc/SPEC.md",
+      "target": "extensions/providers/nacelle/uarc/SPEC.md",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "extensions/providers/nacelle/samples/simple-todo/README.md",
+      "url": "../../ato-cli/README.md",
+      "target": "extensions/providers/nacelle/ato-cli/README.md",
+      "reason": "missing target",
+      "scope": "active"
+    },
+    {
+      "source": "extensions/providers/nacelle/samples/simple-todo/README.md",
+      "url": "../../ato-desktop/README.md",
+      "target": "extensions/providers/nacelle/ato-desktop/README.md",
+      "reason": "missing target",
+      "scope": "active"
+    }
+  ],
+  "limitations": [
+    "External URLs are inventoried, not fetched.",
+    "Inline/reference Markdown paths and ATX/GitHub-style heading anchors are checked.",
+    "HTML application UI, rendered Docsify behavior, image OCR and inline code paths are not executed."
+  ]
+}

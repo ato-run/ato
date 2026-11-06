@@ -1,217 +1,98 @@
 # Ato
 
-Ato（アト）は、ファイル・アプリケーション・実行状態・操作履歴を **Capsule** という共通単位として保存・共有・再開可能にするコンピューティングインターフェースです。単なるファイル共有ではなく、「計算の途中地点」をそのまま手渡し、受け取り手がそこから続きを始められる世界を目指しています。ファイル単体、アプリ付きファイル、作業状態・履歴を含む状態のすべてを「Capsule」という統一モデルで表現します。
+Atoは、参照可能な地点から作業を保存・共有・継続するためのコンピューティングインターフェースです。計算モデルと、Capsuleを扱うランタイム・CLIを組み合わせています。
 
-*([English README](README.md))*
+[ato.run](https://ato.run/)は、動作するソフトウェアの発見、試用、保存、共有のためにAto上に構築されたWebサービスです。このリポジトリにはランタイム、CLI、Adapter、関連ツールが含まれます。[About Ato](https://ato.run/about/) · [English](README.md)
 
----
+## なぜAtoなのか
 
-## 主なユースケース
+作業は多くの場合、プロセス、マシン、ソースツリー、特定のスナップショットに結び付いています。別の場所に移すには、環境を再構築し、結果が期待どおりに動くか確認しなければならないことがあります。Atoは、作業の同一性と、それを実現するプロセス・コンテナ・スナップショットなどの物理的な手段を分けるアプローチを探究しています。
 
-- **バグ再現の効率化**: 再現手順やスクリーンショットを送る代わりに、エラーが発生している Workspace・Terminal・Browser の状態を Capsule として共有します。受け取った人は環境構築を挟まず、その地点から直接デバッグを開始できます。
-- **AIエージェントとの協調**: コードの差分だけでなく、実行したコマンド、ファイル変更、テスト、ブラウザ操作などの履歴を Replay して確認できます。作業地点から人間が引き継ぐことも、別の AI エージェントに続きを任せることも可能です。
-- **アプリケーション状態の共有**: アプリそのものだけでなく、「このモデルと設定でここまで組み上げた」という実際の利用状態を共有します。受け取り手はそこから Continue し、自分なりの変更を加えて別の未来へ分岐できます。
-- **開発作業の復元・引き継ぎ**: 開発サーバーの起動状態、Terminal の作業ディレクトリ、Browser で開いている画面などをまるごと保存します。Human ↔ Human だけでなく、Human ↔ AI 間の作業引き継ぎにも対応します。
+アプリケーションの共有、開発作業の継続、長時間のエージェントタスクの引き継ぎを、共通のインターフェースで扱うことを目指しています。これらはモデルのユースケースであり、すべての状態や引き継ぎが現在サポートされているという意味ではありません。以下の例では、現在の静的アプリケーションの検証経路を試せます。
 
-※これらに共通するのは、「何を使ったか」だけでなく「どこまで計算が進んだか」を共有対象にする点です。
+## 基本概念
 
----
+- **Computation**：現在地点から継続可能な計算・作業。
+- **Capsule**：封印された、不変で参照可能な継続地点。保存・共有でき、実現する物理的な方法はその同一性を定義しません。
+- **Run**：Capsuleを再開して計算を進める実行。同じCapsuleから複数のRunを始め、それぞれ異なる未来へ進められます。
 
-## 設計原則：Everything can be a Capsule
+ポータブルアプリケーションでは、**Contract**が観測可能な要件を記述し、**Derivation**がその実現方法を宣言します。検証**receipt**は、Runで得られた観測結果を記録します。詳細は[Computation](docs/concepts/computation.md)と[アプリケーション契約](docs/concepts/application-contracts.md)を参照してください。
 
-Atoでは対象ごとに別々の共有モデルを作るのではなく、含まれる要素に応じて共通の Capsule インターフェースへ射影（マッピング）します。
+## クイックスタート
 
-| Capsule に含める要素 | 可能な操作 |
-| --- | --- |
-| データ | Pass / Open |
-| データ + アプリケーション | Open |
-| データ + アプリケーション + 実行状態 + 履歴 | Replay / Continue |
+### ato.runを試す
 
-*Everything can be a Capsule* は「すべてを同じデータとして扱う」という意味ではありません。性質の異なるコンピューティング対象であっても、保存・受け渡し・再開・合成という共通の操作で扱えるようにする設計原則です。
+ブラウザで[ato.run](https://ato.run/)の公開ソフトウェアを探すか、[2048を試せます](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)。
 
----
+### CLIを試す
 
-## コアモデル
-
-### Capsule / Run / Replay / Continue
-
-- **Capsule**: ある地点から続きを始められる計算を切り出した、Immutable（不変）かつ Addressable（参照可能）な値です。1つの Capsule から複数の Run を開始して異なる未来へ分岐できます。
-- **Run**: Capsule から再開された、現在進行中の可変な計算状態です。Run を進めて保存すると新しい Capsule になります。
-- **Replay**: 保存された Record を使い、そこまでの interaction を再生・適用します。「どうやってここまで来たか」を確認・再構築する操作です。
-- **Continue**: Capsule の地点を再実現し、新しい Run を開始します。「ここから続きをやる」ための操作です。
-
-```text
-C41 ─────▶ C42 ─────▶ C43
-            │
-           seal
-            ▼
-       Capsule C42
-          /     \
-         ▼       ▼
-       Run A    Run B
-         │       │
-        C43a    C43b
-```
-
-### Core / Kernel と Adapter
-
-Atoは、計算の論理的な意味と、現実世界での実行方法を分離します。
-
-| 要素 | 役割 | 扱う対象 |
-| --- | --- | --- |
-| **Core / Kernel** | 計算の identity・interaction・evolution を定義 | Computation, Port, Protocol, Evolution, Composition |
-| **Adapter** | 論理的な計算と現実の I/O を接続 | Process, PTY, Workspace, HTTP, Binding など |
-
-Core は「この計算が何であり、どう変化し、どう組み合わさるか」を扱います。Adapter はそれを OS プロセス、Terminal、ファイルシステム、HTTP などの具体的な世界へ接続し、interaction を Record として観測・適用します。
-
-```text
-               Computation
-                    │
-                Protocol
-                    │
-          ┌─────────┼─────────┐
-          ▼         ▼         ▼
-       Process     PTY     Workspace
-       Adapter   Adapter     Adapter
-          │         │         │
-          └─────────┼─────────┘
-                    ▼
-                Physical world
-```
-
-この分離により、Web、Terminal、AI エージェント、あるいは将来的な新しい runtime を追加しても、Capsule そのものの意味を変更せずに拡張できます。
-
----
-
-## Materialization
-
-Atoでは、「どの計算地点を保存したか」と「その地点へ物理的にどう戻るか」を明確に分離します。前者が **Capsule**、後者が **Materialization** です。
-
-```text
-                    Capsule C42
-                         │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-       Replay       Filesystem     VM checkpoint
-          │              │              │
-          └──────────────┼──────────────┘
-                         ▼
-                      C42相当
-```
-
-同じ Capsule であっても、Replay、Filesystem reconstruction、Process checkpoint、VM snapshot など異なる方法で再実現（復元）できることを目指します。Snapshot や Container 自体を Capsule の identity に置かないことで、物理的な実行方法を交換可能にしています。
-
----
-
-## 背景にある計算理論
-
-Atoのモデルは、既存の計算理論やシステム研究に影響を受けています。これらを新しく発明するのではなく、計算を保存・受け渡し・継続するための systems model として再構成することを目指しています。
-
-- **λ-calculus / Continuation**: 過去の処理そのものではなく、「現在地点から何が残っているか（Residual Computation / Continuation）」という捉え方。
-- **π-calculus**: 計算を閉じた処理ではなく、Port を通じて他計算や外部世界と相互作用する Process として捉え、複数の Computation を合成（Composition）する考え方。
-- **Kell Calculus**: 計算に明示的な boundary（境界）を与え、実行中の bounded process を Passivation（停止・抽出）する考え方。Atoの Capture / Seal に対応します。
-- **Reversible Process Calculi**: 履歴を単なる一本道ではなく因果関係として扱い、Replay・Rewind・Fork を安全に行うための基礎。
-- **Distributed Snapshot**: 複数 process や host で構成された Computation を、内部通信や in-flight message まで含めて一貫した地点として Capture するための基礎。
-
-```text
-Computation ──▶ capture / seal ──▶ Capsule ──▶ transfer ──▶ 別のruntime ──▶ materialize ──▶ Run ──▶ Continue
-```
-
----
-
-## 基本ライフサイクル
+[rust-toolchain.toml](rust-toolchain.toml)で指定されたRustツールチェーンをインストールし、リポジトリをcloneしてCLIをビルドし、同梱の静的アプリケーションbundleを実行します。
 
 ```sh
-# 新しいlineageを作り、記録を開始
-ato init demo
-
-# 現在地点を保存
-ato stop demo
-
-# 保存地点から再開
-ato resume demo@main
-
-# 過去地点から新しいbranchを作る
-ato resume demo@main#42 --branch experiment
-
-# 1地点をportable Capsuleとしてexport
-ato encap demo@main \
-  --materialize ato.replay@1 \
-  -o demo.capsule
-
-# portable Capsuleを実行
-ato run demo.capsule
+git clone https://github.com/ato-run/ato.git
+cd ato
+cargo build -p ato-cli --bin ato --locked
+mkdir -p .tmp/getting-started
+target/debug/ato run samples/interop-static.capsule --no-open \
+  --verification-receipt .tmp/getting-started/receipt.json
 ```
 
-### `capsule.toml` の例
+CLIはbundleを検証し、宣言された実行経路で実現して、ソースの同一性とHTTP応答をContractに照らし合わせ、receiptを書き出します。成功後、`.tmp/getting-started/receipt.json`で選択されたDerivationと観測結果を確認できます。必要な観測がすべて満たされると`fully_satisfied`は`true`になります。`--no-open`はブラウザを開かずに検証して終了します。詳細、他の経路、失敗時の境界は[Getting started](docs/guides/getting-started.md)を参照してください。公開済みのCLI成果物は[GitHub Releases](https://github.com/ato-run/ato/releases)にあります。
 
-現在の authoring では、開始する process や利用する Adapter を明示します。
+例えば、Python 3でreceiptを確認できます。成功時の出力例は次のとおりです。
 
-```toml
-schema = 1
-
-[[process]]
-id = "app"
-command = ["python", "app.py"]
-cwd = "."
-
-[[adapter]]
-target = "app"
-use = "ato.process@1"
-
-[[adapter]]
-target = "workspace"
-use = "ato.workspace@1"
-
-[encap]
-materializers = ["ato.replay@1"]
+```sh
+python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
 ```
 
----
+```text
+fully_satisfied: True
+app-proof: satisfied
+source-identity: satisfied
+```
 
-## プロジェクトのスコープ
+この静的な例は、一般的なホスト間移植性やプロセスメモリの復元を実証するものではありません。
 
-**Atoが扱うもの**
+## 現在の状況
 
-- Computation / Capsule / Run の identity
-- Capsule lineage と branch
-- Port / Protocol による interaction
-- Computation の Composition
-- Adapter による Record / Replay
-- Capsule の portable encoding
-- Materialization による再実現
+Atoは実験的なプロジェクトです。このリポジトリには計算オブジェクト、ライフサイクルコマンド、Adapter、ポータブルbundleの処理、上記の静的な検証例が含まれます。Python、OCI、GPU、状態、外部サービスには、それぞれ宣言された経路とホストでの実行許可が必要です。コードの存在はato.run本番での利用可能性を意味しません。
 
-**Atoが目指さないもの**
+異なるホスト間の汎用的な復元、プロセスメモリの復元、AIによる自律的なFormationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixなどのツールの代替を目的とするものではありません。Contractの一致だけでは、状態の継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[状態の継続性](docs/concepts/state-continuity.md)を参照してください。
 
-- Docker / Nix / VM の代替となる万能な環境構築システム
-- Package manager / toolchain provisioning の全面的な再実装
-- Git や Container registry の代替
-- あらゆる process の完全決定論的 Replay
-- 万能な sandbox / orchestration system
+## ロードマップと作業管理
 
-※ Docker、Nix、VM、既存の runtime や AI エージェントを利用して計算環境を準備し、Atoはその上で進む計算を「記録・保存・分岐・転送・継続」可能にする層を担当します。
+作業は[GitHub Issues](https://github.com/ato-run/ato/issues)（ボードを使う場合はGitHub Projects）で管理します。このリポジトリにMarkdownのロードマップは置きません。[アーカイブ済みのロードマップ](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)は履歴として残した資料で、更新しません。
 
----
+## ドキュメント
 
-## 現在の実装状態
+一般的な利用者向けドキュメントは[ato.runのドキュメント](https://ato.run/docs/)が所有します。このリポジトリはランタイム、CLI、仕様、運用の技術ドキュメントを所有します（[ドキュメント目次](docs/README.md)）。
 
-**実装済み**
+- [Getting started](docs/guides/getting-started.md)・[Formationガイド](docs/guides/formation.md)
+- [基本概念](docs/concepts/computation.md)・[アプリケーション契約](docs/concepts/application-contracts.md)・[用語集](docs/glossary-reference.md)
+- [アーキテクチャ](docs/architecture/README.md)・[仕様](docs/specifications/README.md)
+- [Runnerとホスティング](docs/guides/runner-hosting.md)・[運用](docs/operations/README.md)・[ドキュメント目次](docs/README.md)
 
-- Immutable な ComputationObject と content-addressed な ComputationRef
-- Port / Protocol による Computation evolution
-- Computation composition
-- Capsule lineage / branch / Run / Record
-- CLI コマンド（`init`, `stop`, `resume`, `encap`, `run`）
-- 各種 Adapter（Process, PTY, Workspace, HTTP, Binding）
-- Portable `.capsule` bundle v2
-- Protocol-generic な Replay Materializer
+## 貢献とライセンス
 
-**実験的・開発中**
+[貢献方法](CONTRIBUTING.md)と[GitHub issues](https://github.com/ato-run/ato/issues)を参照してください。
 
-- Filesystem / workspace snapshot の physical restore
-- Process checkpoint や VM snapshot を含む異種 Materialization
-- 異なる host 間での汎用的な Resume
-- 複数 host にまたがる Distributed Capture
-- 異なる Materialization 間での Contract-equivalent realization
+プロジェクトが作成したコードは[Mozilla Public License 2.0](LICENSE)（`MPL-2.0`）で提供します。第三者のコード、依存ライブラリ、上流コードを含むパッチ、独自のライセンス表示がある資料には、それぞれの条件が引き続き適用されます。例えば、CPythonのfixture、WiXテンプレート、リリースワークフローは上流のライセンスを、AODDスキルはMITライセンスを維持します。CLIの[Apacheライセンス本文](apps/cli/LICENSE-APACHE)はWiXテンプレートおよび過去に配布されたバージョンのために保持しています。過去に付与されたライセンスは引き続き有効です。
 
-Atoは現在実験的なプロジェクトです。既存の全モデルが完成しているわけではなく、まずは異種の Computation を統一的な Lifecycle で扱えるか、段階的な検証を進めています。
+このコードのライセンスは、Capsule Process Modelの理論文書に新たなライセンスを付与するものではありません。
+
+<!-- Compatibility anchors from the previous documentation entry. -->
+<a id="ato"></a>
+<a id="主なユースケース"></a>
+<a id="設計原則everything-can-be-a-capsule"></a>
+<a id="コアモデル"></a>
+<a id="capsule--run--replay--continue"></a>
+<a id="core--kernel-と-adapter"></a>
+<a id="materialization"></a>
+<a id="背景にある計算理論"></a>
+<a id="基本ライフサイクル"></a>
+<a id="capsuletoml-の例"></a>
+<a id="プロジェクトのスコープ"></a>
+<a id="現在の実装状態"></a>
+<a id="capsule-run-replay-continue"></a>
+<a id="core-kernel-と-adapter"></a>
+<a id="設計原則：everything-can-be-a-capsule"></a>

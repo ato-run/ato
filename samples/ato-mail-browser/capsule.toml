@@ -1,0 +1,67 @@
+schema = "ato.capsule/2"
+
+# Browser acceptance slice for the self-hosted mail work.
+#
+# This is NOT D1 (samples/ato-mail). It is the smallest capsule that puts the
+# mail client in a browser through an Ato Run: Stalwart (JMAP) + Missive (the
+# Web Surface), HTTP observations only. It declares no fixed-TCP mail Ports, no
+# TLS observations and no Bindings, so it can run on a Runner without the
+# HostBoundary work D1 needs. It proves the browser path, not mail transport.
+#
+# The production capsule remains samples/ato-mail; K there is the mail contract.
+
+[application]
+title = "ato-mail browser slice: Missive over Stalwart JMAP"
+surface_path = "/health"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "mail_data"
+use = "ato.state.filesystem@1"
+mount = "/var/lib/stalwart"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+# The client is served and alive. What it does NOT prove: sign-in, mailboxes,
+# mail transport. Those are the staging browser gate (README).
+[[contract.observation]]
+id = "webmail-health"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+status = 200
+
+[[contract.observation]]
+id = "webmail-ui"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/login"
+status = 200
+
+[[derivation]]
+id = "mail-browser"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "stalwart"
+runtimes = { "oci.image" = "ghcr.io/koh0920/stalwart-staging@sha256:25723c49ee4968d410f78b35041eb1c79f28fe0cc2afe2487a5c58f99f90629b", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "1073741824", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+argv = ["--config", "/app/stalwart-config.json"]
+env = { STALWART_PUBLIC_URL = "http://stalwart:8080" }
+ports = [{ id = "stalwart.jmap", guest_port = 8080 }]
+state = ["mail_data"]
+
+[[derivation.service]]
+id = "missive"
+runtimes = { "oci.image" = "ghcr.io/koh0920/govcraft-missive@sha256:3dc89054b1a85ae6ad07e5cf1dc483bffa0ba7253b40fd8274803c765b04bc7c", "oci.workspace_mount" = "/app", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "128" }
+argv = ["serve", "--config", "/app/missive-config.toml"]
+ports = [{ id = "app.http", guest_port = 8080 }]
+
+[effects]
+default = "pure"

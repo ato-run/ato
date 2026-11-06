@@ -62,6 +62,9 @@ fn http(port: &str, body: &[u8]) -> BoundRequirement {
         body_digest: Some(digest(body)),
         input: None,
         digest: None,
+
+        server_name: None,
+        start: None,
     }
 }
 
@@ -194,7 +197,10 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
         .unwrap()
         .1;
     let backend_body = client
-        .get(format!("http://{}:8080/", backend.container_address()))
+        .get(format!(
+            "http://{}:8080/",
+            backend.container_address().unwrap()
+        ))
         .send()
         .unwrap()
         .error_for_status()
@@ -229,6 +235,8 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
         http: vec![RuntimeHttpObservation::from_response(
             "app.http", "GET", "/", 200, &app_body,
         )],
+
+        tls: Vec::new(),
     };
     assert!(!verify_runtime(&contract, &observation).fully_satisfied());
     observation.http.push(RuntimeHttpObservation::from_response(

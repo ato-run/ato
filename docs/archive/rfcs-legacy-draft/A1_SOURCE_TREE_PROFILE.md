@@ -23,7 +23,7 @@ uses to prove that "this exact source tree" is what was analyzed, verified, and
 published.
 
 This document defines the **A1v2 source-tree profile**: a set of admissibility
-preconditions layered on top of the frozen [A1 blob-hash algorithm](../accepted/A1_BLOB_HASH.md).
+preconditions layered on top of the frozen [A1 blob-hash algorithm](../rfcs-legacy-accepted/A1_BLOB_HASH.md).
 A1v2 is the second profile in the A1 hashing family. It does **not** change the
 A1 v1 digest — it constrains which trees are *allowed* to be hashed as source.
 
@@ -42,7 +42,7 @@ A1 v1 digest — it constrains which trees are *allowed* to be hashed as source.
 - Where materialization runs and how the archive is stored (see
   [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md)).
 - Dependency-blob hashing and the derivation cache (unchanged; see
-  [A1_BLOB_HASH.md](../accepted/A1_BLOB_HASH.md)).
+  [A1_BLOB_HASH.md](../rfcs-legacy-accepted/A1_BLOB_HASH.md)).
 - Post-MVP support for symlinks, submodules, or LFS resolution.
 
 ## 3. Design
@@ -175,7 +175,7 @@ Both repos' CI must golden-test:
 
 ## References
 
-- [../accepted/A1_BLOB_HASH.md](../accepted/A1_BLOB_HASH.md) — the frozen A1 v1 algorithm.
+- [../accepted/A1_BLOB_HASH.md](../rfcs-legacy-accepted/A1_BLOB_HASH.md) — the frozen A1 v1 algorithm.
 - `crates/capsule/src/foundation/blob/tree_hash.rs` — reference implementation of A1 v1 (reused verbatim).
 - [HASH_AND_PROVENANCE_POLICY.md](HASH_AND_PROVENANCE_POLICY.md) §2, §5, §12 — hash domains and the open decisions this profile closes.
 - [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md) — archive storage and the materialize job.

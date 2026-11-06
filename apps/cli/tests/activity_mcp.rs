@@ -41,6 +41,11 @@ fn activity_mcp_serves_all_fixed_tools_without_leaking_credentials_to_stdio() {
         while server_seen.lock().expect("request list").len() < 10 && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // Accepted sockets can inherit the listener's nonblocking
+                    // mode on macOS; the request reader expects blocking I/O.
+                    stream
+                        .set_nonblocking(false)
+                        .expect("blocking request stream");
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .expect("read timeout");
