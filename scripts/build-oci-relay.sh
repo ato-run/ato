@@ -9,9 +9,17 @@
 # The build is pinned so that CI can reproduce it and compare the result with
 # the committed binaries (extensions/adapters/oci/relay-bin/SHA256SUMS):
 #   * the toolchain is the one `rust-toolchain.toml` pins,
-#   * zig is an exact version.
-# A different zig or rustc may produce a different (but equivalent) binary,
-# which is why both are checked rather than assumed.
+#   * zig is an exact version,
+#   * the checkout and registry paths are remapped, so the bytes do not carry
+#     the directory this build happened to run in.
+# A different zig or rustc may still produce a different (but equivalent)
+# binary, which is why both are checked rather than assumed.
+#
+# Updating the committed binaries: run this script on the CI runner image (the
+# `relay-binaries` job uploads what it built as the `relay-binaries` artifact),
+# copy the artifact over extensions/adapters/oci/relay-bin/, and commit it with
+# the source change. The job then compares the committed bytes with a fresh
+# rebuild and fails if they differ.
 #
 # Requirements: zig 0.15.2 on PATH, and the musl targets for the pinned
 # toolchain:
@@ -55,13 +63,15 @@ export ZIG_GLOBAL_CACHE_DIR="$work/zig-cache"
 export ZIG_LOCAL_CACHE_DIR="$work/zig-local"
 export CARGO_TARGET_DIR="$work/target"
 # The musl target ships its own crt objects; zig provides them too.
-export RUSTFLAGS="-C link-self-contained=no"
+export RUSTFLAGS="-C link-self-contained=no \
+  --remap-path-prefix=$root=/src/ato \
+  --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/registry=/cargo/registry"
 
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$work/tools/zig-cc-arm64.sh" \
-  cargo "+$PINNED_TOOLCHAIN" build -p ato-oci-relay --bin ato-oci-relay --release \
+  cargo "+$PINNED_TOOLCHAIN" build -p ato-adapter-oci --bin ato-oci-relay --release \
     --target aarch64-unknown-linux-musl --locked
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$work/tools/zig-cc-amd64.sh" \
-  cargo "+$PINNED_TOOLCHAIN" build -p ato-oci-relay --bin ato-oci-relay --release \
+  cargo "+$PINNED_TOOLCHAIN" build -p ato-adapter-oci --bin ato-oci-relay --release \
     --target x86_64-unknown-linux-musl --locked
 
 bin="$root/extensions/adapters/oci/relay-bin"
