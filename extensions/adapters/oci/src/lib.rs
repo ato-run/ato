@@ -19,6 +19,11 @@ use std::time::Duration;
 
 mod connector;
 mod relay;
+// Compiled twice: the adapter uses the Run's end, and the relay binary
+// (`src/bin/ato-oci-relay.rs`) includes the same file for the container's end.
+// Items only the relay uses are dead in this build.
+#[allow(dead_code)]
+mod relay_protocol;
 
 pub use connector::{ConnectorKind, DirectBridge, PortConnection, PortConnector, SharedConnector};
 pub use relay::{DaemonRelay, RelayDestination, RelayEvidence};
