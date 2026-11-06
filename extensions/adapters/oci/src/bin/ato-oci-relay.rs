@@ -3,7 +3,7 @@
 //! It runs *inside* the Run's internal container network, so the service
 //! containers' addresses are reachable from it even when they are not
 //! reachable from the Run's own process (a VM-backed or rootless daemon). It
-//! speaks [`ato_oci_relay`]'s framing over stdin/stdout and connects to nothing
+//! speaks [`relay_protocol`]'s framing over stdin/stdout and connects to nothing
 //! the Run did not list on its command line.
 //!
 //! ```text
