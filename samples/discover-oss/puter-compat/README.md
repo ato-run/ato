@@ -19,6 +19,28 @@ Limits:
 - `kv.incr` is read-modify-write, not atomic across devices.
 - A cold load fetches every record of a collection, eight requests at a time.
 
+## Sign-in policy
+
+Single-user and single-company OSS apps run on ato.run with their own sign-in
+turned off, because ato.run already authenticated the viewer. The rule:
+
+- Replace the app's auth at one point (here `puter.auth`; for server apps, a
+  trusted identity passed by ato.run) instead of deleting auth code app by app,
+  so the upstream diff stays small.
+- Keep passing a user identity to the app. The shim fixes it to
+  `ato:<Instance>` until ato.run can hand the signed-in user to the page.
+
+Preconditions; if one does not hold, keep the app's own sign-in:
+
+1. The app is reachable only through ato.run. A server app whose port can be
+   reached directly must not drop its sign-in.
+2. The Instance is private. Storage is shared scope, so anyone who can open
+   the Instance sees all data; do not use this for published or shared apps.
+3. Roles inside the app (admin, staff, ...) are kept; only sign-in is replaced.
+
+Not suitable: apps where several people need separate data, or where outside
+people sign in (customer portals, client galleries, booking forms).
+
 Tests: `node --test samples/discover-oss/puter-compat/ato-puter-shim.test.mjs`.
 
 ## Staging check, 2026-11-07
