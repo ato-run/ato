@@ -1,0 +1,41 @@
+{
+  "result_id": "fres_01M5MD8DFDQ7ABYZ332RJ07638",
+  "result_digest": "sha256:55551e0b1e728ec187662b20fe07ddfcbbd76514c04e8b5ac842e33cdbff4930",
+  "receipt": {
+    "contract_ref": "sha256:26e1fbea310cfa4fae607519b04b6b8eb940511fa05e7230b20ef42e3774ec7b",
+    "derivation_ref": "sha256:70c3162cfff6cef455b616e976ddef23b6dc850d0070b00e64c5140379c75be7",
+    "execution": {
+      "attempt_id": "fatt_01M5MD85G91A02NP8WEFJYPWBM",
+      "endpoint": "http://127.0.0.1:40175/",
+      "platform": "linux/x86_64",
+      "realization": "static_web",
+      "request_id": "fjob_8863372c1784658e7f252cb87f6a9f79e93d3950d462efbce01ab43bcb3fa8f5"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:5650b08da46afbbaa5efc65b6542563593e438034e4b7082bfc4de034b56a4b7",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "digest": "sha256:3a3e2a9d5a832b86e16a136ed671aa7037a8aa4828b7d250b470862391a54899",
+          "input": "workspace"
+        },
+        "id": "source-identity",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "scope": "Formation runtime only; HTTP and workspace observations; does not verify grammar or hosted Run"
+}

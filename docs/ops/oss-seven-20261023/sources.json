@@ -1,0 +1,76 @@
+{
+  "checked_at": "2026-10-23",
+  "attribution": "User supplied repository URLs; no X/Reddit post URL was supplied.",
+  "sources": [
+    {
+      "order": 1,
+      "name": "Harper",
+      "repository": "https://github.com/Automattic/harper",
+      "commit": "2b320e5069ad708b900bcd85253c4be637a869e7",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/Automattic/harper/tree/2b320e5069ad708b900bcd85253c4be637a869e7",
+      "runtime_acceptance": "pending",
+      "published_by_this_task": false
+    },
+    {
+      "order": 2,
+      "name": "Apktool",
+      "repository": "https://github.com/iBotPeaches/Apktool",
+      "commit": "fd9d5d4dc7e45fa7f984698ded7a03c554d0a7b3",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/iBotPeaches/Apktool/tree/fd9d5d4dc7e45fa7f984698ded7a03c554d0a7b3",
+      "runtime_acceptance": "pending",
+      "published_by_this_task": false
+    },
+    {
+      "order": 3,
+      "name": "Ghidra",
+      "repository": "https://github.com/NationalSecurityAgency/ghidra",
+      "commit": "164003036607e669226647bd0f7bedaf281e56a6",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/NationalSecurityAgency/ghidra/tree/164003036607e669226647bd0f7bedaf281e56a6",
+      "runtime_acceptance": "pending",
+      "published_by_this_task": false
+    },
+    {
+      "order": 4,
+      "name": "Helix Foundry",
+      "repository": "https://github.com/HelixDB/helix-foundry",
+      "commit": "52cfaa3ed2bde3fbeeca933fb77be55580a75efb",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/HelixDB/helix-foundry/tree/52cfaa3ed2bde3fbeeca933fb77be55580a75efb",
+      "runtime_acceptance": "pending",
+      "published_by_this_task": false
+    },
+    {
+      "order": 5,
+      "name": "OmniVoice",
+      "repository": "https://github.com/k2-fsa/OmniVoice",
+      "commit": "08be0b4ccbac3e13e374e86fbfead4b4cac343e2",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/k2-fsa/OmniVoice/tree/08be0b4ccbac3e13e374e86fbfead4b4cac343e2",
+      "runtime_acceptance": "pending",
+      "published_by_this_task": false
+    },
+    {
+      "order": 6,
+      "name": "MiniCPM-V",
+      "repository": "https://github.com/OpenBMB/MiniCPM-V",
+      "commit": "dfe5db0cabf054c4615c796306a51f9b0ee399ca",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/OpenBMB/MiniCPM-V/tree/dfe5db0cabf054c4615c796306a51f9b0ee399ca",
+      "runtime_acceptance": "pending",
+      "published_by_this_task": false
+    },
+    {
+      "order": 7,
+      "name": "MiroFish",
+      "repository": "https://github.com/666ghj/MiroFish",
+      "commit": "7657031ac01184afe2cb220f5ee3545573b5e843",
+      "license": "AGPL-3.0",
+      "source_url": "https://github.com/666ghj/MiroFish/tree/7657031ac01184afe2cb220f5ee3545573b5e843",
+      "runtime_acceptance": "pending",
+      "published_by_this_task": false
+    }
+  ]
+}

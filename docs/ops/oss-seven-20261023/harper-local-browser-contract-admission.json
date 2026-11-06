@@ -1,0 +1,43 @@
+{
+  "exit_code": 1,
+  "result": {
+    "status": "no_verified_route",
+    "attempted_contract_refs": [
+      "sha256:208c2667af7e76374fcea165cebfb670f96fb96a3f05309df4a34e6b0071d73f"
+    ],
+    "attempts": [
+      {
+        "candidate": "authored",
+        "attempt_id": "local-61130-3",
+        "derivation_ref": "sha256:ca433bd5f6675b34d380abea91c70236a4811e46ffaa27b0ff1c21494e351d90",
+        "contract_ref": "sha256:208c2667af7e76374fcea165cebfb670f96fb96a3f05309df4a34e6b0071d73f",
+        "base_contract_ref": "sha256:6c9ef96394979d0031a9987e1e7943efbe1dad9c366a97dcd2c03e56a9c66a6e",
+        "runtime_id": "local",
+        "status": "filtered",
+        "outcomes": {
+          "seal": {
+            "state": "not_attempted",
+            "reason": "browser_contract_needs_realization"
+          },
+          "runtime_verification": {
+            "state": "not_attempted",
+            "reason": "browser_contract_needs_realization"
+          },
+          "cleanup": {
+            "state": "not_applicable",
+            "reason": "nothing ran"
+          },
+          "publication": {
+            "state": "not_attempted",
+            "reason": "browser_contract_needs_realization"
+          }
+        },
+        "failure": {
+          "code": "browser_contract_needs_realization",
+          "stage": "admission",
+          "message": "a browser Contract is verified against a running process candidate; this candidate's lane is not browser-verified on this Runtime"
+        }
+      }
+    ]
+  }
+}

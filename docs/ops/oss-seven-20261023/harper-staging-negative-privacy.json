@@ -1,0 +1,20 @@
+{
+  "kind": "negative-privacy-evidence",
+  "scope": "original-staging-derivation-only",
+  "instance_id": "cinst_01M5MDBFAJHF3F6AE7FWKHNTZX",
+  "synthetic_text_sent": true,
+  "server_status": 200,
+  "synthetic_text_removed_after_probe": true,
+  "requests": [
+    {
+      "path": "/__ato/instance-state/local-storage",
+      "method": "POST",
+      "synthetic_text_present": true
+    },
+    {
+      "path": "/__ato/instance-state/local-storage",
+      "method": "POST",
+      "synthetic_text_present": false
+    }
+  ]
+}
