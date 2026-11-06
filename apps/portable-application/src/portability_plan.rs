@@ -73,6 +73,13 @@ pub fn plan_portable_export(
                     capabilities.insert(format!("python:{version}"));
                 }
             }
+            PortableRealizationKind::ProcessServiceGroup => {
+                for step in &route.derivation.steps {
+                    if let Some(version) = step.runtimes.get(PYTHON_RUNTIME) {
+                        capabilities.insert(format!("python:{version}"));
+                    }
+                }
+            }
             PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
                 for (image, _) in crate::oci_images(route) {
                     oci_images.insert(image);

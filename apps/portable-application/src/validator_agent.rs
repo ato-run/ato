@@ -329,6 +329,7 @@ impl ValidatorAgent {
                     portability_profile: None,
                     embedded_oci_image_loaded: None,
                     services: Vec::new(),
+                    ..Default::default()
                 });
         execution.endpoint = job.endpoint.clone();
         execution.lease_id = job.lease_id.clone();
@@ -1135,6 +1136,7 @@ fn validated_routes(
                     }
                     PortableRealizationKind::OciContainer => "oci",
                     PortableRealizationKind::OciServiceGroup => "oci_service_group",
+                    PortableRealizationKind::ProcessServiceGroup => "process_service_group",
                 },
                 runtimes: route.derivation.runtimes.clone(),
                 argv: step.argv.clone(),
@@ -1994,6 +1996,7 @@ mod tests {
                 protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: "/data".to_owned(),
                 access: StateAccess::ReadWrite,
+                mount_required: None,
             });
         let report = validated_routes(&[route]).unwrap().remove(0);
         assert_eq!(report.state.as_ref().unwrap().state_key, "data");

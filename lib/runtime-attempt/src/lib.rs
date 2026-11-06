@@ -35,6 +35,8 @@ pub mod journal;
 pub mod launch;
 pub mod native_launch;
 pub mod network_bridge;
+#[cfg(unix)]
+pub mod peer_broker;
 pub mod plan;
 pub mod realize;
 pub mod resource_boundary;
