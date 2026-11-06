@@ -1,0 +1,66 @@
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "oci.image"
+version = "docker.io/pandoc/core@sha256:388e8ed4db8f9586e924f6fed4be88f64cada231777d7f4b8f10a8ae438a7ec9"
+[[runtime]]
+name = "oci.platform"
+version = "linux/amd64"
+[[runtime]]
+name = "oci.entrypoint"
+version = "/bin/sh"
+[[runtime]]
+name = "oci.memory_bytes"
+version = "536870912"
+[[runtime]]
+name = "oci.cpu_limit_millis"
+version = "1000"
+[[runtime]]
+name = "oci.pids_limit"
+version = "64"
+[[runtime]]
+name = "oci.user"
+version = "65532:65532"
+
+[[derive.step]]
+id = "serve"
+use = "ato.oci@1"
+op = "serve"
+argv = ["launch.sh"]
+cwd = "."
+
+[derive.native_surface]
+kind = "terminal"
+profile = "ato.terminal-surface.v1"
+cols = 120
+rows = 40
+port = "app.native"
+probe_port = "app.probe"
+probe_path = "/result"
+probe_ready_output = "pandoc$ \u001b[6n"
+probe_input = "printf '# Hello\\n' | pandoc -t html; echo \"E$?D\"\n"
+probe_output_delimiter = "E0D\r\npandoc$ \u001b[6n"
+probe_max_output_bytes = 4096
+probe_timeout_ms = 15000
+
+[[port]]
+id = "app.native"
+use = "ato.pty@1"
+from = "serve"
+
+[[port]]
+id = "app.probe"
+use = "ato.http@1"
+from = "serve"
+
+[[contract.require]]
+id = "converts-markdown"
+use = "ato.contract.http@1"
+port = "app.probe"
+path = "/result"
+expect = { status = 200, body_digest = "sha256:fedfeb15effefa5859ae948bd64de35fe4c20c2fab4ae2328b7cb8e44586c452" }
