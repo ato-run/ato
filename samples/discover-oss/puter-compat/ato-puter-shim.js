@@ -30,9 +30,15 @@
     return s;
   }
 
+  // ato.run storage keys may not contain whitespace, '/', '\', "'" or '"'.
+  // Only those characters (and '%') are escaped, one by one, so keys that were
+  // already valid are stored unchanged and prefix listing still works.
+  const escKey = (k) => k.replace(/[%\s\\/'"]/g, (c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+  const unescKey = (k) => k.replace(/%([0-9a-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+
   async function rawGet(key) {
     try {
-      const r = await storage().get(key, true);
+      const r = await storage().get(escKey(key), true);
       return r && typeof r.value === 'string' ? r.value : null;
     } catch (e) {
       if (e && (e.code === 'not_found' || /not.?found/i.test(String(e.message)))) return null;
@@ -40,18 +46,18 @@
     }
   }
   async function rawSet(key, value) {
-    await storage().set(key, value, true);
+    await storage().set(escKey(key), value, true);
   }
   async function rawDel(key) {
     try {
-      await storage().delete(key, true);
+      await storage().delete(escKey(key), true);
     } catch (e) {
       if (!(e && (e.code === 'not_found' || /not.?found/i.test(String(e.message))))) throw e;
     }
   }
   async function rawList(prefix) {
-    const r = await storage().list(prefix, true);
-    return Array.isArray(r) ? r : (r && r.keys) || [];
+    const r = await storage().list(escKey(prefix), true);
+    return (Array.isArray(r) ? r : (r && r.keys) || []).map(unescKey);
   }
 
   const decode = (s) => (s == null ? null : JSON.parse(s));
@@ -286,7 +292,7 @@
     kv,
     fs,
     workers,
-    ai: { chat: unsupported('Puter AI'), img: unsupported('Puter AI'), txt2img: unsupported('Puter AI') },
+    ai: { chat: unsupported('Puter AI'), img: unsupported('Puter AI'), img2txt: unsupported('Puter AI'), txt2img: unsupported('Puter AI') },
     hosting: { create: unsupported('Puter hosting'), delete: unsupported('Puter hosting'), list: async () => [] },
     net: { fetch: (...a) => fetch(...a) },
     print: (...a) => console.log(...a),
