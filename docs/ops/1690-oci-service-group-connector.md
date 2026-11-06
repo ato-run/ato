@@ -10,18 +10,19 @@ non-Linux host (`oci_needs_native_linux`), the adapter dialled container
 addresses on a network the CLI cannot reach, and the stop path could leave a
 workload's children running.
 
-It is split across five Draft PRs against `stg`; this page is the evidence
-ledger, not a second source of truth.
+It lands as one Draft PR against `stg`; this page is the evidence ledger, not a
+second source of truth.
 
-## Pull requests
+## Pull request
 
 | Phase | Branch | PR | What it changes |
 |---|---|---|---|
-| A | `feat/1690-a-process-group-reclaim` | [#1691](https://github.com/ato-run/ato/pull/1691) | Reclaim the whole process group on stop; scope Seatbelt outbound connect to `localhost:{port}`. |
-| B | `feat/1690-b-host-facts-preflight` | [#1694](https://github.com/ato-run/ato/pull/1694) | `lib/ato-host-facts`: observed host facts, reason codes, the execution decision; `ato pack` reports it, `ato run` admits on it. |
-| C | `feat/1690-c-oci-relay-connector` | [#1695](https://github.com/ato-run/ato/pull/1695) | `PortConnector` (direct bridge / relay), the relay container and its protocol, connector choice from host facts, connector evidence in the receipt. |
-| D | `feat/1690-d-native-service-group` | [#1693](https://github.com/ato-run/ato/pull/1693) | Native multi-service Derivation, shared supervisor, peer broker. |
-| E | `feat/1690-e-native-state-path` | [#1692](https://github.com/ato-run/ato/pull/1692) | `mount_required = false` state slots delivered by path. |
+| A–E | `feat/1690-portable-process-connector` | [#1700](https://github.com/ato-run/ato/pull/1700) | Process-group stop, host facts and admission, `PortConnector` (direct bridge / relay) with connector evidence, native multi-service Derivation with the peer broker, and `mount_required = false` state slots delivered by path. |
+
+The phases were reviewed as five stacked Draft PRs (#1691 A, #1694 B, #1695 C,
+#1693 D, #1692 E). They were consolidated into #1700 so the change lands as one
+reviewable unit; the stacked PRs are closed and their CI evidence is recorded
+below.
 
 ## macOS + Docker Desktop acceptance (Phase C)
 
