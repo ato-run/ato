@@ -129,8 +129,8 @@ containers: (none)
 networks:   (none)
 ```
 
-The relay image is kept (`ato-oci-relay:489d2967d873`, digest
-`sha256:27764d7c…`): it is content-addressed and identical for the same
+The relay image is kept (`ato-oci-relay:<image id>`, digest
+`sha256:3e66ad94…`): it is content-addressed and identical for the same
 architecture and relay binary, so keeping it only saves a `docker load`.
 
 ## Preflight with the host unable to run the route (Phase B, condition E)
@@ -221,16 +221,27 @@ still accepted only `/1`–`/3`. Now:
 
 - The adapter normalises the daemon architecture itself; the caller passes the
   observation. No adapter depends on host facts.
-- The relay wire format is the contract between the CLI and the relay
-  container, so its crate is classified `adapter-api` (an adapter may depend on
-  an adapter API) rather than `lib`. The rule itself was not relaxed.
+- The relay wire format is not an interface every adapter shares: it is the
+  contract between this adapter and the relay binary it embeds. It now lives in
+  `ato-adapter-oci` (`src/relay_protocol.rs`), and the relay binary is a bin
+  target of the same package (`src/bin/ato-oci-relay.rs`), which includes the
+  framing source directly instead of linking the adapter (the adapter embeds
+  the relay binary, so linking it would embed the relay in itself). The
+  separate `lib/ato-oci-relay` crate is gone; no layer was added or relaxed.
 
 ### R4 — the embedded relay binaries have provenance
 
 - `extensions/adapters/oci/relay-bin/SHA256SUMS` records the hash of both
   binaries; a test hashes what `include_bytes!` embedded and refuses a match
   that disagrees.
-- `scripts/build-oci-relay.sh` pins the toolchain (1.96.0) and zig (0.15.2).
+- `scripts/build-oci-relay.sh` pins the toolchain (1.96.0) and zig (0.15.2), and
+  remaps the checkout and registry paths (`--remap-path-prefix`) so the bytes
+  do not carry the directory the build ran in.
+- Updating the committed binaries: the `relay-binaries` job uploads what it
+  built as the `relay-binaries` artifact (even when the comparison fails), so
+  the procedure is: push the source change, download the artifact, copy it over
+  `extensions/adapters/oci/relay-bin/`, commit, push again. The job then
+  compares the committed bytes with a fresh rebuild.
 - The `relay-binaries` CI job rebuilds from source on the runner that defines
   the canonical bytes and fails unless the rebuilt SHA256SUMS equals the
   committed one. A binary built on another host is equivalent but not
@@ -264,16 +275,47 @@ skipping.
 
 ## macOS acceptance, re-run after the fixes
 
-The relay binaries changed (CI-built), so the acceptance was re-run:
+The relay binaries changed twice (CI-built, then rebuilt from the moved source
+with remapped paths), so the acceptance was re-run after each:
 
 ```text
 fully_satisfied: true
 schema: ato.contract-verification-receipt/4
 connector: relay
-relay_image_digest: sha256:2449d4dbbb436911cca8ef7f8d3a657004b4f0b8997354b6fba97a95deea0ea3
+relay_image_digest: sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd
 ```
 
 `accept_receipt` was run against that exact file with the bundle's own Contract
 and the Run's attempt id; it is accepted. No internal Port was published and no
 container or network remained after the stop (same checks as above; the run's
 receipt is `.tmp/1690/mac.json`).
+
+## Out-of-scope change: the CI trigger (approved)
+
+`rust-ci.yml` now also triggers on `pull_request` whose base is `feat/**`. It
+was added so a stacked PR (base = its parent feature branch) still gets the
+workspace, clippy and arch-check evidence; without it a stack silently stops
+being tested after its first PR. This is a repository-wide trigger change, not
+part of the connector work: it was reviewed and approved as an explicit
+addition to this PR rather than split out, because splitting it would leave the
+stack without Rust CI until the separate PR merged.
+
+## Merge order and the hosted receipt schema
+
+A relay Run's receipt is `/4`; a direct Run's receipt is unchanged. The hosted
+validator accepts `/4` only after `ato-run/ato-api#1134` is deployed, so the
+release combination must be pinned in the Release Manifest as
+**ato-api #1134 → ato C** (and therefore before D/E, which build on C). A
+Linux hosted Run is unaffected (it is direct and keeps the stg schema), but a
+CLI that sends a `/4` receipt to an older ato-api would be rejected.
+
+## ato-api CI: not started (billing)
+
+`ato-run/ato-api#1134` could not run its CI: four jobs were not started and
+their annotation says `The job was not started because recent account payments
+have failed or your spending limit needs to be increased`; the self-hosted
+`full-serial` shards stayed queued. It is not counted as a success. The
+substitute verification, run locally in the ato-api worktree, is
+`pnpm typecheck` (pass) and `vitest run src/tests/portable-verification-ack.test.ts`
+(19 pass) plus the related suite (78 pass). Approver of the billing exception:
+the reviewer who confirmed the annotation in the PR review (koh0920).
