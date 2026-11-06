@@ -31,6 +31,9 @@ pub struct FormationRealizer<'a> {
     pub shim: &'a Path,
     /// What the build may reach. The candidate itself never gets egress.
     pub network: NetworkPolicy,
+    /// The unreviewed private lane requires an isolated network for the
+    /// verification candidate as well as for later Runs.
+    pub require_private_isolation: bool,
 }
 
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
@@ -44,6 +47,18 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
 impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
+        if self.require_private_isolation
+            && (self.network != NetworkPolicy::Denied
+                || !planned.plan.lane.is_process()
+                || !planned.derivation.state.is_empty()
+                || planned.derivation.ports.len() != 1
+                || planned.derivation.ports[0].protocol != ato_formation::authoring::HTTP_PROTOCOL)
+        {
+            return refused(
+                "private_formation_policy_unsupported",
+                "private Formation requires a stateless, single-HTTP-port process with denied build network",
+            );
+        }
         if planned.derivation.source_oci.is_some()
             || planned.derivation.runtimes.contains_key("oci.image")
             || !planned.derivation.requirements.is_empty()
@@ -112,6 +127,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
             planned: self.planned,
             shim: self.shim,
             network: self.network,
+            require_private_isolation: self.require_private_isolation,
         }
         .realize(executed, attempt_id, attempt_root)
     }
@@ -128,6 +144,7 @@ pub(crate) struct CandidateLauncher<'a> {
     pub planned: &'a PlannedCandidate,
     pub shim: &'a Path,
     pub network: NetworkPolicy,
+    pub require_private_isolation: bool,
 }
 
 #[derive(Default)]
@@ -277,7 +294,9 @@ impl CandidateLauncher<'_> {
             // no egress, TCP bind only on the allocated host ports. A
             // `dependency-resolution` request widens the BUILD, never the run.
             build_network: crate::attempt::network_name(self.network).to_owned(),
-            candidate_network: if bindings.gate.is_some() {
+            candidate_network: if self.require_private_isolation {
+                "isolated namespace; declared ingress; no egress"
+            } else if bindings.gate.is_some() {
                 "isolated namespace; declared ingress; phase-scoped HTTPS egress broker"
             } else {
                 "no-egress; tcp bind limited to allocated host ports"
@@ -295,13 +314,24 @@ impl CandidateLauncher<'_> {
             shim: self.shim,
             attempt_id,
         };
-        let launched = TemporaryRealization::launch_controlled_with_state(
-            &request,
-            bindings.gate,
-            bindings.variables,
-            bindings.state,
-            control,
-        );
+        let launched = if self.require_private_isolation {
+            if bindings.gate.is_some() || !bindings.variables.is_empty() || bindings.state.is_some()
+            {
+                Err(anyhow::anyhow!(
+                    "private Formation does not accept external bindings"
+                ))
+            } else {
+                TemporaryRealization::launch_private_isolated(&request, control)
+            }
+        } else {
+            TemporaryRealization::launch_controlled_with_state(
+                &request,
+                bindings.gate,
+                bindings.variables,
+                bindings.state,
+                control,
+            )
+        };
         let realization = match launched {
             Ok(realization) => realization,
             Err(error) => {

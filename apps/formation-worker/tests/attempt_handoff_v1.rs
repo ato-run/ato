@@ -185,6 +185,7 @@ fn attempt(
             },
             shim: &shim,
             network,
+            require_private_isolation: false,
         },
         &AttemptJournal::new(fixture.scratch.path().join("records")),
     )
