@@ -1,0 +1,47 @@
+[package]
+name = "capsulehub"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MPL-2.0"
+description = "Self-hosted capsulehub coordinator — blind, content-addressed ciphertext storage for formed .capsule bundles"
+repository = "https://github.com/ato-run/ato"
+homepage = "https://ato.run"
+authors = ["ato-run"]
+# Internal service crate: distributed as a source build, not a crates.io
+# package or a cargo-dist release artifact. `ato.run/capsulehub` runs this
+# exact binary; there is no separate hosted implementation.
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "service"
+
+[lib]
+name = "capsulehub"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ato-capsulehub"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive", "env"] }
+hex = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+hex = "0.4"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
