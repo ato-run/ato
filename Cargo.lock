@@ -877,6 +877,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "windows",
 ]
 
 [[package]]

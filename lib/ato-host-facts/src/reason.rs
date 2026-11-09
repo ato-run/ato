@@ -57,6 +57,10 @@ pub enum ReasonCode {
     /// This host's platform has no native desktop Adapter that can enforce the
     /// mandatory policies yet.
     NativeAdapterUnsupported,
+    /// Windows native routes are fail-closed: the AppContainer policy that
+    /// would enforce the mandatory set is not implemented, so the route is
+    /// refused instead of run with a gap.
+    NativeWindowsContainmentUnavailable,
     // ── containment (process workloads) ───────────────────────────────
     BwrapBinaryMissing,
     BwrapProbeFailed,
@@ -94,6 +98,7 @@ impl ReasonCode {
                 "native_signature_verification_unavailable"
             }
             Self::NativeAdapterUnsupported => "native_adapter_unsupported",
+            Self::NativeWindowsContainmentUnavailable => "native_windows_containment_unavailable",
             Self::BwrapBinaryMissing => "bwrap_binary_missing",
             Self::BwrapProbeFailed => "bwrap_probe_failed",
             Self::ApparmorRestrictsUnprivilegedUserns => "apparmor_restricts_unprivileged_userns",
