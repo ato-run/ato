@@ -71,6 +71,7 @@ fn v4_bundle(directory: &Path) -> PathBuf {
             slot: "main".to_owned(),
             protocol: DATA_JSON_PROTOCOL.to_owned(),
             content_ref: saved_data_ref.clone(),
+            save: None,
         }],
         assets: vec![InstanceSnapshotAssetV1 {
             alias: "asset-1".to_owned(),
