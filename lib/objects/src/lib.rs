@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod bundle;
+pub mod capsulehub;
 mod portable_bundle;
 mod repository;
 
