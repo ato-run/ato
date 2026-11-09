@@ -237,16 +237,24 @@ pub(crate) fn sandbox_plan(
             .iter()
             .map(|(_, path)| path.display().to_string()),
     );
+    // A zero port is not a declaration; descriptor validation already refuses
+    // it. Filtering here keeps the guarantee local to the renderer so no
+    // caller can turn it into an unparseable SBPL profile.
+    let declared_ports = ports
+        .iter()
+        .copied()
+        .filter(|port| *port != 0)
+        .collect::<Vec<_>>();
     let policy = SandboxPolicy::new()
         .allow_read_only(read_only.iter().map(PathBuf::from))
         .allow_read_write(read_write.iter().map(PathBuf::from))
         .with_network(false)
-        .allow_tcp_bind(ports.iter().copied());
+        .allow_tcp_bind(declared_ports.iter().copied());
     SandboxPlan {
         policy,
         read_only,
         read_write,
-        inbound_ports: ports.to_vec(),
+        inbound_ports: declared_ports,
     }
 }
 
@@ -701,7 +709,7 @@ mod tests {
         let profile = ato_sandbox::render_seatbelt_profile(&plan.policy).unwrap();
         assert!(profile.contains("(deny default)"), "{profile}");
         assert!(
-            profile.contains("(allow network-inbound (local tcp \"*:18080\"))"),
+            profile.contains("(allow network-inbound (local tcp \"localhost:18080\"))"),
             "{profile}"
         );
         assert!(!profile.contains("(allow network-outbound)"), "{profile}");
@@ -750,7 +758,7 @@ mod tests {
             assert!(!facts.sandbox_tool);
             eprintln!(
                 "NOTE: live Seatbelt enforcement was not exercised because this process cannot \
-                 nest a sandbox ({}); admission refuses the route for the same measured fact",
+                 apply a profile ({}); admission refuses the route for the same measured fact",
                 facts
                     .sandbox_detail
                     .unwrap_or_else(|| "sandbox_apply was denied".to_owned())
@@ -842,11 +850,6 @@ mod tests {
         }
     }
 
-    fn free_port() -> u16 {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        listener.local_addr().unwrap().port()
-    }
-
     fn pid_alive(pid: u32) -> bool {
         Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -871,36 +874,60 @@ mod tests {
     /// The candidate owns a process group, not one process: a native app that
     /// forked a helper is still running when only its leader exits, and the
     /// Run's stop must reclaim it and show no leftovers.
+    /// Start the tiny child, retrying on a fresh port if the port this test
+    /// chose was taken between selection and bind. Port selection is a test
+    /// concern; the supervisor under test is unchanged.
+    fn start_tiny_child(workspace: &Path, pid_file: &Path) -> (ProcessServiceGroup, u16, u32) {
+        let mut last_error = None;
+        for _ in 0..8 {
+            // Hold the listener while choosing so the next allocation cannot
+            // return the same number, then release it for the child.
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            let script = format!(
+                r#"import socket,subprocess,time
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+for _ in range(50):
+    try:
+        s.bind(('127.0.0.1',{port}))
+        break
+    except OSError:
+        time.sleep(0.02)
+s.listen()
+child=subprocess.Popen(['sleep','60'])
+open({pid_file:?},'w').write(str(child.pid))
+time.sleep(0.3)
+"#,
+                pid_file = pid_file.display().to_string()
+            );
+            match ProcessServiceGroup::start(
+                workspace,
+                vec![ServiceSpec {
+                    name: "native".to_owned(),
+                    command: vec!["python3".to_owned(), "-c".to_owned(), script],
+                    cwd: PathBuf::new(),
+                    environment: BTreeMap::new(),
+                    readiness: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                    helpers: Vec::new(),
+                }],
+            ) {
+                Ok(group) => {
+                    let leader = group.pids()[0].1;
+                    return (group, port, leader);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        panic!("the tiny native child never started: {last_error:#?}");
+    }
+
     #[test]
     fn the_owned_group_is_reaped_including_a_child_left_by_an_exited_leader() {
         let workspace = tempfile::tempdir().unwrap();
-        let port = free_port();
         let pid_file = workspace.path().join("child.pid");
-        let script = format!(
-            "import socket,subprocess,time\n\
-             s=socket.socket()\n\
-             s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n\
-             s.bind(('127.0.0.1',{port}))\n\
-             s.listen()\n\
-             child=subprocess.Popen(['sleep','60'])\n\
-             open({pid_file:?},'w').write(str(child.pid))\n\
-             time.sleep(0.3)\n",
-            pid_file = pid_file.display().to_string()
-        );
-        let group = ProcessServiceGroup::start(
-            workspace.path(),
-            vec![ServiceSpec {
-                name: "native".to_owned(),
-                command: vec!["python3".to_owned(), "-c".to_owned(), script],
-                cwd: PathBuf::new(),
-                environment: BTreeMap::new(),
-                readiness: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-                helpers: Vec::new(),
-            }],
-        )
-        .expect("the tiny native child starts");
-        let pids = group.pids();
-        let leader = pids[0].1;
+        let (group, port, leader) = start_tiny_child(workspace.path(), &pid_file);
         let child = wait_for_pid(&pid_file);
         assert!(pid_alive(child));
         let owned = vec![workspace.path().join("owned")];
@@ -930,10 +957,13 @@ mod tests {
 
     #[test]
     fn readiness_waits_for_every_declared_port_and_refuses_a_silent_one() {
-        let first = free_port();
-        let second = free_port();
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, first)).unwrap();
-        let second_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, second)).unwrap();
+        // Two listeners are held at once: asking the kernel for a port and
+        // releasing it twice in a row can hand back the same number.
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let second_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let first = listener.local_addr().unwrap().port();
+        let second = second_listener.local_addr().unwrap().port();
+        assert_ne!(first, second);
         let ports = vec![
             crate::ValidatedNativePort {
                 id: "app.http".to_owned(),
@@ -947,12 +977,252 @@ mod tests {
         assert!(wait_for_ports_with_timeout(&ports, Duration::from_secs(2)).is_ok());
         drop(listener);
         drop(second_listener);
-        let silent = free_port();
+        // A port nobody listens on: bind once to learn a number, then release
+        // it immediately before asking the readiness probe to wait on it.
+        let silent = {
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            port
+        };
         let ports = vec![crate::ValidatedNativePort {
             id: "app.http".to_owned(),
             guest_port: silent,
         }];
         let error = wait_for_ports_with_timeout(&ports, Duration::from_millis(150)).unwrap_err();
         assert!(error.contains("did not accept TCP"), "{error}");
+    }
+
+    /// The generated profile must be something `sandbox-exec` can parse, on
+    /// every host. A profile with an invalid port aborts with
+    /// "invalid port in network address" before any rule is applied; that is
+    /// detected here even when this process is itself sandboxed and cannot
+    /// apply a nested profile (the failure is then EPERM, not a parse error).
+    #[test]
+    fn the_generated_profile_is_accepted_by_sandbox_exec() {
+        let launcher = seatbelt_launcher().expect("sandbox-exec is required on macOS");
+        let scratch = tempfile::tempdir().unwrap();
+        let state = scratch.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        let plan = sandbox_plan(
+            scratch.path(),
+            scratch.path(),
+            &[("data".to_owned(), state)],
+            scratch.path(),
+            &[18080, 18081],
+        );
+        let profile = ato_sandbox::render_seatbelt_profile(&plan.policy).unwrap();
+        assert!(
+            profile.contains("(local tcp \"localhost:18080\")"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains("(local tcp \"localhost:18081\")"),
+            "{profile}"
+        );
+        let profile_path = scratch.path().join("policy.sb");
+        fs::write(&profile_path, &profile).unwrap();
+        let output = Command::new(launcher)
+            .arg("-f")
+            .arg(&profile_path)
+            .arg("/usr/bin/true")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() || stderr.contains("sandbox_apply"),
+            "sandbox-exec rejected the generated profile: {stderr}"
+        );
+        assert!(
+            !stderr.contains("invalid"),
+            "sandbox-exec could not parse the generated profile: {stderr}"
+        );
+    }
+
+    /// A route with no declared Port must not produce an inbound rule at all;
+    /// `(local tcp \"*:0\")` is an unparseable profile.
+    #[test]
+    fn a_plan_with_no_declared_port_renders_no_inbound_rule() {
+        let scratch = tempfile::tempdir().unwrap();
+        let plan = sandbox_plan(scratch.path(), scratch.path(), &[], scratch.path(), &[0]);
+        let profile = ato_sandbox::render_seatbelt_profile(&plan.policy).unwrap();
+        assert!(!profile.contains("network-inbound"), "{profile}");
+        assert!(!profile.contains(":0\""), "{profile}");
+        assert!(plan.inbound_ports.is_empty());
+    }
+
+    /// The whole adapter path: extract → signature verdict → Seatbelt →
+    /// launch → readiness → stop/reap. It runs only where a profile can
+    /// actually be applied; elsewhere the same measured fact must refuse
+    /// admission, which is asserted instead of pretending the launch ran.
+    #[test]
+    fn the_adapter_launches_a_native_artifact_serves_its_port_and_reaps_it() {
+        let facts = ato_host_facts::NativeFacts::probe();
+        if !facts.sandbox_tool {
+            // The same measured fact must refuse the route before anything is
+            // materialized or launched; prove the refusal instead of skipping.
+            let scratch = tempfile::tempdir().unwrap();
+            let descriptor = ato_formation::native_desktop::NativeDescriptor {
+                os: ato_formation::native_desktop::NativeOs::Macos,
+                arch: ato_formation::native_desktop::NativeArch::Aarch64,
+                artifact: format!("sha256:{}", "a".repeat(64)),
+                entry: "app/run.sh".to_owned(),
+                format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+                signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+            };
+            let ports = vec![crate::ValidatedNativePort {
+                id: "app.http".to_owned(),
+                guest_port: 18080,
+            }];
+            let environment = BTreeMap::new();
+            let request = NativeStart {
+                artifact_bytes: Vec::new(),
+                descriptor: &descriptor,
+                ports: &ports,
+                workspace: scratch.path().to_path_buf(),
+                runtime_root: scratch.path(),
+                state_paths: Vec::new(),
+                environment: &environment,
+                local_override: true,
+                declares_egress: false,
+            };
+            let refusal = prepare(&request, &scratch.path().join("native")).unwrap_err();
+            assert_eq!(refusal.code, "native_sandbox_unavailable");
+            eprintln!(
+                "NOTE: live native launch not exercised: this process cannot apply a profile ({}); \
+                 the route is refused for that measured fact",
+                facts
+                    .sandbox_detail
+                    .as_deref()
+                    .unwrap_or("sandbox_apply was denied")
+            );
+            return;
+        }
+        // A tiny artifact: a wrapper that serves its own proof document on the
+        // declared Port, exactly the shape the fixture uses.
+        let wrapper = b"#!/bin/sh\nexec python3 -m http.server \"$ATO_NATIVE_PORT\" --bind 127.0.0.1 --directory \"$(dirname \"$0\")\"\n";
+        let proof = b"native-desktop-proof\n";
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (path, bytes, mode) in [
+            ("app/run.sh", wrapper.as_slice(), 0o755u32),
+            ("app/proof.txt", proof.as_slice(), 0o644u32),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(mode);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, std::io::Cursor::new(bytes))
+                .unwrap();
+        }
+        let artifact = builder.into_inner().unwrap().finish().unwrap();
+
+        let scratch = tempfile::tempdir().unwrap();
+        let runtime_root = scratch.path().join("run");
+        fs::create_dir_all(&runtime_root).unwrap();
+        let workspace = scratch.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let mut last_error = None;
+        for _ in 0..8 {
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            let ports = vec![crate::ValidatedNativePort {
+                id: "app.http".to_owned(),
+                guest_port: port,
+            }];
+            let descriptor = ato_formation::native_desktop::NativeDescriptor {
+                os: ato_formation::native_desktop::NativeOs::Macos,
+                arch: ato_formation::native_desktop::NativeArch::Aarch64,
+                artifact: format!("sha256:{}", "a".repeat(64)),
+                entry: "app/run.sh".to_owned(),
+                format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+                signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+            };
+            // The interpreter has to be inside the read-only set; use the
+            // system python rather than whatever PATH this test inherited.
+            let environment = BTreeMap::from([(
+                "PATH".to_owned(),
+                "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
+            )]);
+            let request = NativeStart {
+                artifact_bytes: artifact.clone(),
+                descriptor: &descriptor,
+                ports: &ports,
+                workspace: workspace.clone(),
+                runtime_root: &runtime_root,
+                state_paths: Vec::new(),
+                environment: &environment,
+                local_override: true,
+                declares_egress: false,
+            };
+            match start(request) {
+                Ok(realized) => {
+                    let endpoint = realized
+                        .candidate
+                        .endpoints()
+                        .get("app.http")
+                        .cloned()
+                        .expect("the declared Port is exposed");
+                    let body = http_get(&format!("{endpoint}/proof.txt"));
+                    assert_eq!(
+                        body.as_deref(),
+                        Some("native-desktop-proof\n"),
+                        "the launched app did not serve its proof document"
+                    );
+                    let native = realized
+                        .execution
+                        .native
+                        .clone()
+                        .expect("the receipt carries native evidence");
+                    assert_eq!(native.codesign_verify, "invalid");
+                    assert_eq!(native.signature_kind, "unsigned");
+                    assert!(native.local_override);
+                    assert_eq!(native.sandbox, "seatbelt");
+                    assert_eq!(native.enforced_inbound_ports, vec![port]);
+                    assert!(native.materialized_tree_digest.starts_with("sha256:"));
+                    RunningCandidate::stop(realized.candidate)
+                        .expect("the Run stops and reaps the native app");
+                    // The declared Port is free again: nothing survived.
+                    assert!(
+                        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok(),
+                        "the native app was not reaped"
+                    );
+                    return;
+                }
+                Err(error) => last_error = Some(describe_failure(&error)),
+            }
+        }
+        panic!("the native adapter never launched: {last_error:#?}");
+    }
+
+    fn describe_failure(failure: &RealizeFailure) -> String {
+        match failure {
+            RealizeFailure::Execution(error) => format!("execution: {error:#}"),
+            RealizeFailure::Launch { error, .. } => format!("launch: {error:#}"),
+            RealizeFailure::Stopped { error, .. } => format!("stopped: {error:#}"),
+            RealizeFailure::Abandoned { error, cleanup, .. } => {
+                format!("abandoned: {error:#} ({cleanup})")
+            }
+        }
+    }
+
+    fn http_get(url: &str) -> Option<String> {
+        let rest = url.strip_prefix("http://")?;
+        let (authority, path) = rest.split_once('/')?;
+        let mut stream = std::net::TcpStream::connect(authority).ok()?;
+        use std::io::{Read, Write};
+        write!(
+            stream,
+            "GET /{path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        )
+        .ok()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).ok()?;
+        let (_, body) = response.split_once("\r\n\r\n")?;
+        Some(body.to_owned())
     }
 }
