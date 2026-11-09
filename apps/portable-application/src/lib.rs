@@ -43,6 +43,8 @@ pub mod hosted_export;
 pub mod instance_snapshot;
 pub mod local_instance;
 #[cfg(test)]
+mod native_desktop_tests;
+#[cfg(test)]
 mod native_surface_tests;
 #[cfg(test)]
 mod native_terminal_authoring_tests;
@@ -65,6 +67,14 @@ pub const APPLICATION_V2_SCHEMA: &str = "ato.application/2";
 pub const PORTABLE_TREE_SCHEMA: &str = "ato.portable-tree/1";
 pub const PORTABLE_TREE_V2_SCHEMA: &str = "ato.portable-tree/2";
 pub const OCI_PROTOCOL: &str = "ato.oci@1";
+/// The one serving step protocol of a native desktop Derivation. Its facts
+/// live in the step's `runtimes` map (see `ato_formation::native_desktop`); it
+/// adds no field to `BoundStep`, so every earlier Derivation keeps its bytes.
+pub const NATIVE_PROTOCOL: &str = ato_formation::native_desktop::NATIVE_PROTOCOL;
+/// Largest artifact blob a native route may add to the bundle closure.
+pub const MAX_NATIVE_ARTIFACT_BYTES: u64 = ato_formation::native_desktop::MAX_NATIVE_ARTIFACT_BYTES;
+/// Logical ports one native serving step may expose.
+pub const MAX_NATIVE_PORTS: usize = 8;
 
 pub const PYTHON_RUNTIME: &str = "python";
 pub const OCI_IMAGE_RUNTIME: &str = "oci.image";
@@ -228,6 +238,27 @@ pub struct ValidatedPortableApplication {
     /// The route's scenario requirements, each verified against its canonical
     /// `ato.scenario/1` object in the bundle closure.
     pub scenarios: Vec<ValidatedScenario>,
+    /// The validated descriptor of a native desktop route. `None` for every
+    /// other realization; it carries only declared facts, never a host verdict.
+    pub native: Option<ValidatedNativeDescriptor>,
+}
+
+/// One validated `ato.native@1` serving step.
+///
+/// The descriptor is the declared, format-validated fact; the logical ports
+/// are the loopback endpoints the common verifier will observe. Neither is a
+/// launch result and neither says anything about this host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedNativeDescriptor {
+    pub descriptor: ato_formation::native_desktop::NativeDescriptor,
+    pub ports: Vec<ValidatedNativePort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedNativePort {
+    pub id: String,
+    /// The loopback port the application serves inside the extracted artifact.
+    pub guest_port: u16,
 }
 
 /// One `ato.contract.scenario@1` requirement resolved against the bundle's
@@ -305,6 +336,10 @@ pub enum PortableRealizationKind {
     /// Several `ato.process@1` serving steps of one Derivation, supervised
     /// together by the local Runtime.
     ProcessServiceGroup,
+    /// One `ato.native@1` serving step: a digest-pinned desktop executable
+    /// materialized from its artifact blob and launched by this host's native
+    /// Adapter for exactly one platform.
+    NativeDesktop,
 }
 
 impl ValidatedPortableApplication {
@@ -328,7 +363,8 @@ impl ValidatedPortableApplication {
                 PortableRealizationKind::LocalProcess
                 | PortableRealizationKind::OciContainer
                 | PortableRealizationKind::OciServiceGroup
-                | PortableRealizationKind::ProcessServiceGroup => {
+                | PortableRealizationKind::ProcessServiceGroup
+                | PortableRealizationKind::NativeDesktop => {
                     ato_runtime_attempt::spec::CandidateShape::Process
                 }
             },
@@ -362,6 +398,7 @@ impl PortableRealizationKind {
             Self::OciContainer => "OCI Container",
             Self::OciServiceGroup => "OCI Service Group",
             Self::ProcessServiceGroup => "Native Process Group",
+            Self::NativeDesktop => "Native Desktop",
         }
     }
 }
@@ -424,11 +461,33 @@ pub struct PortableDynamicRouteSpec {
     pub execution: PortableExecutionSpec,
     /// Zero for an OCI service group.
     pub guest_port: u16,
+    /// `StaticWeb` only: the entry document inside the workspace tree.
+    pub entry: Option<String>,
+    /// `StaticWeb` only: whether an unknown path falls back to `entry`.
+    pub spa_fallback: Option<bool>,
+    /// `NativeDesktop` only: the artifact bytes and the declared platform.
+    pub native: Option<PortableNativeRouteSpec>,
     pub services: Vec<PortableServiceRouteSpec>,
     /// Bound as the route's `requirements.host`. A placement condition the
     /// Runner that runs this route is admitted against; it grants nothing.
     pub host: Option<ato_formation::requirements::HostRequirement>,
     pub startup: Option<ato_formation::requirements::StartupRequirement>,
+}
+
+/// One native route as a bundle builder sees it: the exact artifact bytes plus
+/// the facts the serving step will declare. The builder hashes the bytes, so a
+/// caller cannot state a digest that does not match what it carries.
+#[derive(Debug, Clone)]
+pub struct PortableNativeRouteSpec {
+    pub os: String,
+    pub arch: String,
+    pub entry: String,
+    /// Source-relative path of the artifact file. Used only to exclude the
+    /// file from the workspace tree; it is never written into the bundle.
+    pub artifact_path: String,
+    pub artifact: Vec<u8>,
+    pub format: Option<String>,
+    pub signature: Option<String>,
 }
 
 /// One serving step of a service group (OCI or native process).
@@ -869,7 +928,9 @@ fn validate_selected_derivation(
     // to be applied here too: a `.capsule` pinned to a Node affected by
     // CVE-2026-111497 is not admitted, whichever entry reads it.
     validate_runtime_policy(&derivation)?;
-    let realization = validate_initial_route(&contract, &application, &derivation)?;
+    let validation =
+        validate_initial_route_with_bundle(bundle, &contract, &application, &derivation)?;
+    let realization = validation.realization;
     if let Some(snapshot_ref) = instance_snapshot_ref.as_ref() {
         let snapshot: InstanceSnapshotV1 =
             structured(bundle, snapshot_ref, INSTANCE_SNAPSHOT_SCHEMA)?;
@@ -947,6 +1008,7 @@ fn validate_selected_derivation(
         realization,
         model_sets,
         scenarios,
+        native: validation.native,
     })
 }
 
@@ -1354,6 +1416,9 @@ pub fn build_dynamic_process_oci_bundle(
                     realization: PortableRealizationKind::LocalProcess,
                     execution: spec.process.clone(),
                     guest_port: spec.guest_port,
+                    entry: None,
+                    spa_fallback: None,
+                    native: None,
                     services: Vec::new(),
                     host: None,
                     startup: None,
@@ -1362,6 +1427,9 @@ pub fn build_dynamic_process_oci_bundle(
                     realization: PortableRealizationKind::OciContainer,
                     execution: spec.oci.clone(),
                     guest_port: spec.guest_port,
+                    entry: None,
+                    spa_fallback: None,
+                    native: None,
                     services: Vec::new(),
                     host: None,
                     startup: None,
@@ -1517,53 +1585,85 @@ fn authored_bundle_spec_v2(
     let routes = draft
         .derivations
         .into_iter()
-        .map(|derivation| PortableDynamicRouteSpec {
-            realization: match derivation.kind {
-                PortableDerivationKindV2::Process => PortableRealizationKind::LocalProcess,
-                PortableDerivationKindV2::Oci => PortableRealizationKind::OciContainer,
-                PortableDerivationKindV2::OciServiceGroup => {
-                    PortableRealizationKind::OciServiceGroup
+        .map(|derivation| {
+            let native = match derivation.native {
+                None => None,
+                Some(native) => {
+                    // The artifact is read once, here, and becomes a payload
+                    // blob of the bundle. It is never fetched at run time and
+                    // never part of the workspace tree: the file path is
+                    // authoring metadata, and the digest is the declaration.
+                    let bytes = read(source_root.join(&native.artifact_path))?;
+                    if bytes.is_empty() {
+                        return Err(profile(format!(
+                            "native artifact {} is empty",
+                            native.artifact_path
+                        )));
+                    }
+                    Some(PortableNativeRouteSpec {
+                        os: native.os,
+                        arch: native.arch,
+                        entry: native.entry,
+                        artifact_path: native.artifact_path,
+                        artifact: bytes,
+                        format: native.format,
+                        signature: native.signature,
+                    })
                 }
-                PortableDerivationKindV2::ProcessServiceGroup => {
-                    PortableRealizationKind::ProcessServiceGroup
-                }
-            },
-            execution: PortableExecutionSpec {
-                runtimes: derivation.runtimes,
-                argv: derivation.argv,
-                cwd: derivation.cwd,
-                env: derivation.env,
-            },
-            guest_port: derivation.guest_port,
-            services: derivation
-                .services
-                .into_iter()
-                .map(|service| PortableServiceRouteSpec {
-                    id: service.id,
-                    execution: PortableExecutionSpec {
-                        runtimes: service.runtimes,
-                        argv: service.argv,
-                        cwd: service.cwd,
-                        env: service.env,
-                    },
-                    ports: service
-                        .ports
-                        .into_iter()
-                        .map(|port| PortableServicePortSpec {
-                            id: port.id,
-                            guest_port: port.guest_port,
-                            client_address_transport: port.client_address_transport,
-                        })
-                        .collect(),
-                    state: service.state,
-                    bindings: service.bindings,
-                    connect: service.connect,
-                })
-                .collect(),
-            host: derivation.host,
-            startup: derivation.startup,
+            };
+            Ok(PortableDynamicRouteSpec {
+                realization: match derivation.kind {
+                    PortableDerivationKindV2::Process => PortableRealizationKind::LocalProcess,
+                    PortableDerivationKindV2::Oci => PortableRealizationKind::OciContainer,
+                    PortableDerivationKindV2::OciServiceGroup => {
+                        PortableRealizationKind::OciServiceGroup
+                    }
+                    PortableDerivationKindV2::ProcessServiceGroup => {
+                        PortableRealizationKind::ProcessServiceGroup
+                    }
+                    PortableDerivationKindV2::StaticWeb => PortableRealizationKind::StaticWeb,
+                    PortableDerivationKindV2::Native => PortableRealizationKind::NativeDesktop,
+                },
+                execution: PortableExecutionSpec {
+                    runtimes: derivation.runtimes,
+                    argv: derivation.argv,
+                    cwd: derivation.cwd,
+                    env: derivation.env,
+                },
+                guest_port: derivation.guest_port,
+                entry: derivation.entry,
+                spa_fallback: Some(derivation.spa_fallback),
+                native,
+                services: derivation
+                    .services
+                    .into_iter()
+                    .map(|service| PortableServiceRouteSpec {
+                        id: service.id,
+                        execution: PortableExecutionSpec {
+                            runtimes: service.runtimes,
+                            argv: service.argv,
+                            cwd: service.cwd,
+                            env: service.env,
+                        },
+                        ports: service
+                            .ports
+                            .into_iter()
+                            .map(|port| PortableServicePortSpec {
+                                id: port.id,
+                                guest_port: port.guest_port,
+                                client_address_transport: port.client_address_transport,
+                            })
+                            .collect(),
+                        state: service.state,
+                        bindings: service.bindings,
+                        connect: service.connect,
+                    })
+                    .collect(),
+                host: derivation.host,
+                startup: derivation.startup,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, PortableApplicationError>>()?;
     Ok(PortableAuthoredBundleSpec {
         title: draft.title,
         surface_path: draft.surface_path,
@@ -1770,12 +1870,20 @@ fn build_routes_bundle(
     // A candidate manifest that omits `[contract]` names no scenario file; any
     // scenario file it carries is ordinary source content.
     excluded.extend(spec.scenarios.iter().map(|input| input.path.clone()));
+    // A native artifact is a bundle payload, not workspace content: its file
+    // path is authoring metadata and the verified blob is what a Run reads.
+    excluded.extend(
+        spec.routes
+            .iter()
+            .filter_map(|route| route.native.as_ref())
+            .map(|native| native.artifact_path.clone()),
+    );
     let (mut objects, tree_ref) =
         build_portable_tree_with_schema(source_root, PORTABLE_TREE_V2_SCHEMA, &excluded)?;
     let input = BoundInput {
         id: "workspace".to_owned(),
         protocol: WORKSPACE_PROTOCOL.to_owned(),
-        content_ref: tree_ref,
+        content_ref: tree_ref.clone(),
     };
     let mut route_inputs = vec![input.clone()];
     for (id, _, manifest) in &spec.model_sets {
@@ -1855,130 +1963,6 @@ fn build_routes_bundle(
         }
     }
     route_inputs.sort_by(|a, b| a.id.cmp(&b.id));
-    let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
-        native_surface: None,
-        runtime_port_operations: vec![],
-        variable_bindings: vec![],
-        requirements: ato_formation::requirements::ExecutionRequirements {
-            host: route.host.clone(),
-            startup: route.startup.clone(),
-            ..Default::default()
-        },
-        schema: BOUND_DERIVATION_SCHEMA.to_owned(),
-        inputs: route_inputs.clone(),
-        runtimes: route.execution.runtimes.clone(),
-        platforms: Vec::new(),
-        steps: if matches!(
-            route.realization,
-            PortableRealizationKind::OciServiceGroup | PortableRealizationKind::ProcessServiceGroup
-        ) {
-            let protocol = if route.realization == PortableRealizationKind::OciServiceGroup {
-                OCI_PROTOCOL
-            } else {
-                PROCESS_PROTOCOL
-            };
-            route
-                .services
-                .iter()
-                .map(|service| BoundStep {
-                    id: service.id.clone(),
-                    protocol: protocol.to_owned(),
-                    op: "serve".to_owned(),
-                    argv: service.execution.argv.clone(),
-                    cwd: service.execution.cwd.clone(),
-                    env: service.execution.env.clone(),
-                    source: None,
-                    root: None,
-                    entry: None,
-                    spa_fallback: None,
-                    network: Default::default(),
-                    runtimes: service.execution.runtimes.clone(),
-                    state: service.state.clone(),
-                    bindings: service.bindings.clone(),
-                    peer_ports: if route.realization == PortableRealizationKind::ProcessServiceGroup
-                    {
-                        service.connect.clone()
-                    } else {
-                        Vec::new()
-                    },
-                })
-                .collect()
-        } else {
-            vec![BoundStep {
-                id: "serve".to_owned(),
-                protocol: match route.realization {
-                    PortableRealizationKind::LocalProcess => PROCESS_PROTOCOL.to_owned(),
-                    PortableRealizationKind::OciContainer
-                    | PortableRealizationKind::OciServiceGroup => OCI_PROTOCOL.to_owned(),
-                    PortableRealizationKind::StaticWeb => BROWSER_PROTOCOL.to_owned(),
-                    // Unreachable for a service group: the group branch above
-                    // builds those steps per service. Kept total so the
-                    // single-step builder never silently mislabels a route.
-                    PortableRealizationKind::ProcessServiceGroup => PROCESS_PROTOCOL.to_owned(),
-                },
-                op: "serve".to_owned(),
-                argv: route.execution.argv.clone(),
-                cwd: route.execution.cwd.clone(),
-                env: route.execution.env.clone(),
-                source: None,
-                root: None,
-                entry: None,
-                spa_fallback: None,
-                network: Default::default(),
-                runtimes: BTreeMap::new(),
-                state: Vec::new(),
-                bindings: Vec::new(),
-                peer_ports: Vec::new(),
-            }]
-        },
-        ports: if matches!(
-            route.realization,
-            PortableRealizationKind::OciServiceGroup | PortableRealizationKind::ProcessServiceGroup
-        ) {
-            route
-                .services
-                .iter()
-                .flat_map(|service| {
-                    service.ports.iter().map(|port| BoundPort {
-                        id: port.id.clone(),
-                        protocol: if port.id == "app.http" {
-                            HTTP_PROTOCOL
-                        } else {
-                            TCP_PROTOCOL
-                        }
-                        .to_owned(),
-                        from: service.id.clone(),
-                        guest_port: Some(port.guest_port),
-                        client_address_transport: port.client_address_transport,
-                    })
-                })
-                .collect()
-        } else {
-            vec![BoundPort {
-                id: "app.http".to_owned(),
-                protocol: HTTP_PROTOCOL.to_owned(),
-                from: "serve".to_owned(),
-                guest_port: Some(route.guest_port),
-                client_address_transport: None,
-            }]
-        },
-        state: spec
-            .filesystem_state
-            .as_ref()
-            .map(|state| ato_formation::authoring::BoundState {
-                id: state.id.clone(),
-                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
-                mount: state.mount.clone(),
-                access: StateAccess::ReadWrite,
-                mount_required: state.mount_required,
-            })
-            .into_iter()
-            .collect(),
-        workspace_build: None,
-        workspace_compiler: None,
-        source_oci: None,
-        effects: spec.effects,
-    };
     let contract = match frozen_contract {
         // The frozen K is carried as data: this builder neither re-derives nor
         // edits it. Its canonical bytes are checked against its own ref below.
@@ -1986,15 +1970,48 @@ fn build_routes_bundle(
         None => contract_from_spec(spec)?,
     };
     validate_application_bindings(&spec.bindings)?;
-    let application = ApplicationV2 {
-        schema: APPLICATION_V2_SCHEMA.to_owned(),
-        title: spec.title.clone(),
-        surfaces: vec![ApplicationSurfaceV2 {
-            id: "main".to_owned(),
-            port: "app.http".to_owned(),
-            path: spec.surface_path.clone(),
-        }],
-        bindings: spec.bindings.clone(),
+    // One Application object serves every route of the bundle. A static route
+    // can only be described by `ato.application/1` (its surface names a file
+    // tree entry), while a logical-port route is described by
+    // `ato.application/2`. A bundle that declares both therefore uses the v1
+    // object, which also validates for a logical-port route whose artifact is
+    // the workspace tree. A route set without a static route keeps the v2
+    // object every existing authored bundle already has.
+    let static_route = spec
+        .routes
+        .iter()
+        .find(|route| route.realization == PortableRealizationKind::StaticWeb);
+    let application_ref = match static_route {
+        Some(route) => {
+            let application = ApplicationV1 {
+                schema: APPLICATION_SCHEMA.to_owned(),
+                title: spec.title.clone(),
+                surfaces: vec![ApplicationSurfaceV1 {
+                    id: "main".to_owned(),
+                    port: "app.http".to_owned(),
+                    artifact_ref: tree_ref,
+                    entry: route
+                        .entry
+                        .clone()
+                        .ok_or_else(|| profile("a static-web route declares its entry document"))?,
+                    spa_fallback: route.spa_fallback.unwrap_or(false),
+                }],
+            };
+            add_structured(&mut objects, &application, APPLICATION_SCHEMA)?
+        }
+        None => {
+            let application = ApplicationV2 {
+                schema: APPLICATION_V2_SCHEMA.to_owned(),
+                title: spec.title.clone(),
+                surfaces: vec![ApplicationSurfaceV2 {
+                    id: "main".to_owned(),
+                    port: "app.http".to_owned(),
+                    path: spec.surface_path.clone(),
+                }],
+                bindings: spec.bindings.clone(),
+            };
+            add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?
+        }
     };
 
     // A different source cannot satisfy a source-bound K. The transformation
@@ -2024,7 +2041,7 @@ fn build_routes_bundle(
     }
     let mut derivation_refs = Vec::with_capacity(spec.routes.len());
     for route in &spec.routes {
-        let bound = derivation(route);
+        let bound = bound_authored_derivation(route, &route_inputs, spec, &mut objects)?;
         if let Some(frozen) = frozen_contract {
             ato_formation::authoring::validate_derivation_against_contract(&bound, frozen)
                 .map_err(|error| PortableApplicationError::Transformation {
@@ -2045,7 +2062,6 @@ fn build_routes_bundle(
             "authored routes have duplicate Derivation identity",
         ));
     }
-    let application_ref = add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?;
     let bundle = finish_bundle(
         objects,
         contract_ref,
@@ -2072,6 +2088,249 @@ fn build_routes_bundle(
     }
     let bytes = encode_portable_application_bundle(&bundle)?;
     Ok((bytes, bundle))
+}
+
+/// Bind one authored route into its canonical Derivation.
+///
+/// A native route's artifact is added to the bundle here, as an opaque blob,
+/// so the descriptor's `sha256:` is computed from exactly the bytes the bundle
+/// carries. Nothing is fetched later: a Run reads the artifact from the
+/// verified closure.
+fn bound_authored_derivation(
+    route: &PortableDynamicRouteSpec,
+    route_inputs: &[BoundInput],
+    spec: &PortableAuthoredBundleSpec,
+    objects: &mut BTreeMap<String, ObjectToEncode>,
+) -> Result<BoundDerivation, PortableApplicationError> {
+    let (steps, ports) = match route.realization {
+        PortableRealizationKind::StaticWeb => {
+            let entry = route
+                .entry
+                .clone()
+                .ok_or_else(|| profile("a static-web route declares its entry document"))?;
+            (
+                vec![BoundStep {
+                    id: "serve".to_owned(),
+                    protocol: BROWSER_PROTOCOL.to_owned(),
+                    op: "serve".to_owned(),
+                    argv: Vec::new(),
+                    cwd: String::new(),
+                    env: BTreeMap::new(),
+                    source: Some("workspace".to_owned()),
+                    root: None,
+                    entry: Some(entry),
+                    spa_fallback: Some(route.spa_fallback.unwrap_or(false)),
+                    network: Default::default(),
+                    runtimes: BTreeMap::new(),
+                    state: Vec::new(),
+                    bindings: Vec::new(),
+                    peer_ports: Vec::new(),
+                }],
+                vec![BoundPort {
+                    id: "app.http".to_owned(),
+                    protocol: HTTP_PROTOCOL.to_owned(),
+                    from: "serve".to_owned(),
+                    guest_port: None,
+                    client_address_transport: None,
+                }],
+            )
+        }
+        PortableRealizationKind::NativeDesktop => {
+            let native = route
+                .native
+                .as_ref()
+                .ok_or_else(|| profile("a native desktop route declares its artifact"))?;
+            let descriptor = bind_native_descriptor(native, objects)?;
+            (
+                vec![BoundStep {
+                    id: "serve".to_owned(),
+                    protocol: NATIVE_PROTOCOL.to_owned(),
+                    op: "serve".to_owned(),
+                    argv: Vec::new(),
+                    cwd: String::new(),
+                    env: BTreeMap::new(),
+                    source: None,
+                    root: None,
+                    entry: None,
+                    spa_fallback: None,
+                    network: Default::default(),
+                    runtimes: descriptor.runtimes(),
+                    state: Vec::new(),
+                    bindings: Vec::new(),
+                    peer_ports: Vec::new(),
+                }],
+                vec![BoundPort {
+                    id: "app.http".to_owned(),
+                    protocol: HTTP_PROTOCOL.to_owned(),
+                    from: "serve".to_owned(),
+                    guest_port: Some(route.guest_port),
+                    client_address_transport: None,
+                }],
+            )
+        }
+        PortableRealizationKind::OciServiceGroup | PortableRealizationKind::ProcessServiceGroup => {
+            let protocol = if route.realization == PortableRealizationKind::OciServiceGroup {
+                OCI_PROTOCOL
+            } else {
+                PROCESS_PROTOCOL
+            };
+            (
+                route
+                    .services
+                    .iter()
+                    .map(|service| BoundStep {
+                        id: service.id.clone(),
+                        protocol: protocol.to_owned(),
+                        op: "serve".to_owned(),
+                        argv: service.execution.argv.clone(),
+                        cwd: service.execution.cwd.clone(),
+                        env: service.execution.env.clone(),
+                        source: None,
+                        root: None,
+                        entry: None,
+                        spa_fallback: None,
+                        network: Default::default(),
+                        runtimes: service.execution.runtimes.clone(),
+                        state: service.state.clone(),
+                        bindings: service.bindings.clone(),
+                        peer_ports: if route.realization
+                            == PortableRealizationKind::ProcessServiceGroup
+                        {
+                            service.connect.clone()
+                        } else {
+                            Vec::new()
+                        },
+                    })
+                    .collect(),
+                route
+                    .services
+                    .iter()
+                    .flat_map(|service| {
+                        service.ports.iter().map(|port| BoundPort {
+                            id: port.id.clone(),
+                            protocol: if port.id == "app.http" {
+                                HTTP_PROTOCOL
+                            } else {
+                                TCP_PROTOCOL
+                            }
+                            .to_owned(),
+                            from: service.id.clone(),
+                            guest_port: Some(port.guest_port),
+                            client_address_transport: port.client_address_transport,
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::OciContainer => {
+            let protocol = if route.realization == PortableRealizationKind::LocalProcess {
+                PROCESS_PROTOCOL
+            } else {
+                OCI_PROTOCOL
+            };
+            (
+                vec![BoundStep {
+                    id: "serve".to_owned(),
+                    protocol: protocol.to_owned(),
+                    op: "serve".to_owned(),
+                    argv: route.execution.argv.clone(),
+                    cwd: route.execution.cwd.clone(),
+                    env: route.execution.env.clone(),
+                    source: None,
+                    root: None,
+                    entry: None,
+                    spa_fallback: None,
+                    network: Default::default(),
+                    runtimes: BTreeMap::new(),
+                    state: Vec::new(),
+                    bindings: Vec::new(),
+                    peer_ports: Vec::new(),
+                }],
+                vec![BoundPort {
+                    id: "app.http".to_owned(),
+                    protocol: HTTP_PROTOCOL.to_owned(),
+                    from: "serve".to_owned(),
+                    guest_port: Some(route.guest_port),
+                    client_address_transport: None,
+                }],
+            )
+        }
+    };
+    Ok(BoundDerivation {
+        native_surface: None,
+        runtime_port_operations: vec![],
+        variable_bindings: vec![],
+        requirements: ato_formation::requirements::ExecutionRequirements {
+            host: route.host.clone(),
+            startup: route.startup.clone(),
+            ..Default::default()
+        },
+        schema: BOUND_DERIVATION_SCHEMA.to_owned(),
+        inputs: route_inputs.to_vec(),
+        runtimes: route.execution.runtimes.clone(),
+        platforms: Vec::new(),
+        steps,
+        ports,
+        state: spec
+            .filesystem_state
+            .as_ref()
+            .map(|state| ato_formation::authoring::BoundState {
+                id: state.id.clone(),
+                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: state.mount.clone(),
+                access: StateAccess::ReadWrite,
+                mount_required: state.mount_required,
+            })
+            .into_iter()
+            .collect(),
+        workspace_build: None,
+        workspace_compiler: None,
+        source_oci: None,
+        effects: spec.effects,
+    })
+}
+
+/// Hash the carrier bytes and declare them as the artifact blob. The digest a
+/// descriptor states is therefore always the digest of what is in the bundle.
+fn bind_native_descriptor(
+    native: &PortableNativeRouteSpec,
+    objects: &mut BTreeMap<String, ObjectToEncode>,
+) -> Result<ato_formation::native_desktop::NativeDescriptor, PortableApplicationError> {
+    use ato_formation::native_desktop::{
+        NativeArch, NativeArtifactFormat, NativeDescriptor, NativeOs, NativeSignaturePolicy,
+    };
+    let os = NativeOs::parse(&native.os)
+        .ok_or_else(|| profile("a native route declares os = macos or windows"))?;
+    let arch = NativeArch::parse(&native.arch)
+        .ok_or_else(|| profile("a native route declares arch = aarch64 or x86_64"))?;
+    let format = match native.format.as_deref() {
+        None => NativeArtifactFormat::TarGz,
+        Some(value) => NativeArtifactFormat::parse(value)
+            .ok_or_else(|| profile("a native route declares format = tar.gz"))?,
+    };
+    let signature = match native.signature.as_deref() {
+        None => NativeSignaturePolicy::RequireValid,
+        Some(value) => NativeSignaturePolicy::parse(value)
+            .ok_or_else(|| profile("a native route declares a defined signature policy"))?,
+    };
+    let reference = add_blob(objects, &native.artifact)?;
+    Ok(NativeDescriptor {
+        os,
+        arch,
+        artifact: reference,
+        entry: native.entry.clone(),
+        format,
+        signature,
+    })
+}
+
+fn add_blob(
+    objects: &mut BTreeMap<String, ObjectToEncode>,
+    bytes: &[u8],
+) -> Result<String, PortableApplicationError> {
+    let reference = bundle_sha256(bytes);
+    objects.insert(reference.clone(), ObjectToEncode::Blob(bytes.to_vec()));
+    Ok(reference)
 }
 
 /// Materialize the validated tree into a new directory and re-read every byte
@@ -2211,15 +2470,258 @@ fn validate_native_route(
     Ok(realization)
 }
 
+/// What one declared Derivation's serving route validates to.
+///
+/// `native` carries the validated descriptor of an `ato.native@1` route. It is
+/// a declared fact, not a host verdict, so it is produced for every declared D
+/// regardless of the platform this validator runs on.
+struct RouteValidation {
+    realization: PortableRealizationKind,
+    native: Option<ValidatedNativeDescriptor>,
+}
+
+fn validate_initial_route_with_bundle(
+    bundle: &PortableApplicationBundle,
+    contract: &BoundContract,
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+) -> Result<RouteValidation, PortableApplicationError> {
+    // A native step is dispatched before the Adapter-profile branch because it
+    // is a serving protocol of its own, not a shape of the process/OCI profile.
+    if derivation
+        .steps
+        .iter()
+        .any(|step| step.protocol == NATIVE_PROTOCOL)
+    {
+        let native = validate_native_desktop_route(bundle, contract, application, derivation)?;
+        return Ok(RouteValidation {
+            realization: PortableRealizationKind::NativeDesktop,
+            native: Some(native),
+        });
+    }
+    if derivation.native_surface.is_some() {
+        return Ok(RouteValidation {
+            realization: validate_native_route(contract, application, derivation)?,
+            native: None,
+        });
+    }
+    Ok(RouteValidation {
+        realization: validate_route_profile(contract, application, derivation, false)?,
+        native: None,
+    })
+}
+
+/// The serving profile of a Derivation that needs no bundle object to decide.
+///
+/// Kept as the bundle-free entry point so existing profile tests (and any
+/// caller that already holds nothing but the canonical K/D values) keep their
+/// exact meaning. A native route is the one case that needs the bundle to
+/// resolve its artifact blob, and it is refused here rather than guessed.
+#[cfg(test)]
 fn validate_initial_route(
     contract: &BoundContract,
     application: &ValidatedApplication,
     derivation: &BoundDerivation,
 ) -> Result<PortableRealizationKind, PortableApplicationError> {
+    if derivation
+        .steps
+        .iter()
+        .any(|step| step.protocol == NATIVE_PROTOCOL)
+    {
+        return Err(profile(
+            "a native desktop route is validated together with the bundle that carries its artifact",
+        ));
+    }
     if derivation.native_surface.is_some() {
         return validate_native_route(contract, application, derivation);
     }
     validate_route_profile(contract, application, derivation, false)
+}
+
+/// The one-step `ato.native@1` profile.
+///
+/// Format validation only: every check here is host-independent, so a native D
+/// built for another platform still validates and never invalidates the bundle
+/// or another D. Platform, signature and sandbox admission happen later, and
+/// only for the explicitly selected D.
+fn validate_native_desktop_route(
+    bundle: &PortableApplicationBundle,
+    contract: &BoundContract,
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+) -> Result<ValidatedNativeDescriptor, PortableApplicationError> {
+    use ato_formation::native_desktop::NativeDescriptor;
+
+    if derivation.native_surface.is_some() {
+        return Err(profile(
+            "a native desktop route does not declare a native_surface Adapter",
+        ));
+    }
+    if !matches!(
+        application.schema.as_str(),
+        APPLICATION_SCHEMA | APPLICATION_V2_SCHEMA
+    ) || application.surfaces.len() != 1
+    {
+        return Err(profile(
+            "a native desktop route requires one Application surface",
+        ));
+    }
+    let surface = &application.surfaces[0];
+    if application.schema == APPLICATION_V2_SCHEMA {
+        validate_dynamic_surface(surface)?;
+    }
+    if !portable_inputs_supported(derivation)
+        || derivation
+            .inputs
+            .iter()
+            .any(|input| input.protocol != WORKSPACE_PROTOCOL)
+    {
+        return Err(profile(
+            "a native desktop route consumes one workspace input and no other input",
+        ));
+    }
+    if derivation.workspace_build.is_some()
+        || derivation.workspace_compiler.is_some()
+        || derivation.steps.len() != 1
+    {
+        return Err(profile(
+            "a native desktop route has no workspace build and exactly one serving step",
+        ));
+    }
+    let step = &derivation.steps[0];
+    if step.protocol != NATIVE_PROTOCOL
+        || step.op != "serve"
+        || !step.argv.is_empty()
+        || !step.cwd.is_empty()
+        || !step.env.is_empty()
+        || step.source.is_some()
+        || step.root.is_some()
+        || step.entry.is_some()
+        || step.spa_fallback.is_some()
+        || !step.state.is_empty()
+        || !step.bindings.is_empty()
+        || !step.peer_ports.is_empty()
+        || !step.network.is_denied()
+    {
+        return Err(profile(
+            "an ato.native@1 serving step declares only its descriptor and op = serve",
+        ));
+    }
+    let descriptor = NativeDescriptor::from_step(step)
+        .map_err(|error| profile(format!("native descriptor: {}", error.0)))?;
+    if derivation.requirements.host.is_some() {
+        return Err(profile(
+            "a native route states its platform as descriptor os/arch, not requirements.host",
+        ));
+    }
+    let workspace = workspace_input(derivation)
+        .ok_or_else(|| profile("native route omitted its workspace input"))?;
+    if surface
+        .artifact_ref
+        .as_ref()
+        .is_some_and(|reference| reference != &workspace.content_ref)
+    {
+        return Err(profile(
+            "a native route's surface artifact does not name its workspace input",
+        ));
+    }
+    if derivation.ports.is_empty() || derivation.ports.len() > MAX_NATIVE_PORTS {
+        return Err(profile(
+            "a native serving step exposes between one and eight logical Ports",
+        ));
+    }
+    let mut ports = Vec::with_capacity(derivation.ports.len());
+    let mut port_ids = BTreeSet::new();
+    for port in &derivation.ports {
+        let Some(guest_port) = port.guest_port else {
+            return Err(profile(
+                "every native logical Port declares the loopback port its app serves",
+            ));
+        };
+        if !port_ids.insert(port.id.as_str())
+            || port.protocol != HTTP_PROTOCOL
+            || port.from != step.id
+            || port.client_address_transport.is_some()
+            || guest_port == 0
+        {
+            return Err(profile(
+                "a native Port is one declared HTTP Port served by the native step",
+            ));
+        }
+        ports.push(ValidatedNativePort {
+            id: port.id.clone(),
+            guest_port,
+        });
+    }
+    if !port_ids.contains(surface.port.as_str()) {
+        return Err(profile(
+            "the Application surface does not name a Port this native step declares",
+        ));
+    }
+    if derivation.state.len() > 1 {
+        return Err(profile(
+            "a native route permits at most one filesystem state slot",
+        ));
+    }
+    for slot in &derivation.state {
+        if slot.protocol != STATE_FILESYSTEM_PROTOCOL
+            || slot.access != StateAccess::ReadWrite
+            || !valid_state_key(&slot.id)
+            || !valid_guest_mount(&slot.mount)
+            || slot.mount == "/app"
+        {
+            return Err(profile(
+                "native filesystem state must be one read-write ato.state.filesystem@1 slot at an absolute guest path other than /app",
+            ));
+        }
+        // A native route runs without a mount namespace on both platforms this
+        // increment models, so it must locate every slot by path. A slot that
+        // needs a fixed mount is a declaration this Adapter cannot honour, and
+        // admitting it would hand the app a path that does not exist.
+        if slot.requires_fixed_mount() {
+            return Err(profile(
+                "a native route delivers its state by path (mount_required = false)",
+            ));
+        }
+    }
+    for requirement in &derivation.requirements.network {
+        if requirement.phase != ato_formation::requirements::ExecutionPhase::Runtime {
+            return Err(profile(
+                "a native route declares only runtime egress; the artifact is not built at run time",
+            ));
+        }
+    }
+    if let Some(startup) = &derivation.requirements.startup {
+        startup.validate().map_err(|error| profile(error.0))?;
+        if !port_ids.contains(startup.port.as_str()) {
+            return Err(profile(
+                "startup names a Port this native step does not declare",
+            ));
+        }
+    }
+    validate_route_requirements(contract, workspace, &port_ids, &surface.port)?;
+
+    // The artifact is a declared blob of the digest the descriptor states. The
+    // closure check already proved the reference resolves; this proves it is
+    // an opaque blob inside the size bound, so no reader can mistake it for a
+    // structured object or fetch it at run time.
+    let artifact_ref = parse_ref(&descriptor.artifact, "native artifact reference")?;
+    let artifact = bundle
+        .descriptor(&artifact_ref)
+        .ok_or_else(|| PortableBundleError::IncompleteClosure(artifact_ref.clone()))?;
+    if artifact.kind != PortableBundleObjectKind::Blob || artifact.schema.is_some() {
+        return Err(profile(
+            "the native artifact reference must name an opaque blob",
+        ));
+    }
+    if artifact.size == 0 || artifact.size > MAX_NATIVE_ARTIFACT_BYTES {
+        return Err(profile(
+            "the native artifact is empty or larger than the supported bound",
+        ));
+    }
+    bundle.payload_bytes(&artifact_ref)?;
+
+    Ok(ValidatedNativeDescriptor { descriptor, ports })
 }
 
 fn validate_route_profile(
@@ -3427,11 +3929,30 @@ impl PortableReferenceExtractor for DerivationReferences {
 
     fn outgoing(&self, bytes: &[u8]) -> Result<Vec<ContentRef>, PortableBundleError> {
         let derivation = parse_for_extraction::<BoundDerivation>(BOUND_DERIVATION_SCHEMA, bytes)?;
-        derivation
+        let mut outgoing = derivation
             .inputs
             .into_iter()
             .map(|input| parse_for_extraction_ref(BOUND_DERIVATION_SCHEMA, &input.content_ref))
-            .collect()
+            .collect::<Result<Vec<_>, PortableBundleError>>()?;
+        // A native serving step pins its executable artifact as a bundle
+        // payload. Emitting it here is what puts the blob in the verified
+        // closure: without it the artifact would be an unreachable object and
+        // the route would have nothing to materialize.
+        for step in &derivation.steps {
+            if step.protocol != NATIVE_PROTOCOL {
+                continue;
+            }
+            let descriptor = ato_formation::native_desktop::NativeDescriptor::from_step(step)
+                .map_err(|error| PortableBundleError::ReferenceExtraction {
+                    schema: BOUND_DERIVATION_SCHEMA.to_owned(),
+                    reason: format!("ato.native@1 descriptor: {}", error.0),
+                })?;
+            outgoing.push(parse_for_extraction_ref(
+                BOUND_DERIVATION_SCHEMA,
+                &descriptor.artifact,
+            )?);
+        }
+        Ok(outgoing)
     }
 }
 
