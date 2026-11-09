@@ -138,6 +138,28 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
     .map_err(bundle_failure)?;
     let transport = ato_portable_application::bundle_sha256(&bundle_bytes);
 
+    // Formation publishes the v3 transport (ato.portable-application/1). The
+    // media type and schema_profile reported below name that profile, so a
+    // builder that starts returning v4 must be refused here rather than
+    // mislabelled as v3.
+    if bundle.index.version != ato_objects::PORTABLE_APPLICATION_BUNDLE_VERSION
+        || bundle.index.profile != ato_objects::PORTABLE_APPLICATION_PROFILE
+        || bundle.index.instance_snapshot_ref.is_some()
+        || bundle.portability.is_some()
+    {
+        return Err(formation_failure(
+            CAPSULE_V2_BUNDLE_INVALID,
+            FailureStage::Authoring,
+            format!(
+                "the portable transport is version {} profile {} (portability: {}, snapshot: {});                  Formation publishes only the v3 ato.portable-application/1 transport",
+                bundle.index.version,
+                bundle.index.profile,
+                bundle.portability.is_some(),
+                bundle.index.instance_snapshot_ref.is_some(),
+            ),
+        ).into());
+    }
+
     // 3. Which Derivation runs is the caller's decision, never a planner's.
     let derivation_ref = select_derivation(&bundle, request.requested_derivation)?;
     let routes = validate_all_derivations(&bundle).map_err(bundle_failure)?;
@@ -635,7 +657,7 @@ fn compose_result(
         "materializations": [{
             "kind": "portable_application",
             "content_ref": transport,
-            "media_type": ato_ipc::formation::PORTABLE_APPLICATION_MEDIA_TYPE,
+            "media_type": ato_ipc::formation::PORTABLE_APPLICATION_V3_MEDIA_TYPE,
             "digest": transport,
             "size_bytes": size_bytes,
             "target": {"triple": triple, "workspace_guest_root": PORTABLE_GUEST_ROOT},
@@ -647,7 +669,7 @@ fn compose_result(
             "kind": "portable_application",
             "derivation_ref": derivation_ref,
             "bundle_artifact_ref": artifact_ref,
-            "schema_profile": ato_ipc::formation::PORTABLE_APPLICATION_PROFILE,
+            "schema_profile": ato_ipc::formation::PORTABLE_APPLICATION_V3_PROFILE,
         }],
         "exported_ports": exported_ports,
         "readiness_contracts": readiness_contracts,
@@ -704,7 +726,7 @@ fn compose_result(
             "publication": ato_formation::request::Outcome::succeeded(),
         },
         "formation_kind": "portable_v2",
-        "schema_profile": ato_ipc::formation::PORTABLE_APPLICATION_PROFILE,
+        "schema_profile": ato_ipc::formation::PORTABLE_APPLICATION_V3_PROFILE,
         "portable_bundle_sha256": transport,
         "portable_bundle_artifact_ref": artifact_ref,
     }))

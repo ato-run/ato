@@ -37,9 +37,11 @@ object set must equal the reachable set exactly.
 Formation may seal a candidate when every requirement is either satisfied or
 deferred to a named runtime verifier. Interoperability succeeds only when an
 actual run returns `fully_satisfied=true`; a deferred result is not success.
-Both local and hosted execution emit
-`ato.contract-verification-receipt/1`. The receipt records the bundle hash,
-ContractRef, DerivationRef, target, and per-requirement verdicts.
+The receipt schema is chosen by the evidence it carries, not by the wire
+version: `/1` (base), `/2` (portability profile), `/3` (TLS observations) and
+`/4` (connector evidence). Local and hosted execution both emit one of these
+schemas; the receipt records the bundle hash, ContractRef, DerivationRef,
+target, and per-requirement verdicts.
 
 For an HTTP body digest, Formation proves the exact artifact path exists and
 defers the byte comparison. The runtime must issue the declared request, read

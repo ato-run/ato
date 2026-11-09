@@ -26,6 +26,10 @@
 //! - **No implicit selection.** A candidate bundle with zero or several
 //!   derivations does not get a guessed one; the caller names a declared
 //!   `DerivationRef` or receives the list.
+//! - **The transport profile is not silently changed.** A v4 frozen bundle
+//!   (`ato.portable-application/2`) is refused with
+//!   [`FROZEN_V4_TRANSPORT_UNSUPPORTED`] instead of being rewritten as a v3
+//!   candidate that has lost its portability manifest.
 //! - **Nothing is published.** The returned bytes are a local candidate; the
 //!   old bundle and its receipts are never touched.
 
@@ -71,6 +75,10 @@ pub const CANDIDATE_DERIVATION_NOT_COMPATIBLE: &str = "candidate_derivation_not_
 /// its portability manifest and the snapshot closure. Refused explicitly rather
 /// than silently dropping the snapshot.
 pub const FROZEN_INSTANCE_SNAPSHOT_UNSUPPORTED: &str = "frozen_instance_snapshot_unsupported";
+/// A frozen v4 transport (ato.portable-application/2) cannot be transformed by
+/// v0: the candidate is always v3, and silently dropping the portability
+/// manifest would change the transport profile while claiming to preserve K.
+pub const FROZEN_V4_TRANSPORT_UNSUPPORTED: &str = "frozen_v4_transport_unsupported";
 
 fn refusal(code: &'static str, detail: impl Into<String>) -> PortableApplicationError {
     PortableApplicationError::Transformation {
@@ -98,6 +106,9 @@ pub struct FrozenTransformTarget {
     /// The frozen index's Instance snapshot, when it has one. Carried as a
     /// fact here; transforming a snapshot-bearing bundle is refused in v0.
     pub instance_snapshot_ref: Option<String>,
+    /// The wire version of the frozen transport (3 or 4). v4 is refused by
+    /// transformation v0 rather than downgraded to a v3 candidate.
+    pub wire_version: u32,
 }
 
 /// A candidate bundle built from a new source under the frozen K, before any
@@ -144,19 +155,19 @@ pub fn frozen_contract_is_source_bound(contract: &BoundContract) -> bool {
 
 fn decode_frozen_bundle(
     frozen_bundle_bytes: &[u8],
-) -> Result<PortableApplicationBundle, PortableApplicationError> {
-    match decode_capsule_bundle_document(frozen_bundle_bytes).map_err(|error| {
+) -> Result<(PortableApplicationBundle, u32), PortableApplicationError> {
+    let document = decode_capsule_bundle_document(frozen_bundle_bytes).map_err(|error| {
         refusal(
             FROZEN_BUNDLE_NOT_PORTABLE_APPLICATION,
             format!("the frozen input is not a decodable Capsule bundle: {error}"),
         )
-    })? {
-        CapsuleBundleDocument::PortableApplicationV3(bundle)
-        | CapsuleBundleDocument::PortableApplicationV4(bundle) => Ok(bundle),
+    })?;
+    match document {
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => Ok((bundle, 3)),
+        CapsuleBundleDocument::PortableApplicationV4(bundle) => Ok((bundle, 4)),
         CapsuleBundleDocument::ComputationV2(_) => Err(refusal(
             FROZEN_BUNDLE_NOT_PORTABLE_APPLICATION,
-            "the frozen input is a computation-root v2 bundle, not a portable application \
-             (ato.portable-application/1) whose canonical Contract can be preserved",
+            "the frozen input is a computation-root v2 bundle, not a portable application              (ato.portable-application/1) whose canonical Contract can be preserved",
         )),
     }
 }
@@ -183,7 +194,7 @@ fn canonical_contract(contract: &BoundContract) -> Result<Vec<u8>, PortableAppli
 pub fn inspect_frozen_transform_target(
     frozen_bundle_bytes: &[u8],
 ) -> Result<FrozenTransformTarget, PortableApplicationError> {
-    let bundle = decode_frozen_bundle(frozen_bundle_bytes)?;
+    let (bundle, wire_version) = decode_frozen_bundle(frozen_bundle_bytes)?;
     let routes = validate_all_derivations(&bundle)?;
     let contract = routes
         .first()
@@ -221,6 +232,7 @@ pub fn inspect_frozen_transform_target(
         derivation_refs,
         source_closure_refs: source_closure_refs.into_iter().collect(),
         instance_snapshot_ref: bundle.index.instance_snapshot_ref.clone(),
+        wire_version,
     })
 }
 
@@ -253,6 +265,17 @@ pub fn build_transformation_candidate(
                  (ato.contract.workspace@1), so it only admits its original source; a different \
                  source cannot be transformed under it",
                 frozen.contract_ref
+            ),
+        ));
+    }
+    if frozen.wire_version == 4 {
+        return Err(refusal(
+            FROZEN_V4_TRANSPORT_UNSUPPORTED,
+            format!(
+                "the frozen bundle {} uses the v4 transport (ato.portable-application/2); \
+                 transformation v0 only builds v3 candidates and will not silently drop the \
+                 portability manifest. Re-export or repack the frozen bundle as v3 explicitly",
+                frozen.bundle_sha256
             ),
         ));
     }
@@ -293,7 +316,7 @@ pub fn build_transformation_candidate(
     // source's Derivation against it and refuses an incompatible route. Any
     // `ato.scenario/1` object the frozen K pins is carried from the frozen
     // bundle, never re-derived from the new source.
-    let frozen_bundle = decode_frozen_bundle(frozen_bundle_bytes)?;
+    let (frozen_bundle, _) = decode_frozen_bundle(frozen_bundle_bytes)?;
     let (candidate_bytes, candidate_bundle) = crate::build_derivation_candidate_bundle(
         source_root,
         &spec,
@@ -919,6 +942,34 @@ env = { ROUTE_VARIANT = "b" }
             Some(FROZEN_BUNDLE_NOT_PORTABLE_APPLICATION)
         );
     }
+    #[test]
+    fn a_v4_frozen_transport_is_refused_not_downgraded() {
+        let frozen_source = written_source(200, "print('old')\n", "python-a");
+        let (_, bundle) = build_authored_bundle_v2(frozen_source.path()).unwrap();
+        let (v4_bytes, v4) = crate::portability_export::repack_portable_dependencies(
+            &bundle,
+            ato_objects::PortableDependencyProfile::Cached,
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("repacked v4 transport");
+        assert_eq!(v4.index.version, 4);
+        assert_eq!(v4.index.profile, "ato.portable-application/2");
+
+        let new_source = written_source(200, "print('new')\n", "python-a");
+        let error = build_transformation_candidate(&v4_bytes, new_source.path(), None)
+            .expect_err("a v4 frozen transport must be refused, not downgraded");
+        assert_eq!(
+            error.transformation_code(),
+            Some(FROZEN_V4_TRANSPORT_UNSUPPORTED)
+        );
+        assert_eq!(
+            inspect_frozen_transform_target(&v4_bytes)
+                .expect("inspect v4")
+                .wire_version,
+            4
+        );
+    }
+
     #[test]
     fn a_frozen_scenario_contract_is_carried_to_the_candidate() {
         let frozen_source = scenario_source();
