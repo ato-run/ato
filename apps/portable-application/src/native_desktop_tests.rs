@@ -322,7 +322,7 @@ fn a_native_route_is_admitted_only_on_the_platform_it_was_built_for() {
     );
     let failure = admit(&bundle, windows, scratch.path(), &windows_host)
         .expect("the Windows Adapter is fail-closed until its mandatory policies are enforceable");
-    assert_eq!(failure.code, "native_sandbox_unavailable");
+    assert_eq!(failure.code, "native_windows_containment_unavailable");
 }
 
 #[test]
@@ -639,4 +639,75 @@ fn a_native_route_that_declares_tcp_egress_is_refused_at_admission() {
             .code,
         "native_egress_policy_unavailable"
     );
+}
+
+/// PR6: the Windows adapter is fail-closed on its own platform, while the
+/// bundle and every other Derivation stay valid and runnable.
+#[test]
+fn a_windows_native_route_is_fail_closed_on_windows_and_only_a_platform_mismatch_elsewhere() {
+    let (bytes, bundle) = sample_bundle();
+    let (_, validated) = validate_bytes_all(&bytes).unwrap();
+    let windows = validated
+        .iter()
+        .find(|route| {
+            route
+                .native
+                .as_ref()
+                .is_some_and(|n| n.descriptor.os.as_str() == "windows")
+        })
+        .unwrap();
+    let macos = validated
+        .iter()
+        .find(|route| {
+            route
+                .native
+                .as_ref()
+                .is_some_and(|n| n.descriptor.os.as_str() == "macos")
+        })
+        .unwrap();
+    let web = derivation_for(&validated, PortableRealizationKind::StaticWeb);
+    let scratch = tempfile::tempdir().unwrap();
+
+    // The bundle carrying the Windows D stays format-valid everywhere, and the
+    // Windows D itself is a valid selected route.
+    assert_eq!(validated.len(), 3);
+    let (_, selected) =
+        crate::validate_bytes_for_derivation(&bytes, windows.derivation_ref.as_str()).unwrap();
+    assert_eq!(selected.realization, PortableRealizationKind::NativeDesktop);
+
+    let macos_host = host_facts(
+        "macos",
+        "aarch64",
+        ato_host_facts::NativeFacts {
+            sandbox_tool: true,
+            sandbox_detail: None,
+            signature_tools: true,
+        },
+    );
+    let failure = admit(&bundle, windows, scratch.path(), &macos_host)
+        .expect("a Windows route is not admitted on macOS");
+    assert_eq!(failure.code, "native_platform_mismatch");
+    // The static route over the same K is runnable on that host.
+    assert!(admit(&bundle, web, scratch.path(), &macos_host).is_none());
+
+    let windows_host = host_facts(
+        "windows",
+        "x86_64",
+        ato_host_facts::NativeFacts {
+            sandbox_tool: false,
+            sandbox_detail: Some("AppContainer policy not implemented".to_owned()),
+            signature_tools: true,
+        },
+    );
+    // On its own platform the Windows D is refused with the named fail-closed
+    // reason: nothing is launched and no containment is claimed.
+    let failure = admit(&bundle, windows, scratch.path(), &windows_host)
+        .expect("Windows native admission must fail closed");
+    assert_eq!(failure.code, "native_windows_containment_unavailable");
+    assert_eq!(failure.stage, "admission");
+    // A macOS D is a platform mismatch there, and the static route still runs.
+    let failure = admit(&bundle, macos, scratch.path(), &windows_host)
+        .expect("a macOS route is not admitted on Windows");
+    assert_eq!(failure.code, "native_platform_mismatch");
+    assert!(admit(&bundle, web, scratch.path(), &windows_host).is_none());
 }
