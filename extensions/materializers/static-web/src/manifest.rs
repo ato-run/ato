@@ -16,8 +16,17 @@ use url::Url;
 /// Schema tag shared with the static-content Worker.
 pub const STATIC_WEB_MANIFEST_V1_SCHEMA: &str = "ato.static-web-manifest/v1";
 
-/// The only embedding origins v1 recognizes, in the only permitted order.
+/// The embedding origins a v1 manifest is produced with, in the only permitted
+/// order (byte-identical with the ato-api mirror and the ato-contents edge).
 pub const STATIC_WEB_FRAME_ANCESTORS_V1: &[&str] = &[
+    "https://ato.run",
+    "https://app.ato.run",
+    "https://stg-app.ato.run",
+];
+/// The set baked into manifests published before 2026-11; it still lists the
+/// retired Store origin. Accepted so those content-addressed manifests stay
+/// valid, never produced.
+pub const STATIC_WEB_FRAME_ANCESTORS_LEGACY_V1: &[&str] = &[
     "https://ato.run",
     "https://app.ato.run",
     "https://staging.store.ato.run",
@@ -358,13 +367,16 @@ fn validate_security(security: &StaticWebSecurityV1) -> Result<(), StaticWebMani
             "security.connect_src must be sorted in ASCII dictionary order".to_owned(),
         ));
     }
-    let expected = STATIC_WEB_FRAME_ANCESTORS_V1
-        .iter()
-        .map(|origin| (*origin).to_owned())
-        .collect::<Vec<_>>();
-    if security.frame_ancestors != expected {
+    let matches = |set: &[&str]| {
+        security
+            .frame_ancestors
+            .iter()
+            .map(String::as_str)
+            .eq(set.iter().copied())
+    };
+    if !matches(STATIC_WEB_FRAME_ANCESTORS_V1) && !matches(STATIC_WEB_FRAME_ANCESTORS_LEGACY_V1) {
         return Err(StaticWebManifestError::InvalidFrameAncestor(
-            "frame_ancestors must equal the fixed v1 trust set".to_owned(),
+            "frame_ancestors must equal a fixed v1 trust set".to_owned(),
         ));
     }
     Ok(())
@@ -429,6 +441,16 @@ mod tests {
         manifest.security.connect_src.reverse();
         assert!(manifest.validate().is_err());
         manifest.security.connect_src.reverse();
+        // The fixture carries the pre-2026-11 set; it stays accepted.
+        assert!(manifest.validate().is_ok());
+        let produced = StaticWebSecurityV1::producer_policy(Vec::new()).unwrap();
+        assert_eq!(produced.frame_ancestors, STATIC_WEB_FRAME_ANCESTORS_V1);
+        let legacy = manifest.security.frame_ancestors.clone();
+        manifest.security.frame_ancestors = produced.frame_ancestors.clone();
+        assert!(manifest.validate().is_ok());
+        manifest.security.frame_ancestors.reverse();
+        assert!(manifest.validate().is_err());
+        manifest.security.frame_ancestors = legacy;
         manifest.security.frame_ancestors.pop();
         assert!(manifest.validate().is_err());
     }
