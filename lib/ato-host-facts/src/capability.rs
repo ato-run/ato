@@ -109,8 +109,14 @@ pub struct HostFacts {
 /// would not satisfy the mandatory condition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NativeFacts {
-    /// The containment tool (macOS Seatbelt's `sandbox-exec`).
+    /// Whether Seatbelt could actually be applied here. Finding
+    /// `sandbox-exec` is not enough: a process that is already sandboxed (for
+    /// example one started by a runner that applies its own profile) cannot
+    /// nest a second profile, and `sandbox_apply` fails with EPERM.
     pub sandbox_tool: bool,
+    /// Why the sandbox probe failed, when it did. Never a claim of containment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_detail: Option<String>,
     /// The tooling that produces a signature verdict (macOS `codesign` and
     /// `spctl`). Windows Authenticode is an OS API, not a CLI tool.
     pub signature_tools: bool,
@@ -120,9 +126,14 @@ impl NativeFacts {
     pub fn probe() -> Self {
         #[cfg(target_os = "macos")]
         {
+            let (sandbox_tool, sandbox_detail) = probe_seatbelt();
             Self {
-                sandbox_tool: std::path::Path::new("/usr/bin/sandbox-exec").is_file(),
-                signature_tools: path_tool("codesign") && path_tool("spctl"),
+                sandbox_tool,
+                sandbox_detail,
+                // `spctl` lives in /usr/sbin, which is absent from the PATH of
+                // many GUI-launched processes; both are resolved the same way.
+                signature_tools: find_tool("codesign", &["/usr/bin/codesign"]).is_some()
+                    && find_tool("spctl", &["/usr/sbin/spctl"]).is_some(),
             }
         }
         #[cfg(target_os = "windows")]
@@ -131,6 +142,9 @@ impl NativeFacts {
                 // AppContainer/filesystem policy is not implemented yet, so the
                 // mandatory set is not enforceable here.
                 sandbox_tool: false,
+                sandbox_detail: Some(
+                    "no Windows native adapter can enforce the mandatory policies yet".to_owned(),
+                ),
                 // WinVerifyTrust is part of the OS.
                 signature_tools: true,
             }
@@ -139,6 +153,7 @@ impl NativeFacts {
         {
             Self {
                 sandbox_tool: false,
+                sandbox_detail: Some("this platform has no native desktop Adapter".to_owned()),
                 signature_tools: false,
             }
         }
@@ -151,13 +166,56 @@ impl Default for NativeFacts {
     }
 }
 
-fn path_tool(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|directory| {
+/// Resolve a tool on `PATH`, then through the explicit fallbacks.
+pub fn find_tool(name: &str, fallbacks: &[&str]) -> Option<std::path::PathBuf> {
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
             let candidate = directory.join(name);
-            candidate.is_file()
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    fallbacks
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|path| path.is_file())
+}
+
+/// Run a trivial Seatbelt application to learn whether this process may apply
+/// a profile at all. Finding the binary is not the capability.
+#[cfg(target_os = "macos")]
+fn probe_seatbelt() -> (bool, Option<String>) {
+    use std::sync::OnceLock;
+    static PROBE: OnceLock<(bool, Option<String>)> = OnceLock::new();
+    PROBE
+        .get_or_init(|| {
+            let Some(launcher) = find_tool("sandbox-exec", &["/usr/bin/sandbox-exec"]) else {
+                return (false, Some("sandbox-exec was not found".to_owned()));
+            };
+            match std::process::Command::new(launcher)
+                .args([
+                    "-p",
+                    "(version 1)(deny default)(allow process-exec)",
+                    "/usr/bin/true",
+                ])
+                .output()
+            {
+                Ok(output) if output.status.success() => (true, None),
+                Ok(output) => (
+                    false,
+                    Some(
+                        String::from_utf8_lossy(&output.stderr)
+                            .trim()
+                            .chars()
+                            .take(300)
+                            .collect(),
+                    ),
+                ),
+                Err(error) => (false, Some(format!("could not run sandbox-exec: {error}"))),
+            }
         })
-    })
+        .clone()
 }
 
 /// `arm64`/`amd64` are the same architectures under different spellings; a
@@ -348,10 +406,17 @@ pub fn execution_status(
         } else {
             if !host.native.sandbox_tool {
                 state = CapabilityState::Unavailable;
+                let detail = host
+                    .native
+                    .sandbox_detail
+                    .as_deref()
+                    .unwrap_or("the sandbox could not be applied");
                 reasons.push(Reason::new(
                     ReasonCode::NativeSandboxUnavailable,
-                    "the native route's mandatory filesystem/state/egress/lifecycle policy \
-                     cannot be enforced on this host, so it is not launched",
+                    format!(
+                        "the native route's mandatory filesystem/state/egress/lifecycle policy \
+                         cannot be enforced on this host ({detail}), so it is not launched"
+                    ),
                 ));
             }
             if !host.native.signature_tools {
@@ -402,6 +467,7 @@ mod tests {
             linux_sandbox: false,
             native: NativeFacts {
                 sandbox_tool: true,
+                sandbox_detail: None,
                 signature_tools: true,
             },
         }
