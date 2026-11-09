@@ -151,6 +151,7 @@ impl Default for NativeFacts {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn path_tool(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths).any(|directory| {
