@@ -16,134 +16,38 @@ account, `maicon-sinapsis`, on github.com). Verify with `git config user.email`
 
 ## Branching model
 
-### Long-lived branches
+Every change except an exceptional hotfix follows one release path:
 
 ```
-main          — latest stable release only (every commit = a published vX.Y.Z tag)
-dev           — normal development integration; next stable candidate
-nightly       — 0.7.0 MVP / experimental integration
-release/0.6   — 0.6.x maintenance branch
-release/0.5   — 0.5.x maintenance branch (limited / security-only support)
+feat/* | fix/* ──PR──▶ dev ──PR──▶ stg ──release PR──▶ main
+                         │
+                         └─ nightly = dev + feature-flagged work (rebased onto dev)
+feat/* (feature flag only) ──PR──▶ nightly
 ```
 
-Future: `release/0.7` is created when 0.7.0 ships; `nightly` then advances to 0.8 work.
+| Branch | Role | Rules |
+|--------|------|-------|
+| `dev` | Integration of all new work. Default PR base. | PR only, merge commits, no force push / deletion. |
+| `stg` | Staging candidate; shared Staging E2E. Updated by `dev → stg` PRs. | PR only, merge commits, no force push / deletion. |
+| `main` | Release-approved code. Updated only by `stg → main` release PRs. Merging ≠ production deploy. | PR only, merge commits, no force push / deletion. |
+| `nightly` | `dev` plus work that ships behind a feature flag. | Rebased onto `dev` continuously with `--force-with-lease`; never deleted. Nothing flows from `nightly` to `stg`/`main`; flagged work graduates by a normal PR to `dev`. |
 
-### Feature branch naming
+- Base new work on `origin/dev` and open the PR against `dev`. Only work that is
+  gated behind a feature flag may target `nightly` instead.
+- Hotfix (exceptional only): `hotfix/*` from `main` → PR to `main`, then
+  immediately back-merge `main` into `stg` and `dev` (nightly picks it up on its
+  next rebase). Record why the normal path was skipped in the PR.
+- After a PR merges, delete its branch. Long-lived branches are exactly
+  `main`, `stg`, `dev`, `nightly`.
 
-```
-feat/*, fix/*, hotfix/*
-```
+### Release promotion
 
-Short-lived, one issue or one tightly-scoped change per branch.
-Examples: `fix/0.6-desktop-stop-active-session`, `feat/0.7-orchestration-consent`.
-
-### Development flows
-
-```
-0.7 new features:
-  feat/0.7-* ──PR──▶ nightly ──▶ dev ──▶ main
-
-0.6 patch:
-  fix/0.6-* ──PR──▶ release/0.6 ──▶ main
-                               ↘ cherry-pick / forward-port ──▶ dev ──▶ nightly
-
-0.5 patch:
-  fix/0.5-* ──PR──▶ release/0.5 ──▶ main
-                               ↘ forward-port ──▶ release/0.6 ──▶ dev ──▶ nightly
-
-Urgent hotfix:
-  hotfix/* from main ──▶ main
-                      ↘ cherry-pick ──▶ affected release branches / dev / nightly
-```
-
-**Forward-port rule — always flow fixes oldest → newest:**
-
-```
-release/0.5 → release/0.6 → dev → nightly
-```
-
-Never backport from `nightly` to `release/*`. 0.7 API / placement / session
-changes must not bleed into maintenance branches.
-
-### Choosing the base branch for a worktree
-
-| Work type | Base branch |
-|-----------|-------------|
-| 0.7 new feature / experiment | `nightly` |
-| 0.6.x patch or regression fix | `release/0.6` |
-| 0.5.x critical / security fix | `release/0.5` |
-| Normal dev (non-version-specific) | `dev` |
-| Urgent hotfix from stable | `main` |
-
-```sh
-# Example: 0.6 patch
-git fetch origin
-git worktree add -b fix/0.6-issue-NNN-slug .worktrees/issue-NNN origin/release/0.6
-
-# Example: 0.7 feature
-git fetch origin
-git worktree add -b feat/0.7-issue-NNN-slug .worktrees/issue-NNN origin/nightly
-```
-
-### Versioning
-
-| Branch | Version scheme |
-|--------|----------------|
-| `release/0.5` | `v0.5.x` |
-| `release/0.6` | `v0.6.x` |
-| `nightly` | `v0.7.0-nightly.YYYYMMDD+sha` |
-| `dev` | `v0.7.0-dev` (unreleased) |
-| `main` | stable tags only (`vX.Y.Z`) |
-
-### Branch protection rules
-
-| Branch | Policy |
-|--------|--------|
-| `main` | No direct push. Release PR only. Full CI + manual smoke required. |
-| `release/0.6` | No direct push. Patch / security / regression fix only. No new features. |
-| `release/0.5` | No direct push. Critical / security fix only. Short-lived or limited support. |
-| `dev` | Normal integration. CI required. |
-| `nightly` | 0.7 experimental. Compile + test required. AODD may be degraded — log reason. |
-
-### Promoting to a release
-
-#### Patch release from `release/0.6` (or `release/0.5`)
-
-1. Verify the maintenance branch end-to-end.
-2. Bump versions in the four release crates: `cli`, `desktop`,
-   `nacelle`, `ato-desktop-xtask` (xtask must track desktop because
-   `env!("CARGO_PKG_VERSION")` is embedded into bundle filenames).
-3. `cargo update -p <crate> --offline` for each (refreshes Cargo.lock files).
-4. Commit `chore(release): bump to X.Y.Z` on the maintenance branch.
-5. Open a release PR from `release/0.6` → `main`. Merge, then tag:
-   ```sh
-   git tag -a vX.Y.Z && git push origin vX.Y.Z
-   ```
-6. Forward-port the bump commit to `dev` (and `nightly` if relevant).
-
-#### Promoting `dev` → `main` (0.7 stable / major release)
-
-1. Verify `dev` end-to-end (AODD receipt with `result: complete` is the gate —
-   see `.claude/skills/aodd/SKILL.md`).
-2. Bump versions in the four release crates and refresh Cargo.lock files.
-3. Commit `chore(release): bump to X.Y.Z` on `dev`.
-4. Fast-forward `main` from `dev`, push, then `git tag -a vX.Y.Z` and push the
-   tag. The `release.yml` and `desktop-release.yml` workflows handle artifact
-   publishing.
-5. Create `release/0.7` from the tagged commit; `nightly` advances to 0.8 work.
-
-#### 0.7 graduation options
-
-```
-Lightweight (no RC):   nightly → dev → main
-With RC period:        nightly → dev → release/0.7 → main
-```
-
-### Branch hygiene
-
-- After a PR merges, delete the feature branch (local + remote).
-- Long-lived branches: `main`, `dev`, `nightly`, `release/0.6`, `release/0.5`
-  (and future `release/0.7`). Any other branch that outlives its PR is a smell.
+1. `dev → stg` PR; verify on shared Staging.
+2. Bump versions in the release crates (`cli`, `desktop`, `nacelle`,
+   `ato-desktop-xtask` — xtask tracks desktop because bundle filenames embed
+   `CARGO_PKG_VERSION`), refresh Cargo.lock files, commit on `dev`, promote.
+3. `stg → main` release PR. After merge, tag `vX.Y.Z` on `main` and push the tag
+   (`release.yml` / `desktop-release.yml` publish artifacts).
 
 ## Parallel development with git worktrees
 
@@ -160,7 +64,7 @@ this and is gitignored (see `.gitignore`).
 - **Branch per worktree**: each worktree gets its own feature branch. Never
   share a branch between two worktrees (git enforces this anyway, but make
   it explicit).
-- **Base from `dev`**, not `main`: feature work integrates against `dev`.
+- **Base from `dev`**: feature work integrates against `dev` (flag-gated work may use `nightly`).
   ```sh
   git fetch origin
   git worktree add -b fix/issue-NNN-slug .worktrees/issue-NNN origin/dev
