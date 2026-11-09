@@ -5306,6 +5306,30 @@ status = 200
         );
     }
 
+    // PR0 contrast test: Capsule identity is ContractRef(K). The transport
+    // profile (v3 `/1`, v4 `/2`) and the packing are not part of K, so the
+    // same Contract must keep the same root reference across profiles while
+    // the whole-file digest changes.
+    #[test]
+    fn v3_and_v4_with_one_contract_share_the_capsule_id() {
+        let (v3_bytes, v3) = build_static_bundle(&fixture_root(), "Ato portability proof").unwrap();
+        let (v4_bytes, v4) = crate::portability_export::repack_portable_dependencies(
+            &v3,
+            ato_objects::PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(v3.index.version, 3);
+        assert_eq!(v3.index.profile, "ato.portable-application/1");
+        assert_eq!(v4.index.version, 4);
+        assert_eq!(v4.index.profile, "ato.portable-application/2");
+
+        assert_eq!(v4.index.root_contract_ref, v3.index.root_contract_ref);
+        assert_eq!(v4.index.derivations, v3.index.derivations);
+        assert_ne!(bundle_sha256(&v4_bytes), bundle_sha256(&v3_bytes));
+    }
+
     fn multi_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation")
     }
