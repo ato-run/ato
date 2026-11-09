@@ -1,0 +1,70 @@
+# Three realizations of one Identity K: a static web route, and a native
+# desktop route for each of the two platforms this increment models.
+#
+# The Contract is the same for every route: GET /proof.txt with an exact body
+# digest. Selecting any Derivation removes nothing from K, and the receipt for
+# each carries the same ContractRef and the same requirement set. The native
+# routes expose the logical Port `app.http` on a loopback endpoint the runtime
+# establishes; artifact integrity and launch evidence are additional execution
+# evidence and never satisfy a Contract observation by themselves.
+#
+# The artifacts under artifacts/ are tiny tar.gz payload blobs. They are covered by
+# the bundle's closure digest and are never fetched at run time. They are
+# unsigned (the macOS wrapper is a shell script, not a Developer ID binary), so
+# the macOS Derivation declares `require-valid-or-local-override`: an explicit
+# local override is recorded as evidence and never relaxes filesystem, state,
+# egress or lifecycle policy. The Windows artifact declares the default
+# fail-closed policy.
+schema = "ato.capsule/2"
+
+[application]
+title = "Native desktop multi-derivation"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "proof"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/proof.txt"
+status = 200
+body_digest = "sha256:9113378dd00cb2c890c36562b05589dfb3990ba989db0edc483e2afbe632865e"
+
+# Static web: serves the workspace tree, whose proof.txt is the observed body.
+[[derivation]]
+id = "web"
+use = "ato.browser@1"
+runtimes = {}
+entry = "index.html"
+
+[[derivation]]
+id = "native-macos"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "artifacts/app-macos.tar.gz"
+os = "macos"
+arch = "aarch64"
+entry = "app/run.sh"
+signature = "require-valid-or-local-override"
+
+[[derivation]]
+id = "native-windows"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "artifacts/app-windows.tar.gz"
+os = "windows"
+arch = "x86_64"
+entry = "app/run.bat"
+
+[effects]
+default = "pure"

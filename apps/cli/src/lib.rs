@@ -3289,6 +3289,7 @@ fn start_portable_attempt(
         PortableRealizationKind::OciContainer => "OCI container",
         PortableRealizationKind::OciServiceGroup => "OCI service group",
         PortableRealizationKind::ProcessServiceGroup => "native process group",
+        PortableRealizationKind::NativeDesktop => "native desktop",
     };
     let base_url = live
         .endpoint()

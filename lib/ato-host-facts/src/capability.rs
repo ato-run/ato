@@ -19,6 +19,10 @@ pub struct ExecutionRequirements {
     /// The `os/arch` platform the route's images are pinned to, when it declares
     /// one.
     pub platform: Option<String>,
+    /// The `os/arch` a native desktop Derivation is built for, when the
+    /// selected D is one. Kept apart from `platform` (an OCI image platform)
+    /// because the two are matched against different facts.
+    pub native_platform: Option<String>,
     /// Whether the route declares filesystem state.
     pub needs_state: bool,
     /// Whether the route's realization is a container realization.
@@ -39,6 +43,15 @@ impl ExecutionRequirements {
 
     pub fn process() -> Self {
         Self::default()
+    }
+
+    /// A native desktop route: the executable is built for exactly this
+    /// `os/arch`, and its mandatory policies need the host's native Adapter.
+    pub fn native_desktop(os: &str, arch: &str) -> Self {
+        Self {
+            native_platform: Some(format!("{os}/{arch}")),
+            ..Self::default()
+        }
     }
 
     pub fn with_state(mut self) -> Self {
@@ -85,6 +98,76 @@ pub struct HostFacts {
     /// Whether this host has the Linux containment a process route with state
     /// needs (bubblewrap + user namespaces).
     pub linux_sandbox: bool,
+    /// The OS-level tools a native desktop route's mandatory policies need.
+    pub native: NativeFacts,
+}
+
+/// What a native desktop Adapter can enforce on this host.
+///
+/// Measured, not assumed. A native route whose signature or sandbox policy
+/// cannot be enforced before launch is refused at admission: recording the gap
+/// would not satisfy the mandatory condition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NativeFacts {
+    /// The containment tool (macOS Seatbelt's `sandbox-exec`).
+    pub sandbox_tool: bool,
+    /// The tooling that produces a signature verdict (macOS `codesign` and
+    /// `spctl`). Windows Authenticode is an OS API, not a CLI tool.
+    pub signature_tools: bool,
+}
+
+impl NativeFacts {
+    pub fn probe() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self {
+                sandbox_tool: std::path::Path::new("/usr/bin/sandbox-exec").is_file(),
+                signature_tools: path_tool("codesign") && path_tool("spctl"),
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self {
+                // AppContainer/filesystem policy is not implemented yet, so the
+                // mandatory set is not enforceable here.
+                sandbox_tool: false,
+                // WinVerifyTrust is part of the OS.
+                signature_tools: true,
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Self {
+                sandbox_tool: false,
+                signature_tools: false,
+            }
+        }
+    }
+}
+
+impl Default for NativeFacts {
+    fn default() -> Self {
+        Self::probe()
+    }
+}
+
+fn path_tool(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| {
+            let candidate = directory.join(name);
+            candidate.is_file()
+        })
+    })
+}
+
+/// `arm64`/`amd64` are the same architectures under different spellings; a
+/// native descriptor uses `aarch64`/`x86_64`.
+fn normalize_arch(arch: &str) -> &str {
+    match arch {
+        "arm64" => "aarch64",
+        "amd64" => "x86_64",
+        other => other,
+    }
 }
 
 impl Default for HostFacts {
@@ -94,6 +177,7 @@ impl Default for HostFacts {
             arch: std::env::consts::ARCH.to_owned(),
             docker: DockerFacts::default(),
             linux_sandbox: cfg!(target_os = "linux"),
+            native: NativeFacts::probe(),
         }
     }
 }
@@ -111,6 +195,7 @@ impl HostFacts {
             arch: std::env::consts::ARCH.to_owned(),
             docker,
             linux_sandbox: cfg!(target_os = "linux"),
+            native: NativeFacts::probe(),
         }
     }
 
@@ -244,6 +329,42 @@ pub fn execution_status(
         }
     }
 
+    // A native desktop D names the exact os/arch its artifact was built for,
+    // and its mandatory policies need the host's native Adapter. Both are
+    // refusals, never warnings: the D either cannot run, or cannot run with
+    // the containment its declaration requires.
+    if let Some(native) = requirements.native_platform.as_deref() {
+        let (os, arch) = native.split_once('/').unwrap_or((native, ""));
+        if host.os != os || normalize_arch(&host.arch) != normalize_arch(arch) {
+            state = CapabilityState::Unavailable;
+            reasons.push(Reason::new(
+                ReasonCode::NativePlatformMismatch,
+                format!(
+                    "the selected native Derivation is built for {native}; this host is \
+                     {}/{}",
+                    host.os, host.arch
+                ),
+            ));
+        } else {
+            if !host.native.sandbox_tool {
+                state = CapabilityState::Unavailable;
+                reasons.push(Reason::new(
+                    ReasonCode::NativeSandboxUnavailable,
+                    "the native route's mandatory filesystem/state/egress/lifecycle policy \
+                     cannot be enforced on this host, so it is not launched",
+                ));
+            }
+            if !host.native.signature_tools {
+                state = CapabilityState::Unavailable;
+                reasons.push(Reason::new(
+                    ReasonCode::NativeSignatureVerificationUnavailable,
+                    "the native route's signature policy cannot be verified on this host, so \
+                     no verdict could be recorded before launch",
+                ));
+            }
+        }
+    }
+
     CapabilityStatus {
         capability: "route:execution".to_owned(),
         state,
@@ -279,6 +400,10 @@ mod tests {
             arch: "arm64".to_owned(),
             docker,
             linux_sandbox: false,
+            native: NativeFacts {
+                sandbox_tool: true,
+                signature_tools: true,
+            },
         }
     }
 
@@ -351,6 +476,7 @@ mod tests {
             arch: "x86_64".to_owned(),
             docker,
             linux_sandbox: true,
+            native: NativeFacts::default(),
         };
         assert_eq!(host.connector_choice(), None);
         let status = execution_status(
@@ -364,6 +490,70 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|reason| reason.code == ReasonCode::RemoteDaemonWorkspaceUnsupported)
+        );
+    }
+
+    #[test]
+    fn a_native_route_is_placed_only_on_the_platform_it_was_built_for() {
+        let host = desktop_host();
+        let status = execution_status(
+            &host,
+            &ExecutionRequirements::native_desktop("macos", "aarch64"),
+        );
+        assert_eq!(status.state, CapabilityState::Advertised);
+
+        let status = execution_status(
+            &host,
+            &ExecutionRequirements::native_desktop("macos", "x86_64"),
+        );
+        assert_eq!(status.state, CapabilityState::Unavailable);
+        assert!(
+            status
+                .reasons
+                .iter()
+                .any(|reason| reason.code == ReasonCode::NativePlatformMismatch)
+        );
+
+        let status = execution_status(
+            &host,
+            &ExecutionRequirements::native_desktop("windows", "x86_64"),
+        );
+        assert_eq!(status.state, CapabilityState::Unavailable);
+        assert!(
+            status
+                .reasons
+                .iter()
+                .any(|reason| reason.code == ReasonCode::NativePlatformMismatch)
+        );
+    }
+
+    #[test]
+    fn a_native_route_whose_mandatory_policy_cannot_be_enforced_is_refused() {
+        let mut host = desktop_host();
+        host.native.sandbox_tool = false;
+        let status = execution_status(
+            &host,
+            &ExecutionRequirements::native_desktop("macos", "aarch64"),
+        );
+        assert_eq!(status.state, CapabilityState::Unavailable);
+        assert!(
+            status
+                .reasons
+                .iter()
+                .any(|reason| reason.code == ReasonCode::NativeSandboxUnavailable)
+        );
+
+        let mut host = desktop_host();
+        host.native.signature_tools = false;
+        let status = execution_status(
+            &host,
+            &ExecutionRequirements::native_desktop("macos", "aarch64"),
+        );
+        assert_eq!(status.state, CapabilityState::Unavailable);
+        assert!(
+            status.reasons.iter().any(|reason| {
+                reason.code == ReasonCode::NativeSignatureVerificationUnavailable
+            })
         );
     }
 }
