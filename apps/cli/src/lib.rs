@@ -7,6 +7,7 @@ mod formation_exploration;
 mod formation_input;
 mod formation_session;
 mod formation_verify;
+mod hub;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;
@@ -144,6 +145,15 @@ enum Commands {
     Login(LoginArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
+    /// Distribute a formed `.capsule` through a capsulehub coordinator, or
+    /// retrieve one from a shared link.
+    ///
+    /// The coordinator is a blind ciphertext store: it never sees the capsule
+    /// contents or the link key. Validation happens here, on the client.
+    Hub {
+        #[command(subcommand)]
+        command: hub::HubCommands,
+    },
     /// Form a local directory into a Capsule: build each candidate, observe it
     /// satisfying its Contract, and keep the verified artifact.
     Form(Box<FormArgs>),
@@ -722,6 +732,7 @@ pub fn run() -> Result<()> {
         Commands::Export(args) => export_portable(args),
         Commands::Login(args) => login(args),
         Commands::Upload(args) => upload(args),
+        Commands::Hub { command } => hub::run(command),
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
         Commands::FormInspect {
