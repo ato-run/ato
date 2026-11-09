@@ -404,7 +404,7 @@ impl FormationApi {
             .bearer_auth(&self.token)
             .header(
                 "content-type",
-                ato_ipc::formation::PORTABLE_APPLICATION_MEDIA_TYPE,
+                ato_ipc::formation::PORTABLE_APPLICATION_V3_MEDIA_TYPE,
             )
             .header("x-ato-contract-ref", contract_ref)
             .header("x-ato-derivation-ref", derivation_ref)

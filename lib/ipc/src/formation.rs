@@ -902,9 +902,13 @@ fn sha256_ref(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-/// Media type of the sealed `ato.portable-application/1` wire v3 bundle a
-/// `portable_application` materialization carries.
-pub const PORTABLE_APPLICATION_MEDIA_TYPE: &str = "application/vnd.ato.portable-application.v3";
+/// Media type of the sealed wire v3 transport (ato.portable-application/1) that
+/// a portable_application materialization declares. Bundle readers accept v3
+/// and v4; Formation's portable output is v3 only.
+pub const PORTABLE_APPLICATION_V3_MEDIA_TYPE: &str =
+    "application/vnd.ato.portable-application.v3";
 
-/// The only portable-application bundle profile this build emits or accepts.
-pub const PORTABLE_APPLICATION_PROFILE: &str = "ato.portable-application/1";
+/// The profile a Formation portable output declares. Readers accept
+/// ato.portable-application/1 (v3) and ato.portable-application/2 (v4); this
+/// constant names the v3 output profile only, never the accepted set.
+pub const PORTABLE_APPLICATION_V3_PROFILE: &str = "ato.portable-application/1";
