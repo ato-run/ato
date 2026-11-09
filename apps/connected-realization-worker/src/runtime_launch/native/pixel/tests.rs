@@ -100,6 +100,458 @@ fn image() -> String {
     app_archive().image
 }
 
+#[test]
+fn private_formation_requires_a_prepared_owner_boundary() {
+    assert!(stub_helper().verify_private_formation_boundary().is_err());
+}
+
+#[test]
+fn application_archive_for_terminal_is_refused_before_startup() {
+    let image = format!("example.invalid/app@sha256:{}", "1".repeat(64));
+    let (spec, descriptor, _, d) = terminal::fixture(&image);
+    let root = terminal::scratch();
+    let context = terminal::context(root.path(), "");
+    let owner = terminal::owner(&spec);
+    let archive = PortableOciArchive {
+        image,
+        platform: "linux/amd64".into(),
+        bytes: String::new(),
+    };
+    let mut checked = false;
+    let result = NativeLeaseRun::start_with_archive(
+        &spec,
+        &d.derivation_ref().unwrap(),
+        &descriptor,
+        &context,
+        &owner,
+        terminal::config(),
+        None,
+        Some(archive),
+        &mut || {
+            checked = true;
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!checked);
+    assert!(!root.path().join("oci-runtime").exists());
+}
+
+#[test]
+#[ignore = "requires Linux Docker, the frozen Geany bundle, app and verified display helper"]
+fn actual_geany_owned_lease_uses_verified_application_archive() {
+    use std::io::{Read, Write};
+    let path = std::env::var_os("ATO_NATIVE_PIXEL_TEST_BUNDLE").expect("frozen bundle");
+    let (bundle, routes) =
+        ato_portable_application::validate_bytes_all(&std::fs::read(path).unwrap()).unwrap();
+    let [route] = routes.as_slice() else {
+        panic!("one route required")
+    };
+    let (fixture_spec, _, _, _) = fixture(&image());
+    let selected = route.derivation_ref.to_string();
+    let spec = ato_portable_application::portable_run::native_launch_spec(
+        &bundle,
+        &selected,
+        fixture_spec.context,
+        route.tree_ref.to_string(),
+    )
+    .unwrap();
+    let descriptor = NativeLaunchDeclaration::from_derivation(&route.derivation)
+        .unwrap()
+        .session_surface_descriptor("native-terminal")
+        .unwrap();
+    let root = terminal::scratch();
+    let workspace = root.path().join("workspace");
+    ato_portable_application::materialize_tree(&bundle, route, &workspace).unwrap();
+    let context = ResolvedRuntimeLaunchContext::new(
+        workspace,
+        "",
+        route.derivation.steps[0].env.clone(),
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let owner = terminal::owner(&spec);
+    let mut trusted = crate::native_pixel_config::NativePixelConfig::default();
+    trusted.enabled = true;
+    trusted.helper_archive = Some(
+        std::env::var_os("ATO_NATIVE_PIXEL_HELPER_ARCHIVE")
+            .unwrap()
+            .into(),
+    );
+    trusted.helper_image = Some("ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037".into());
+    trusted.cgroup_parent = Some(
+        std::env::var("ATO_NATIVE_PIXEL_TEST_CGROUP_PARENT")
+            .unwrap_or_else(|_| "system.slice".into()),
+    );
+    trusted.prepare(root.path(), 1).unwrap();
+    let helper = trusted.helper(root.path()).unwrap();
+    let mut config = terminal::config();
+    config.startup_timeout = Duration::from_secs(30);
+    let run = NativeLeaseRun::start_with_archive(
+        &spec,
+        &selected,
+        &descriptor,
+        &context,
+        &owner,
+        config,
+        Some(helper),
+        Some(app_archive()),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    let mut stream = std::net::TcpStream::connect(run.observation_addr()).unwrap();
+    stream
+        .write_all(b"GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    let body_start = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let runtime = ato_formation::verify::RuntimeObservation {
+        input_refs: BTreeMap::new(),
+        http: vec![RuntimeHttpObservation::from_response(
+            "app.probe",
+            "GET",
+            "/result",
+            200,
+            &response[body_start..],
+        )],
+        instance_snapshot_ref: None,
+        scenarios: vec![],
+        tls: vec![],
+    };
+    let verification = ato_formation::verify::verify_runtime(&route.contract, &runtime);
+    let completion = run.stop();
+    assert!(completion.stop.is_confirmed());
+    assert_no_resources(&owner);
+    assert!(verification.fully_satisfied(), "{verification:?}");
+}
+
+#[test]
+#[ignore = "requires Linux Docker, the frozen Geany bundle, app and verified display helper"]
+fn actual_geany_common_formation_attempt_verifies_original_contract_and_cleans_up() {
+    use ato_runtime_attempt::{
+        admission::EffectAuthorization,
+        build_sandbox::NetworkPolicy,
+        journal::{AttemptJournal, AttemptLedger, AttemptRecordState},
+        realize::StopClass,
+    };
+    let path = std::env::var_os("ATO_NATIVE_PIXEL_TEST_BUNDLE").expect("frozen bundle");
+    let bytes = std::fs::read(path).unwrap();
+    let (bundle, routes) = ato_portable_application::validate_bytes_all(&bytes).unwrap();
+    let [route] = routes.as_slice() else {
+        panic!("one route required")
+    };
+    let selected = route.derivation_ref.to_string();
+    let (fixture_spec, _, _, _) = fixture(&image());
+    let mut owner = terminal::owner(&fixture_spec);
+    owner.lease_id = "native-formation-attempt".into();
+    let root = terminal::scratch();
+    let attempt_root = root.path().join(&owner.lease_id);
+    std::fs::create_dir(&attempt_root).unwrap();
+    let mut trusted = crate::NativePixelConfig::default();
+    trusted.enabled = true;
+    trusted.helper_archive = Some(
+        std::env::var_os("ATO_NATIVE_PIXEL_HELPER_ARCHIVE")
+            .unwrap()
+            .into(),
+    );
+    trusted.helper_image = Some("ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037".into());
+    trusted.cgroup_parent = Some(
+        std::env::var("ATO_NATIVE_PIXEL_TEST_CGROUP_PARENT")
+            .unwrap_or_else(|_| "system.slice".into()),
+    );
+    trusted.prepare(root.path(), 1).unwrap();
+    let helper = trusted.helper(root.path()).unwrap();
+    let mut config = terminal::config();
+    config.startup_timeout = Duration::from_secs(30);
+    let contract_ref = route.contract_ref.to_string();
+    let profile = ato_formation::request::RuntimeProfile::default();
+    let journal = AttemptJournal::new(root.path().join("attempt-journal"));
+    let permit = journal
+        .acquire("native-formation-request", &owner.lease_id)
+        .unwrap();
+    let binding_environment = BTreeMap::new();
+    let result = super::super::formation::run_portable_native_attempt(
+        &ato_portable_application::portable_run::PortableBundleAttempt {
+            bundle_bytes: &bytes,
+            bundle: &bundle,
+            derivation_ref: &selected,
+            runtime_root: &attempt_root,
+            cache_root: root.path(),
+            sandbox_shim: Path::new("/unused"),
+            sandbox_subcommand: "unused",
+            request_id: "native-formation-request",
+            attempt_id: &owner.lease_id,
+            label: "native",
+            runtime_id: "native-formation-local",
+            profile: &profile,
+            authorization: EffectAuthorization::Unattended,
+            network: NetworkPolicy::Denied,
+            receipt_target: VerificationTargetKind::FormationRuntime,
+            run_id: None,
+            binding_environment: &binding_environment,
+            interrupt: None,
+            host: None,
+        },
+        owner.clone(),
+        helper,
+        app_archive(),
+        config,
+        permit,
+    )
+    .unwrap();
+    assert_eq!(result.attempt_record, AttemptRecordState::Finished);
+    assert_eq!(result.stop, Some(StopClass::Confirmed));
+    if result.attempt.status != ato_formation::request::AttemptStatus::Verified {
+        eprintln!(
+            "GEANY_FORMATION_FAILURE failure={:?} receipt={:?}",
+            result.attempt.failure, result.attempt.receipt
+        );
+    }
+    assert_eq!(
+        result.attempt.status,
+        ato_formation::request::AttemptStatus::Verified
+    );
+    let receipt = result.attempt.receipt.expect("original-K receipt");
+    assert!(receipt.fully_satisfied);
+    assert_eq!(receipt.contract_ref, contract_ref);
+    assert_eq!(receipt.derivation_ref, selected);
+    assert_eq!(
+        receipt.target.kind,
+        VerificationTargetKind::FormationRuntime
+    );
+    assert_eq!(
+        receipt
+            .execution
+            .as_ref()
+            .and_then(|e| e.attempt_id.as_deref()),
+        Some(owner.lease_id.as_str())
+    );
+    assert_eq!(route.contract.contract_ref().unwrap(), contract_ref);
+    assert_no_resources(&owner);
+    assert!(
+        crate::runtime_launch::recovery::RunJournal::new(
+            root.path(),
+            &owner.runner_id,
+            &owner.slot_id
+        )
+        .unwrap()
+        .load()
+        .unwrap()
+        .is_empty()
+    );
+    eprintln!(
+        "GEANY_FORMATION_ATTEMPT contract_ref={contract_ref} derivation_ref={selected} fully_satisfied=true record=finished cleanup=confirmed"
+    );
+}
+
+/// Geany's expected first-key frame was observed independently before this
+/// attempt, with the pinned app and display-helper images in the ops record.
+/// This direct adapter test is not a hosted Run or a Formation receipt.
+#[tokio::test]
+#[ignore = "requires explicit Geany and display-helper OCI archives on Linux"]
+async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
+    let (fixture_spec, _, _, _) = fixture(&image());
+    assert_eq!(
+        image(),
+        "ato-source/afd3c22b6d2e@sha256:b4ff17ab8c8c58f36644c35826b09396724c765994eba1eaa8a2837322e575ce"
+    );
+    let path = std::env::var_os("ATO_NATIVE_PIXEL_TEST_BUNDLE")
+        .expect("explicit frozen Geany portable bundle");
+    let bytes = std::fs::read(path).unwrap();
+    let (bundle, routes) = ato_portable_application::validate_bytes_all(&bytes).unwrap();
+    let [route] = routes.as_slice() else {
+        panic!("one route required")
+    };
+    let k = &route.contract;
+    let d = &route.derivation;
+    let original_k = k.contract_ref().unwrap();
+    assert_eq!(
+        original_k,
+        "sha256:0118d5aab2d8e3bb86e87a627a3a0405ff675e006862b6cd0c337efecf4df442"
+    );
+    let expected_d = std::env::var("ATO_NATIVE_PIXEL_TEST_DERIVATION").unwrap_or_else(|_| {
+        "sha256:0dc98f01b28bdc159adcb0b0223d80ea23c5a9314ae62a6741c48a3ab9723aa7".into()
+    });
+    assert_eq!(d.derivation_ref().unwrap(), expected_d);
+    let declaration = NativeLaunchDeclaration::from_derivation(d).unwrap();
+    let descriptor = declaration
+        .session_surface_descriptor("native-terminal")
+        .unwrap();
+    let spec = ato_portable_application::portable_run::native_launch_spec(
+        &bundle,
+        &d.derivation_ref().unwrap(),
+        fixture_spec.context,
+        route.tree_ref.to_string(),
+    )
+    .unwrap();
+    let root = terminal::scratch();
+    let workspace = root.path().join("workspace");
+    ato_portable_application::materialize_tree(&bundle, route, &workspace).unwrap();
+    let context = ResolvedRuntimeLaunchContext::new(
+        workspace,
+        "",
+        BTreeMap::from([("HOME".into(), "/tmp".into())]),
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let owner = terminal::owner(&spec);
+    let mut config = terminal::config();
+    config.startup_timeout = Duration::from_secs(30);
+    let (_alive, rx) = watch::channel(true);
+    let helper = helper();
+    assert_eq!(
+        helper.image,
+        "ato-source/96366216222f@sha256:b30c92090d1c1fac7209cfe77beb32d0c8631627e47f283848d9ad03a58e9037"
+    );
+    let no_network = std::env::var("ATO_NATIVE_PIXEL_TEST_NO_NETWORK").as_deref() == Ok("1");
+    let run = start_pixel_with_network(
+        &spec,
+        &d.derivation_ref().unwrap(),
+        &descriptor,
+        &context,
+        &owner,
+        config,
+        helper,
+        Some(app_archive()),
+        rx,
+        no_network,
+    )
+    .await
+    .unwrap();
+    let observation: anyhow::Result<(Vec<u8>, Vec<u8>)> = async {
+        if no_network {
+            let host: std::net::IpAddr = std::env::var("ATO_NATIVE_PIXEL_TEST_HOST_IP")?.parse()?;
+            anyhow::ensure!(
+                !host.is_loopback() && !host.is_unspecified(),
+                "host probe needs a non-loopback address"
+            );
+            let listener = std::net::TcpListener::bind((host, 0))?;
+            let target = listener.local_addr()?;
+            // Prove the exact listener is actually reachable on the host.
+            std::net::TcpStream::connect_timeout(&target, Duration::from_secs(1))?;
+            let evidence = run.execution_evidence();
+            let ids = std::iter::once(
+                evidence
+                    .container_id
+                    .as_deref()
+                    .context("app container missing")?,
+            )
+            .chain(
+                evidence
+                    .services
+                    .iter()
+                    .map(|service| service.container_id.as_str()),
+            );
+            for id in ids {
+                let shell = std::process::Command::new("docker")
+                    .args(["exec", id, "/bin/bash", "-c", "exit 0"])
+                    .status()?;
+                anyhow::ensure!(shell.success(), "test shell unavailable in container");
+                let script = format!("echo test > /dev/tcp/{host}/{}", target.port());
+                let output = std::process::Command::new("docker")
+                    .args(["exec", id, "/bin/bash", "-c", &script])
+                    .output()?;
+                anyhow::ensure!(
+                    !output.status.success(),
+                    "network-free container reached host listener"
+                );
+            }
+            eprintln!(
+                "GEANY_NETWORK_NONE host_listener_reachable=true containers_cannot_connect=true"
+            );
+        }
+        let mut stream = tokio::net::TcpStream::connect(run.observation_addr()).await?;
+        stream
+            .write_all(b"GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+        anyhow::ensure!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "probe did not return 200"
+        );
+        let body_start = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .context("missing HTTP header terminator")?
+            + 4;
+        let before = response.split_off(body_start);
+        use std::os::fd::AsRawFd;
+        let dir = std::fs::File::open(root.path().join("oci-runtime/display/rfb"))?;
+        let socket = PathBuf::from(format!("/proc/self/fd/{}/display.sock", dir.as_raw_fd()));
+        let mut relay = RfbRelay::start(socket).await?;
+        let frame = netd::rfb_probe::capture_private_rfb_frame_with_settle(
+            relay.addr,
+            640,
+            480,
+            &[0x68],
+            640 * 480 * 4,
+            Duration::from_millis(500),
+            Duration::from_secs(5),
+        )
+        .await;
+        let stopped = relay.stop().await;
+        let frame = frame?;
+        stopped?;
+        if let Some(path) = std::env::var_os("ATO_NATIVE_GEANY_FRAME") {
+            let mut ppm = b"P6\n640 480\n255\n".to_vec();
+            for pixel in frame.chunks_exact(4) {
+                ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            }
+            std::fs::write(path, ppm)?;
+        }
+        let after = pixel_probe_result(&frame).map_err(anyhow::Error::msg)?;
+        Ok((before, after))
+    }
+    .await;
+    let completion = run.stop().await;
+    assert!(completion.stop.is_confirmed());
+    assert_no_resources(&owner);
+    let observation = observation.expect("Geany frame observation failed");
+    eprintln!(
+        "GEANY_OBSERVED_FIRST_KEY {}",
+        String::from_utf8_lossy(&observation.0).trim()
+    );
+    let runtime = ato_formation::verify::RuntimeObservation {
+        input_refs: BTreeMap::new(),
+        http: vec![RuntimeHttpObservation::from_response(
+            "app.probe",
+            "GET",
+            "/result",
+            200,
+            &observation.0,
+        )],
+        instance_snapshot_ref: None,
+        scenarios: Vec::new(),
+        tls: Vec::new(),
+    };
+    let verification = ato_formation::verify::verify_runtime(k, &runtime);
+    assert!(verification.fully_satisfied(), "{verification:?}");
+    let mut wrong_runtime = runtime.clone();
+    wrong_runtime.http[0] =
+        RuntimeHttpObservation::from_response("app.probe", "GET", "/result", 200, b"surface ready");
+    assert!(!ato_formation::verify::verify_runtime(k, &wrong_runtime).fully_satisfied());
+    wrong_runtime.http[0] =
+        RuntimeHttpObservation::from_response("app.native", "GET", "/result", 200, &observation.0);
+    assert!(!ato_formation::verify::verify_runtime(k, &wrong_runtime).fully_satisfied());
+    assert_eq!(k.contract_ref().unwrap(), original_k);
+    assert_ne!(
+        observation.0, observation.1,
+        "Geany frame did not change after input"
+    );
+    eprintln!(
+        "GEANY_FRAME_OBSERVATION before={} after={} local_original_k_satisfied=true contract_ref={original_k}",
+        String::from_utf8_lossy(&observation.0).trim(),
+        String::from_utf8_lossy(&observation.1).trim()
+    );
+}
+
 async fn get(addr: SocketAddr) -> Vec<u8> {
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     s.write_all(b"GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")

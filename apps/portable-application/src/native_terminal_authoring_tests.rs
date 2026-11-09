@@ -92,6 +92,67 @@ fn build(dir: &Path) -> (Vec<u8>, PortableApplicationBundle) {
 }
 
 #[test]
+fn a_pixel_declaration_produces_a_validated_native_bundle() {
+    let manifest = MANIFEST
+        .replace("kind = \"terminal\"\nprofile = \"ato.terminal-surface.v1\"\ncols = 120\nrows = 40", "kind = \"pixel_stream\"\nprofile = \"ato.pixel-stream.v1\"\nwidth = 640\nheight = 480")
+        .replace("probe_input = \"go\\n\"\nprobe_output_delimiter = \"END\"\nprobe_max_output_bytes = 4096", "probe_keysyms = [103]\nprobe_max_frame_bytes = 1228800")
+        .replace("use = \"ato.pty@1\"", "use = \"ato.tcp@1\"");
+    let dir = source(&manifest);
+    let path = dir.path().join(CAPSULE_FILE_NAME);
+    assert!(build_native_terminal_bundle(dir.path(), &path, "Pixel").is_err());
+    let (bytes, bundle) = build_native_bundle(dir.path(), &path, "Pixel").unwrap();
+    let (_, routes) = validate_bytes_all(&bytes).unwrap();
+    assert_eq!(
+        bundle.index.root_contract_ref,
+        routes[0].contract_ref.to_string()
+    );
+    assert_eq!(
+        routes[0].contract.requirements[0].body_digest.as_deref(),
+        Some(BODY_DIGEST)
+    );
+    let reports = validator_agent::tests_support::route_reports(&routes).unwrap();
+    assert_eq!(reports[0].realization, "native_oci_container");
+    assert!(matches!(
+        reports[0].session_surface,
+        Some(ato_ipc::session_surface::SessionSurfaceDescriptor::PixelStream { .. })
+    ));
+    let context = ato_ipc::runtime_launch::LaunchContextV1 {
+        run_id: "run".into(),
+        compute_id: "compute".into(),
+        compute_schema_id: "schema".into(),
+        compute_instance_id: "instance".into(),
+    };
+    let selected = routes[0].derivation_ref.to_string();
+    let launch = crate::portable_run::native_launch_spec(
+        &bundle,
+        &selected,
+        context.clone(),
+        "materialization".into(),
+    )
+    .unwrap();
+    let ato_ipc::runtime_launch::LaunchRealizationV1::Oci(oci) = launch.realization else {
+        panic!("OCI expected")
+    };
+    let declared = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(
+        oci.native_surface.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(declared.derivation_ref, selected);
+    assert_eq!(declared.ports.as_ref(), Some(&routes[0].derivation.ports));
+    assert_eq!(oci.image_reference.as_deref(), Some(IMAGE));
+    assert_eq!(oci.argv.as_ref(), Some(&routes[0].derivation.steps[0].argv));
+    assert!(
+        crate::portable_run::native_launch_spec(
+            &bundle,
+            &format!("sha256:{}", "0".repeat(64)),
+            context,
+            "materialization".into()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn a_declared_terminal_surface_becomes_a_native_oci_bundle_the_validator_names() {
     let dir = source(MANIFEST);
     let (bytes, bundle) = build(dir.path());

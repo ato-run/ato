@@ -494,7 +494,10 @@ impl SourceOciRealizer<'_> {
                             .context("frozen base binding missing")
                     })
                     .collect::<Result<_>>()?,
-                declared_transport_port: d.ports[0].guest_port.context("OCI guest port missing")?,
+                declared_transport_port: Some(
+                    d.ports[0].guest_port.context("OCI guest port missing")?,
+                ),
+                image_only: false,
                 authorized_state: d
                     .state
                     .iter()
@@ -780,6 +783,7 @@ impl SourceOciRealizer<'_> {
                     .into(),
             ),
             services: vec![],
+            ..Default::default()
         };
         Ok(Realized {
             candidate,

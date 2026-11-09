@@ -96,6 +96,13 @@ pub trait CandidateRealizer {
         false
     }
 
+    /// Native execution remains refused unless this trusted realizer names
+    /// the exact Adapter profile and Derivation it can own. Its `admit` must
+    /// still establish physical availability and resource boundaries.
+    fn native_surface_binding(&self) -> Option<(&str, &str)> {
+        None
+    }
+
     /// Whether this realizer can run the candidate on this Runtime
     /// (containment, toolchains, build network). `None` when it can. Asked
     /// before the start record, so a refusal runs nothing.

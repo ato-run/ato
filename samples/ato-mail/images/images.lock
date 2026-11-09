@@ -4,11 +4,16 @@
 
 [stalwart]
 upstream = "docker.io/stalwartlabs/stalwart@sha256:d898e81b67b9f0f989b2aaec05f4c36fe9faa18fd570f8303ccef05c6127cdfe"
-image = "ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7ab2749baa5bcd15a56b51f90ba99aea0c3256ce04d4f7e5e3076e8e0"
+image = "ghcr.io/koh0920/stalwart-staging@sha256:25723c49ee4968d410f78b35041eb1c79f28fe0cc2afe2487a5c58f99f90629b"
 platform = "linux/amd64"
 
 [missive]
 source = "https://github.com/Govcraft/missive@7716106b6c4638426169dac264657437914bbe7f"
-image = "ghcr.io/koh0920/govcraft-missive@sha256:f2dd0d893a3fbf83812e35df3510d3fbc9846e9dd31a8a84899cf5fa818682fe"
+image = "ghcr.io/koh0920/govcraft-missive@sha256:3dc89054b1a85ae6ad07e5cf1dc483bffa0ba7253b40fd8274803c765b04bc7c"
 platform = "linux/amd64"
 patches = ["missive-nondefault-port.patch", "missive-identity-submission-capability.patch"]
+
+[adapter]
+source = "samples/stalwart-missive-mail/transport-adapter"
+image = "ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:c7142ba99cbde02e3f392cffe052f7702a259c01501fc727549acec1908eb557"
+platform = "linux/amd64"

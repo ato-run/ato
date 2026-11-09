@@ -186,6 +186,8 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
 ]
 
@@ -289,6 +291,7 @@ dependencies = [
  "ato-contracts",
  "ato-formation",
  "ato-formation-worker",
+ "ato-host-facts",
  "ato-ipc",
  "ato-kernel",
  "ato-local-execution",
@@ -367,6 +370,7 @@ dependencies = [
  "ato-computation",
  "ato-contracts",
  "ato-formation",
+ "ato-host-facts",
  "ato-ipc",
  "ato-kernel",
  "ato-materializer-api",
@@ -382,6 +386,7 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "clap",
+ "ed25519-dalek",
  "fs2",
  "hex",
  "hmac",
@@ -466,6 +471,7 @@ dependencies = [
  "ato-adapter-api",
  "ato-adapter-oci",
  "ato-adapter-process",
+ "ato-connected-realization-worker",
  "ato-formation",
  "ato-ipc",
  "ato-materializer-static-web",
@@ -496,6 +502,16 @@ dependencies = [
  "libc",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-host-facts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -710,6 +726,7 @@ dependencies = [
  "ato-adapter-process",
  "ato-computation",
  "ato-formation",
+ "ato-host-facts",
  "ato-ipc",
  "ato-materializer-static-web",
  "ato-objects",

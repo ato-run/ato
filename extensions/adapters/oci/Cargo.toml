@@ -14,6 +14,14 @@ layer = "adapter"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
+tar = "0.4"
+
+[[bin]]
+# The relay container's half of the protocol. It is built for a static Linux
+# target by `scripts/build-oci-relay.sh` and embedded in this adapter.
+name = "ato-oci-relay"
+path = "src/bin/ato-oci-relay.rs"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }

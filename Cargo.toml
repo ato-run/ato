@@ -16,6 +16,7 @@ members = [
     "lib/runtime-attempt",
     "lib/objects",
     "lib/sandbox",
+    "lib/ato-host-facts",
     "lib/tls-observe",
     "extensions/adapters/api",
     "extensions/adapters/process",
@@ -88,6 +89,12 @@ authors = ["ato-run"]
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Keep local debug/test caches small: line tables keep backtraces usable
+# while dropping full debuginfo, and incremental artifacts are not kept.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
 
 [profile.release]
 opt-level = "s"

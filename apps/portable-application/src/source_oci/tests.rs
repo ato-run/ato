@@ -330,7 +330,8 @@ fn request(dir: &Path) -> SourceOciRequest {
         dockerfile: "Dockerfile".into(),
         platform: "linux/amd64".into(),
         base_images: vec![base_input(dir, "base.tar", "base:1", BaseShape::default())],
-        declared_transport_port: 8080,
+        declared_transport_port: Some(8080),
+        image_only: false,
         authorized_state: vec![],
         policy: SourceOciPolicy {
             network: "none".into(),
@@ -373,11 +374,49 @@ fn code(r: Result<Materialized>) -> &'static str {
 }
 
 #[test]
+fn image_only_requires_explicit_profile_and_does_not_invent_an_http_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(dir.path());
+    let legacy = serde_json::to_value(&req).unwrap();
+    assert_eq!(legacy["declared_transport_port"], 8080);
+    assert!(legacy.get("image_only").is_none());
+    req.declared_transport_port = None;
+    assert!(req.validate().is_err());
+    req.image_only = true;
+    req.validate().unwrap();
+    let result = run(
+        &req,
+        &fake(
+            image_config(json!([]), json!({}), "amd64"),
+            BuildOutcome::Built,
+        ),
+        &dir.path().join("image-only"),
+    )
+    .unwrap();
+    assert!(result.capsule_toml.is_none());
+    assert_eq!(result.provenance["image_only"], true);
+    assert_eq!(
+        result.provenance["http_suitability"],
+        "not applicable: image only"
+    );
+    assert!(result.archive.is_file());
+    let exposed = run(
+        &req,
+        &fake(ok_config(), BuildOutcome::Built),
+        &dir.path().join("exposed"),
+    );
+    assert_eq!(code(exposed), "source_oci_port_unmatched");
+    req.declared_transport_port = Some(8080);
+    assert!(req.validate().is_err());
+}
+
+#[test]
 fn materializes_a_verified_archive_and_an_authored_route_the_existing_packer_accepts() {
     let dir = tempfile::tempdir().unwrap();
     let req = request(dir.path());
     let b = fake(ok_config(), BuildOutcome::Built);
     let m = run(&req, &b, &dir.path().join("out")).unwrap();
+    assert!(m.provenance.get("image_only").is_none());
     assert!(m.image_reference.starts_with("ato-source/") && m.image_reference.contains("@sha256:"));
     let calls = b.calls.borrow().join("\n");
     assert!(calls.contains(&format!(
@@ -388,7 +427,12 @@ fn materializes_a_verified_archive_and_an_authored_route_the_existing_packer_acc
     assert_eq!(m.provenance["outputs"]["image_config"]["cmd"][0], "python3");
     // The image's own WorkingDir is projected into D, not overridden.
     assert_eq!(m.provenance["working_dir"], "/srv");
-    assert!(m.capsule_toml.contains(r#""oci.working_dir" = "/srv""#));
+    assert!(
+        m.capsule_toml
+            .as_deref()
+            .unwrap()
+            .contains(r#""oci.working_dir" = "/srv""#)
+    );
     // The pinned root, the selected platform manifest and the loaded config
     // are recorded separately.
     let base = &m.provenance["inputs"]["base_images"][0];
@@ -401,7 +445,7 @@ fn materializes_a_verified_archive_and_an_authored_route_the_existing_packer_acc
     // The existing ato.capsule/2 packer + portable OCI profile accept the route.
     let src = dir.path().join("authored");
     std::fs::create_dir(&src).unwrap();
-    std::fs::write(src.join("capsule.toml"), &m.capsule_toml).unwrap();
+    std::fs::write(src.join("capsule.toml"), m.capsule_toml.as_deref().unwrap()).unwrap();
     std::fs::write(
         src.join(PROVENANCE_FILE),
         serde_json::to_vec_pretty(&m.provenance).unwrap(),
@@ -888,11 +932,21 @@ fn image_volumes_need_exactly_the_authorized_state_slots() {
     // Exactly equal: the route declares the slot at that path.
     let b = fake(with_volume(json!({"/data":{}})), BuildOutcome::Built);
     let m = run(&r, &b, &dir.path().join("o4")).unwrap();
-    assert!(m.capsule_toml.contains("[[state]]\nid = \"data\""));
-    assert!(m.capsule_toml.contains("mount = \"/data\""));
+    assert!(
+        m.capsule_toml
+            .as_deref()
+            .unwrap()
+            .contains("[[state]]\nid = \"data\"")
+    );
+    assert!(
+        m.capsule_toml
+            .as_deref()
+            .unwrap()
+            .contains("mount = \"/data\"")
+    );
     let src = dir.path().join("authored");
     std::fs::create_dir(&src).unwrap();
-    std::fs::write(src.join("capsule.toml"), &m.capsule_toml).unwrap();
+    std::fs::write(src.join("capsule.toml"), m.capsule_toml.as_deref().unwrap()).unwrap();
     std::fs::write(src.join(PROVENANCE_FILE), b"{}").unwrap();
     let (_, bundle) = crate::build_authored_bundle_v2(&src).unwrap();
     crate::validate_all_derivations(&bundle).unwrap();

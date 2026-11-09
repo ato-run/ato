@@ -34,6 +34,12 @@ pub struct NativePixelConfig {
         env = "ATO_NATIVE_PIXEL_HELPER_ARCHIVE"
     )]
     pub helper_archive: Option<PathBuf>,
+    /// Optional operator-owned application archive; never supplied by a lease.
+    #[arg(
+        long = "native-pixel-app-archive",
+        env = "ATO_RUNNER_NATIVE_PIXEL_APP_ARCHIVE"
+    )]
+    pub app_archive: Option<PathBuf>,
     #[arg(
         long = "native-pixel-helper-image",
         env = "ATO_NATIVE_PIXEL_HELPER_IMAGE"
@@ -74,6 +80,7 @@ impl Default for NativePixelConfig {
             text_paste: false,
             framebuffer_resize: false,
             helper_archive: None,
+            app_archive: None,
             helper_image: None,
             cgroup_parent: None,
             helper_memory_mib: 256,
@@ -93,7 +100,7 @@ impl fmt::Debug for NativePixelConfig {
     }
 }
 impl NativePixelConfig {
-    pub(crate) fn prepare(&mut self, work_root: &Path, slots: u32) -> Result<()> {
+    pub fn prepare(&mut self, work_root: &Path, slots: u32) -> Result<()> {
         ensure!(
             self.enabled || (!self.text_paste && !self.framebuffer_resize),
             "native_surface_controls_unsupported: controls require enabled Native Pixel"
@@ -204,6 +211,18 @@ impl NativePixelConfig {
             false
         }
     }
+    pub(crate) fn private_boundary_available(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.prepared
+                .as_ref()
+                .is_some_and(|helper| helper.verify_private_formation_boundary().is_ok())
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
     #[cfg(unix)]
     pub(crate) fn prepared_helper(
         &self,
@@ -211,7 +230,7 @@ impl NativePixelConfig {
         self.prepared.clone()
     }
     #[cfg(unix)]
-    pub(crate) fn helper(
+    pub fn helper(
         &self,
         work_root: &Path,
     ) -> Result<crate::runtime_launch::native::pixel::PixelHelper> {
@@ -289,6 +308,17 @@ mod tests {
             OperatorArgs::try_parse_from(["worker", "--native-pixel-text-paste=arbitrary"])
                 .is_err()
         );
+        let args = OperatorArgs::try_parse_from([
+            "worker",
+            "--native-pixel-app-archive",
+            "/operator/pinned-application.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.pixel.app_archive.as_deref(),
+            Some(Path::new("/operator/pinned-application.json"))
+        );
+        assert!(!format!("{:?}", args.pixel).contains("pinned-application"));
     }
     #[test]
     fn controls_default_off_and_disabled_pixel_cannot_silently_ignore_opt_in() {

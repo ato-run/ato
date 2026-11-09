@@ -329,6 +329,7 @@ impl ValidatorAgent {
                     portability_profile: None,
                     embedded_oci_image_loaded: None,
                     services: Vec::new(),
+                    ..Default::default()
                 });
         execution.endpoint = job.endpoint.clone();
         execution.lease_id = job.lease_id.clone();
@@ -384,6 +385,19 @@ impl ValidatorAgent {
                 bundle_id: job.bundle_id.clone(),
                 failure_code: code.to_owned(),
             });
+        }
+        // Publication has a separate ingress-protection gate. Ask the control
+        // plane to probe this exact live Run while this claim is still held;
+        // it persists the result independently of the Contract receipt. Older
+        // control planes may not implement the endpoint, and a failed probe
+        // must not change an otherwise valid private Run's Contract verdict.
+        if point.receipt.fully_satisfied
+            && job.run_id.is_some()
+            && job.lease_id.is_some()
+            && deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(10)
+            && let Err(error) = self.api.probe_ingress_protection(&job)
+        {
+            eprintln!("[validator] ingress protection was not recorded: {error}");
         }
         self.api.ack_runtime(&job, &point.receipt)?;
         Ok(ValidatorRunOutcome::HostedVerified {
@@ -1122,6 +1136,7 @@ fn validated_routes(
                     }
                     PortableRealizationKind::OciContainer => "oci",
                     PortableRealizationKind::OciServiceGroup => "oci_service_group",
+                    PortableRealizationKind::ProcessServiceGroup => "process_service_group",
                 },
                 runtimes: route.derivation.runtimes.clone(),
                 argv: step.argv.clone(),
@@ -1593,6 +1608,31 @@ impl HttpValidatorApi {
         Ok(())
     }
 
+    /// Request independent, server-owned publication evidence. The response
+    /// body is deliberately not treated as a Contract observation or as proof:
+    /// only the control plane's persisted evidence can satisfy publication.
+    fn probe_ingress_protection(&self, job: &ValidationJob) -> Result<()> {
+        let path = format!(
+            "/v1/capsule-bundles/runtime-verification-jobs/{}/ingress-protection",
+            job.job_id
+        );
+        let response = self
+            .claimed(
+                self.client
+                    .post(self.url(&path))
+                    .timeout(Duration::from_secs(8)),
+                &job.claim_id,
+            )
+            .send()
+            .map_err(|_| anyhow::anyhow!("probe transport failed"))?;
+        ensure!(
+            response.status().is_success(),
+            "probe returned {}",
+            response.status()
+        );
+        Ok(())
+    }
+
     fn ack_runtime(
         &self,
         job: &ValidationJob,
@@ -1956,6 +1996,7 @@ mod tests {
                 protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: "/data".to_owned(),
                 access: StateAccess::ReadWrite,
+                mount_required: None,
             });
         let report = validated_routes(&[route]).unwrap().remove(0);
         assert_eq!(report.state.as_ref().unwrap().state_key, "data");

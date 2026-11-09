@@ -5,9 +5,9 @@ and [Core Concepts](docs/concepts/application-contracts.md). Read
 [AGENTS.md](AGENTS.md) and the applicable component instructions before
 changing code. The workspace above this repository has additional instructions.
 
-Use a separate feature/fix branch and an independent PR. Check the current
-integration policy in the repository and owning workspace before selecting
-a base; legacy `dev` work and the newer `stg` release flow must not be confused.
+Use a separate feature/fix branch and an independent PR against `dev`
+(release path: `dev → stg → main`; feature-flagged work may target `nightly`).
+See the branching model in [AGENTS.md](AGENTS.md).
 Check branch, HEAD, remote and worktree state, and preserve other tasks'
 uncommitted work. Main promotion requires a separately reviewed release
 candidate, and merge permission does not imply deployment permission.

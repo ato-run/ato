@@ -2,9 +2,12 @@ name: Rust CI
 
 on:
   push:
-    branches: [main, dev, nightly]
+    branches: [main, dev, nightly, stg]
   pull_request:
-    branches: [main, dev, nightly]
+    # `feat/**` is here so a stacked PR (base = its parent feature branch)
+    # still gets the workspace, clippy and arch-check evidence; without it a
+    # stack silently stops being tested after its first PR.
+    branches: [main, dev, nightly, stg, "feat/**"]
   workflow_dispatch:
 
 permissions:
@@ -127,6 +130,17 @@ jobs:
       # Unix path policy, and Linux/macOS daemon lifecycle. Windows host code
       # is still compiled and linted here; portable CLI behavior is exercised
       # separately by cli-ci on windows-latest.
+      - name: OCI service group direct E2E (Linux)
+        # The macOS acceptance runs the same bundle through the relay; this is
+        # the direct path on a native Linux daemon. The Linux runner has Docker,
+        # so a missing daemon is a failure rather than a skip.
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        env:
+          ATO_REQUIRE_DOCKER_E2E: "1"
+        run: >-
+          cargo test -p ato-cli --test oci_service_group_direct --locked --
+          --nocapture
+
       - name: Clippy workspace
         if: ${{ !cancelled() && runner.os != 'Windows' }}
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -134,3 +148,40 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: cargo clippy --workspace --exclude guest-agent --exclude ato-firecracker-guest-image --all-targets --all-features --locked -- -D warnings
       - run: cargo run --locked -p arch-check
+
+  relay-binaries:
+    name: relay binaries (rebuilt from source)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          # Pinned: a different zig may link a different (equivalent) binary,
+          # and the point of this job is that the committed bytes are
+          # reproducible from this source.
+          version: 0.15.2
+      - name: Rebuild the relay binaries
+        run: |
+          cp extensions/adapters/oci/relay-bin/SHA256SUMS "$RUNNER_TEMP/committed-SHA256SUMS"
+          scripts/build-oci-relay.sh
+      - name: Upload the rebuilt binaries
+        # The canonical binaries are the ones this job produces: a binary built
+        # on another host is equivalent but not byte-identical, so the check is
+        # reproducible-build-to-committed-bytes *on this runner image*.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-binaries
+          path: |
+            extensions/adapters/oci/relay-bin/linux-arm64/ato-oci-relay
+            extensions/adapters/oci/relay-bin/linux-amd64/ato-oci-relay
+            extensions/adapters/oci/relay-bin/SHA256SUMS
+      - name: Compare with the committed binaries
+        run: |
+          echo "--- committed" && cat "$RUNNER_TEMP/committed-SHA256SUMS"
+          echo "--- rebuilt" && cat extensions/adapters/oci/relay-bin/SHA256SUMS
+          diff -u "$RUNNER_TEMP/committed-SHA256SUMS" extensions/adapters/oci/relay-bin/SHA256SUMS
+          git diff --exit-code -- extensions/adapters/oci/relay-bin

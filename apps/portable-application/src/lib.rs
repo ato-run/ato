@@ -50,6 +50,7 @@ pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
 pub mod portable_run;
+pub mod process_group;
 pub mod source_oci;
 pub mod transformation;
 pub mod validator_agent;
@@ -301,6 +302,9 @@ pub enum PortableRealizationKind {
     OciContainer,
     /// Several `ato.oci@1` serving steps of one Derivation, on one Runner.
     OciServiceGroup,
+    /// Several `ato.process@1` serving steps of one Derivation, supervised
+    /// together by the local Runtime.
+    ProcessServiceGroup,
 }
 
 impl ValidatedPortableApplication {
@@ -323,7 +327,8 @@ impl ValidatedPortableApplication {
                 }
                 PortableRealizationKind::LocalProcess
                 | PortableRealizationKind::OciContainer
-                | PortableRealizationKind::OciServiceGroup => {
+                | PortableRealizationKind::OciServiceGroup
+                | PortableRealizationKind::ProcessServiceGroup => {
                     ato_runtime_attempt::spec::CandidateShape::Process
                 }
             },
@@ -356,6 +361,7 @@ impl PortableRealizationKind {
             Self::LocalProcess => "Local Process",
             Self::OciContainer => "OCI Container",
             Self::OciServiceGroup => "OCI Service Group",
+            Self::ProcessServiceGroup => "Native Process Group",
         }
     }
 }
@@ -392,6 +398,10 @@ pub struct PortableExecutionSpec {
 pub struct PortableFilesystemStateSpec {
     pub id: String,
     pub mount: String,
+    /// `Some(false)` when the route locates the slot through
+    /// `ATO_STATE_PATH_<ID>` instead of requiring a fixed mount. `None` keeps
+    /// the fixed-mount declaration every existing bundle already has.
+    pub mount_required: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -421,7 +431,7 @@ pub struct PortableDynamicRouteSpec {
     pub startup: Option<ato_formation::requirements::StartupRequirement>,
 }
 
-/// One serving step of an OCI service group.
+/// One serving step of a service group (OCI or native process).
 #[derive(Debug, Clone)]
 pub struct PortableServiceRouteSpec {
     pub id: String,
@@ -430,6 +440,9 @@ pub struct PortableServiceRouteSpec {
     pub ports: Vec<PortableServicePortSpec>,
     pub state: Vec<String>,
     pub bindings: Vec<String>,
+    /// Port ids of earlier services this service may connect to. Empty unless
+    /// a native process service group declares the edge.
+    pub connect: Vec<String>,
 }
 
 /// One Port a service serves, and how the Runner addresses its clients.
@@ -1511,6 +1524,9 @@ fn authored_bundle_spec_v2(
                 PortableDerivationKindV2::OciServiceGroup => {
                     PortableRealizationKind::OciServiceGroup
                 }
+                PortableDerivationKindV2::ProcessServiceGroup => {
+                    PortableRealizationKind::ProcessServiceGroup
+                }
             },
             execution: PortableExecutionSpec {
                 runtimes: derivation.runtimes,
@@ -1541,6 +1557,7 @@ fn authored_bundle_spec_v2(
                         .collect(),
                     state: service.state,
                     bindings: service.bindings,
+                    connect: service.connect,
                 })
                 .collect(),
             host: derivation.host,
@@ -1558,6 +1575,7 @@ fn authored_bundle_spec_v2(
             .map(|state| PortableFilesystemStateSpec {
                 id: state.id,
                 mount: state.mount,
+                mount_required: state.mount_required,
             }),
         bindings: draft
             .bindings
@@ -1616,7 +1634,7 @@ fn authored_bundle_spec_v2(
     })
 }
 
-/// Compile one `ato.capsule/1` route that declares a Terminal `native_surface`
+/// Compile one `ato.capsule/1` route that declares a native `native_surface`
 /// into the canonical wire v3 bundle the hosted validator imports.
 ///
 /// The manifest is authoring input and is never embedded in the artifact tree.
@@ -1627,6 +1645,24 @@ pub fn build_native_terminal_bundle(
     source_root: &Path,
     manifest: &Path,
     title: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_native_bundle_inner(source_root, manifest, title, true)
+}
+
+/// Compile a declared Terminal or Pixel Surface into a portable bundle.
+pub fn build_native_bundle(
+    source_root: &Path,
+    manifest: &Path,
+    title: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_native_bundle_inner(source_root, manifest, title, false)
+}
+
+fn build_native_bundle_inner(
+    source_root: &Path,
+    manifest: &Path,
+    title: &str,
+    terminal_only: bool,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if title.trim().is_empty() {
         return Err(profile("application title must not be empty"));
@@ -1640,7 +1676,7 @@ pub fn build_native_terminal_bundle(
         draft.derivation.native_surface.clone().ok_or_else(|| {
             profile("native bundle requires a [derive.native_surface] declaration")
         })?;
-    if native.surface.kind() != "terminal" {
+    if terminal_only && native.surface.kind() != "terminal" {
         return Err(profile(
             "this bundle profile carries one declared Terminal native Surface",
         ));
@@ -1832,13 +1868,21 @@ fn build_routes_bundle(
         inputs: route_inputs.clone(),
         runtimes: route.execution.runtimes.clone(),
         platforms: Vec::new(),
-        steps: if route.realization == PortableRealizationKind::OciServiceGroup {
+        steps: if matches!(
+            route.realization,
+            PortableRealizationKind::OciServiceGroup | PortableRealizationKind::ProcessServiceGroup
+        ) {
+            let protocol = if route.realization == PortableRealizationKind::OciServiceGroup {
+                OCI_PROTOCOL
+            } else {
+                PROCESS_PROTOCOL
+            };
             route
                 .services
                 .iter()
                 .map(|service| BoundStep {
                     id: service.id.clone(),
-                    protocol: OCI_PROTOCOL.to_owned(),
+                    protocol: protocol.to_owned(),
                     op: "serve".to_owned(),
                     argv: service.execution.argv.clone(),
                     cwd: service.execution.cwd.clone(),
@@ -1851,6 +1895,12 @@ fn build_routes_bundle(
                     runtimes: service.execution.runtimes.clone(),
                     state: service.state.clone(),
                     bindings: service.bindings.clone(),
+                    peer_ports: if route.realization == PortableRealizationKind::ProcessServiceGroup
+                    {
+                        service.connect.clone()
+                    } else {
+                        Vec::new()
+                    },
                 })
                 .collect()
         } else {
@@ -1861,6 +1911,10 @@ fn build_routes_bundle(
                     PortableRealizationKind::OciContainer
                     | PortableRealizationKind::OciServiceGroup => OCI_PROTOCOL.to_owned(),
                     PortableRealizationKind::StaticWeb => BROWSER_PROTOCOL.to_owned(),
+                    // Unreachable for a service group: the group branch above
+                    // builds those steps per service. Kept total so the
+                    // single-step builder never silently mislabels a route.
+                    PortableRealizationKind::ProcessServiceGroup => PROCESS_PROTOCOL.to_owned(),
                 },
                 op: "serve".to_owned(),
                 argv: route.execution.argv.clone(),
@@ -1874,9 +1928,13 @@ fn build_routes_bundle(
                 runtimes: BTreeMap::new(),
                 state: Vec::new(),
                 bindings: Vec::new(),
+                peer_ports: Vec::new(),
             }]
         },
-        ports: if route.realization == PortableRealizationKind::OciServiceGroup {
+        ports: if matches!(
+            route.realization,
+            PortableRealizationKind::OciServiceGroup | PortableRealizationKind::ProcessServiceGroup
+        ) {
             route
                 .services
                 .iter()
@@ -1912,6 +1970,7 @@ fn build_routes_bundle(
                 protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: state.mount.clone(),
                 access: StateAccess::ReadWrite,
+                mount_required: state.mount_required,
             })
             .into_iter()
             .collect(),
@@ -2177,14 +2236,23 @@ fn validate_route_profile(
         return Err(profile("invalid portable Application object"));
     }
     if derivation.requirements.startup.is_some()
-        && (derivation.steps.len() != 1 || derivation.steps[0].protocol != PROCESS_PROTOCOL)
+        && (derivation.steps.len() != 1
+            || !matches!(
+                derivation.steps[0].protocol.as_str(),
+                PROCESS_PROTOCOL | OCI_PROTOCOL
+            ))
     {
         return Err(profile(
-            "startup is supported only on a single process derivation",
+            "startup is supported only on a single process or single OCI derivation",
         ));
     }
     if derivation.steps.len() > 1 {
-        let surface_port = validate_oci_service_group(application, derivation)?;
+        // Two separate questions, in order: is this a well-formed multi-step
+        // route (shared), and can the Adapter its steps select actually
+        // realize it (per protocol)? Facts of one Adapter never decide
+        // admission of another.
+        let surface_port = validate_service_group_structure(application, derivation)?;
+        let realization = validate_service_group_adapter(application, derivation, surface_port)?;
         let input = workspace_input(derivation)
             .ok_or_else(|| profile("route omitted its workspace input"))?;
         validate_route_requirements(
@@ -2197,7 +2265,7 @@ fn validate_route_profile(
                 .collect(),
             surface_port,
         )?;
-        return Ok(PortableRealizationKind::OciServiceGroup);
+        return Ok(realization);
     }
     if application.surfaces.len() != 1
         || !portable_inputs_supported(derivation)
@@ -2337,6 +2405,14 @@ fn validate_route_profile(
             if let Some(user) = derivation.runtimes.get(OCI_USER_RUNTIME) {
                 user.parse::<ato_adapter_oci::OciUser>()
                     .map_err(|error| profile(error.to_string()))?;
+            }
+            // The route's one Port is where the startup probe must land; a
+            // name that is not this route's Port would never be observed.
+            if let Some(startup) = &derivation.requirements.startup {
+                startup.validate().map_err(|error| profile(error.0))?;
+                if startup.port != port.id {
+                    return Err(profile("startup names an undeclared OCI Port"));
+                }
             }
             if let Some(entrypoint) = derivation.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
                 validate_oci_entrypoint(entrypoint)?;
@@ -2599,20 +2675,21 @@ fn oci_resource_limits(
     Ok((values[0], values[1], values[2]))
 }
 
-/// The OCI service group profile: 2–4 `ato.oci@1` serving steps of one
-/// Derivation, realized together on one Runner behind one Surface. Returns
-/// the Port the Surface serves.
+/// Shape and reference integrity shared by every multi-step route: the
+/// Surface, the step and Port bounds, step-scoped base fields, and the rule
+/// that each state slot and Binding is visible to exactly one service.
 ///
-/// Visibility is scoped per step: each state slot and each Application
-/// Binding is visible to exactly one step, so a secret or a mail store never
-/// reaches a sibling that does not need it.
-fn validate_oci_service_group<'a>(
+/// What the selected step protocol can actually realize is the Adapter's own
+/// validation. Keeping the two apart means a fact of one Adapter never decides
+/// admission of another, and it is what lets a native process group reuse the
+/// OCI group's structural bar without inheriting its container profile.
+fn validate_service_group_structure<'a>(
     application: &ValidatedApplication,
     derivation: &'a BoundDerivation,
 ) -> Result<&'a str, PortableApplicationError> {
     use ato_ipc::oci_service_group::{
         OCI_SERVICE_GROUP_MAX_PORTS, OCI_SERVICE_GROUP_MAX_SERVICES,
-        OCI_SERVICE_GROUP_MIN_SERVICES, group_totals, is_service_name,
+        OCI_SERVICE_GROUP_MIN_SERVICES, is_service_name,
     };
 
     if application.schema != APPLICATION_V2_SCHEMA
@@ -2620,7 +2697,7 @@ fn validate_oci_service_group<'a>(
         || !portable_inputs_supported(derivation)
     {
         return Err(profile(
-            "an OCI service group requires one ato.application/2 Surface and one workspace input",
+            "a service group requires one ato.application/2 Surface and one workspace input",
         ));
     }
     let surface = &application.surfaces[0];
@@ -2631,7 +2708,7 @@ fn validate_oci_service_group<'a>(
         || derivation.ports.len() > OCI_SERVICE_GROUP_MAX_PORTS
     {
         return Err(profile(
-            "an OCI service group has 2-4 serving steps and 1-8 Ports",
+            "a service group has 2-4 serving steps and 1-8 Ports",
         ));
     }
     if derivation.state.len() > 1
@@ -2639,7 +2716,7 @@ fn validate_oci_service_group<'a>(
         || derivation.workspace_compiler.is_some()
     {
         return Err(profile(
-            "an OCI service group permits at most one state and forbids builds",
+            "a service group permits at most one state and forbids builds",
         ));
     }
     let has_tcp_egress = application
@@ -2656,22 +2733,11 @@ fn validate_oci_service_group<'a>(
     };
     if !valid_effect {
         return Err(profile(if has_tcp_egress {
-            "an OCI service group with tcp-egress requires confirmation or is non-repeatable"
+            "a service group with tcp-egress requires confirmation or is non-repeatable"
         } else {
-            "an OCI service group without tcp-egress must be pure"
+            "a service group without tcp-egress must be pure"
         }));
     }
-    if derivation.runtimes.len() != 1 {
-        return Err(profile(
-            "an OCI service group shares only oci.platform at the route level",
-        ));
-    }
-    validate_oci_platform(
-        derivation
-            .runtimes
-            .get(OCI_PLATFORM_RUNTIME)
-            .ok_or_else(|| profile("OCI service group omitted oci.platform"))?,
-    )?;
 
     let binding_ids = application
         .bindings
@@ -2683,17 +2749,9 @@ fn validate_oci_service_group<'a>(
         .iter()
         .map(|state| state.id.as_str())
         .collect::<BTreeSet<_>>();
-    let model_input_ids = derivation
-        .inputs
-        .iter()
-        .filter(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
-        .map(|input| input.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let mut input_readers = BTreeSet::new();
     let mut step_ids = BTreeSet::new();
     let mut state_readers = BTreeMap::<&str, usize>::new();
     let mut binding_readers = BTreeMap::<&str, usize>::new();
-    let mut limits = Vec::with_capacity(derivation.steps.len());
     for step in &derivation.steps {
         if !is_service_name(&step.id) || !step_ids.insert(step.id.as_str()) {
             return Err(profile(format!(
@@ -2701,8 +2759,7 @@ fn validate_oci_service_group<'a>(
                 step.id
             )));
         }
-        if step.protocol != OCI_PROTOCOL
-            || step.op != "serve"
+        if step.op != "serve"
             || step.argv.is_empty()
             || step.argv.iter().any(|value| value.contains('\0'))
             || !valid_workspace_relative(&step.cwd)
@@ -2716,94 +2773,13 @@ fn validate_oci_service_group<'a>(
             || step.spa_fallback.is_some()
         {
             return Err(profile(format!(
-                "service `{}` is outside the declared container profile",
+                "service `{}` is outside the declared serving-step profile",
                 step.id
             )));
         }
-        let image = step
-            .runtimes
-            .get(OCI_IMAGE_RUNTIME)
-            .ok_or_else(|| profile(format!("service `{}` omitted oci.image", step.id)))?;
-        validate_immutable_oci_image(image)?;
-        limits.push(oci_resource_limits(&step.runtimes)?);
-        if let Some(user) = step.runtimes.get(OCI_USER_RUNTIME) {
-            user.parse::<ato_adapter_oci::OciUser>()
-                .map_err(|error| profile(error.to_string()))?;
-        }
-        if let Some(entrypoint) = step.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
-            validate_oci_entrypoint(entrypoint)?;
-        }
-        let workspace_mount = match step.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME) {
-            Some(target) => {
-                validate_oci_workspace_mount(target)?;
-                target.as_str()
-            }
-            None => "/app",
-        };
-        if let Some(raw) = step
-            .runtimes
-            .get(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME)
-        {
-            let ids = ato_ipc::oci_component_inputs::parse_input_ids(raw).map_err(profile)?;
-            let projected_names = ids
-                .iter()
-                .map(|id| ato_ipc::oci_component_inputs::input_env_name(id))
-                .chain(std::iter::once("ATO_OUTPUT_DIR".to_owned()))
-                .collect::<BTreeSet<_>>();
-            if step.env.keys().any(|name| projected_names.contains(name))
-                || application
-                    .bindings
-                    .iter()
-                    .filter(|binding| step.bindings.contains(&binding.id))
-                    .any(|binding| {
-                        projected_names.contains(&application_binding_environment_name(binding))
-                    })
-                || std::iter::once(workspace_mount)
-                    .chain(
-                        derivation
-                            .state
-                            .iter()
-                            .filter(|state| step.state.contains(&state.id))
-                            .map(|state| state.mount.as_str()),
-                    )
-                    .any(|target| {
-                        Path::new(target).starts_with("/.ato-data")
-                            || Path::new("/.ato-data").starts_with(target)
-                    })
-            {
-                return Err(profile(
-                    "component input/output conflicts with environment or mounts",
-                ));
-            }
-            for id in ids {
-                if id != ato_ipc::oci_component_inputs::ASSETS_INPUT_ID
-                    && !model_input_ids.contains(id.as_str())
-                {
-                    return Err(profile(format!(
-                        "service `{}` selects undeclared input `{id}`",
-                        step.id
-                    )));
-                }
-                input_readers.insert(id);
-            }
-        }
-        if step.runtimes.len()
-            != 4 + usize::from(
-                step.runtimes
-                    .contains_key(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME),
-            ) + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
-                + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
-                + usize::from(step.runtimes.contains_key(OCI_USER_RUNTIME))
-        {
-            return Err(profile(format!(
-                "service `{}` declares a runtime fact this profile does not model",
-                step.id
-            )));
-        }
-
         let mut seen = BTreeSet::new();
         for state_id in &step.state {
-            let Some(state) = derivation
+            let Some(_) = derivation
                 .state
                 .iter()
                 .find(|state| &state.id == state_id)
@@ -2814,16 +2790,10 @@ fn validate_oci_service_group<'a>(
                     step.id
                 )));
             };
-            if state.mount == workspace_mount {
-                return Err(profile(format!(
-                    "service `{}` mounts state over its workspace",
-                    step.id
-                )));
-            }
-            *state_readers.entry(state.id.as_str()).or_default() += 1;
+            *state_readers.entry(state_id.as_str()).or_default() += 1;
         }
         // Environment names only need to be unique WITHIN a service: each
-        // service is its own container, so siblings may reuse a name.
+        // service is its own process or container, so siblings may reuse one.
         let mut seen = BTreeSet::new();
         for binding_id in &step.bindings {
             if !binding_ids.contains(binding_id.as_str()) || !seen.insert(binding_id.as_str()) {
@@ -2848,19 +2818,6 @@ fn validate_oci_service_group<'a>(
             }
             *binding_readers.entry(binding_id.as_str()).or_default() += 1;
         }
-    }
-    if model_input_ids
-        .iter()
-        .any(|id| !input_readers.contains(*id))
-    {
-        return Err(profile(
-            "Model Set input has no explicitly declared service consumer",
-        ));
-    }
-    if group_totals(limits).is_none() {
-        return Err(profile(
-            "OCI service group resource limits exceed the group budget",
-        ));
     }
     for (what, ids, readers) in [
         ("state", &state_ids, &state_readers),
@@ -2928,6 +2885,286 @@ fn validate_oci_service_group<'a>(
         )));
     }
     surface_port.ok_or_else(|| profile("no service serves the Application Surface Port"))
+}
+
+/// Which Adapter the route's serving steps select, and whether that Adapter
+/// admits the shape the shared structure check accepted.
+fn validate_service_group_adapter(
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+    _surface_port: &str,
+) -> Result<PortableRealizationKind, PortableApplicationError> {
+    let mut protocols = derivation
+        .steps
+        .iter()
+        .map(|step| step.protocol.as_str())
+        .collect::<BTreeSet<_>>();
+    if protocols.len() != 1 {
+        return Err(profile(
+            "a service group's serving steps must select one Adapter protocol",
+        ));
+    }
+    match protocols.pop_first() {
+        Some(OCI_PROTOCOL) => validate_oci_service_group(application, derivation),
+        Some(PROCESS_PROTOCOL) => validate_process_service_group(application, derivation),
+        Some(other) => Err(profile(format!(
+            "a service group requires {PROCESS_PROTOCOL} or {OCI_PROTOCOL} serving steps, not `{other}`"
+        ))),
+        None => Err(profile("a service group declares no serving step")),
+    }
+}
+
+/// The OCI service group profile: 2–4 `ato.oci@1` serving steps of one
+/// Derivation, realized together on one Runner behind one Surface.
+///
+/// This is the Adapter half only; the shared structure check has already
+/// verified Ports, visibility, and the exactly-one-reader rule. Behaviour and
+/// the resulting `DerivationRef` for existing OCI groups are unchanged.
+fn validate_oci_service_group(
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+) -> Result<PortableRealizationKind, PortableApplicationError> {
+    use ato_ipc::oci_service_group::group_totals;
+
+    if derivation.runtimes.len() != 1 {
+        return Err(profile(
+            "an OCI service group shares only oci.platform at the route level",
+        ));
+    }
+    validate_oci_platform(
+        derivation
+            .runtimes
+            .get(OCI_PLATFORM_RUNTIME)
+            .ok_or_else(|| profile("OCI service group omitted oci.platform"))?,
+    )?;
+
+    let model_input_ids = derivation
+        .inputs
+        .iter()
+        .filter(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+        .map(|input| input.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut input_readers = BTreeSet::new();
+    let mut limits = Vec::with_capacity(derivation.steps.len());
+    for step in &derivation.steps {
+        if step.protocol != OCI_PROTOCOL {
+            return Err(profile(format!(
+                "service `{}` is outside the declared container profile",
+                step.id
+            )));
+        }
+        let image = step
+            .runtimes
+            .get(OCI_IMAGE_RUNTIME)
+            .ok_or_else(|| profile(format!("service `{}` omitted oci.image", step.id)))?;
+        validate_immutable_oci_image(image)?;
+        limits.push(oci_resource_limits(&step.runtimes)?);
+        if let Some(user) = step.runtimes.get(OCI_USER_RUNTIME) {
+            user.parse::<ato_adapter_oci::OciUser>()
+                .map_err(|error| profile(error.to_string()))?;
+        }
+        if let Some(entrypoint) = step.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
+            validate_oci_entrypoint(entrypoint)?;
+        }
+        let workspace_mount = match step.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME) {
+            Some(target) => {
+                validate_oci_workspace_mount(target)?;
+                target.as_str()
+            }
+            None => "/app",
+        };
+        for state_id in &step.state {
+            if let Some(state) = derivation.state.iter().find(|state| &state.id == state_id)
+                && state.mount == workspace_mount
+            {
+                return Err(profile(format!(
+                    "service `{}` mounts state over its workspace",
+                    step.id
+                )));
+            }
+        }
+        if let Some(raw) = step
+            .runtimes
+            .get(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME)
+        {
+            let ids = ato_ipc::oci_component_inputs::parse_input_ids(raw).map_err(profile)?;
+            let projected_names = ids
+                .iter()
+                .map(|id| ato_ipc::oci_component_inputs::input_env_name(id))
+                .chain(std::iter::once("ATO_OUTPUT_DIR".to_owned()))
+                .collect::<BTreeSet<_>>();
+            if step.env.keys().any(|name| projected_names.contains(name))
+                || application
+                    .bindings
+                    .iter()
+                    .filter(|binding| step.bindings.contains(&binding.id))
+                    .any(|binding| {
+                        projected_names.contains(&application_binding_environment_name(binding))
+                    })
+                || std::iter::once(workspace_mount)
+                    .chain(
+                        derivation
+                            .state
+                            .iter()
+                            .filter(|state| step.state.contains(&state.id))
+                            .map(|state| state.mount.as_str()),
+                    )
+                    .any(|target| {
+                        Path::new(target).starts_with("/.ato-data")
+                            || Path::new("/.ato-data").starts_with(target)
+                    })
+            {
+                return Err(profile(
+                    "component input/output conflicts with environment or mounts",
+                ));
+            }
+            for id in ids {
+                if id != ato_ipc::oci_component_inputs::ASSETS_INPUT_ID
+                    && !model_input_ids.contains(id.as_str())
+                {
+                    return Err(profile(format!(
+                        "service `{}` selects undeclared input `{id}`",
+                        step.id
+                    )));
+                }
+                input_readers.insert(id);
+            }
+        }
+        if step.runtimes.len()
+            != 4 + usize::from(
+                step.runtimes
+                    .contains_key(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME),
+            ) + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
+                + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
+                + usize::from(step.runtimes.contains_key(OCI_USER_RUNTIME))
+        {
+            return Err(profile(format!(
+                "service `{}` declares a runtime fact this profile does not model",
+                step.id
+            )));
+        }
+    }
+    if model_input_ids
+        .iter()
+        .any(|id| !input_readers.contains(*id))
+    {
+        return Err(profile(
+            "Model Set input has no explicitly declared service consumer",
+        ));
+    }
+    if group_totals(limits).is_none() {
+        return Err(profile(
+            "OCI service group resource limits exceed the group budget",
+        ));
+    }
+    Ok(PortableRealizationKind::OciServiceGroup)
+}
+
+/// The native process service group profile: 2–4 `ato.process@1` serving steps
+/// of one Derivation, supervised together by the local Runtime.
+///
+/// Port binding is explicit: each service receives `ATO_ENDPOINT_<PORT>_PORT`
+/// for the Ports it serves and for the peer Ports its D declares. This adapter
+/// never infers a Port from argv.
+fn validate_process_service_group(
+    application: &ValidatedApplication,
+    derivation: &BoundDerivation,
+) -> Result<PortableRealizationKind, PortableApplicationError> {
+    if !derivation.runtimes.is_empty() {
+        return Err(profile(
+            "a native process service group declares every runtime per service",
+        ));
+    }
+    if derivation
+        .inputs
+        .iter()
+        .any(|input| input.protocol == ato_formation::model_set::MODEL_SET_PROTOCOL)
+    {
+        return Err(profile(
+            "a native process service group does not yet deliver Model Set inputs",
+        ));
+    }
+    if application
+        .bindings
+        .iter()
+        .any(|binding| binding.protocol == TCP_EGRESS_PROTOCOL)
+    {
+        return Err(profile(
+            "a native process service group does not model tcp-egress Bindings",
+        ));
+    }
+    // Filesystem state on macOS needs the Linux bubblewrap path, and this
+    // increment does not carry it into the group supervisor. Refusing it is
+    // explicit; silently ignoring the declaration would change what D means.
+    if !derivation.state.is_empty() {
+        return Err(profile(
+            "a native process service group does not yet model filesystem state",
+        ));
+    }
+    for (index, step) in derivation.steps.iter().enumerate() {
+        if step.protocol != PROCESS_PROTOCOL {
+            return Err(profile(format!(
+                "service `{}` is not a native process serving step",
+                step.id
+            )));
+        }
+        let python = step
+            .runtimes
+            .get(PYTHON_RUNTIME)
+            .filter(|value| !value.trim().is_empty());
+        if python.is_none() || step.runtimes.len() != 1 {
+            return Err(profile(format!(
+                "service `{}` must declare only its python runtime",
+                step.id
+            )));
+        }
+        // A peer edge is an authority grant. It may name only a Port this
+        // route declares, served by a different service that starts earlier,
+        // so the supervisor can prove the target was ready before the
+        // consumer started.
+        let mut seen = BTreeSet::new();
+        for peer in &step.peer_ports {
+            if !seen.insert(peer.as_str()) {
+                return Err(profile(format!(
+                    "service `{}` repeats peer Port `{peer}`",
+                    step.id
+                )));
+            }
+            let port = derivation
+                .ports
+                .iter()
+                .find(|port| &port.id == peer)
+                .ok_or_else(|| {
+                    profile(format!(
+                        "service `{}` names undeclared peer Port `{peer}`",
+                        step.id
+                    ))
+                })?;
+            if port.from == step.id {
+                return Err(profile(format!(
+                    "service `{}` names its own Port `{peer}` as a peer",
+                    step.id
+                )));
+            }
+            if !matches!(port.protocol.as_str(), HTTP_PROTOCOL | TCP_PROTOCOL) {
+                return Err(profile(format!(
+                    "peer Port `{peer}` must be an HTTP or TCP Port"
+                )));
+            }
+            let provider = derivation
+                .steps
+                .iter()
+                .position(|candidate| candidate.id == port.from)
+                .ok_or_else(|| profile(format!("peer Port `{peer}` has no serving step")))?;
+            if provider >= index {
+                return Err(profile(format!(
+                    "service `{}` names peer Port `{peer}` served by a later service",
+                    step.id
+                )));
+            }
+        }
+    }
+    Ok(PortableRealizationKind::ProcessServiceGroup)
 }
 
 fn valid_guest_mount(target: &str) -> bool {
@@ -5640,6 +5877,7 @@ status = 200
         spec.filesystem_state = Some(PortableFilesystemStateSpec {
             id: "data".to_owned(),
             mount: "/data".to_owned(),
+            mount_required: None,
         });
         let (_, mut bundle) =
             build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
@@ -5655,6 +5893,98 @@ status = 200
         assert!(validate_bundle_for_derivation(&bundle, &invalid_ref).is_err());
     }
 
+    /// The authored grammar is how a user says a slot needs no fixed mount.
+    /// This walks that declaration all the way to the canonical Derivation,
+    /// and proves an authoring source that omits it still produces the exact
+    /// pre-existing state bytes.
+    #[test]
+    fn an_authored_slot_can_declare_that_a_fixed_mount_is_not_required() {
+        const SOURCE: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Native state"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+MOUNT_REQUIRED
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "health"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+status = 200
+
+[[derivation]]
+id = "serve"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"
+"#;
+
+        fn process_route(source: &Path) -> ValidatedPortableApplication {
+            let (_, bundle) = build_authored_bundle_v2(source).expect("the source packs");
+            validate_all_derivations(&bundle)
+                .expect("the bundle validates")
+                .into_iter()
+                .find(|route| route.realization == PortableRealizationKind::LocalProcess)
+                .expect("one process route")
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("app.py"), "print('ok')\n").unwrap();
+        fs::write(
+            root.path().join(CAPSULE_FILE_NAME),
+            SOURCE.replace("MOUNT_REQUIRED", "mount_required = false"),
+        )
+        .unwrap();
+        let path_delivered = process_route(root.path());
+        assert_eq!(
+            path_delivered.derivation.state[0].mount_required,
+            Some(false)
+        );
+        assert!(
+            serde_jcs::to_string(&path_delivered.derivation.state[0])
+                .unwrap()
+                .contains(r#""mount_required":false"#)
+        );
+
+        fs::write(
+            root.path().join(CAPSULE_FILE_NAME),
+            SOURCE.replace("MOUNT_REQUIRED", ""),
+        )
+        .unwrap();
+        let fixed_mount = process_route(root.path());
+        assert_eq!(fixed_mount.derivation.state[0].mount_required, None);
+        assert_eq!(
+            serde_jcs::to_string(&fixed_mount.derivation.state[0]).unwrap(),
+            r#"{"access":"read-write","id":"data","mount":"/data","protocol":"ato.state.filesystem@1"}"#,
+            "an authored source that does not declare the relaxation keeps the old bytes"
+        );
+        assert_ne!(
+            fixed_mount.derivation_ref, path_delivered.derivation_ref,
+            "the declaration is part of the addressed route"
+        );
+    }
+
     #[test]
     fn dynamic_routes_reject_multiple_or_read_only_filesystem_states() {
         let (_, original) =
@@ -5668,6 +5998,7 @@ status = 200
                 protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: "/data".to_owned(),
                 access: StateAccess::ReadOnly,
+                mount_required: None,
             });
         });
         assert!(validate_bundle_for_derivation(&read_only, &read_only_ref).is_err());
@@ -5680,6 +6011,7 @@ status = 200
                     protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                     mount: mount.to_owned(),
                     access: StateAccess::ReadWrite,
+                    mount_required: None,
                 });
             }
         });
@@ -5699,6 +6031,7 @@ status = 200
                     protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                     mount: "/data".to_owned(),
                     access: StateAccess::ReadWrite,
+                    mount_required: None,
                 });
             });
         }
@@ -6029,14 +6362,60 @@ status = 200
         let mut derivation = route.derivation.clone();
         derivation.requirements.startup.as_mut().unwrap().port = "other.http".into();
         assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
+        // A service group becomes ready per container, so one startup
+        // condition cannot describe it.
         derivation = route.derivation.clone();
-        derivation.steps[0].protocol = OCI_PROTOCOL.into();
+        let mut second = derivation.steps[0].clone();
+        second.id = "second-site".to_owned();
+        derivation.steps.push(second);
         assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
         derivation = route.derivation.clone();
         derivation.requirements.startup.as_mut().unwrap().timeout_ms = 0;
         assert!(validate_initial_route(&route.contract, &route.application, &derivation).is_err());
         assert_eq!(route.contract.requirements[0].status, Some(200));
         assert!(route.contract.requirements[0].body_digest.is_some());
+    }
+
+    #[test]
+    fn q15_a_single_oci_route_may_gate_its_startup_separately_from_k() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-oci-startup-json");
+        let (bytes, bundle) = build_authored_bundle_v2(&source).unwrap();
+        assert!(!bytes.is_empty());
+        let routes = validate_all_derivations(&bundle).unwrap();
+        let [route] = routes.as_slice() else {
+            panic!("one route");
+        };
+        assert_eq!(route.realization, PortableRealizationKind::OciContainer);
+        let startup = route
+            .derivation
+            .requirements
+            .startup
+            .as_ref()
+            .expect("startup");
+        assert_eq!(startup.path, "/api/system/bootProgress");
+        assert_eq!(startup.expect_status, Some(200));
+        let json = startup.json.as_ref().expect("json condition");
+        assert_eq!(json.pointer, "/data/progress");
+        assert_eq!(
+            json.gte,
+            Some(ato_formation::requirements::StartupJsonScalar::Integer(100))
+        );
+        // K is unchanged: the user URL is the only thing the Contract observes,
+        // and the boot progress never becomes an observation.
+        let http = route
+            .contract
+            .requirements
+            .iter()
+            .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
+            .collect::<Vec<_>>();
+        assert_eq!(http.len(), 1);
+        assert_eq!(http[0].path.as_deref(), Some("/"));
+        assert_eq!(http[0].status, Some(200));
+        // Naming any Port but the route's own leaves the condition unobserved.
+        let mut wrong = route.derivation.clone();
+        wrong.requirements.startup.as_mut().unwrap().port = "other.http".into();
+        assert!(validate_initial_route(&route.contract, &route.application, &wrong).is_err());
     }
 
     #[test]

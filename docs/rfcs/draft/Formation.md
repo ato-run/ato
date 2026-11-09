@@ -3,7 +3,7 @@
 Status: architecture contract for the correction in ADR-041; not a claim that
 CandidateProducer or durable proposal rounds are already implemented. This
 repository companion has now been checked against the complete downloaded
-`docs/Continuation_Model_rewritten/Continuation Model/Formation.md` (workspace
+`docs/rfcs/draft/continuation-model/Formation.md` (workspace
 path; 330 lines, SHA-256
 `7d8a4187db2910eeeb3e34cc8d0325dd19f8588442d34e00a5e5ef8aa12af043`).
 The original [hosted note](https://cinst-tfgnfdkubznb7xh2.stg-app.ato.run/#root/iuv9VgcYHeL3/FIVzrv4ni7q2/WwsYaQA5nRAT?ntxId=CVDlt5)

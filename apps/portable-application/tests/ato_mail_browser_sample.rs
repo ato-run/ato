@@ -7,8 +7,8 @@ use ato_portable_application::build_authored_bundle_v2;
 
 const HTTP_PROTOCOL: &str = "ato.http@1";
 const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
-const STALWART_IMAGE: &str = "ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7ab2749baa5bcd15a56b51f90ba99aea0c3256ce04d4f7e5e3076e8e0";
-const MISSIVE_IMAGE: &str = "ghcr.io/koh0920/govcraft-missive@sha256:f2dd0d893a3fbf83812e35df3510d3fbc9846e9dd31a8a84899cf5fa818682fe";
+const STALWART_IMAGE: &str = "ghcr.io/koh0920/stalwart-staging@sha256:25723c49ee4968d410f78b35041eb1c79f28fe0cc2afe2487a5c58f99f90629b";
+const MISSIVE_IMAGE: &str = "ghcr.io/koh0920/govcraft-missive@sha256:3dc89054b1a85ae6ad07e5cf1dc483bffa0ba7253b40fd8274803c765b04bc7c";
 
 fn browser_sample_route() -> ValidatedPortableApplication {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/ato-mail-browser");

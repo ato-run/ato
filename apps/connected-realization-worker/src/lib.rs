@@ -9,14 +9,56 @@
 
 mod activity_controller;
 mod data_plane;
+mod device_key;
+// The contract requires an owner-only file mode only Unix can enforce, and these
+// tests generate and store real key files.
+#[cfg(all(test, unix))]
+mod device_key_tests;
 pub mod diagnostics;
+pub mod host_capabilities;
 pub mod host_resources;
 #[cfg(all(test, target_os = "linux"))]
 mod managed_hosted_tests;
 mod native_pixel_config;
+pub use native_pixel_config::NativePixelConfig;
 mod process_run_verification;
 pub mod runtime_launch;
 mod slot_state;
+
+/// Preserve the existing semver when a build has no supplied source commit.
+/// A release build may embed the exact source commit as semver build metadata;
+/// the control plane exposes `agent_version` without changing precedence.
+fn runner_agent_version(
+    version: &str,
+    commit: Option<&str>,
+    build_id: Option<&str>,
+    clean: bool,
+) -> String {
+    if !clean {
+        return version.to_owned();
+    }
+    let Some(commit) = commit.filter(|value| {
+        value.len() == 40
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) else {
+        return version.to_owned();
+    };
+    let separator = if version.contains('+') { "." } else { "+" };
+    let build_suffix = build_id
+        .filter(|id| {
+            !id.is_empty() && id.len() <= 10 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+        .map(|id| format!(".b.{id}"))
+        .unwrap_or_default();
+    let stamped = format!("{version}{separator}git.{commit}{build_suffix}");
+    if stamped.len() <= 64 {
+        stamped
+    } else {
+        version.to_owned()
+    }
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -99,8 +141,8 @@ use activity_controller::{
     ActivityControllerEvent, ActivityControllerPageConfig, ActivityControllerServer,
 };
 
-const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
-const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
+pub(crate) const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
+pub(crate) const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
 /// Capabilities every Runner has, regardless of host.
 ///
 /// The VM-snapshot materializer and Firecracker backend are deliberately NOT
@@ -109,6 +151,11 @@ const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0
 const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     ato_runtime_attempt::startup::PROCESS_STARTUP_RUNTIME_FEATURE,
+    // This build evaluates a D startup condition instead of only accepting a
+    // 2xx, so it may be handed one. A Runner built before it advertises
+    // neither, and the control plane refuses to place such a route there.
+    ato_runtime_attempt::startup::STARTUP_JSON_RUNTIME_FEATURE,
+    ato_runtime_attempt::startup::STARTUP_STATUS_RUNTIME_FEATURE,
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     NAMESPACE_ISOLATION_CAPABILITY,
     "isolation:runtime_launch=untrusted-v1",
@@ -199,7 +246,9 @@ fn with_explicit_runtime_placement_capability(
     }
     capabilities
 }
-fn explicit_runtime_placement_kinds(
+/// The explicit-placement routing restriction, in one place so the heartbeat
+/// and the doctor apply exactly the same filter.
+pub(crate) fn explicit_runtime_placement_kinds(
     mut kinds: Vec<&'static str>,
     required: bool,
 ) -> Vec<&'static str> {
@@ -251,6 +300,16 @@ fn with_native_pixel_control_capabilities(
     }
     if pixel_available && controls.framebuffer_resize {
         capabilities.push("runtime_feature=native_framebuffer_resize_v1");
+    }
+    capabilities
+}
+
+fn with_private_pixel_capability(
+    mut capabilities: Vec<&'static str>,
+    available: bool,
+) -> Vec<&'static str> {
+    if available {
+        capabilities.push(runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE);
     }
     capabilities
 }
@@ -1394,12 +1453,27 @@ pub struct WorkerConfig {
     pub workload_gid: Option<u32>,
     #[arg(long)]
     pub once: bool,
+    /// Rotate this Runner's device key once, before serving. The rotation is
+    /// signed with the current key; if the control plane refuses it the old key
+    /// is kept and the worker exits with the error.
+    #[arg(long, env = "ATO_RUNNER_ROTATE_DEVICE_KEY", default_value_t = false)]
+    pub rotate_device_key: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum IsolationMode {
     Namespace,
     HostBoundary,
+}
+
+impl IsolationMode {
+    /// Stable label for diagnostics: the same spelling the CLI accepts.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Namespace => "namespace",
+            Self::HostBoundary => "host-boundary",
+        }
+    }
 }
 
 /// The single-use token a freshly provisioned machine starts with. Read from
@@ -1434,20 +1508,46 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
         .runner_credentials_file
         .clone()
         .unwrap_or_else(|| config.work_root.join("runner-credentials.json"));
+    let device_key_file = device_key::path_beside_credentials(&credentials_file);
     // An identity already exists (a restart on the same machine): keep it and
     // only drop the stale token. The control plane would refuse it anyway.
     let already_enrolled = credentials_file.is_file() || !config.runner_token.trim().is_empty();
     if !already_enrolled {
         fs::create_dir_all(&config.work_root)?;
         let api_base = config.api_base.trim_end_matches('/');
+        // Device keys need an owner-only file mode this platform may not be able
+        // to enforce. Where it cannot, enrollment proceeds exactly as before and
+        // the Runner stays bearer-only: no key is generated or claimed.
+        let device_key = if device_key::supported() {
+            // Generated before the request because it signs the enrollment
+            // proof, and a retry after a lost response must present the same
+            // public key rather than binding a second identity.
+            Some(device_key_for_enrollment(&device_key_file)?)
+        } else {
+            eprintln!(
+                "[device-key] device keys need Unix owner-only file permissions; enrolling without one and staying bearer-only"
+            );
+            None
+        };
+        let mut request_body = serde_json::json!({
+            "enrollment_token": token,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
+        });
+        if let Some(device_key) = &device_key {
+            // Section 11.5 enrollment binding (RFC errata ato-api#1092): the
+            // single-use token is the replay guard, so this proof is over the
+            // token digest and the epoch, with no challenge.
+            request_body["device_key"] = serde_json::json!({
+                "public_key": device_key.public_key_b64(),
+                "key_epoch": device_key.key_epoch(),
+                "signature": device_key.enrollment_signature(&token),
+            });
+        }
         let response: serde_json::Value = reqwest::blocking::Client::new()
             .post(format!("{api_base}/v1/runners/enroll"))
-            .json(&serde_json::json!({
-                "enrollment_token": token,
-                "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH,
-                "protocol_versions": [diagnostics::OPEN_COMPUTE_VERSION],
-            }))
+            .json(&request_body)
             .send()
             .context("enrollment request failed")?
             .error_for_status()
@@ -1461,17 +1561,152 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
                 .filter(|value| !value.is_empty())
                 .with_context(|| format!("enrollment response has no {pointer}"))
         };
+        let runner_id = field("/runner/id")?;
+        let runner_token = field("/runner_token")?;
+        if let Some(device_key) = device_key {
+            // Additive enrollment answer (RFC errata): when the control plane
+            // says it stored the key, that is authoritative and the register
+            // round trip is skipped. Older answers carry no block, which keeps
+            // the explicit challenge/register migration path.
+            let registered = enrollment_device_key_registration(&response, device_key.key_epoch())?;
+            bind_device_key_to_identity(&device_key_file, device_key, runner_id, registered)?;
+        }
         write_private_file(
             &credentials_file,
             &serde_json::to_vec(&serde_json::json!({
                 "api_base": api_base,
-                "runner_id": field("/runner/id")?,
-                "runner_token": field("/runner_token")?,
+                "runner_id": runner_id,
+                "runner_token": runner_token,
                 "management_kind": response.pointer("/runner/management_kind").and_then(serde_json::Value::as_str),
             }))?,
         )?;
     }
     reexec_without_enrollment_token(&credentials_file)
+}
+
+/// The key that will sign this enrollment, generated if necessary.
+///
+/// A retry of an interrupted enrollment must present the SAME public key (it may
+/// already have been bound by a response this process never saw). A key bound to
+/// a different identity cannot be active for the next one, and must not sign its
+/// enrollment proof either, so it is replaced BEFORE the request — never after,
+/// where the control plane would end up holding a key this host no longer has.
+fn device_key_for_enrollment(device_key_file: &Path) -> Result<device_key::RunnerDeviceKey> {
+    match device_key::RunnerDeviceKey::load_if_present(device_key_file)? {
+        Some(key) if key.runner_id().is_empty() => Ok(key),
+        Some(_) => {
+            let key = device_key::RunnerDeviceKey::generate("", device_key::FIRST_KEY_EPOCH)?;
+            key.save_replace(device_key_file)?;
+            Ok(key)
+        }
+        None => {
+            let key = device_key::RunnerDeviceKey::generate("", device_key::FIRST_KEY_EPOCH)?;
+            key.save_new(device_key_file)?;
+            Ok(key)
+        }
+    }
+}
+
+/// Whether the enrollment answer says the control plane stored the key we sent.
+///
+/// The block is additive: absent means an older API, and the Runner must then
+/// prove registration itself. A block that contradicts the epoch this Runner
+/// signed for is a protocol error, not something to paper over.
+fn enrollment_device_key_registration(
+    response: &serde_json::Value,
+    signed_key_epoch: u64,
+) -> Result<bool> {
+    let Some(block) = response.get("device_key") else {
+        return Ok(false);
+    };
+    if !block
+        .get("registered")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    match block.get("key_epoch").and_then(serde_json::Value::as_u64) {
+        Some(epoch) if epoch == signed_key_epoch => Ok(true),
+        Some(epoch) => bail!(
+            "the enrollment registered device key epoch {epoch}, not the epoch this Runner signed for ({signed_key_epoch})"
+        ),
+        None => bail!("the enrollment reported a registered device key without its epoch"),
+    }
+}
+
+/// Tie the locally generated key to the identity the enrollment produced.
+///
+/// Only the bookkeeping is written: the key that signed the enrollment proof is
+/// exactly the key the control plane bound, so replacing it here would leave the
+/// two sides disagreeing. A key already bound to another Runner is a stale file
+/// an operator has to remove, not something to silently rebind.
+fn bind_device_key_to_identity(
+    device_key_file: &Path,
+    mut key: device_key::RunnerDeviceKey,
+    runner_id: &str,
+    registered: bool,
+) -> Result<()> {
+    let mut changed = false;
+    if key.runner_id() != runner_id {
+        ensure!(
+            key.runner_id().is_empty(),
+            "device key {} belongs to Runner {} but the enrollment returned {}; remove the stale key file and enroll again",
+            device_key_file.display(),
+            key.runner_id(),
+            runner_id
+        );
+        key.set_runner_id(runner_id);
+        changed = true;
+    }
+    if registered && !key.registered() {
+        key.set_registered(true);
+        changed = true;
+    }
+    if changed {
+        key.save_replace(device_key_file)?;
+    }
+    Ok(())
+}
+
+/// Make sure a locally stored key is also active on the control plane.
+///
+/// Enrollment normally binds the key in the same request, so this is the
+/// migration path for a Runner enrolled before device keys existed: a Runner
+/// that already holds a bearer credential but has no registered key. A control
+/// plane without the device-key endpoints (flag off) answers 404 and this Runner
+/// keeps the bearer-only behaviour section 11.1 promises.
+///
+/// Registration is not an execution authorization and is never a reason to
+/// silently downgrade a signature: if a key IS active, a bearer-only request
+/// fails with signature_required and the worker stops.
+fn register_device_key_if_needed(
+    api: &HttpRunnerApi,
+    device_key_file: &Path,
+    mut key: device_key::RunnerDeviceKey,
+) -> Result<device_key::RunnerDeviceKey> {
+    if key.registered() {
+        return Ok(key);
+    }
+    match api.register_device_key(&key) {
+        Ok(DeviceKeyRegistration::Registered | DeviceKeyRegistration::AlreadyActive) => {
+            key.set_registered(true);
+            key.save_replace(device_key_file)?;
+            Ok(key)
+        }
+        Ok(DeviceKeyRegistration::Unsupported) => {
+            eprintln!(
+                "[device-key] the control plane does not expose the device-key endpoints; this Runner stays bearer-only"
+            );
+            Ok(key)
+        }
+        Err(error) => {
+            eprintln!(
+                "[device-key] registration was not accepted; this Runner stays bearer-only until it succeeds: {error:#}"
+            );
+            Ok(key)
+        }
+    }
 }
 
 /// A host-boundary workload runs as another user from a directory under the
@@ -1568,6 +1803,9 @@ struct RuntimeServeControls<'a> {
     hard_deadline: Option<Instant>,
     execution_authorization: Option<&'a mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
     network_authorization: Option<&'a runtime_launch::lease::NetworkAuthorization>,
+    /// Resolved before the workload started; the listener this slot creates
+    /// must use exactly the gate the lease was admitted with.
+    surface_gate: SurfaceGate,
 }
 
 pub struct ConnectedWorker {
@@ -1600,6 +1838,49 @@ impl ConnectedWorker {
             .prepare(&config.work_root, config.max_slots)?;
         let mut api =
             HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
+        // The device key is a local identity, never a capability: holding one
+        // changes what this Runner can sign and nothing about what it claims.
+        // A missing key file is the migration case for a Runner enrolled before
+        // device keys existed; it is generated here and registered with the
+        // bearer it already holds.
+        let device_key_file = config.device_key_path();
+        let device_key = if device_key::supported() {
+            let key = match device_key::RunnerDeviceKey::load_if_present(&device_key_file)? {
+                Some(key) => {
+                    ensure!(
+                        key.runner_id().is_empty() || key.runner_id() == config.runner_id,
+                        "device key {} belongs to another Runner; refusing to use it",
+                        device_key_file.display()
+                    );
+                    key
+                }
+                None => {
+                    let key = device_key::RunnerDeviceKey::generate(
+                        &config.runner_id,
+                        device_key::FIRST_KEY_EPOCH,
+                    )?;
+                    key.save_new(&device_key_file)?;
+                    key
+                }
+            };
+            Some(register_device_key_if_needed(&api, &device_key_file, key)?)
+        } else {
+            // Section 11.8 needs a file mode this platform cannot enforce.
+            // Holding a private key it cannot protect would be a false claim of
+            // device identity, so this Runner stays bearer-only instead.
+            eprintln!(
+                "[device-key] device keys need Unix owner-only file permissions; this platform is unsupported, so this Runner stays bearer-only"
+            );
+            None
+        };
+        api.device_key = device_key;
+        if config.rotate_device_key {
+            ensure!(
+                api.device_key.is_some(),
+                "--rotate-device-key is not supported on this platform: device keys need Unix owner-only file permissions"
+            );
+            api.rotate_device_key(&device_key_file)?;
+        }
         if config.network_controls {
             runtime_launch::network_broker::prepare_egress_firewall().context(
                 "TCP egress controls failed host firewall admission; capability not advertised",
@@ -2261,15 +2542,16 @@ impl ConnectedWorker {
             result,
             stop_confirmed: true,
         };
-        // A host-boundary Runner is a machine whose public address is the
-        // provider's proxy, reachable by anyone. Its Surface is published
-        // only behind the assertion gate; a lease that carries no key would
-        // publish the workload ungated, so nothing of it starts.
-        if let Err(error) =
-            require_surface_gate(self.config.isolation, lease, &self.config.runner_id)
-        {
-            return not_started(Err(error));
-        }
+        // A public Surface listener is reachable by anyone: the provider's
+        // proxy for a host-boundary slot, a configured public_base_url (an
+        // operator or Ato-managed slot ingress), or a non-loopback bind. Its
+        // Surface is published only behind the assertion gate; a lease that
+        // carries no key would publish the workload ungated, so nothing of it
+        // starts. The resolved gate is reused when the listener is created.
+        let surface_gate = match require_surface_gate(&self.config, lease) {
+            Ok(gate) => gate,
+            Err(error) => return not_started(Err(error)),
+        };
         let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
             self.api.client.clone(),
             self.api.base.clone(),
@@ -2558,6 +2840,8 @@ impl ConnectedWorker {
                     } else {
                         None
                     },
+                    command.requires_private_isolation,
+                    self.config.native_pixel.app_archive.as_deref(),
                     &mut check_startup,
                 )
             }
@@ -2651,6 +2935,7 @@ impl ConnectedWorker {
                     hard_deadline,
                     execution_authorization: execution_authorization.as_mut(),
                     network_authorization,
+                    surface_gate,
                 },
             )
         });
@@ -2752,6 +3037,7 @@ impl ConnectedWorker {
             hard_deadline,
             mut execution_authorization,
             network_authorization,
+            surface_gate,
         } = controls;
         ensure!(
             hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
@@ -2796,19 +3082,20 @@ impl ConnectedWorker {
         let execution_evidence = active.execution_evidence();
         let oci_port_mapping = active.launched.surface_container().and_then(|container| {
             let (container_ip, mappings) = container.port_mapping();
-            mappings.first().map(|mapping| OciPortMappingReport {
-                container_ip: container_ip.to_string(),
-                guest_port: mapping.guest_port,
-                runner_forward_port: mapping.host_port,
-            })
+            mappings
+                .first()
+                .zip(container_ip)
+                .map(|(mapping, container_ip)| OciPortMappingReport {
+                    container_ip: container_ip.to_string(),
+                    guest_port: mapping.guest_port,
+                    runner_forward_port: mapping.host_port,
+                })
         });
         // The public slot port is this worker's gate, not the workload: a
         // request is forwarded to the hidden loopback port only after it
-        // proves it came through the app proxy. When the claim carried no
-        // assertion key the gate is absent and the proxy passes through —
-        // that is exactly the state in which the control plane cannot sign
-        // assertions, so nothing enforceable is lost. A host-boundary Runner
-        // never reaches here without a key (`require_surface_gate`).
+        // proves it came through the app proxy. A public listener never
+        // reaches here without a key (`require_surface_gate` refused the
+        // lease first); only a loopback-only listener forwards without one.
         let mut observation_targets = BTreeMap::new();
         if let (Some(spec), runtime_launch::lease::ActiveWorkload::Oci(launched)) =
             (spec.service_group_spec(), &active.launched)
@@ -2822,7 +3109,12 @@ impl ConnectedWorker {
                 for endpoint in &service.endpoints {
                     observation_targets.insert(
                         endpoint.name.clone(),
-                        SocketAddr::new(handle.container_address(), endpoint.guest_port),
+                        SocketAddr::new(
+                            handle
+                                .container_address()
+                                .context("observation service has no network address")?,
+                            endpoint.guest_port,
+                        ),
                     );
                 }
             }
@@ -2846,7 +3138,7 @@ impl ConnectedWorker {
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
+                gate: surface_gate,
                 guest_surface_gateway: native.is_some(),
                 observation_targets,
             }),
@@ -2903,13 +3195,19 @@ impl ConnectedWorker {
                 self.fixed_tcp.activate(
                     &lease.run_id,
                     allocation,
-                    SocketAddr::new(container.container_address(), allocation.guest_port),
+                    SocketAddr::new(
+                        container
+                            .container_address()
+                            .context("fixed TCP service has no network address")?,
+                        allocation.guest_port,
+                    ),
                 )?;
             }
         }
         if let Some(container) = active.launched.surface_container() {
             let (container_ip, mappings) = container.port_mapping();
             for mapping in mappings {
+                let container_ip = container_ip.context("port mapping has no container address")?;
                 eprintln!(
                     "[runtime-launch-surface] {}",
                     serde_json::json!({
@@ -3034,6 +3332,10 @@ impl ConnectedWorker {
         command: &PortableLeaseCommand,
         lease_root: &Path,
     ) -> Result<()> {
+        // A public listener is refused before the graph is downloaded or any
+        // workload, VM or browser starts: the listener this path creates is
+        // the same gate as the runtime-launch slot.
+        let surface_gate = require_surface_gate(&self.config, lease)?;
         let trace_started_at = Instant::now();
         let source = self.api.graph_source(
             &lease.id,
@@ -3111,7 +3413,7 @@ impl ConnectedWorker {
             Some(SurfaceMux {
                 control_target: browser.as_ref().map(|runtime| runtime.control_address()),
                 presentation_frame: presentation_frame.clone(),
-                gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
+                gate: surface_gate,
                 guest_surface_gateway: true,
                 observation_targets: BTreeMap::new(),
             }),
@@ -3476,6 +3778,15 @@ fn activity_surface_id(run_id: &str, lease_id: &str) -> String {
 }
 
 impl WorkerConfig {
+    /// Where this Runner's Ed25519 device key lives: beside the bearer
+    /// credential file, never inside it (RFC section 11.8).
+    pub fn device_key_path(&self) -> PathBuf {
+        match self.runner_credentials_file.as_deref() {
+            Some(credentials) => device_key::path_beside_credentials(credentials),
+            None => self.work_root.join(device_key::DEVICE_KEY_FILE_NAME),
+        }
+    }
+
     /// Whether this host is configured to restore VM snapshots.
     ///
     /// One predicate, used by BOTH the capability advertisement and the VM
@@ -3485,6 +3796,13 @@ impl WorkerConfig {
         self.tap_host_cidr
             .as_deref()
             .is_some_and(|cidr| !cidr.trim().is_empty())
+    }
+
+    /// Whether this Runner publishes its Surface listener beyond this host.
+    /// A public listener requires the per-lease assertion key; see
+    /// `SurfacePublication`.
+    pub(crate) fn surface_publication(&self) -> SurfacePublication {
+        SurfacePublication::of(self)
     }
 }
 
@@ -4837,10 +5155,11 @@ struct ClaimedLease {
     command: LeaseCommand,
     expires_at: Option<String>,
     /// Runner-scoped HMAC key for the HTTP proxy-origin gate, delivered by the
-    /// control plane inside the claim. Absent means the API does not mint
-    /// assertions for this Runner — the gate stays off, which is the only
-    /// ordering-safe read (an enforcing gate with a non-signing API would
-    /// refuse every request).
+    /// control plane inside the claim. Absent is allowed only for a private,
+    /// loopback-only Surface listener: a public listener refuses this lease
+    /// (`surface_assertion_key_missing`) before any workload or public socket
+    /// exists, because a non-signing control plane would otherwise publish the
+    /// workload ungated.
     #[serde(default)]
     proxy_assertion_key: Option<String>,
 }
@@ -5041,6 +5360,24 @@ struct ReadyReport<'a> {
     control: Option<BrowserControlReport<'a>>,
 }
 
+/// Outcome of asking the control plane to activate a locally generated key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceKeyRegistration {
+    /// The control plane now has this key active.
+    Registered,
+    /// The Runner already had an active key: for a freshly enrolled Runner that
+    /// can only be the key the enrollment bound in the same transaction.
+    AlreadyActive,
+    /// The control plane does not implement the device-key endpoints (flag off).
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeviceKeyChallenge {
+    challenge_id: String,
+    nonce: String,
+}
+
 #[derive(Clone)]
 pub struct HttpRunnerApi {
     client: Client,
@@ -5049,6 +5386,9 @@ pub struct HttpRunnerApi {
     token: String,
     /// Whether this worker has a usable persistent volume store.
     persistent_volumes: bool,
+    /// This Runner's control-signing key. Present only once the control plane
+    /// has it active; until then every request stays bearer-only.
+    device_key: Option<device_key::RunnerDeviceKey>,
 }
 
 impl HttpRunnerApi {
@@ -5059,11 +5399,152 @@ impl HttpRunnerApi {
             runner_id: runner_id.to_owned(),
             token: token.to_owned(),
             persistent_volumes: false,
+            device_key: None,
         })
     }
 
     fn authorized(&self, request: RequestBuilder) -> RequestBuilder {
         request.bearer_auth(&self.token)
+    }
+
+    /// Map a full control-plane URL back to the path and query that the
+    /// signature covers. A URL outside the configured base is a programming
+    /// error, never a reason to send an unsigned request.
+    fn path_and_query(&self, url: &str) -> Result<String> {
+        match url.strip_prefix(&self.base) {
+            Some(path) if path.starts_with('/') => Ok(path.to_owned()),
+            _ => bail!("control-plane URL {url} is not under the configured API base"),
+        }
+    }
+
+    /// Section 11.4 headers, or None while this Runner has no active key.
+    fn signature_headers(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        body: &[u8],
+    ) -> Option<device_key::SignedControlHeaders> {
+        self.device_key
+            .as_ref()
+            .filter(|key| key.registered())
+            .map(|key| key.sign_control(method, path_and_query, body))
+    }
+
+    /// Start a signed request body. The bytes are the ones the signature covers,
+    /// so the body is serialized once and sent verbatim.
+    fn signed_request(
+        &self,
+        method: reqwest::Method,
+        path_and_query: &str,
+        body: Option<&[u8]>,
+    ) -> RequestBuilder {
+        let url = format!("{}{}", self.base, path_and_query);
+        let mut request = self.authorized(self.client.request(method.clone(), url));
+        if let Some(body) = body {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_vec());
+        }
+        if device_key::is_signed_control_request(method.as_str(), path_and_query) {
+            let empty = [];
+            if let Some(headers) =
+                self.signature_headers(method.as_str(), path_and_query, body.unwrap_or(&empty))
+            {
+                for (name, value) in headers.into_pairs() {
+                    request = request.header(name, value);
+                }
+            }
+        }
+        request
+    }
+
+    /// Ask the control plane for a single-use key challenge. None means the
+    /// endpoints do not exist (flag off).
+    fn device_key_challenge(&self) -> Result<Option<DeviceKeyChallenge>> {
+        let path = format!("/v1/runners/{}/device-keys/challenge", self.runner_id);
+        let response = self
+            .signed_request(reqwest::Method::POST, &path, None)
+            .send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(response.error_for_status()?.json()?))
+    }
+
+    /// Register the locally generated key with the bearer this Runner already
+    /// holds (section 11.5): prove the register string with the new key.
+    fn register_device_key(
+        &self,
+        key: &device_key::RunnerDeviceKey,
+    ) -> Result<DeviceKeyRegistration> {
+        let Some(challenge) = self.device_key_challenge()? else {
+            return Ok(DeviceKeyRegistration::Unsupported);
+        };
+        let path = format!("/v1/runners/{}/device-keys", self.runner_id);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "challenge_id": challenge.challenge_id,
+            "public_key": key.public_key_b64(),
+            "key_epoch": key.key_epoch(),
+            "signature": key.register_signature(&self.runner_id, &challenge.nonce),
+        }))?;
+        let response = self
+            .signed_request(reqwest::Method::POST, &path, Some(&body))
+            .send()?;
+        match response.status() {
+            status if status.is_success() => Ok(DeviceKeyRegistration::Registered),
+            reqwest::StatusCode::CONFLICT => Ok(DeviceKeyRegistration::AlreadyActive),
+            reqwest::StatusCode::NOT_FOUND => Ok(DeviceKeyRegistration::Unsupported),
+            status => bail!(
+                "the control plane refused device-key registration with {status}: {}",
+                truncate(&response.text().unwrap_or_default(), 300)
+            ),
+        }
+    }
+
+    /// Rotate this Runner's key (section 11.5). The old key keeps authority
+    /// until the control plane accepts the rotation and the successor is durably
+    /// written; a failure leaves the old key file untouched.
+    fn rotate_device_key(&mut self, device_key_file: &Path) -> Result<()> {
+        let current = self.device_key.clone().context(
+            "--rotate-device-key needs an enrolled device key; none was found beside the credential file",
+        )?;
+        ensure!(
+            current.registered(),
+            "device key is not registered with the control plane; refusing to rotate"
+        );
+        let Some(challenge) = self.device_key_challenge()? else {
+            bail!("the control plane does not expose the device-key endpoints; cannot rotate");
+        };
+        let next =
+            device_key::RunnerDeviceKey::generate(current.runner_id(), current.key_epoch() + 1)?;
+        let path = format!("/v1/runners/{}/device-keys/rotate", self.runner_id);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "challenge_id": challenge.challenge_id,
+            "next_public_key": next.public_key_b64(),
+            "next_key_epoch": next.key_epoch(),
+            // Proved by the OLD key over the successor's epoch and public key.
+            "signature": current.rotate_signature(&self.runner_id, &next, &challenge.nonce),
+        }))?;
+        // The rotation is itself a control request: sign it with the key that
+        // still has authority. The body proof above is the mandatory part; the
+        // headers are additional evidence the API accepts.
+        let response = self
+            .signed_request(reqwest::Method::POST, &path, Some(&body))
+            .send()?;
+        let response = response.error_for_status().with_context(|| {
+            format!(
+                "the control plane refused the device-key rotation for {}",
+                self.runner_id
+            )
+        })?;
+        drop(response);
+        let mut next = next;
+        next.set_registered(true);
+        // Only after the control plane accepted: the old key is still the only
+        // one that can sign if this write fails, so it is reported, not hidden.
+        next.save_replace(device_key_file)?;
+        self.device_key = Some(next);
+        Ok(())
     }
 
     fn heartbeat(&self, config: &WorkerConfig, active_slots: u32) -> Result<()> {
@@ -5083,12 +5564,8 @@ impl HttpRunnerApi {
         let pixel = config
             .native_pixel
             .available(&config.work_root, oci_available);
-        self.authorized(self.client.post(format!(
-            "{}/v1/runners/{}/heartbeat",
-            self.base, self.runner_id
-        )))
-        .json(&serde_json::json!({
-            "capabilities": with_explicit_runtime_placement_capability(advertised_capabilities(
+        let body = serde_json::json!({
+            "capabilities": with_explicit_runtime_placement_capability(with_private_pixel_capability(advertised_capabilities(
                 with_native_pixel_control_capabilities(
                     with_native_terminal_capability(runner_capabilities(
                         config.firecracker_configured(), oci_available, self.persistent_volumes,
@@ -5100,7 +5577,8 @@ impl HttpRunnerApi {
                 runtime_launch::host_boundary::active().is_some(),
                 resources["accelerators"].as_array().is_some_and(|devices| !devices.is_empty()),
                 config.max_slots == 1 && ato_runtime_attempt::resource_boundary::verify_current().is_ok(),
-            ), config.require_explicit_runtime_placement),
+            ), pixel && config.max_slots == 1 && runtime_launch::host_boundary::active().is_none()
+                && config.native_pixel.private_boundary_available()), config.require_explicit_runtime_placement),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": supported_session_surfaces(native, pixel),
             "public_base_url": config.public_base_url,
@@ -5108,7 +5586,7 @@ impl HttpRunnerApi {
             "arch": std::env::consts::ARCH,
             "max_slots": config.max_slots,
             "active_slots": active_slots,
-            "agent_version": env!("CARGO_PKG_VERSION"),
+            "agent_version": runner_agent_version(env!("CARGO_PKG_VERSION"), option_env!("ATO_BUILD_COMMIT"), option_env!("ATO_BUILD_ID"), option_env!("ATO_BUILD_DIRTY") == Some("clean")),
             // Observability, not scheduling truth: whether this slot finished
             // reconciling its previous incarnation's leftovers. An
             // unrecovered slot claims nothing, so the control plane can tell
@@ -5116,14 +5594,17 @@ impl HttpRunnerApi {
             "slot_recovered": runtime_launch::recovery::slot_recovered(),
             // Refresh mutable capacity and device visibility on every heartbeat.
             "host_resources": resources,
-        }))
-        .timeout(if config.native_terminal || config.native_pixel.enabled {
-            Duration::from_millis(500)
-        } else {
-            Duration::from_secs(60)
-        })
-        .send()?
-        .error_for_status()?;
+        });
+        let path = format!("/v1/runners/{}/heartbeat", self.runner_id);
+        let bytes = serde_json::to_vec(&body)?;
+        self.signed_request(reqwest::Method::POST, &path, Some(&bytes))
+            .timeout(if config.native_terminal || config.native_pixel.enabled {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_secs(60)
+            })
+            .send()?
+            .error_for_status()?;
         Ok(())
     }
 
@@ -5137,14 +5618,19 @@ impl HttpRunnerApi {
         url: String,
         body: &T,
     ) -> Result<()> {
+        // Serialize once: the signature covers these exact bytes, and every
+        // retry resends the same body.
+        let bytes = serde_json::to_vec(body)?;
+        let path_and_query = self.path_and_query(&url)?;
         let mut last_error = None;
         for delay in TERMINAL_REPORT_RETRY_DELAYS {
             if !delay.is_zero() {
                 thread::sleep(delay);
             }
+            // A nonce is single use, so a retry is re-signed with a fresh one
+            // even though the body is byte-identical.
             match self
-                .authorized(self.client.post(&url))
-                .json(body)
+                .signed_request(reqwest::Method::POST, &path_and_query, Some(&bytes))
                 .send()
                 .and_then(reqwest::blocking::Response::error_for_status)
             {
@@ -5161,22 +5647,18 @@ impl HttpRunnerApi {
     }
 
     fn claim_next(&self) -> Result<ClaimResponse> {
+        let path = format!("/v1/runners/{}/leases/next?wait_ms=20000", self.runner_id);
         Ok(self
-            .authorized(self.client.get(format!(
-                "{}/v1/runners/{}/leases/next?wait_ms=20000",
-                self.base, self.runner_id
-            )))
+            .signed_request(reqwest::Method::GET, &path, None)
             .send()?
             .error_for_status()?
             .json()?)
     }
 
     fn open_leases(&self) -> Result<Vec<OpenLease>> {
+        let path = format!("/v1/runners/{}/leases/open", self.runner_id);
         Ok(self
-            .authorized(self.client.get(format!(
-                "{}/v1/runners/{}/leases/open",
-                self.base, self.runner_id
-            )))
+            .signed_request(reqwest::Method::GET, &path, None)
             .send()?
             .error_for_status()?
             .json::<OpenLeasesResponse>()?
@@ -5282,12 +5764,10 @@ impl HttpRunnerApi {
     }
 
     fn control_with_timeout(&self, lease_id: &str, timeout: Duration) -> Result<ControlResponse> {
+        let path = format!("/v1/runner-leases/{lease_id}/control");
         Ok(self
-            .authorized(
-                self.client
-                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base))
-                    .timeout(timeout),
-            )
+            .signed_request(reqwest::Method::GET, &path, None)
+            .timeout(timeout)
             .send()?
             .error_for_status()?
             .json()?)
@@ -5430,11 +5910,9 @@ impl runtime_launch::recovery::RecoveryReporter for HttpRunnerApi {
     /// existed), which leaves nothing live for a dir to belong to.
     fn lease_liveness(&self, lease_id: &str) -> Result<runtime_launch::recovery::LeaseLiveness> {
         use runtime_launch::recovery::LeaseLiveness;
+        let path = format!("/v1/runner-leases/{lease_id}/control");
         let response = self
-            .authorized(
-                self.client
-                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base)),
-            )
+            .signed_request(reqwest::Method::GET, &path, None)
             .send()?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(LeaseLiveness::Terminal);
@@ -5459,32 +5937,40 @@ struct LeaseStatusProbe {
     status: Option<String>,
 }
 
-fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
-    let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
-    // Only advertised where the workload can actually be contained. A Runner
-    // that took `runtime_launch` leases it must then refuse would look
-    // available to the scheduler and fail every Run it won.
-    // A slot still holding an unconfirmed previous Run takes no new runtime
-    // work: its old workload may still be writing.
-    if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
-        && runtime_launch::recovery::slot_recovered()
-    {
-        kinds.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+/// What the heartbeat measures about its own lease kinds.
+///
+/// The decision itself lives in `host_capabilities` so doctor and the heartbeat
+/// cannot disagree. Only the inputs admission actually depends on are set here;
+/// the diagnostic observations behind a negative answer are doctor's business
+/// and are deliberately not probed on every heartbeat.
+fn lease_kind_facts(
+    config: &WorkerConfig,
+    persistent_volumes: bool,
+) -> host_capabilities::HostFacts {
+    host_capabilities::HostFacts {
+        // Only advertised where the workload can actually be contained. A
+        // Runner that took `runtime_launch` leases it must then refuse would
+        // look available to the scheduler and fail every Run it won. A slot
+        // still holding an unconfirmed previous Run takes no new runtime work:
+        // its old workload may still be writing.
+        containment_available: runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED(),
+        slot_recovered: runtime_launch::recovery::slot_recovered(),
         // Volume operations need the volume store, and the same recovered
         // slot: an unrecovered one may still have a workload writing.
-        if persistent_volumes {
-            kinds.push(runtime_launch::volume_maintenance::STATE_VOLUME_MAINTENANCE_LEASE_KIND);
-        }
+        persistent_volumes,
+        explicit_placement: config.require_explicit_runtime_placement,
+        browser_executor_configured: config.browser_chrome.as_deref().is_some_and(Path::is_file)
+            && config
+                .run_control_verification_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+        browser_executor_evaluated: true,
+        ..host_capabilities::HostFacts::default()
     }
-    if config.browser_chrome.as_deref().is_some_and(Path::is_file)
-        && config
-            .run_control_verification_key
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        kinds.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
-    }
-    explicit_runtime_placement_kinds(kinds, config.require_explicit_runtime_placement)
+}
+
+fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
+    host_capabilities::lease_admission(&lease_kind_facts(config, persistent_volumes)).kinds
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -5669,9 +6155,10 @@ struct HttpProxyAssertionClaims {
 }
 
 impl HttpProxyGate {
-    /// The gate for one lease, or None when the claim carried no key — the
-    /// control plane does not sign assertions for this Runner, so there is
-    /// nothing to enforce with.
+    /// The gate for one lease, or None when the claim carried no key. A
+    /// missing key is only tolerable for a private loopback listener; every
+    /// public listener resolves this through `SurfaceGate::for_lease`, which
+    /// refuses a keyless lease instead of publishing it.
     fn for_lease(lease: &ClaimedLease, runner_id: &str) -> Option<Arc<Self>> {
         let key = lease.proxy_assertion_key.as_ref()?.trim();
         if key.len() < 32 {
@@ -5780,23 +6267,120 @@ fn strip_http_prelude_header(head: &[u8], tail: &[u8], name: &str) -> Vec<u8> {
     out
 }
 
-/// Refuse to serve a lease whose Surface could not be gated. Only the
-/// host-boundary mode requires it: there the slot is a public provider URL and
-/// nothing in front of it authenticates. Other modes keep the existing rollout
-/// rule (no key means the control plane signs nothing, so nothing is lost).
-fn require_surface_gate(
-    isolation: IsolationMode,
-    lease: &ClaimedLease,
-    runner_id: &str,
-) -> Result<()> {
-    if isolation == IsolationMode::HostBoundary
-        && HttpProxyGate::for_lease(lease, runner_id).is_none()
-    {
-        anyhow::bail!(
-            "surface_assertion_key_missing: a host-boundary Runner publishes a Surface only behind the assertion gate, and this lease carried no verification key"
-        );
+/// Why this Runner's Surface listener is reachable from outside the host.
+///
+/// One listener may be public for more than one reason (a host-boundary slot
+/// that also configures a public origin), so every reason is kept. A slot
+/// ingress — an operator reverse proxy or the Ato-managed per-slot host — is
+/// visible to the worker only as `public_base_url`: the worker never sees the
+/// proxy itself. A host-boundary slot is public even without one because the
+/// provider's proxy reaches its listener directly, and a listener bound to a
+/// non-loopback address is public on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SurfacePublication {
+    public_base_url: bool,
+    host_boundary_slot: bool,
+    non_loopback_listener: bool,
+}
+
+impl SurfacePublication {
+    pub(crate) fn of(config: &WorkerConfig) -> Self {
+        Self::from_parts(
+            config.public_base_url.is_some(),
+            config.isolation,
+            config.surface_listen,
+        )
     }
-    Ok(())
+
+    pub(crate) fn from_parts(
+        public_base_url: bool,
+        isolation: IsolationMode,
+        surface_listen: SocketAddr,
+    ) -> Self {
+        Self {
+            public_base_url,
+            host_boundary_slot: isolation == IsolationMode::HostBoundary,
+            non_loopback_listener: !surface_listen.ip().is_loopback(),
+        }
+    }
+
+    pub(crate) fn is_public(self) -> bool {
+        self.public_base_url || self.host_boundary_slot || self.non_loopback_listener
+    }
+
+    /// Stable reason codes, in the order an operator should read them.
+    pub(crate) fn reasons(self) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if self.public_base_url {
+            reasons.push("public_base_url");
+        }
+        if self.host_boundary_slot {
+            reasons.push("host_boundary_slot");
+        }
+        if self.non_loopback_listener {
+            reasons.push("non_loopback_listener");
+        }
+        reasons
+    }
+
+    fn describe(self) -> String {
+        let reasons = self.reasons();
+        if reasons.is_empty() {
+            "loopback-only listener with no public base URL".to_owned()
+        } else {
+            reasons.join(", ")
+        }
+    }
+}
+
+/// The assertion policy of one Surface listener.
+///
+/// A public listener has no pass-through: `SurfaceGate::for_lease` refuses to
+/// build one it cannot enforce, before a workload is materialized or a public
+/// socket is bound. Only a loopback-only listener may run without a key,
+/// because no request from outside this host can reach it.
+enum SurfaceGate {
+    /// Every request must carry a signed assertion scoped to this lease.
+    Assertion(Arc<HttpProxyGate>),
+    /// A listener nothing outside this host can reach. The control plane mints
+    /// no assertion for it, so requests are forwarded without one.
+    LoopbackOnly,
+}
+
+impl std::fmt::Debug for SurfaceGate {
+    /// Never print the key: a gate's Debug is also a diagnostic.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Assertion(_) => formatter.write_str("SurfaceGate::Assertion(..)"),
+            Self::LoopbackOnly => formatter.write_str("SurfaceGate::LoopbackOnly"),
+        }
+    }
+}
+
+impl SurfaceGate {
+    fn for_lease(
+        publication: SurfacePublication,
+        lease: &ClaimedLease,
+        runner_id: &str,
+    ) -> Result<Self> {
+        let Some(gate) = HttpProxyGate::for_lease(lease, runner_id) else {
+            ensure!(
+                !publication.is_public(),
+                "surface_assertion_key_missing: this Runner publishes a public Surface listener ({}), and this lease carried no verification key; neither the workload nor the listener was started",
+                publication.describe()
+            );
+            return Ok(Self::LoopbackOnly);
+        };
+        Ok(Self::Assertion(gate))
+    }
+}
+
+/// Resolve the gate for a lease before anything is started. The key arrives
+/// inside the lease claim, so this is the first moment the Runner can know
+/// whether it can enforce the gate; a public listener without one is refused
+/// here, not after the workload is already reachable.
+fn require_surface_gate(config: &WorkerConfig, lease: &ClaimedLease) -> Result<SurfaceGate> {
+    SurfaceGate::for_lease(config.surface_publication(), lease, &config.runner_id)
 }
 
 fn proxy_assertion_forbidden(client: &mut TcpStream) {
@@ -5812,9 +6396,10 @@ struct SurfaceMux {
     /// credential, verified inside the control server.
     control_target: Option<SocketAddr>,
     presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
-    /// The proxy-origin gate. None only when the control plane does not sign
-    /// assertions for this Runner.
-    gate: Option<Arc<HttpProxyGate>>,
+    /// The proxy-origin gate. A public listener always carries an enforcing
+    /// gate; `LoopbackOnly` exists only for a listener nothing off this host
+    /// can reach.
+    gate: SurfaceGate,
     /// True when surface_target is a guest hosting the session-surface
     /// gateway, which authenticates `SURFACE_CONNECT_PATH` itself. False for
     /// runtime-launch workloads — there the path is just an app path and stays
@@ -5909,71 +6494,79 @@ fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &S
         proxy_connection_with_prelude(&mut client, surface_target, &prelude);
         return;
     }
-    if let Some(claims) = mux.gate.as_deref().and_then(|gate| {
-        http_prelude_header(head, RUN_ASSERTION_HEADER).and_then(|assertion| gate.claims(assertion))
-    }) && claims.kind == "observation"
-    {
-        let request_line = std::str::from_utf8(head)
-            .ok()
-            .and_then(|text| text.split("\r\n").next());
-        let expected = claims
-            .path
-            .as_ref()
-            .map(|path| format!("GET {path} HTTP/1.1"));
-        let target = claims
-            .port
-            .as_ref()
-            .and_then(|port| mux.observation_targets.get(port));
-        if !claims.path.as_deref().is_some_and(|path| {
-            path.starts_with('/')
-                && !path.starts_with("//")
-                && !path
-                    .chars()
-                    .any(|c| c.is_ascii_control() || c.is_ascii_whitespace() || c == '#')
-        }) || claims.method.as_deref() != Some("GET")
-            || request_line != expected.as_deref()
-            || !tail.is_empty()
-            || http_prelude_header(head, "transfer-encoding").is_some()
-            || http_prelude_header(head, "content-length").is_some_and(|value| value != "0")
-        {
-            proxy_assertion_forbidden(&mut client);
-            return;
-        }
-        if let Some(target) = target {
-            // Rebuild one bodyless request. Do not pass Upgrade, credentials, pipelined
-            // requests or arbitrary headers into a private service.
-            let request = format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                claims.path.as_deref().unwrap_or("/"),
-                target
-            );
-            if let Ok(mut upstream) = TcpStream::connect_timeout(target, Duration::from_secs(5)) {
-                let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
-                if upstream.write_all(request.as_bytes()).is_ok() {
-                    let _ = io::copy(&mut upstream.take(1024 * 1024 + 16384), &mut client);
+    match &mux.gate {
+        SurfaceGate::Assertion(gate) => {
+            if let Some(claims) = http_prelude_header(head, RUN_ASSERTION_HEADER)
+                .and_then(|assertion| gate.claims(assertion))
+                && claims.kind == "observation"
+            {
+                let request_line = std::str::from_utf8(head)
+                    .ok()
+                    .and_then(|text| text.split("\r\n").next());
+                let expected = claims
+                    .path
+                    .as_ref()
+                    .map(|path| format!("GET {path} HTTP/1.1"));
+                let target = claims
+                    .port
+                    .as_ref()
+                    .and_then(|port| mux.observation_targets.get(port));
+                if !claims.path.as_deref().is_some_and(|path| {
+                    path.starts_with('/')
+                        && !path.starts_with("//")
+                        && !path
+                            .chars()
+                            .any(|c| c.is_ascii_control() || c.is_ascii_whitespace() || c == '#')
+                }) || claims.method.as_deref() != Some("GET")
+                    || request_line != expected.as_deref()
+                    || !tail.is_empty()
+                    || http_prelude_header(head, "transfer-encoding").is_some()
+                    || http_prelude_header(head, "content-length").is_some_and(|value| value != "0")
+                {
+                    proxy_assertion_forbidden(&mut client);
+                    return;
                 }
+                if let Some(target) = target {
+                    // Rebuild one bodyless request. Do not pass Upgrade, credentials, pipelined
+                    // requests or arbitrary headers into a private service.
+                    let request = format!(
+                        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                        claims.path.as_deref().unwrap_or("/"),
+                        target
+                    );
+                    if let Ok(mut upstream) =
+                        TcpStream::connect_timeout(target, Duration::from_secs(5))
+                    {
+                        let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
+                        if upstream.write_all(request.as_bytes()).is_ok() {
+                            let _ = io::copy(&mut upstream.take(1024 * 1024 + 16384), &mut client);
+                        }
+                    }
+                } else {
+                    proxy_assertion_forbidden(&mut client);
+                }
+                return;
             }
-        } else {
-            proxy_assertion_forbidden(&mut client);
+            if !http_prelude_header(head, RUN_ASSERTION_HEADER)
+                .is_some_and(|assertion| gate.verify(assertion))
+            {
+                proxy_assertion_forbidden(&mut client);
+                return;
+            }
         }
-        return;
-    }
-    if let Some(gate) = mux.gate.as_deref() {
-        let asserted = http_prelude_header(head, RUN_ASSERTION_HEADER)
-            .is_some_and(|assertion| gate.verify(assertion));
-        if !asserted {
-            proxy_assertion_forbidden(&mut client);
-            return;
-        }
+        // A loopback-only listener has no assertion to enforce and no path
+        // from outside this host. A public listener never reaches this arm:
+        // `SurfaceGate::for_lease` refuses it before the socket exists, so
+        // there is no ungated public pass-through.
+        SurfaceGate::LoopbackOnly => {}
     }
     if path == Some(BROWSER_PRESENTATION_PATH) {
         serve_browser_presentation(&mut client, mux.presentation_frame.as_ref());
         return;
     }
-    let forwarded = if mux.gate.is_some() {
-        strip_http_prelude_header(head, tail, RUN_ASSERTION_HEADER)
-    } else {
-        prelude
+    let forwarded = match &mux.gate {
+        SurfaceGate::Assertion(_) => strip_http_prelude_header(head, tail, RUN_ASSERTION_HEADER),
+        SurfaceGate::LoopbackOnly => prelude,
     };
     proxy_connection_with_prelude(&mut client, surface_target, &forwarded);
 }
@@ -6179,6 +6772,38 @@ mod tests {
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn runner_version_reports_only_a_valid_explicit_build_commit() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), None, true),
+            format!("0.1.0+git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0+ci.1", Some(commit), None, true),
+            format!("0.1.0+ci.1.git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), Some("12345678"), true),
+            format!("0.1.0+git.{commit}.b.12345678")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), Some("invalid!"), true),
+            format!("0.1.0+git.{commit}")
+        );
+        assert_eq!(
+            runner_agent_version("0.1.0", Some(commit), None, false),
+            "0.1.0"
+        );
+        for invalid in [
+            None,
+            Some("dirty"),
+            Some("A123456789abcdef0123456789abcdef01234567"),
+        ] {
+            assert_eq!(runner_agent_version("0.1.0", invalid, None, true), "0.1.0");
+        }
+    }
 
     #[test]
     fn journal_entry_is_dropped_only_once_the_terminal_report_is_delivered() {
@@ -7190,6 +7815,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         assert!(validate_config(&config).is_err());
     }
@@ -7222,6 +7848,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         assert!(validate_config(&config).is_err());
         config.max_slots = 64;
@@ -7265,6 +7892,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         resolve_runner_credentials(&mut config).unwrap();
         assert_eq!(config.runner_id, "runner-file");
@@ -7326,6 +7954,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         assert_eq!(ready_local_port(&config), 8420);
         assert_ne!(
@@ -7392,6 +8021,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         }
     }
 
@@ -7470,6 +8100,19 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(
             !advertised_capabilities(base.clone(), false, false, false)
                 .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE)
+        );
+    }
+
+    #[test]
+    fn private_pixel_capability_is_only_advertised_after_its_separate_preflight() {
+        let base = vec![runtime_launch::lease::PRIVATE_ISOLATED_PROCESS_FEATURE];
+        assert!(
+            !with_private_pixel_capability(base.clone(), false)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE)
+        );
+        assert!(
+            with_private_pixel_capability(base, true)
+                .contains(&runtime_launch::lease::PRIVATE_ISOLATED_PIXEL_FEATURE)
         );
     }
 
@@ -7603,6 +8246,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             workload_uid: None,
             workload_gid: None,
             once: true,
+            rotate_device_key: false,
         };
         runtime_launch::recovery::mark_slot_recovered(true);
         let mut expected = vec![PORTABLE_CAPSULE_LEASE_KIND];
@@ -7671,7 +8315,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         (address, worker)
     }
 
-    fn gated_proxy(gate: Arc<HttpProxyGate>, target: SocketAddr) -> (SocketAddr, TcpProxy) {
+    fn surface_proxy(gate: SurfaceGate, target: SocketAddr) -> (SocketAddr, TcpProxy) {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let public = reservation.local_addr().unwrap();
         drop(reservation);
@@ -7681,13 +8325,35 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: Some(gate),
+                gate,
                 guest_surface_gateway: false,
                 observation_targets: BTreeMap::new(),
             }),
         )
         .unwrap();
         (public, proxy)
+    }
+
+    fn gated_proxy(gate: Arc<HttpProxyGate>, target: SocketAddr) -> (SocketAddr, TcpProxy) {
+        surface_proxy(SurfaceGate::Assertion(gate), target)
+    }
+
+    fn keyed_lease() -> ClaimedLease {
+        let mut lease = lease(None);
+        lease.proxy_assertion_key = Some("k".repeat(32));
+        lease
+    }
+
+    /// Send one raw request, half-close, and return everything the listener
+    /// answered. Used for WebSocket upgrades and chunked bodies, which the
+    /// GET helper does not express.
+    fn raw_request(public: SocketAddr, request: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect(public).unwrap();
+        client.write_all(request).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        response
     }
 
     fn http_get(public: SocketAddr, path: &str, assertion: Option<&str>) -> Vec<u8> {
@@ -7729,7 +8395,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: Some(gate.clone()),
+                gate: SurfaceGate::Assertion(gate.clone()),
                 guest_surface_gateway: false,
                 observation_targets: BTreeMap::from([("backend.http".to_owned(), upstream)]),
             }),
@@ -7838,22 +8504,151 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(gate.verify(&sign(claims("http", "lease_1", "runner_1"), &key)));
     }
 
+    /// A namespace Runner behind a slot ingress is as public as a host-boundary
+    /// one: public_base_url is the origin that ingress serves, so the lease
+    /// must carry the gate key or nothing starts.
     #[test]
-    fn a_host_boundary_runner_refuses_a_lease_it_cannot_gate() {
-        let mut ungated = lease(None);
-        assert!(require_surface_gate(IsolationMode::Namespace, &ungated, "runner_1").is_ok());
-        let error = require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1")
+    fn q3_a_namespace_runner_with_a_public_base_url_refuses_a_keyless_lease() {
+        let config = capability_test_config(None);
+        assert_eq!(config.isolation, IsolationMode::Namespace);
+        assert!(config.public_base_url.is_some());
+        let error = require_surface_gate(&config, &lease(None))
             .unwrap_err()
             .to_string();
         assert!(
             error.starts_with("surface_assertion_key_missing"),
             "{error}"
         );
+        assert!(error.contains("public_base_url"), "{error}");
         // A key too short to be the derived one is no key.
-        ungated.proxy_assertion_key = Some("short".to_owned());
-        assert!(require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1").is_err());
-        ungated.proxy_assertion_key = Some("k".repeat(32));
-        assert!(require_surface_gate(IsolationMode::HostBoundary, &ungated, "runner_1").is_ok());
+        let mut short = lease(None);
+        short.proxy_assertion_key = Some("short".to_owned());
+        assert!(require_surface_gate(&config, &short).is_err());
+        // The same lease with the real key resolves an enforcing gate.
+        assert!(matches!(
+            require_surface_gate(&config, &keyed_lease()).unwrap(),
+            SurfaceGate::Assertion(_)
+        ));
+
+        // A host-boundary slot is public even without a public base URL, and a
+        // non-loopback bind is public on its own.
+        let mut boundary = capability_test_config(None);
+        boundary.public_base_url = None;
+        boundary.isolation = IsolationMode::HostBoundary;
+        assert!(boundary.surface_publication().is_public());
+        assert!(require_surface_gate(&boundary, &lease(None)).is_err());
+
+        let mut open = capability_test_config(None);
+        open.public_base_url = None;
+        open.surface_listen = "0.0.0.0:8420".parse().unwrap();
+        assert!(open.surface_publication().is_public());
+        assert!(require_surface_gate(&open, &lease(None)).is_err());
+    }
+
+    /// The gate's public contract: a public listener answers 403 without an
+    /// assertion and forwards a signed request with the credential stripped.
+    #[test]
+    fn q3_a_public_listener_answers_403_ungated_and_200_with_an_assertion() {
+        let gate = test_gate();
+        let (upstream_addr, upstream) = prelude_echo_upstream();
+        let (public, proxy) =
+            surface_proxy(SurfaceGate::Assertion(Arc::clone(&gate)), upstream_addr);
+
+        let response = http_get(public, "/i/", None);
+        assert!(response.starts_with(b"HTTP/1.1 403"), "{response:?}");
+
+        let assertion = http_assertion(
+            &"k".repeat(32),
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        let response = http_get(public, "/i/", Some(&assertion));
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+
+        let forwarded = String::from_utf8(upstream.join().unwrap()).unwrap();
+        assert!(forwarded.starts_with("GET /i/ HTTP/1.1"), "{forwarded}");
+        assert!(!forwarded.contains(RUN_ASSERTION_HEADER), "{forwarded}");
+        drop(proxy);
+    }
+
+    /// WebSocket upgrades and chunked bodies take the same prelude path as
+    /// ordinary HTTP: an unasserted request never reaches the workload, and an
+    /// asserted one is forwarded byte-for-byte.
+    #[test]
+    fn q17_websocket_upgrades_and_chunked_bodies_use_the_same_public_gate() {
+        let gate = test_gate();
+        let (upstream_addr, upstream) = request_capture_upstream();
+        let (public, proxy) =
+            surface_proxy(SurfaceGate::Assertion(Arc::clone(&gate)), upstream_addr);
+
+        let upgrade = b"GET /socket HTTP/1.1\r\nHost: s0-runner.ato.run\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        let response = raw_request(public, upgrade);
+        assert!(
+            response.starts_with(b"HTTP/1.1 403"),
+            "a WS upgrade without an assertion must be refused: {response:?}"
+        );
+
+        let chunked_body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let mut chunked = b"POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        chunked.extend_from_slice(chunked_body);
+        let response = raw_request(public, &chunked);
+        assert!(
+            response.starts_with(b"HTTP/1.1 403"),
+            "a chunked body without an assertion must be refused: {response:?}"
+        );
+
+        // Neither refusal reached the workload; the first upstream connection
+        // is the asserted chunked request below.
+        let assertion = http_assertion(
+            &"k".repeat(32),
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        let mut chunked = format!(
+            "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n{RUN_ASSERTION_HEADER}: {assertion}\r\n\r\n"
+        )
+        .into_bytes();
+        chunked.extend_from_slice(chunked_body);
+        let response = raw_request(public, &chunked);
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+
+        let received = upstream.join().unwrap();
+        assert!(
+            !received
+                .windows(RUN_ASSERTION_HEADER.len())
+                .any(|window| window == RUN_ASSERTION_HEADER.as_bytes()),
+            "the workload must not see the assertion"
+        );
+        assert!(
+            received.ends_with(chunked_body),
+            "the chunked tail must be forwarded untouched"
+        );
+        drop(proxy);
+    }
+
+    /// Requirement's private case: loopback-only with no public base URL keeps
+    /// running without a key, exactly as before.
+    #[test]
+    fn q92_a_loopback_only_runner_serves_without_an_assertion_key() {
+        let mut config = capability_test_config(None);
+        config.public_base_url = None;
+        config.surface_listen = "127.0.0.1:8420".parse().unwrap();
+        config.isolation = IsolationMode::Namespace;
+        assert!(!config.surface_publication().is_public());
+        let gate = require_surface_gate(&config, &lease(None)).unwrap();
+        assert!(matches!(gate, SurfaceGate::LoopbackOnly));
+
+        let (upstream_addr, upstream) = prelude_echo_upstream();
+        let (public, proxy) = surface_proxy(SurfaceGate::LoopbackOnly, upstream_addr);
+        let response = http_get(public, "/i/", None);
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+        let forwarded = String::from_utf8(upstream.join().unwrap()).unwrap();
+        assert!(forwarded.starts_with("GET /i/ HTTP/1.1"), "{forwarded}");
+        drop(proxy);
     }
 
     #[test]
@@ -7872,7 +8667,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             Some(SurfaceMux {
                 control_target: None,
                 presentation_frame: None,
-                gate: Some(gate),
+                gate: SurfaceGate::Assertion(gate),
                 guest_surface_gateway: true,
                 observation_targets: BTreeMap::new(),
             }),

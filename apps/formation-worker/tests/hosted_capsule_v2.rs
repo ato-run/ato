@@ -210,6 +210,94 @@ fn scratch_dir() -> tempfile::TempDir {
     tempfile::tempdir_in(root).unwrap()
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the pinned Geany source and operator-configured native Pixel runtime"]
+fn actual_native_geany_job_publishes_the_original_contract_after_cleanup() {
+    let source = std::env::var_os("ATO_NATIVE_GEANY_SOURCE").expect("pinned Geany src subtree");
+    let fetcher = Fetcher {
+        bytes: ato_formation_worker::pack::pack_tree(Path::new(&source)).unwrap(),
+    };
+    let scratch = scratch_dir();
+    let fixture = ApiFixture::new();
+    let api = FormationApi::new(
+        reqwest::blocking::Client::new(),
+        fixture.url.clone(),
+        "synthetic-test-token".into(),
+    );
+    let context = JobContext {
+        api: &api,
+        fetcher: &fetcher,
+        packer: &Packer,
+        work_root: scratch.path(),
+        shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+        worker_id: "native_geany_fixture",
+        limits: BuildLimits::default(),
+        source_limits: SourceLimits::default(),
+    };
+    let attempt = BuildAttempt {
+        job_id: "geany_job".into(),
+        attempt_id: "geany_attempt".into(),
+        attempt_fence: 1,
+    };
+    let manifest = match std::env::var_os("ATO_NATIVE_GEANY_MANIFEST") {
+        Some(path) => std::fs::read_to_string(path).expect("frozen Geany manifest"),
+        None => {
+            include_str!("../../../docs/ops/fixtures/native-geany-source-linux-amd64-20261104.toml")
+                .to_owned()
+        }
+    };
+    let mut job = json!({
+        "job_id": "geany_job", "source": {"kind":"git_hub", "owner":"geany", "repository":"Geany", "resolved_commit_sha":"0e02cc52a7634d1fed8511bd44730ea0ab791d9f", "subdirectory":""},
+        "requested_outputs":["portable_application"],
+        "target":{"triple":"x86_64-linux-gnu","workspace_guest_root":"/app"},
+        "policy":{"policy_version":"formation-policy-v1","network":"denied","publish_enabled":false},
+        "authoring":{"manifest_toml":manifest}
+    });
+    if std::env::var("ATO_NATIVE_GEANY_PRIVATE").as_deref() == Ok("1") {
+        job["policy"]["private_isolated"] = json!(true);
+    }
+    let result = run_claimed_job(
+        &context,
+        &attempt,
+        &job,
+        "compute_geany",
+        "revision_geany",
+        false,
+    );
+    assert!(result.is_ok(), "native job failed: {result:?}");
+    let captured = fixture.captured.result.lock().unwrap();
+    let result = captured.as_ref().expect("published Formation result");
+    assert_eq!(
+        result["provenance"]["isolation"],
+        "oci-network-none;native-pixel"
+    );
+    if let Some(path) = std::env::var_os("ATO_NATIVE_GEANY_RESULT") {
+        std::fs::write(path, serde_json::to_vec_pretty(result).unwrap()).unwrap();
+    }
+    assert_eq!(
+        result["contract_ref"],
+        "sha256:dba72da3da110f31dd551a046a69cd8c50ae53bb2aba5b02f1bd00dd2b89e395"
+    );
+    assert_eq!(
+        result["derivation_ref"],
+        std::env::var("ATO_NATIVE_GEANY_DERIVATION").unwrap_or_else(|_| {
+            "sha256:84cc0aefc3e05d888e9ba7bed711e55f51f593ae135bd9f8ccfdfc82391caa3d".into()
+        })
+    );
+    assert_eq!(result["verification_receipt"]["fully_satisfied"], true);
+    assert_eq!(
+        result["verification_receipt"]["execution"]["attempt_id"],
+        "geany_attempt"
+    );
+    assert!(
+        result["verification_receipt"]["execution"]
+            .get("lease_id")
+            .is_none()
+    );
+    assert_eq!(fixture.captured.uploads.load(Ordering::SeqCst), 1);
+}
+
 /// A v2 process route: one Python server, one HTTP observation.
 fn process_manifest(runtime: &str, version: &str, server: &str) -> String {
     format!(

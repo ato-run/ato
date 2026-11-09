@@ -17,8 +17,8 @@
 //! 6. runs the bundle through the shared portable attempt and publishes the
 //!    additive v2 result the control plane accepts.
 //!
-//! A v1 source never enters this module: `job.rs` routes on the declared
-//! schema, and the v1 path below the branch is unchanged.
+//! A v1 source declaring a native Surface also uses this portable publication
+//! path, after the v1 parser has validated its authored route.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -33,7 +33,7 @@ use ato_formation::capsule_toml_v2::{
     CAPSULE_SCHEMA_V2, PortableAuthoringDraftV2, parse_capsule_toml_v2,
 };
 use ato_formation::failure::{FailureStage, FormationFailure};
-use ato_formation::request::AttemptOutcomes;
+use ato_formation::request::{AttemptOutcomes, AttemptStatus};
 use ato_formation::source::SourceClosureRef;
 use ato_formation::verify::{ContractVerification, ContractVerificationReceipt};
 use ato_portable_application::portable_run::{
@@ -41,8 +41,9 @@ use ato_portable_application::portable_run::{
 };
 use ato_portable_application::{ValidatedPortableApplication, validate_all_derivations};
 use ato_runtime_attempt::build_sandbox::NetworkPolicy;
-use ato_runtime_attempt::journal::AttemptPermit;
+use ato_runtime_attempt::journal::{AttemptPermit, AttemptRecordState};
 use ato_runtime_attempt::plan::digest;
+use ato_runtime_attempt::realize::StopClass;
 
 use crate::api::FormationApi;
 use crate::build::BuildAttempt;
@@ -60,12 +61,11 @@ pub const CAPSULE_V2_DERIVATION_NOT_DECLARED: &str = "derivation_selection_not_d
 pub const CAPSULE_V2_BUNDLE_PUBLICATION_FAILED: &str = "capsule_v2_bundle_publication_failed";
 pub const CAPSULE_V2_CONTRACT_NOT_SATISFIED: &str = "capsule_v2_contract_not_satisfied";
 
-/// Whether a job's authored document belongs to this frontend.
+/// Whether a job's authored document declares the v2 frontend.
 ///
 /// Routing only: the parser decides validity. A document that declares
-/// `ato.capsule/2` gets the v2 frontend; every other document (including an
-/// unknown schema, which the v1 parser refuses as `unsupported_capsule_schema`)
-/// keeps the v1 path byte-for-byte.
+/// `ato.capsule/2` gets the v2 frontend; other documents reach the v1 parser,
+/// which can subsequently route an explicitly declared native Surface here.
 pub(crate) fn owns(manifest: &str) -> Result<bool, FormationFailure> {
     Ok(declared_schema(manifest).map_err(FormationFailure::from)?
         == Some(CAPSULE_SCHEMA_V2.to_owned()))
@@ -92,6 +92,10 @@ pub(crate) struct V2Request<'a> {
     /// `job.authoring.derivation_ref` — required only when the bundle declares
     /// more than one Derivation. v1 jobs never carry it.
     pub requested_derivation: Option<&'a str>,
+    /// A v1 native manifest uses the same portable publication path. The
+    /// title is presentation metadata, not a substitute for the original K.
+    pub native_title: Option<&'a str>,
+    pub private_isolated: bool,
     pub permit: Option<Box<dyn AttemptPermit>>,
 }
 
@@ -102,9 +106,13 @@ const PORTABLE_GUEST_ROOT: &str = "/app";
 
 pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
     let attempt = request.attempt;
-    let draft = parse_capsule_toml_v2(request.manifest).map_err(|error| {
-        formation_failure(error.code(), FailureStage::Authoring, error.to_string())
-    })?;
+    let draft = if request.native_title.is_none() {
+        Some(parse_capsule_toml_v2(request.manifest).map_err(|error| {
+            formation_failure(error.code(), FailureStage::Authoring, error.to_string())
+        })?)
+    } else {
+        None
+    };
 
     // 1. The control plane's copy is the document it accepted and recorded.
     //    `capsule.toml` is excluded from the bundle's workspace digest, so
@@ -122,9 +130,12 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
     })?;
 
     // 2. Same builder as `ato pack`. No second compiler.
-    let (bundle_bytes, bundle) =
+    let (bundle_bytes, bundle) = if let Some(title) = request.native_title {
+        ato_portable_application::build_native_bundle(request.source_root, &manifest_path, title)
+    } else {
         ato_portable_application::build_authored_bundle_v2(request.source_root)
-            .map_err(bundle_failure)?;
+    }
+    .map_err(bundle_failure)?;
     let transport = ato_portable_application::bundle_sha256(&bundle_bytes);
 
     // 3. Which Derivation runs is the caller's decision, never a planner's.
@@ -138,7 +149,9 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
         })?;
 
     // 4. Nothing the author declared may be silently ignored.
-    verify_semantics(&draft, validated)?;
+    if let Some(draft) = &draft {
+        verify_semantics(draft, validated)?;
+    }
 
     // 5. An OCI route pulls its pinned image. This Runtime may only do that
     //    under an admitted policy; `denied` is an admission refusal, not a
@@ -147,11 +160,13 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
         "dependency_resolution" => NetworkPolicy::DependencyResolution,
         _ => NetworkPolicy::Denied,
     };
-    if matches!(
-        validated.realization,
-        ato_portable_application::PortableRealizationKind::OciContainer
-            | ato_portable_application::PortableRealizationKind::OciServiceGroup
-    ) && network != NetworkPolicy::DependencyResolution
+    if request.native_title.is_none()
+        && matches!(
+            validated.realization,
+            ato_portable_application::PortableRealizationKind::OciContainer
+                | ato_portable_application::PortableRealizationKind::OciServiceGroup
+        )
+        && network != NetworkPolicy::DependencyResolution
     {
         return Err(formation_failure(
             CAPSULE_V2_NETWORK_NOT_ADMITTED,
@@ -165,37 +180,52 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
 
     let profile = crate::local::probe_local_runtime();
     let cache_root = request.work_root.join("cache");
-    let outcome = run_portable_bundle_attempt(
-        &PortableBundleAttempt {
-            bundle_bytes: &bundle_bytes,
-            bundle: &bundle,
-            derivation_ref: &derivation_ref,
-            runtime_root: request.attempt_root,
-            cache_root: &cache_root,
-            sandbox_shim: request.shim,
-            sandbox_subcommand: "sandbox-exec",
-            request_id: &attempt.job_id,
-            attempt_id: &attempt.attempt_id,
-            label: "portable_v2",
-            runtime_id: request
-                .work_root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("formation"),
-            profile: &profile,
-            authorization: ato_runtime_attempt::admission::EffectAuthorization::Unattended,
-            network,
-            receipt_target: ato_formation::verify::VerificationTargetKind::FormationRuntime,
-            run_id: None,
-            binding_environment: &Default::default(),
-            interrupt: None,
+    let portable_attempt = PortableBundleAttempt {
+        bundle_bytes: &bundle_bytes,
+        bundle: &bundle,
+        derivation_ref: &derivation_ref,
+        runtime_root: request.attempt_root,
+        cache_root: &cache_root,
+        sandbox_shim: request.shim,
+        sandbox_subcommand: "sandbox-exec",
+        request_id: &attempt.job_id,
+        attempt_id: &attempt.attempt_id,
+        label: "portable_v2",
+        runtime_id: request
+            .work_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("formation"),
+        profile: &profile,
+        authorization: if request.private_isolated {
+            ato_runtime_attempt::admission::EffectAuthorization::PrivateIsolatedFormation
+        } else {
+            ato_runtime_attempt::admission::EffectAuthorization::Unattended
         },
-        request
-            .permit
-            .take()
-            .context("the v2 frontend was given no attempt permit")?,
-    )
+        network,
+        receipt_target: ato_formation::verify::VerificationTargetKind::FormationRuntime,
+        run_id: None,
+        binding_environment: &Default::default(),
+        interrupt: None,
+        host: None,
+    };
+    let permit = request
+        .permit
+        .take()
+        .context("the portable frontend was given no attempt permit")?;
+    let outcome = if request.native_title.is_some() {
+        crate::native_runtime::run(&portable_attempt, permit)
+    } else {
+        run_portable_bundle_attempt(&portable_attempt, permit)
+    }
     .map_err(|error| {
+        if request.native_title.is_some() {
+            return formation_failure(
+                "native_surface_unavailable",
+                FailureStage::Admission,
+                "the native Formation runtime could not admit the requested surface".to_owned(),
+            );
+        }
         formation_failure(
             CAPSULE_V2_BUNDLE_INVALID,
             FailureStage::Projection,
@@ -205,30 +235,14 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
 
     // 6. A result is published only for a fully satisfied Contract: a
     //    `fully_satisfied=false` receipt is evidence, never a published result.
-    let receipt = outcome.receipt.clone().ok_or_else(|| {
-        attempt_failure(
-            &outcome,
-            CAPSULE_V2_CONTRACT_NOT_SATISFIED,
-            "the candidate produced no verification receipt".to_owned(),
-        )
-    })?;
-    if !receipt.fully_satisfied {
-        let code = outcome
-            .attempt
-            .failure
-            .as_ref()
-            .map(|failure| failure.code.clone())
-            .unwrap_or_else(|| failed_observation_code(&receipt).to_owned());
-        return Err(attempt_failure(
-            &outcome,
-            &code,
-            format!(
-                "the candidate did not satisfy K ({} observations)",
-                receipt.observations.len()
-            ),
-        )
-        .into());
-    }
+    let receipt = publishable_receipt(
+        &outcome,
+        validated.contract_ref.as_str(),
+        &derivation_ref,
+        &attempt.attempt_id,
+        &transport,
+    )?
+    .clone();
 
     // 7. Register the bundle before the result names it: an artifact ref that
     //    resolves to nothing is worse than a result that was never published.
@@ -251,7 +265,6 @@ pub(crate) fn run(mut request: V2Request<'_>) -> Result<JobOutcome> {
                 Some(error),
             )
         })?;
-
     let verification = outcome.verification.clone().ok_or_else(|| {
         attempt_failure(
             &outcome,
@@ -553,7 +566,11 @@ fn compose_result(
         .derivation
         .ports
         .iter()
-        .filter(|port| port.id == surface_port)
+        .filter(|port| {
+            port.id == surface_port
+                && port.protocol == ato_formation::authoring::HTTP_PROTOCOL
+                && port.guest_port.is_some()
+        })
         .map(|port| {
             serde_json::json!({
                 "name": "http",
@@ -645,7 +662,7 @@ fn compose_result(
                 NetworkPolicy::DependencyResolution => "dependency_resolution",
                 NetworkPolicy::Scoped => "phase_scoped_connect",
             },
-            "isolation": network.provenance(),
+            "isolation": if request.native_title.is_some() { "oci-network-none;native-pixel" } else { network.provenance() },
             "field_origins": {},
         },
         "diagnostics": [],
@@ -709,6 +726,68 @@ fn failed_observation_code(receipt: &ContractVerificationReceipt) -> &'static st
     CAPSULE_V2_CONTRACT_NOT_SATISFIED
 }
 
+/// A satisfied observation remains evidence even when cleanup or durable
+/// recording fails. Publishing requires all three to have completed.
+fn publishable_receipt<'a>(
+    outcome: &'a PortableBundleAttemptOutcome,
+    expected_contract: &str,
+    expected_derivation: &str,
+    expected_attempt: &str,
+    expected_bundle: &str,
+) -> Result<&'a ContractVerificationReceipt> {
+    let receipt = outcome.receipt.as_ref().ok_or_else(|| {
+        attempt_failure(
+            outcome,
+            CAPSULE_V2_CONTRACT_NOT_SATISFIED,
+            "the candidate produced no verification receipt".to_owned(),
+        )
+    })?;
+    if !receipt.fully_satisfied {
+        let code = outcome
+            .attempt
+            .failure
+            .as_ref()
+            .map(|failure| failure.code.as_str())
+            .unwrap_or_else(|| failed_observation_code(receipt));
+        return Err(
+            attempt_failure(outcome, code, "the candidate did not satisfy K".to_owned()).into(),
+        );
+    }
+    if receipt.contract_ref != expected_contract
+        || receipt.derivation_ref != expected_derivation
+        || receipt.bundle_sha256.as_deref() != Some(expected_bundle)
+        || receipt.target.kind != ato_formation::verify::VerificationTargetKind::FormationRuntime
+        || receipt
+            .execution
+            .as_ref()
+            .and_then(|e| e.attempt_id.as_deref())
+            != Some(expected_attempt)
+        || !outcome
+            .verification
+            .as_ref()
+            .is_some_and(ContractVerification::fully_satisfied)
+    {
+        return Err(attempt_failure(
+            outcome,
+            "candidate_receipt_mismatch",
+            "the receipt does not match this portable attempt".to_owned(),
+        )
+        .into());
+    }
+    if outcome.attempt.status != AttemptStatus::Verified
+        || outcome.attempt_record != AttemptRecordState::Finished
+        || outcome.stop != Some(StopClass::Confirmed)
+    {
+        return Err(attempt_failure(
+            outcome,
+            "candidate_not_publishable",
+            "the verified attempt did not finish and clean up".to_owned(),
+        )
+        .into());
+    }
+    Ok(receipt)
+}
+
 fn attempt_failure(
     outcome: &PortableBundleAttemptOutcome,
     fallback_code: &str,
@@ -769,6 +848,120 @@ fn formation_failure(code: &str, stage: FailureStage, message: String) -> Format
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn observed_outcome() -> PortableBundleAttemptOutcome {
+        use ato_formation::request::FormationAttempt;
+        use ato_formation::verify::VerificationTargetKind;
+        let verification = ContractVerification {
+            verdicts: Vec::new(),
+        };
+        let mut receipt = ContractVerificationReceipt::new(
+            "sha256:bundle",
+            "sha256:contract",
+            "sha256:derivation",
+            VerificationTargetKind::FormationRuntime,
+            verification.clone(),
+        );
+        receipt.execution = Some(
+            serde_json::from_value(serde_json::json!({
+                "realization":"oci", "attempt_id":"attempt"
+            }))
+            .unwrap(),
+        );
+        let outcomes = AttemptOutcomes::not_run("fixture");
+        let attempt = FormationAttempt {
+            candidate: "portable".into(),
+            attempt_id: Some("attempt".into()),
+            derivation_ref: Some("sha256:derivation".into()),
+            contract_ref: Some("sha256:contract".into()),
+            base_contract_ref: None,
+            runtime_id: "runtime".into(),
+            status: AttemptStatus::Verified,
+            verification: Some(verification.clone()),
+            realization: None,
+            browser_verification: None,
+            receipt: Some(receipt.clone()),
+            outcomes: outcomes.clone(),
+            failure: None,
+        };
+        PortableBundleAttemptOutcome {
+            attempt,
+            attempt_record: AttemptRecordState::Finished,
+            receipt: Some(receipt),
+            verification: Some(verification),
+            realization: None,
+            outcomes,
+            stop: Some(StopClass::Confirmed),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn observed_receipt_is_not_published_after_uncertain_cleanup_or_recording() {
+        let check = |outcome: &PortableBundleAttemptOutcome| {
+            publishable_receipt(
+                outcome,
+                "sha256:contract",
+                "sha256:derivation",
+                "attempt",
+                "sha256:bundle",
+            )
+            .map(|_| ())
+        };
+        assert!(check(&observed_outcome()).is_ok());
+        let mut failed_stop = observed_outcome();
+        failed_stop.attempt.status = AttemptStatus::Failed;
+        failed_stop.stop = Some(StopClass::Unconfirmed {
+            reason: "container still running".into(),
+            resources: vec!["container".into()],
+        });
+        failed_stop.attempt.failure = Some(ato_formation::request::AttemptFailure {
+            code: "candidate_cleanup_failed".into(),
+            stage: "cleanup".into(),
+            message: "stop not confirmed".into(),
+        });
+        let error = check(&failed_stop).unwrap_err();
+        let failure = error.downcast_ref::<HostedAttemptFailure>().unwrap();
+        assert_eq!(failure.report.code, "candidate_cleanup_failed");
+        assert!(
+            failure.report.receipt.as_ref().unwrap()["fully_satisfied"]
+                .as_bool()
+                .unwrap()
+        );
+        let mut failed_record = observed_outcome();
+        failed_record.attempt_record = AttemptRecordState::StartedUnfinished;
+        assert!(check(&failed_record).is_err());
+        let mut no_cleanup = observed_outcome();
+        no_cleanup.stop = None;
+        assert!(check(&no_cleanup).is_err());
+        let mut false_receipt = observed_outcome();
+        false_receipt.receipt.as_mut().unwrap().fully_satisfied = false;
+        assert!(check(&false_receipt).is_err());
+        let mut wrong_attempt = observed_outcome();
+        wrong_attempt
+            .receipt
+            .as_mut()
+            .unwrap()
+            .execution
+            .as_mut()
+            .unwrap()
+            .attempt_id = Some("other".into());
+        assert_eq!(
+            check(&wrong_attempt)
+                .unwrap_err()
+                .downcast_ref::<HostedAttemptFailure>()
+                .unwrap()
+                .report
+                .code,
+            "candidate_receipt_mismatch"
+        );
+        let mut wrong_bundle = observed_outcome();
+        wrong_bundle.receipt.as_mut().unwrap().bundle_sha256 = Some("sha256:other".into());
+        assert!(check(&wrong_bundle).is_err());
+        let mut no_verification = observed_outcome();
+        no_verification.verification = None;
+        assert!(check(&no_verification).is_err());
+    }
 
     const PROCESS_TOML: &str = r#"
 schema = "ato.capsule/2"

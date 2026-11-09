@@ -26,9 +26,9 @@ use ato_portable_application::{
     ValidatedPortableApplication, build_authored_bundle_v2, validate_all_derivations,
 };
 
-const STALWART_IMAGE: &str = "ghcr.io/koh0920/stalwart-staging@sha256:d0a846d7ab2749baa5bcd15a56b51f90ba99aea0c3256ce04d4f7e5e3076e8e0";
-const ADAPTER_IMAGE: &str = "ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:868ae56c18a004e7e4cc0e8d0707364b9d28242b914ec25f18f3fe1ca3a6aabf";
-const MISSIVE_IMAGE: &str = "ghcr.io/koh0920/govcraft-missive@sha256:f2dd0d893a3fbf83812e35df3510d3fbc9846e9dd31a8a84899cf5fa818682fe";
+const STALWART_IMAGE: &str = "ghcr.io/koh0920/stalwart-staging@sha256:25723c49ee4968d410f78b35041eb1c79f28fe0cc2afe2487a5c58f99f90629b";
+const ADAPTER_IMAGE: &str = "ghcr.io/koh0920/ato-fixed-socks5-tls-adapter@sha256:c7142ba99cbde02e3f392cffe052f7702a259c01501fc727549acec1908eb557";
+const MISSIVE_IMAGE: &str = "ghcr.io/koh0920/govcraft-missive@sha256:3dc89054b1a85ae6ad07e5cf1dc483bffa0ba7253b40fd8274803c765b04bc7c";
 /// The one host name these samples declare for staging. Changing it changes the
 /// certificate the staging Runner must present on every mail Port.
 const STAGING_SERVER_NAME: &str = "mx-test.atousercontent.com";
