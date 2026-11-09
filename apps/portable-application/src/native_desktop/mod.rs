@@ -20,10 +20,11 @@ use ato_runtime_attempt::realize::{RealizeFailure, Realized};
 
 use crate::ValidatedNativePort;
 
-// The Windows Adapter is fail-closed before materialization, so the shared
-// extraction code is only reached by macOS today. It is deliberately shared:
-// the Windows start path uses it as soon as admission can enforce the policy.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+// Only the macOS adapter materializes an artifact today. Gating the module
+// keeps every other target free of helpers that have no caller there; the
+// Windows Adapter is fail-closed before extraction and will use the same code
+// once its mandatory policy is enforceable.
+#[cfg(target_os = "macos")]
 pub(crate) mod artifact;
 
 #[cfg(target_os = "macos")]
@@ -48,7 +49,10 @@ pub(crate) fn refusal(code: &'static str, detail: impl Into<String>) -> RealizeF
 }
 
 /// Everything the platform Adapter needs to start one selected native D.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+///
+/// Every target constructs this struct; only the platform Adapter that admits
+/// the route reads all of its fields.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct NativeStart<'a> {
     /// The exact artifact bytes the bundle's verified closure carries.
     pub artifact_bytes: Vec<u8>,
@@ -94,7 +98,7 @@ pub(crate) fn start(_request: NativeStart<'_>) -> Result<Realized, RealizeFailur
 /// this proves the file is really there, is a regular file and is executable,
 /// and that the resolved target did not leave the root through a filesystem
 /// link.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 pub(crate) fn resolve_entry(artifact_root: &Path, entry: &str) -> Result<PathBuf, NativeRefusal> {
     let joined = artifact_root.join(entry);
     let canonical = joined.canonicalize().map_err(|error| NativeRefusal {
