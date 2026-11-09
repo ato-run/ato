@@ -1,6 +1,7 @@
 # Capsulehub — E2EE blind capsule registry coordinator
 
-Status: Draft (discussion outcome, 2026-11-09; no implementation yet)
+Status: Draft (reviewed 2026-11-09; v0 profile scope and key-handling trust
+boundary revised on review; no implementation yet)
 Owner: ato CLI / Objects
 Related: [K_D_MODEL](K_D_MODEL.md),
 [PORTABLE_APPLICATION_BUNDLE_V3](PORTABLE_APPLICATION_BUNDLE_V3.md),
@@ -50,21 +51,64 @@ The coordinator is **not trusted for integrity or confidentiality**:
    recomputation disagrees with the link claim. This keeps the coordinator
    unable to swap contents between ids it serves.
 
+### Key-handling clients are a separate trust root (v0)
+
+The fragment keeps keys out of ordinary HTTP requests, but it does **not**
+protect the key from code the hub serves: any script executing on a hub page
+(e.g. a browser tab at `/c/`) can read `location.hash`. A malicious or
+compromised coordinator can therefore recover keys simply by swapping its
+own delivered HTML. The fragment is a transport property, not an
+origin-blinding guarantee.
+
+Accordingly, v0 is CLI/desktop-only for key handling:
+
+- the trusted local CLI/desktop is the only client that parses link keys,
+  decrypts, and verifies; key-bearing links are **never** opened against
+  hub-served HTML, and the coordinator never becomes the decryption front end;
+- browser consumption of capsulehub links is out of scope for v0. If added
+  later, the key-handling client assets must come from a trust root separate
+  from the coordinator (with non-collusion and integrity defined there), and
+  the confidentiality claim must be rewritten against that trust root, not
+  inherited from this document.
+
 ## "Formed capsules only" is a client-side admission rule
 
 The coordinator cannot enforce that it stores formed capsules; it cannot read
 them. The rule is therefore implemented on both client ends:
 
 - `ato hub push` validates the bundle **before** encryption: dispatch on
-  `index.version` / profile, fail closed on unknown profile or fields, and for
-  v3 recompute `root_contract_ref` from canonical `ato.contract/1` bytes.
-  A bundle that fails the same validation the local Run path applies must not
-  be pushed.
+  `index.version` / profile, fail closed on unknown profile or fields, and
+  for contract-root v3/v4 recompute `root_contract_ref` from canonical
+  `ato.contract/1` bytes. v0 additionally rejects computation-root v2 (see
+  Profile scope) and validates all declared Derivations, as the local Run
+  path does. A bundle that fails that validation must not be pushed.
 - `ato hub pull` re-runs the full validation after decryption and again fails
   closed before import or Run.
 
 This asymmetry (server cannot enforce, clients must) is a documented property
 of the design, not a defect to hide.
+
+## Profile scope (v0): contract-root v3/v4 only
+
+v0 handles **only** contract-root bundles (`ato.portable-application/1`,
+wire v3 and v4). The computation-root v2 format is a different reference
+domain — its root is a `ComputationRef`, which is never cast into or read as a
+`ContractRef` — and the current decoder already dispatches it into a separate
+document variant. A v0 push or pull therefore:
+
+- rejects computation-root v2 (and any unknown version/profile) client-side,
+  **before encryption**, naming the mismatch — the hub never silently
+  relabels its identity domain, and
+- carries an identity claim field that names its own reference domain, so a
+  future profile extension must add its own claim kind rather than reinterpret
+  `cid`.
+
+Client-side formed validation reuses the existing validator rather than
+re-coding it: validate the schema/canonical digests/closure of **all declared
+Derivations** (the `validate_bytes_all` path), and for v4 additionally verify
+that the Instance snapshot is bound into K (the snapshot requirement must
+reference the indexed snapshot). Push-side and pull-side run the same
+validation; only the direction differs.
 
 ## Wire sketch (first increment)
 
@@ -139,6 +183,9 @@ implementation time, not as an afterthought.
 
 - AEAD and KDF choices (candidate: XChaCha20-Poly1305 with random nonce; key
   derivation for the fragment form).
+- A future browser key-handling client: the separate trust root for its
+  assets and the conditions under which the fragment claim could change are
+  deliberately out of v0 scope (see the key-handling section).
 - Local HTTP loopback admission rule for self-hosted coordinators.
 - Whether `hub pull` imports a durable local Instance (PORTABLE_LOCAL_INSTANCE
   path) or only offers an ephemeral run in v0.

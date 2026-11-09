@@ -1,6 +1,7 @@
 # Portable Native Derivations (macOS / Windows)
 
-Status: Draft (discussion outcome, 2026-11-09; no implementation yet)
+Status: Draft (reviewed 2026-11-09; observation/admission/save rules revised
+on review; no implementation yet)
 Owner: Portable application runtime
 Related: [K_D_MODEL](K_D_MODEL.md),
 [PORTABLE_DYNAMIC_DERIVATIONS](PORTABLE_DYNAMIC_DERIVATIONS.md),
@@ -53,20 +54,27 @@ default.
    **every** D before realization.
 2. **Runtime admission** applies only to the explicitly selected D: platform
    and architecture must match the host, the pinned artifact digest must be
-   present, the declared signature policy must verify, and the containment
-   features the platform can offer must be available. An unavailable platform
-   must not invalidate another valid D.
+   present, the declared signature policy must verify, and the runtime must
+   be able to fully enforce the D's declared mandatory policies — an
+   environment that cannot enforce them fails admission. Optional extra
+   defenses are not required by admission. An unavailable platform must not
+   invalidate another valid D.
 3. **Execution** materializes the workspace input read-only, launches the
    declared executable with explicit user confirmation, establishes a logical
    Port, and owns cleanup on stop, timeout, and crash.
-4. **Verification** observes artifact integrity (digest comparison) and
-   launch/process evidence for the Run attempt. In this first increment a
-   native D has **no HTTP Contract observations**: the UI experience is not
-   part of K and is not verified. A fully-satisfied native receipt therefore
-   means "the artifact is intact and it launched", not "the UX works".
-   If a native route later authors real observations (HTTP loopback or
-   another observation protocol), that is a new descriptor contract, never a
-   silent weakening of this rule.
+4. **Verification** observes the root K's full requirement set through the
+   same common verifier as every other D. Selecting a native D removes
+   nothing from K: if K requires HTTP observations, the native route must
+   expose the loopback HTTP Port(s) those requirements name and the runtime
+   must issue the same observations against them. Artifact-integrity and
+   launch/process evidence are recorded as execution evidence, but a
+   `surface_ready` or "the artifact is intact and it launched" result can
+   never set `fully_satisfied=true` while any K requirement is unobserved or
+   unsatisfied. A native receipt therefore reports the same meaning as any
+   other receipt: the same ContractRef, the same requirement set, per-
+   requirement verdicts — plus the extra execution evidence. Adding new UX
+   observations to a native route without changing K is a new Release with a
+   new Contract, never a silent weakening of the existing one.
 
 ## Signatures and the QUARANTINE boundary (macOS)
 
@@ -91,16 +99,34 @@ The native route is the highest-risk realization path in the profile, so:
 - containment claims in the receipt state exactly what the OS enforced,
   rather than a blanket "sandboxed" label.
 
-## Isolation (stated honestly)
+## Mandatory admission policies (local and hosted alike)
+
+Mandatory policy for a native D — read-only workspace input, Run-scoped
+writable state, declared egress and lifecycle policy — is enforced **before
+launch** on every execution path. The current CLI already fails local
+admission when sandbox enforcement is not fully applied; the native route
+inherits exactly that rule. A local or Hosted environment that cannot apply a
+declared mandatory policy must refuse to launch that D: recording "was not
+enforced" in the receipt is evidence of a gap, never satisfaction of a
+mandatory condition.
+
+The receipt states which mandatory conditions were enforced and, separately,
+which optional additional defenses (for example OS-level containment listed
+below) were present or absent. An unsigned-artifact override is an evidence
+recording device only: it may record that the signature policy verdict was
+"unsigned, user accepted"; it does not relax filesystem, state, egress, or
+lifecycle policy.
+
+## Isolation boundary for GUI surfaces (stated honestly)
 
 A native GUI application needs window/display interaction, so the process and
-OCI containment guarantees do not carry over wholesale. In this increment the
-enforceable claims are: read-only workspace input, Run-scoped writable state,
-declared egress policy, and process cleanup. Stronger containment (macOS
-sandbox, Windows AppContainer) is desirable but presupposes ongoing OS policy
-work; until then, the receipt must record what was and was not enforced. A
-Hosted Runner that cannot enforce a native D's declared policy must reject
-admission for that D.
+OCI containment guarantees do not carry over wholesale. Window/display-level
+containment is therefore **not** in the mandatory set of this increment; the
+receipt must label those aspects "not enforced" rather than implying
+sandboxing. Stronger OS containment (macOS sandbox profiles, Windows
+AppContainer) is an optional defense when available and is recorded when
+applied. What stays mandatory and pre-launch-enforced everywhere: the
+filesystem, state, egress, and lifecycle policies above.
 
 ## Driver use case — PSP player
 
@@ -113,9 +139,34 @@ One K, three D routes:
 - native-windows D — Tauri-packaged player.
 
 ROM and BIOS files are user-supplied Bindings rebound at Run time; they are
-never part of K, of the bundle, or of the hub ciphertext. Save state is
-Instance state, independent of D (K/D invariant 3), so progress follows the
-user across D switches. The capsule never bundles copyrighted game assets.
+never part of K, of the bundle, or of the hub ciphertext. The capsule never
+bundles copyrighted game assets. Save-state placement is Instance state,
+independent of D (K/D invariant 3) — but D-independence of the state
+*location* is not interoperability of the state *format*; see the next
+section.
+
+## Save continuity across D
+
+Instance state that one D writes and another D restores must actually be
+readable by both. That requires, per capsule:
+
+1. a common save schema with a declared version, shared by every D that
+   declares the state slot,
+2. an explicit mapping from each state slot to its storage location and
+   protocol, so that "which saved resource belongs to which slot" is declared,
+   not inferred, and
+3. declared behavior on incompatibility: refuse the D switch with a named
+   reason, or perform an explicit, user-confirmed migration — never a silent
+   partial restore.
+
+Progress tracking may therefore not over-claim: a native route that reads a
+file format the web route does not write (or vice versa, e.g. localStorage
+versus native files) has produced two isolated Stores, not one continuous
+Instance. Acceptance for a capsule that claims cross-D progress requires a
+round trip: save under one D → restore and update under another D → restore
+the original again. The existing filesystem restore path is exact — it
+restores resources whose slot and protocol match the declared state; it does
+not translate formats — which is the floor this section builds on.
 
 ## Acceptance gate (proposal)
 
@@ -125,8 +176,16 @@ capsule (a static-web game with an added Tauri native D) with:
 
 - byte-identical bundle consumed by CLI on macOS and Windows,
 - explicit D selection for each run,
-- `fully_satisfied = true` receipts for the static-web D (HTTP observations)
-  and the native D (integrity + launch evidence),
+- identical verification meaning for both Ds: the **same ContractRef, the
+  same requirement set, every observation Satisfied**. The native D exposes
+  the loopback HTTP Port(s) the K requirements name and the common verifier
+  runs the same observations; artifact integrity and launch/process evidence
+  are recorded additionally and satisfy nothing by themselves,
+- mandatory filesystem/state/egress/lifecycle policies enforced before
+  launch on both routes, with admission failure when enforcement is
+  incomplete,
+- a cross-D save round trip (save on web D → restore and update on native D
+  → restore on web D again) when the capsule declares save state,
 - receipt naming the selected D in every case.
 
 ## Non-goals
@@ -136,6 +195,8 @@ capsule (a static-web game with an added Tauri native D) with:
 - No marketplace, hub, or discovery integration.
 - No silent cross-D fallback, no D auto-selection, no runtime download of
   native artifacts in the first increment.
+- No detached/background native runtime: the Run owns cleanup, so a native
+  process never outlives it.
 
 ## Undecided (needs review)
 
@@ -145,8 +206,5 @@ capsule (a static-web game with an added Tauri native D) with:
 - Universal binary vs per-arch artifacts for macOS; Windows ARM.
 - Per-D artifact size caps and their interaction with the capsulehub object
   size and with bundle payload transport.
-- Whether native D may declare a loopback HTTP Port for observation reuse in
-  a later increment.
-- Background lifetime for a native launch: today the Run owns cleanup, so a
-  native process must not outlive it; a detached/background mode is a future
-  increment if ever wanted.
+- The exact descriptor field for the loopback HTTP Ports a native route must
+  expose whenever K requirements name HTTP observations.
