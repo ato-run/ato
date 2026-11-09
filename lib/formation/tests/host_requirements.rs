@@ -106,7 +106,7 @@ fn malformed_or_unknown_host_conditions_are_refused() {
         assert!(requirements.validate().is_err(), "{host}");
     }
     for host in [
-        serde_json::json!({"os":"windows","arch":"x86_64"}),
+        serde_json::json!({"os":"solaris","arch":"x86_64"}),
         serde_json::json!({"os":"linux","arch":"x86_64","gpu":true}),
         serde_json::json!({"os":"linux","arch":"x86_64","accelerators":[{"vendor":"amd","count":1,"min_vram_mib":1}]}),
         serde_json::json!({"arch":"x86_64"}),

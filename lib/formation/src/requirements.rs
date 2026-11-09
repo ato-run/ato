@@ -43,10 +43,15 @@ pub struct AuthorityRequirement {
     pub operation: ResourceOperation,
 }
 
+/// The host operating system a route may be placed on. `Macos` and `Windows`
+/// exist because a native desktop Derivation declares the same vocabulary;
+/// adding them is a placement fact, not a change to any existing derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostOs {
     Linux,
+    Macos,
+    Windows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
