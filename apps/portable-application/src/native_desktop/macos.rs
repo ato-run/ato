@@ -207,6 +207,16 @@ pub(crate) struct SandboxPlan {
     pub inbound_ports: Vec<u16>,
 }
 
+/// The path spelling SBPL rules and the receipt use: the resolved one, when
+/// the path exists, so `/var/folders/...` and `/private/var/folders/...` cannot
+/// disagree between the profile and what a workload opens.
+fn resolved_spelling(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 pub(crate) fn sandbox_plan(
     artifact_root: &Path,
     workspace: &Path,
@@ -226,17 +236,22 @@ pub(crate) fn sandbox_plan(
         "/private/var/db",
         "/dev",
     ];
+    // State the rules in the spelling the kernel matches. `/var/folders` and
+    // its resolved `/private/var/folders` are the same vnode but not the same
+    // string, and an SBPL subpath rule is written once: resolve every path the
+    // Run owns before the profile is rendered, and keep the resolved spelling
+    // in the receipt evidence so it says what was actually enforced.
     let mut read_only = vec![
-        artifact_root.display().to_string(),
-        workspace.display().to_string(),
+        resolved_spelling(artifact_root),
+        resolved_spelling(workspace),
     ];
-    read_only.extend(system_read_only.iter().map(|path| (*path).to_owned()));
-    let mut read_write = vec![scratch_root.display().to_string()];
-    read_write.extend(
-        state_paths
+    read_only.extend(
+        system_read_only
             .iter()
-            .map(|(_, path)| path.display().to_string()),
+            .map(|path| resolved_spelling(Path::new(path))),
     );
+    let mut read_write = vec![resolved_spelling(scratch_root)];
+    read_write.extend(state_paths.iter().map(|(_, path)| resolved_spelling(path)));
     // A zero port is not a declaration; descriptor validation already refuses
     // it. Filtering here keeps the guarantee local to the renderer so no
     // caller can turn it into an unparseable SBPL profile.
@@ -765,48 +780,62 @@ mod tests {
             );
             return;
         }
+        // Both the child's working directory and every path the policy states
+        // are resolved first: the child must start inside an allowed
+        // directory, and `/var/folders/...` must not disagree with
+        // `/private/var/folders/...` between the rule and the write.
         let scratch = tempfile::tempdir().unwrap();
-        let state = scratch.path().join("state");
+        let scratch = scratch.path().canonicalize().unwrap();
+        let state = scratch.join("state");
         fs::create_dir_all(&state).unwrap();
         let plan = sandbox_plan(
-            scratch.path(),
-            scratch.path(),
+            &scratch,
+            &scratch,
             &[("data".to_owned(), state.clone())],
-            scratch.path(),
+            &scratch,
             &[0],
         );
         let profile = ato_sandbox::render_seatbelt_profile(&plan.policy).unwrap();
-        let profile_path = scratch.path().join("policy.sb");
+        let profile_path = scratch.join("policy.sb");
         fs::write(&profile_path, profile).unwrap();
+
+        // `/usr/bin/touch` is a real Mach-O, not the `xcode-select` shell shim
+        // `/bin/sh` may be on this host, and `current_dir` keeps `getcwd`
+        // inside the allowed tree.
+        let run_sandboxed = |target: &Path| {
+            Command::new(&launcher)
+                .arg("-f")
+                .arg(&profile_path)
+                .arg("/usr/bin/touch")
+                .arg(target)
+                .current_dir(&state)
+                .output()
+                .unwrap()
+        };
         let allowed = state.join("written");
+        let allowed_output = run_sandboxed(&allowed);
+        assert!(
+            allowed_output.status.success() && allowed.is_file(),
+            "the state write was refused: {}",
+            String::from_utf8_lossy(&allowed_output.stderr)
+        );
+
         // A directory that exists and is writable by this user but is outside
         // every rule the policy states: the write must be refused by the
-        // kernel, not merely fail because the path is missing.
+        // kernel (not merely fail because the path is missing).
         let outside = tempfile::tempdir().unwrap();
-        let denied = outside.path().join("denied");
-        let script = format!(
-            "printf ok > {allowed:?}\nprintf no > {denied:?} 2>/dev/null || exit 42\n",
-            allowed = allowed.display().to_string(),
-            denied = denied.display().to_string(),
-        );
-        let output = Command::new(launcher)
-            .arg("-f")
-            .arg(&profile_path)
-            .arg("/bin/sh")
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        let denied = outside.join("denied");
+        let denied_output = run_sandboxed(&denied);
+        let denied_stderr = String::from_utf8_lossy(&denied_output.stderr);
         assert!(
-            allowed.is_file(),
-            "the state write was refused: {}",
-            String::from_utf8_lossy(&output.stderr)
+            !denied_output.status.success(),
+            "a write outside the Run state was accepted: {}",
+            denied_stderr
         );
-        assert_eq!(
-            output.status.code(),
-            Some(42),
-            "a write outside the Run state must be refused by the kernel: {}",
-            String::from_utf8_lossy(&output.stderr)
+        assert!(
+            denied_stderr.contains("Operation not permitted"),
+            "the outside write failed for a reason other than the kernel policy: {denied_stderr}"
         );
         assert!(!denied.exists());
     }
