@@ -411,6 +411,9 @@ pub struct StateDraft {
     pub protocol: String,
     pub mount: String,
     pub access: StateAccess,
+    /// The save format this slot is written in. `None` declares nothing and
+    /// binds exactly as before.
+    pub save: Option<StateSaveDeclaration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,6 +651,77 @@ pub struct BoundPort {
     pub client_address_transport: Option<ClientAddressTransport>,
 }
 
+/// The save format a filesystem state slot is written in, declared by the route
+/// that writes it.
+///
+/// Saved Instance data is only readable by another route when the two routes
+/// agree on the format; a route that declares nothing keeps the behaviour of
+/// every Derivation formed before this existed. `compatible_versions` is the
+/// ONLY migration the runtime may perform without a converter: copy the bytes
+/// unchanged when the formats are equal and the saved version is listed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateSaveDeclaration {
+    /// Stable identifier of the on-disk format, e.g. `ato.state.filesystem.tar`.
+    pub format: String,
+    /// The format version this route writes.
+    pub version: u32,
+    /// Versions of the same `format` whose bytes this route can read unchanged.
+    /// Absent means none: a version difference without a converter is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatible_versions: Vec<u32>,
+}
+
+const MAX_STATE_SAVE_FORMAT_BYTES: usize = 128;
+const MAX_STATE_SAVE_COMPATIBLE_VERSIONS: usize = 16;
+
+impl StateSaveDeclaration {
+    /// Shape validation shared by binding, bundle validation and restore.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.format.is_empty() || self.format.len() > MAX_STATE_SAVE_FORMAT_BYTES {
+            return Err("format must be a non-empty identifier up to 128 bytes".to_owned());
+        }
+        let mut characters = self.format.chars();
+        if !characters
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+            || !characters.all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '@')
+            })
+        {
+            return Err(format!(
+                "{:?} is not a save format identifier (letters, digits, `.`, `-`, `_`, `@`)",
+                self.format
+            ));
+        }
+        if self.version == 0 {
+            return Err("version must be at least 1".to_owned());
+        }
+        if self.compatible_versions.len() > MAX_STATE_SAVE_COMPATIBLE_VERSIONS {
+            return Err(format!(
+                "at most {MAX_STATE_SAVE_COMPATIBLE_VERSIONS} compatible versions may be declared"
+            ));
+        }
+        if self
+            .compatible_versions
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err("compatible_versions must be sorted and unique".to_owned());
+        }
+        if self
+            .compatible_versions
+            .iter()
+            .any(|version| *version == 0 || *version == self.version)
+        {
+            return Err(
+                "compatible_versions must name other versions than this route's own".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundState {
@@ -655,6 +729,12 @@ pub struct BoundState {
     pub protocol: String,
     pub mount: String,
     pub access: StateAccess,
+    /// The save format this slot is written in. Omitted from canonical bytes
+    /// when the route declares none, so every Derivation formed before this
+    /// field existed keeps the same bytes and `DerivationRef`, and saved data
+    /// from it restores exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save: Option<StateSaveDeclaration>,
     /// Whether a host must give this slot a fixed mount at `mount`.
     ///
     /// Absent means yes: the slot is materialized at `mount`, and a host that
@@ -779,6 +859,12 @@ impl BoundDerivation {
                 "state.mount_required",
                 "must be false when present; omit it when the slot needs a fixed mount",
             ));
+        }
+        for slot in &self.state {
+            if let Some(save) = &slot.save {
+                save.validate()
+                    .map_err(|e| malformed(format!("state.{}.save", slot.id), e))?;
+            }
         }
         digest_of(self)
     }
@@ -1002,11 +1088,16 @@ pub fn bind_derivation(
                 ),
             ));
         }
+        if let Some(save) = &slot.save {
+            save.validate()
+                .map_err(|e| malformed(format!("state.{}.save", slot.id), e))?;
+        }
         state.push(BoundState {
             id: slot.id.clone(),
             protocol: slot.protocol.clone(),
             mount: slot.mount.clone(),
             access: slot.access,
+            save: slot.save.clone(),
             // The v1 authored grammar has no way to say the workload finds
             // its state by path, so binding keeps the fixed-mount semantics.
             mount_required: None,
@@ -1587,11 +1678,61 @@ mod tests {
             protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
             mount: "/data/../etc".to_owned(),
             access: StateAccess::ReadWrite,
+            save: None,
         });
         assert_eq!(
             bind(&draft, &ctx()).unwrap_err().code(),
             "authoring_malformed"
         );
+    }
+
+    #[test]
+    fn a_state_save_declaration_is_carried_and_validated() {
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.derivation.state.push(StateDraft {
+            id: "app_data".to_owned(),
+            protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+            mount: "/data".to_owned(),
+            access: StateAccess::ReadWrite,
+            save: Some(StateSaveDeclaration {
+                format: "app.notes.save".to_owned(),
+                version: 2,
+                compatible_versions: vec![1],
+            }),
+        });
+
+        let (_, bound) = bind(&draft, &ctx()).expect("binds");
+        let save = bound.state[0]
+            .save
+            .clone()
+            .expect("the declaration is carried into the bound route");
+        assert_eq!(save.format, "app.notes.save");
+        assert_eq!(save.version, 2);
+        assert_eq!(save.compatible_versions, vec![1]);
+
+        for invalid in [
+            StateSaveDeclaration {
+                format: String::new(),
+                version: 1,
+                compatible_versions: vec![],
+            },
+            StateSaveDeclaration {
+                format: "app.notes.save".to_owned(),
+                version: 0,
+                compatible_versions: vec![],
+            },
+            StateSaveDeclaration {
+                format: "app.notes.save".to_owned(),
+                version: 2,
+                compatible_versions: vec![2],
+            },
+        ] {
+            draft.derivation.state[0].save = Some(invalid);
+            assert_eq!(
+                bind(&draft, &ctx()).unwrap_err().code(),
+                "authoring_malformed"
+            );
+        }
     }
 
     fn tls_draft(server_name: &str, port: &str) -> AuthoringDraft {

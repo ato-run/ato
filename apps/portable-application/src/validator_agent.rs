@@ -1996,6 +1996,7 @@ mod tests {
                 protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: "/data".to_owned(),
                 access: StateAccess::ReadWrite,
+                save: None,
                 mount_required: None,
             });
         let report = validated_routes(&[route]).unwrap().remove(0);
@@ -2313,6 +2314,7 @@ mod tests {
                 slot: "main".to_owned(),
                 protocol: DATA_JSON_PROTOCOL.to_owned(),
                 content_ref: resource_ref.clone(),
+                save: None,
             }],
             assets: vec![InstanceSnapshotAssetV1 {
                 alias: "asset-1".to_owned(),
