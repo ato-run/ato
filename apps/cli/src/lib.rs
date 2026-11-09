@@ -58,6 +58,7 @@ use ato_portable_application::local_instance::{
 };
 use ato_portable_application::portability_export::repack_portable_dependencies_with_archives;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
+use ato_portable_application::state_continuity::StateMigrationApproval;
 use ato_portable_application::{
     PortableRealizationKind, StaticApplicationAsset, StaticApplicationState,
     ValidatedPortableApplication, build_authored_bundle_v2, bundle_sha256,
@@ -350,6 +351,12 @@ struct AppImportArgs {
     /// Select one declared DerivationRef. Required when the bundle has more than one route.
     #[arg(long)]
     derivation: Option<String>,
+    /// Approve the saved-data migration the import named in its refusal.
+    ///
+    /// Never implied: without this flag an import whose saved data needs a
+    /// migration is refused with `state-migration-approval-required`.
+    #[arg(long)]
+    approve_state_migration: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1812,7 +1819,16 @@ fn import_local_application(args: AppImportArgs) -> Result<()> {
     }
     let bytes =
         fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
-    let instance = local_application_store()?.import(&bytes, args.derivation.as_deref())?;
+    let approval = if args.approve_state_migration {
+        StateMigrationApproval::granted()
+    } else {
+        StateMigrationApproval::not_granted()
+    };
+    let instance = local_application_store()?.import_with_state_migration(
+        &bytes,
+        args.derivation.as_deref(),
+        approval,
+    )?;
     println!("{}", serde_json::to_string_pretty(&instance)?);
     Ok(())
 }

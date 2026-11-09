@@ -128,6 +128,9 @@ pub fn build_hosted_export(
                         slot: resource.slot.clone(),
                         protocol: resource.protocol.clone(),
                         content_ref,
+                        // A hosted capture carries no save declaration; the
+                        // saved data keeps the legacy format/version it implies.
+                        save: None,
                     })
                 })
                 .collect::<Result<Vec<_>, PortableApplicationError>>()?;
