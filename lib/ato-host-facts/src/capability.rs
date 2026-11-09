@@ -196,7 +196,13 @@ fn probe_seatbelt() -> (bool, Option<String>) {
             match std::process::Command::new(launcher)
                 .args([
                     "-p",
-                    "(version 1)(deny default)(allow process-exec)",
+                    // A deny-by-default profile that still lets a trivial
+                    // dynamic binary run: the point is whether this process may
+                    // apply a profile at all (a nested sandbox fails with
+                    // EPERM), not how strict the profile is. The earlier
+                    // `(deny default)(allow process-exec)` aborted `true` even
+                    // on an unsandboxed host because dyld needs file reads.
+                    "(version 1)(deny default)(allow file-read*)(allow process-exec)(allow sysctl-read)",
                     "/usr/bin/true",
                 ])
                 .output()
