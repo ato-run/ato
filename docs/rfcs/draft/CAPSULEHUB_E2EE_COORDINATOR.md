@@ -90,15 +90,24 @@ of the design, not a defect to hide.
 
 ## Profile scope (v0): contract-root v3/v4 only
 
-v0 handles **only** contract-root bundles (`ato.portable-application/1`,
-wire v3 and v4). The computation-root v2 format is a different reference
-domain — its root is a `ComputationRef`, which is never cast into or read as a
-`ContractRef` — and the current decoder already dispatches it into a separate
-document variant. A v0 push or pull therefore:
+v0 handles **only** contract-root bundles, with the version/profile pairing
+the validator enforces:
+
+| wire `index.version` | `index.profile` |
+|---|---|
+| `3` | `ato.portable-application/1` |
+| `4` | `ato.portable-application/2` |
+
+The computation-root v2 format is a different reference domain — its root is
+a `ComputationRef`, which is never cast into or read as a `ContractRef` — and
+the current decoder already dispatches it into a separate document variant.
+A v0 client therefore:
 
 - rejects computation-root v2 (and any unknown version/profile) client-side,
-  **before encryption**, naming the mismatch — the hub never silently
-  relabels its identity domain, and
+  naming the mismatch — the hub never silently relabels its identity domain,
+- validates at the natural client boundary: push-side validation runs
+  **before encryption**, pull-side **after decryption and before import or
+  Run**, and
 - carries an identity claim field that names its own reference domain, so a
   future profile extension must add its own claim kind rather than reinterpret
   `cid`.
