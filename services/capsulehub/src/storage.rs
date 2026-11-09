@@ -445,25 +445,37 @@ fn now_nanos() -> u128 {
 /// Makes a rename durable. Some platforms/filesystems do not support fsync on
 /// a directory handle; that case is not an error for the caller.
 async fn sync_directory(path: &Path) -> Result<(), StorageError> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
-        let directory = fs::File::open(&path)?;
-        match directory.sync_all() {
-            Ok(()) => Ok(()),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-                ) =>
-            {
-                Ok(())
+    // Windows cannot open a directory through `std::fs::File` (it requires
+    // FILE_FLAG_BACKUP_SEMANTICS). The rename is still atomic on NTFS, so
+    // directory-entry durability is left to the OS there rather than failing
+    // an otherwise successful PUT.
+    #[cfg(windows)]
+    {
+        let _ = path;
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
+            let directory = fs::File::open(&path)?;
+            match directory.sync_all() {
+                Ok(()) => Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+                    ) =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(error.into()),
             }
-            Err(error) => Err(error.into()),
-        }
-    })
-    .await
-    .map_err(|error| StorageError::Io(io::Error::other(error.to_string())))??;
-    Ok(())
+        })
+        .await
+        .map_err(|error| StorageError::Io(io::Error::other(error.to_string())))??;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

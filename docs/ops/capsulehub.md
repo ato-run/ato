@@ -3,7 +3,8 @@
 Status: Current (implemented by `services/capsulehub`; not a deployment claim
 for any specific environment).
 Owner: ato CLI / Objects.
-Specification: [Capsulehub E2EE coordinator RFC](../rfcs/draft/CAPSULEHUB_E2EE_COORDINATOR.md).
+Specification: the draft RFCs in [PR #1718](https://github.com/ato-run/ato/pull/1718)
+(`docs/rfcs/draft/CAPSULEHUB_E2EE_COORDINATOR.md` once that PR merges).
 
 `ato-capsulehub` is a self-hosted **blind** distribution coordinator for
 already-formed `.capsule` bundles. A client encrypts a bundle locally and
