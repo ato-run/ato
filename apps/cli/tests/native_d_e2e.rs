@@ -40,6 +40,9 @@
 //! cargo test -p ato-cli --test native_d_e2e -- --nocapture --test-threads=1
 //! ```
 //!
+//! Tests that can launch a native D take a process-wide guard because the
+//! fixture declares one fixed loopback Port; everything else runs in parallel.
+//!
 //! `SKIP (host capability)` lines only appear when `NativeFacts::probe()` says
 //! the native Adapter cannot enforce its mandatory policies on this host.
 //!
