@@ -284,6 +284,46 @@ fn run_scratch_state_file(home: &Path, slot: &str) -> PathBuf {
         .expect("the Run left the declared state slot in its scratch")
 }
 
+/// The receipt schema its own evidence requires.
+///
+/// This is the runtime's one rule (`lib/runtime-attempt/src/verification.rs`):
+/// native execution evidence is what `/5` exists for, connector evidence `/4`,
+/// certificate evidence `/3`, a portability profile `/2`, and the base receipt
+/// `/1`. Deriving it here makes the assertion check the version *and* the
+/// evidence together: a native Run that carried its evidence under an older
+/// schema, or a receipt whose fields and version disagree, would fail.
+fn expected_receipt_schema(receipt: &serde_json::Value) -> &'static str {
+    let execution = receipt.get("execution");
+    let field = |name: &str| execution.and_then(|execution| execution.get(name));
+    if field("native").is_some() {
+        return "ato.contract-verification-receipt/5";
+    }
+    if field("connector").is_some()
+        || field("relay_image_digest").is_some()
+        || field("relay_container_id").is_some()
+        || field("platform_emulated").is_some()
+    {
+        return "ato.contract-verification-receipt/4";
+    }
+    let carries_tls = receipt["observations"]
+        .as_array()
+        .is_some_and(|observations| {
+            observations.iter().any(|observation| {
+                observation
+                    .get("evidence")
+                    .and_then(|evidence| evidence.get("tls"))
+                    .is_some()
+            })
+        });
+    if carries_tls {
+        return "ato.contract-verification-receipt/3";
+    }
+    if field("portability_profile").is_some() {
+        return "ato.contract-verification-receipt/2";
+    }
+    "ato.contract-verification-receipt/1"
+}
+
 fn assert_receipt_names_route(
     receipt: &serde_json::Value,
     contract_ref: &str,
@@ -291,7 +331,11 @@ fn assert_receipt_names_route(
 ) {
     assert_eq!(receipt["contract_ref"], contract_ref);
     assert_eq!(receipt["derivation_ref"], derivation_ref);
-    assert_eq!(receipt["schema"], "ato.contract-verification-receipt/1");
+    assert_eq!(
+        receipt["schema"],
+        expected_receipt_schema(receipt),
+        "the receipt's schema must be the one its own evidence requires"
+    );
 }
 
 /// Every observation K names, from the validated Contract (not from the receipt).
@@ -1935,11 +1979,17 @@ fn instance_state_survives_a_derivation_switch_when_both_declare_the_slot() {
     // static-web route is not implementable in v0 (a web route declares no
     // filesystem state and its durable state is browser localStorage), and no
     // native workload was executed on this host.
+    let live = if host_can_execute_native() {
+        "a live native Run executed and wrote the declared slot at run time"
+    } else {
+        "no native workload executed on this host"
+    };
     eprintln!(
-        "state row: save/restore/switch verified at the Instance level; the \
-         web -> native -> web runtime round trip is NOT met in v0 and no native \
-         workload executed here ({})",
-        native_capability_detail()
+        "state row: save/restore/switch verified at the Instance level ({live}); \
+         the web -> native -> web runtime round trip is NOT met in v0: a \
+         static-web route has no filesystem-state delivery or shared save \
+         format, and no durable Instance start accepts an unsigned native \
+         artifact, so a restored snapshot is not consumed by a native workload"
     );
 }
 
@@ -2056,6 +2106,15 @@ fn a_distributed_three_route_bundle_keeps_its_bytes_contract_and_routes() {
         let receipt = read_receipt(&native_receipt);
         assert_receipt_names_route(&receipt, &contract_ref, &macos_ref);
         assert_eq!(receipt["fully_satisfied"], true);
+        let pulled_macos = native_route(&pulled_routes, "macos");
+        assert_eq!(
+            receipt_observations(&receipt),
+            contract_observation_ids(pulled_macos)
+                .into_iter()
+                .map(|id| (id, "satisfied".to_owned()))
+                .collect::<Vec<_>>()
+        );
+        assert_native_evidence(&receipt, pulled_macos, true);
     } else {
         eprintln!(
             "SKIP (host capability): the pulled native route still cannot launch here: {}",
