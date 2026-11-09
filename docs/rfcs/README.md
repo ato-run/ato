@@ -44,6 +44,7 @@ merged implementation are separate states.
   [PORTABLE_INSTANCE_SNAPSHOT](draft/PORTABLE_INSTANCE_SNAPSHOT.md),
   [PORTABLE_DEPENDENCY_EXPORT](draft/PORTABLE_DEPENDENCY_EXPORT.md),
   [PORTABLE_DYNAMIC_DERIVATIONS](draft/PORTABLE_DYNAMIC_DERIVATIONS.md),
+  [PORTABLE_NATIVE_DERIVATIONS](draft/PORTABLE_NATIVE_DERIVATIONS.md),
   [PORTABLE_OCI_SERVICE_GROUP](draft/PORTABLE_OCI_SERVICE_GROUP.md),
   [formation-operation-source](draft/formation-operation-source.md)
 - Runtime Network (draft):
