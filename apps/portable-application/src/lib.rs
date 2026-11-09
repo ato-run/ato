@@ -52,6 +52,7 @@ pub mod portability_plan;
 pub mod portable_run;
 pub mod process_group;
 pub mod source_oci;
+pub mod state_continuity;
 pub mod transformation;
 pub mod validator_agent;
 
@@ -402,6 +403,10 @@ pub struct PortableFilesystemStateSpec {
     /// `ATO_STATE_PATH_<ID>` instead of requiring a fixed mount. `None` keeps
     /// the fixed-mount declaration every existing bundle already has.
     pub mount_required: Option<bool>,
+    /// The save format this route writes for the slot. `None` declares nothing,
+    /// so the bound derivation keeps its previous bytes and saved data keeps
+    /// restoring as it did.
+    pub save: Option<ato_formation::authoring::StateSaveDeclaration>,
 }
 
 #[derive(Debug, Clone)]
@@ -1576,6 +1581,7 @@ fn authored_bundle_spec_v2(
                 id: state.id,
                 mount: state.mount,
                 mount_required: state.mount_required,
+                save: None,
             }),
         bindings: draft
             .bindings
@@ -1970,6 +1976,7 @@ fn build_routes_bundle(
                 protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: state.mount.clone(),
                 access: StateAccess::ReadWrite,
+                save: state.save.clone(),
                 mount_required: state.mount_required,
             })
             .into_iter()
@@ -5082,6 +5089,7 @@ status = 200
                     slot: "main".to_owned(),
                     protocol: "ato.data.json@1".to_owned(),
                     content_ref: saved_data_ref.clone(),
+                    save: None,
                 }],
                 assets: vec![crate::instance_snapshot::InstanceSnapshotAssetV1 {
                     alias: "asset-1".to_owned(),
@@ -5123,6 +5131,7 @@ status = 200
                     slot: "data".to_owned(),
                     protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                     content_ref: reference.clone(),
+                    save: None,
                 }],
                 assets: vec![],
                 asset_bindings: vec![],
@@ -5878,6 +5887,7 @@ status = 200
             id: "data".to_owned(),
             mount: "/data".to_owned(),
             mount_required: None,
+            save: None,
         });
         let (_, mut bundle) =
             build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
@@ -5998,6 +6008,7 @@ default = "pure"
                 protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 mount: "/data".to_owned(),
                 access: StateAccess::ReadOnly,
+                save: None,
                 mount_required: None,
             });
         });
@@ -6011,6 +6022,7 @@ default = "pure"
                     protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                     mount: mount.to_owned(),
                     access: StateAccess::ReadWrite,
+                    save: None,
                     mount_required: None,
                 });
             }
@@ -6031,6 +6043,7 @@ default = "pure"
                     protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                     mount: "/data".to_owned(),
                     access: StateAccess::ReadWrite,
+                    save: None,
                     mount_required: None,
                 });
             });

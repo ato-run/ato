@@ -87,6 +87,7 @@ fn attach_test_snapshot(source: PortableApplicationBundle) -> Vec<u8> {
             slot: "main".to_owned(),
             protocol: DATA_JSON_PROTOCOL.to_owned(),
             content_ref: saved_data_ref.clone(),
+            save: None,
         }],
         assets: vec![InstanceSnapshotAssetV1 {
             alias: "asset-1".to_owned(),
@@ -609,6 +610,34 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
         .args(["app", "stop", instance_id])
         .assert()
         .success();
+}
+
+#[test]
+fn app_import_accepts_an_explicit_state_migration_approval() {
+    let root = tempfile::tempdir().unwrap();
+    let capsule = root.path().join("saved.capsule");
+    snapshot_fixture(&capsule);
+
+    // An approval is only a consent token: saved data that needs no migration
+    // imports exactly as before, and the flag is part of the public surface.
+    let imported = ato_with_home(root.path())
+        .args(["app", "import", "--approve-state-migration"])
+        .arg(&capsule)
+        .output()
+        .unwrap();
+
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    assert!(
+        instance["instance_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("linst_")
+    );
 }
 
 #[test]
