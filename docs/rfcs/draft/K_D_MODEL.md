@@ -42,7 +42,12 @@ existing hash, identifier or public Contract meaning.
 
 - **computation-root v2**: wire v2; `index.root` is a `ComputationRef`; it is
   not re-read as a ContractRef.
-- **contract-root v3/v4**: `profile = "ato.portable-application/1"`;
+- **contract-root v3/v4**:
+  | wire `index.version` | `index.profile` |
+  |---|---|
+  | `3` | `ato.portable-application/1` |
+  | `4` | `ato.portable-application/2` |
+
   `CapsuleId = root_contract_ref`; the root is recomputed from canonical
   `BoundContract` bytes. v3/v4 select D explicitly. `bundle_sha256` is
   byte-identical transport evidence, never semantic identity.
