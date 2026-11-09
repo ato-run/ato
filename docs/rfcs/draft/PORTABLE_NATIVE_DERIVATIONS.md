@@ -72,9 +72,13 @@ default.
    never set `fully_satisfied=true` while any K requirement is unobserved or
    unsatisfied. A native receipt therefore reports the same meaning as any
    other receipt: the same ContractRef, the same requirement set, per-
-   requirement verdicts — plus the extra execution evidence. Adding new UX
-   observations to a native route without changing K is a new Release with a
-   new Contract, never a silent weakening of the existing one.
+   requirement verdicts — plus the extra execution evidence. Additional UX
+   verification for a native route that leaves K untouched is an Additional
+   feature Contract / Verification Profile over the same Release; turning an
+   additional condition into a required condition of Capsule validity is a
+   new Identity K — new Contract, new CapsuleId, new Release — following the
+   K/D model's critical rule. Neither is a silent weakening of the existing
+   Contract.
 
 ## Signatures and the QUARANTINE boundary (macOS)
 
