@@ -42,10 +42,21 @@ existing hash, identifier or public Contract meaning.
 
 - **computation-root v2**: wire v2; `index.root` is a `ComputationRef`; it is
   not re-read as a ContractRef.
-- **contract-root v3/v4**: `profile = "ato.portable-application/1"`;
+- **contract-root v3**: wire v3, `profile = "ato.portable-application/1"`;
   `CapsuleId = root_contract_ref`; the root is recomputed from canonical
-  `BoundContract` bytes. v3/v4 select D explicitly. `bundle_sha256` is
-  byte-identical transport evidence, never semantic identity.
+  `BoundContract` bytes. v3 rejects `index.instance_snapshot_ref` and the
+  portability manifest. v3 selects D explicitly.
+- **contract-root v4**: wire v4, `profile = "ato.portable-application/2"`;
+  `CapsuleId = root_contract_ref` exactly as for v3. v4 additionally requires
+  the portability manifest and admits `index.instance_snapshot_ref`. When a
+  snapshot is present, K must contain exactly one requirement with
+  `verifier = "ato.contract.instance-snapshot@1"` whose `digest` equals
+  `instance_snapshot_ref`; a new saved-state export therefore forms a new
+  `K_saved` / `ContractRef` / `CapsuleId` while D is unchanged. Bundle
+  validation is not restore evidence: admission still requires the runtime to
+  observe the restored snapshot.
+- In every profile `bundle_sha256` is byte-identical transport evidence, never
+  semantic identity, and a Runtime Resource revision is not a Capsule.
 
 ## 4. Base K and Effective K
 
