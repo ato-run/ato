@@ -319,6 +319,7 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "blake3",
+ "capsulehub",
  "clap",
  "dirs",
  "getrandom 0.3.4",
@@ -333,6 +334,7 @@ dependencies = [
  "signal-hook",
  "socket2 0.6.4",
  "tempfile",
+ "tokio",
  "toml",
  "windows",
 ]

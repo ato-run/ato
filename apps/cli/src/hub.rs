@@ -22,6 +22,11 @@
 //!
 //! The link key lives only in the URL fragment, which is never part of an HTTP
 //! request target. Errors never include key material.
+//!
+//! Both directions accept an optional bearer credential (`--token` or
+//! `ATO_HUB_TOKEN`). Uploads require it when the coordinator uses token auth.
+//! Reads are anonymous by default; the credential is also sent on a pull so a
+//! coordinator started with `--allow-anonymous-read false` remains pull-able.
 
 use std::fs;
 use std::io::{self, Read};
@@ -89,6 +94,10 @@ pub struct PullArgs {
     /// Overwrite an existing destination file.
     #[arg(long)]
     pub force: bool,
+    /// Bearer token for coordinators that require authenticated reads. Falls
+    /// back to `ATO_HUB_TOKEN`. Omitted means an anonymous download.
+    #[arg(long)]
+    pub token: Option<String>,
     /// Permit plain HTTP to a literal loopback host (self-hosted coordinator).
     #[arg(long)]
     pub allow_loopback_http: bool,
@@ -207,10 +216,18 @@ fn pull(args: PullArgs) -> Result<()> {
         bail!("the output directory {} does not exist", parent.display());
     }
 
+    let token = args
+        .token
+        .or_else(|| std::env::var(HUB_TOKEN_ENV).ok())
+        .filter(|value| !value.is_empty());
+
     let client = hub_client()?;
     let url = object_url(&base, &link.object_id);
-    let response = client
-        .get(&url)
+    let mut request = client.get(&url);
+    if let Some(token) = token.as_deref() {
+        request = request.header(AUTHORIZATION, bearer(token));
+    }
+    let response = request
         .send()
         .with_context(|| format!("failed to reach the hub at {base}"))?;
     let status = response.status();
@@ -224,7 +241,9 @@ fn pull(args: PullArgs) -> Result<()> {
         );
     }
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        bail!("hub refused the download ({status})");
+        bail!(
+            "hub refused the download ({status}); pass --token or set {HUB_TOKEN_ENV} if this coordinator requires authenticated reads"
+        );
     }
     ensure!(status.is_success(), "hub download failed ({status})");
 
