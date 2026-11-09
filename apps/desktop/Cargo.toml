@@ -2,7 +2,7 @@
 
 [package]
 name = "ato-desktop"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 authors = ["ato-run"]
 description = "Desktop launcher for Ato computations"
