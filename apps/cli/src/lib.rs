@@ -321,6 +321,11 @@ struct RunArgs {
     /// Write the shared Contract verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
+    /// Run an unsigned/ad-hoc native desktop artifact through the explicit
+    /// local override the route must declare. Recorded in the receipt; never
+    /// relaxes filesystem, state, egress or lifecycle policy.
+    #[arg(long)]
+    allow_unsigned_native: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2254,6 +2259,9 @@ fn portable_instance_worker_claimed(
             bindings: Some(bindings),
             run_id: Some(&claimed.run_id),
         },
+        // A durable local Instance start has no unsigned-native override yet;
+        // an unsigned native D is refused there rather than run silently.
+        false,
     )?;
     let result = (|| -> Result<_> {
         if started.receipt.bundle_sha256.as_deref() != Some(instance.bundle_sha256.as_str())
@@ -2746,6 +2754,9 @@ fn run_portable_application(
             bindings: Some(&bindings),
             ..PortableRuntimeState::default()
         },
+        // The person running this bundle explicitly allowed an unsigned/ad-hoc
+        // native artifact; the receipt records the decision.
+        args.allow_unsigned_native,
     );
     // A Run that fails verification publishes nothing, exactly as it did
     // before the Formation Generalization line was integrated: the attempt
@@ -3012,6 +3023,9 @@ fn run_reform(args: ReformArgs) -> Result<()> {
             bindings: Some(&bindings),
             ..PortableRuntimeState::default()
         },
+        // Transformation verifies a candidate; it never applies a local
+        // override to an unsigned native artifact.
+        false,
     );
 
     // The candidate directory survives the reform runtime; keep the transcript
@@ -3127,6 +3141,7 @@ struct StartedPortableApplication {
 /// admission, the start record, the HTTP observation, K's verdicts and the
 /// receipt are the Runtime's; this only supplies what to run and keeps the
 /// verified candidate that is handed off.
+#[allow(clippy::too_many_arguments)]
 fn start_portable_attempt(
     bundle_bytes: &[u8],
     bundle: &ato_objects::PortableApplicationBundle,
@@ -3135,6 +3150,7 @@ fn start_portable_attempt(
     shutdown: Option<&AtomicBool>,
     runtime_state: PortableRuntimeState<'_>,
     binding_environment: &BTreeMap<String, String>,
+    native_local_override: bool,
 ) -> Result<StartedPortableApplication> {
     use ato_runtime_attempt::admission::EffectAuthorization;
     use ato_runtime_attempt::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
@@ -3158,6 +3174,7 @@ fn start_portable_attempt(
         // requirements; `ato run` refuses before realization on the same
         // decision `ato pack` reported.
         host: None,
+        native_local_override,
     };
     let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
     // A local Instance's Run is the attempt; `ato run` starts a new one.
@@ -3339,6 +3356,7 @@ fn start_and_verify_portable_application(
     runtime_root: &Path,
     shutdown: Option<&AtomicBool>,
     runtime_state: PortableRuntimeState<'_>,
+    native_local_override: bool,
 ) -> Result<StartedPortableApplication> {
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     let empty_bindings = BTreeMap::new();
@@ -3354,6 +3372,7 @@ fn start_and_verify_portable_application(
         shutdown,
         runtime_state,
         &binding_environment,
+        native_local_override,
     )
 }
 
@@ -3961,6 +3980,7 @@ mod tests {
             bindings: Vec::new(),
             no_open: false,
             verification_receipt: None,
+            allow_unsigned_native: false,
         };
         assert!(
             run_capsule(args)
