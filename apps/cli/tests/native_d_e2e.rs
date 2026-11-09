@@ -43,6 +43,15 @@
 //! `SKIP (host capability)` lines only appear when `NativeFacts::probe()` says
 //! the native Adapter cannot enforce its mandatory policies on this host.
 //!
+//! Platforms: the launch, artifact-authoring and process-group helpers are
+//! `#[cfg(unix)]`, so the Windows target compiles this file without unused
+//! items and runs only what it can. On Windows rows 1-2 (format validity over
+//! one K), 3 (the static route), 6-10 (Instance state, hub, profiles) run as
+//! written, and a Windows-only test covers the native refusals: the macOS D is
+//! `native_platform_mismatch` and the Windows D is the documented
+//! `native_windows_containment_unavailable`, both naming the boundary, launching
+//! nothing and publishing no receipt.
+//!
 //! Rows and the tests that carry them (DESIGN §9):
 //!
 //! | Row | Test |
@@ -133,9 +142,10 @@ fn home(parent: &Path) -> PathBuf {
 /// shim that leaves a child holding the probe pipes can stall it outright. The
 /// native app still needs `python3`, so only the Docker directory is dropped.
 fn acceptance_path() -> std::ffi::OsString {
+    let docker = format!("docker{}", std::env::consts::EXE_SUFFIX);
     let path = std::env::var_os("PATH").unwrap_or_default();
     let kept: Vec<PathBuf> = std::env::split_paths(&path)
-        .filter(|directory| !directory.join("docker").is_file())
+        .filter(|directory| !directory.join(&docker).is_file())
         .collect();
     std::env::join_paths(kept).unwrap_or(path)
 }
@@ -372,6 +382,24 @@ fn web_route(
         .iter()
         .find(|route| route.realization == PortableRealizationKind::StaticWeb)
         .expect("the static web route")
+}
+
+/// Serialize the tests that can launch a native Derivation.
+///
+/// Every native fixture declares the same loopback guest port (18080). That is
+/// a property of the Derivation — part of what the Run must honour — not a
+/// test convenience, so a second test that launches a native app at the same
+/// time would observe the first one's app on that port (and a "must never
+/// serve" case would be accepted for the wrong reason). Each test that can
+/// launch takes this guard for its whole body; every other test stays parallel.
+///
+/// A panic in one holder poisons the mutex; recovery keeps the rest of the
+/// suite running rather than turning one failure into fourteen.
+fn native_port_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ---------------------------------------------------------------------------
@@ -943,19 +971,7 @@ fn a_run_selects_exactly_the_declared_derivation() {
         false,
         Some(&windows_receipt),
     );
-    if !windows.status.success() {
-        assert!(
-            stderr(&windows).contains("built for windows")
-                || stderr(&windows).contains("native_platform_mismatch"),
-            "a Windows D on a macOS host is a platform mismatch: {}",
-            stderr(&windows)
-        );
-        assert!(!windows_receipt.exists());
-    } else {
-        // A Windows host: the same bundle and the same selection are admitted.
-        let receipt = read_receipt(&windows_receipt);
-        assert_receipt_names_route(&receipt, &contract_ref, &windows_ref);
-    }
+    assert_windows_derivation_refused(&windows, &windows_receipt);
     assert_no_owned_process(&home);
 }
 
@@ -1050,6 +1066,40 @@ fn assert_native_evidence(
     );
 }
 
+/// The Windows Derivation never runs in v0, on any host.
+///
+/// On a Windows host admission refuses it with the documented fail-closed
+/// reason (the AppContainer policy that would enforce the mandatory
+/// filesystem/state/egress/lifecycle set is not implemented); on every other
+/// host it is a platform mismatch. Either way the refusal is a named admission
+/// failure and no receipt is published, so the unsigned-native override cannot
+/// turn it into a run.
+fn assert_windows_derivation_refused(output: &Output, receipt: &Path) {
+    assert!(
+        !output.status.success(),
+        "the Windows native Derivation must not run in v0: {}",
+        stdout(output)
+    );
+    let message = stderr(output);
+    assert!(
+        message.contains("Native Desktop runtime admission failed"),
+        "the refusal must be a named admission failure: {message}"
+    );
+    if cfg!(windows) {
+        assert!(
+            message.contains("Windows native admission is fail-closed")
+                || message.contains("native_windows_containment_unavailable"),
+            "the documented Windows fail-closed reason must be named: {message}"
+        );
+    } else {
+        assert!(
+            message.contains("built for windows") || message.contains("native_platform_mismatch"),
+            "the platform boundary must be named: {message}"
+        );
+    }
+    assert!(!receipt.exists(), "a refused Run publishes no receipt");
+}
+
 // ---------------------------------------------------------------------------
 // Row 2 (admission scoping) — the unsigned-native override is per selected D
 // ---------------------------------------------------------------------------
@@ -1114,26 +1164,11 @@ fn the_unsigned_native_override_is_scoped_to_the_selected_route() {
         true,
         Some(&windows_receipt),
     );
-    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
-        assert!(
-            !windows.status.success(),
-            "a Windows D is not admitted on this host because of a flag"
-        );
-        assert!(
-            stderr(&windows).contains("built for windows")
-                || stderr(&windows).contains("native_platform_mismatch"),
-            "the platform boundary must be named: {}",
-            stderr(&windows)
-        );
-        assert!(
-            !windows_receipt.exists(),
-            "the override flag never turns a refusal into a receipt"
-        );
-        // A second static-web Run still succeeds: another route's refusal did
-        // not poison the bundle.
-        let again = run_bundle(&home, &capsule, Some(&web_ref), false, None);
-        assert_success(&again, "the web route still runs after a native refusal");
-    }
+    assert_windows_derivation_refused(&windows, &windows_receipt);
+    // A second static-web Run still succeeds: another route's refusal did not
+    // poison the bundle.
+    let again = run_bundle(&home, &capsule, Some(&web_ref), false, None);
+    assert_success(&again, "the web route still runs after a native refusal");
     assert_no_owned_process(&home);
 }
 
@@ -1143,6 +1178,9 @@ fn the_unsigned_native_override_is_scoped_to_the_selected_route() {
 
 #[test]
 fn the_same_requirement_set_is_verified_for_web_and_native() {
+    // The declared native Port is process-wide: no other launch-capable test may run.
+    let _native_port = native_port_guard();
+
     let scratch = tempfile::tempdir().unwrap();
     let home = home(scratch.path());
     let capsule = scratch.path().join("multi-d.capsule");
@@ -1418,6 +1456,9 @@ fn an_unsigned_artifact_needs_the_declared_local_override() {
 
 #[test]
 fn a_host_that_cannot_enforce_the_native_policy_refuses_admission() {
+    // The declared native Port is process-wide: no other launch-capable test may run.
+    let _native_port = native_port_guard();
+
     // This is the fail-closed rule that is observable on every host: when the
     // mandatory sandbox/egress/lifecycle policy cannot be enforced before
     // launch, admission refuses and records nothing as satisfied.
@@ -1506,27 +1547,29 @@ fn macos_artifact_source(scratch: &Path, name: &str, script: &str) -> PathBuf {
 }
 
 /// `pgrep -f <marker>` finds nothing: nothing that Run started is still alive.
+///
+/// Unix only, like the native launch it follows.
+#[cfg(unix)]
 fn assert_no_process_matching(marker: &str) {
-    #[cfg(unix)]
-    {
-        thread::sleep(Duration::from_millis(300));
-        let listing = Command::new("pgrep")
-            .arg("-f")
-            .arg(marker)
-            .output()
-            .expect("pgrep runs");
-        assert!(
-            listing.status.code() == Some(1) || listing.stdout.is_empty(),
-            "a process matching `{marker}` outlived its Run:\n{}",
-            String::from_utf8_lossy(&listing.stdout)
-        );
-    }
-    #[cfg(not(unix))]
-    let _ = marker;
+    thread::sleep(Duration::from_millis(300));
+    let listing = Command::new("pgrep")
+        .arg("-f")
+        .arg(marker)
+        .output()
+        .expect("pgrep runs");
+    assert!(
+        listing.status.code() == Some(1) || listing.stdout.is_empty(),
+        "a process matching `{marker}` outlived its Run:\n{}",
+        String::from_utf8_lossy(&listing.stdout)
+    );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_native_run_leaves_no_owned_process() {
+    // The declared native Port is process-wide: no other launch-capable test may run.
+    let _native_port = native_port_guard();
+
     let scratch = tempfile::tempdir().unwrap();
     let home = home(scratch.path());
     let capsule = scratch.path().join("multi-d.capsule");
@@ -1598,8 +1641,12 @@ wait
     let _ = &receipt;
 }
 
+#[cfg(unix)]
 #[test]
 fn a_crashed_native_leader_leaves_no_owned_process() {
+    // The declared native Port is process-wide: no other launch-capable test may run.
+    let _native_port = native_port_guard();
+
     let scratch = tempfile::tempdir().unwrap();
     let home = home(scratch.path());
     let capsule = scratch.path().join("multi-d.capsule");
@@ -1663,8 +1710,12 @@ exit 1
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_native_run_that_never_serves_is_reaped_at_the_readiness_timeout() {
+    // The declared native Port is process-wide: no other launch-capable test may run.
+    let _native_port = native_port_guard();
+
     let scratch = tempfile::tempdir().unwrap();
     let home = home(scratch.path());
     let capsule = scratch.path().join("multi-d.capsule");
@@ -1731,11 +1782,132 @@ wait
 }
 
 // ---------------------------------------------------------------------------
+// Rows 1-5 on Windows — format validity and the fail-closed native refusal
+// ---------------------------------------------------------------------------
+
+/// Windows acceptance.
+///
+/// The bundle is format-valid on Windows and the static route runs; the native
+/// routes are refused by name before anything is launched: the macOS D is a
+/// platform mismatch, and the Windows D is fail-closed because the AppContainer
+/// policy that would enforce the mandatory filesystem/state/egress/lifecycle
+/// set is not implemented. Nothing is launched, no receipt is published, and
+/// the unsigned-native override cannot change that.
+#[cfg(windows)]
+#[test]
+fn a_windows_native_route_fails_closed_on_its_own_platform() {
+    let scratch = tempfile::tempdir().unwrap();
+    let home = home(scratch.path());
+    let capsule = scratch.path().join("multi-d.capsule");
+    let packed = pack(&home, &multi_d_root(), &capsule);
+    assert_success(&packed, "ato pack on Windows");
+
+    // Rows 1-2: the same three routes over one K are format-valid here, and the
+    // capability report names why each native route cannot run.
+    let bytes = fs::read(&capsule).unwrap();
+    let (bundle, routes) =
+        validate_bytes_all(&bytes).expect("every declared Derivation validates on Windows");
+    assert_eq!(bundle.index.derivations.len(), 3);
+    assert_eq!(routes.len(), 3);
+    let contract_ref = packed_value(&packed, "contract_ref");
+    assert_eq!(
+        routes
+            .iter()
+            .map(|route| route.contract_ref.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1,
+        "one Identity K"
+    );
+    let web_ref = web_route(&routes).derivation_ref.as_str().to_owned();
+    let macos_ref = native_route(&routes, "macos")
+        .derivation_ref
+        .as_str()
+        .to_owned();
+    let windows_ref = native_route(&routes, "windows")
+        .derivation_ref
+        .as_str()
+        .to_owned();
+    let capabilities = stdout(&packed);
+    assert!(
+        capabilities.contains("reason=native_windows_containment_unavailable"),
+        "the Windows D must report its documented fail-closed reason: {capabilities}"
+    );
+    assert!(
+        capabilities.contains("reason=native_platform_mismatch"),
+        "the macOS D must report a platform mismatch: {capabilities}"
+    );
+
+    // Row 3: the static route satisfies K and the receipt names it.
+    let web_receipt_path = scratch.path().join("web.json");
+    let web = run_bundle(
+        &home,
+        &capsule,
+        Some(&web_ref),
+        false,
+        Some(&web_receipt_path),
+    );
+    assert_success(&web, "the static web Run on Windows");
+    let receipt = read_receipt(&web_receipt_path);
+    assert_receipt_names_route(&receipt, &contract_ref, &web_ref);
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert_eq!(
+        receipt_observations(&receipt),
+        [(CONTRACT_OBSERVATION_ID.to_owned(), "satisfied".to_owned())]
+    );
+
+    // Rows 2/4/5: the Windows D is refused on its own platform, with and
+    // without the unsigned-native override.
+    for allow_unsigned_native in [false, true] {
+        let receipt = scratch
+            .path()
+            .join(format!("windows-{allow_unsigned_native}.json"));
+        let run = run_bundle(
+            &home,
+            &capsule,
+            Some(&windows_ref),
+            allow_unsigned_native,
+            Some(&receipt),
+        );
+        assert_windows_derivation_refused(&run, &receipt);
+    }
+    // The macOS D is a platform mismatch here and publishes nothing either.
+    let macos_receipt = scratch.path().join("macos.json");
+    let macos = run_bundle(
+        &home,
+        &capsule,
+        Some(&macos_ref),
+        true,
+        Some(&macos_receipt),
+    );
+    assert!(
+        !macos.status.success(),
+        "a macOS D is not admitted on Windows: {}",
+        stdout(&macos)
+    );
+    assert!(
+        stderr(&macos).contains("built for macos")
+            || stderr(&macos).contains("native_platform_mismatch"),
+        "the platform boundary must be named: {}",
+        stderr(&macos)
+    );
+    assert!(!macos_receipt.exists());
+
+    // The bundle and the other routes are unaffected by the native refusals.
+    let again = run_bundle(&home, &capsule, Some(&web_ref), false, None);
+    assert_success(&again, "the web route still runs after the native refusals");
+    assert_no_owned_process(&home);
+}
+
+// ---------------------------------------------------------------------------
 // Row 6 — Instance state continuity between Derivations
 // ---------------------------------------------------------------------------
 
 #[test]
 fn instance_state_survives_a_derivation_switch_when_both_declare_the_slot() {
+    // The declared native Port is process-wide: no other launch-capable test may run.
+    let _native_port = native_port_guard();
+
     let scratch = tempfile::tempdir().unwrap();
     let home = home(scratch.path());
     let capsule = scratch.path().join("stateful.capsule");
@@ -1999,6 +2171,9 @@ fn instance_state_survives_a_derivation_switch_when_both_declare_the_slot() {
 
 #[test]
 fn a_distributed_three_route_bundle_keeps_its_bytes_contract_and_routes() {
+    // The declared native Port is process-wide: no other launch-capable test may run.
+    let _native_port = native_port_guard();
+
     let scratch = tempfile::tempdir().unwrap();
     let home = home(scratch.path());
     let capsule = scratch.path().join("multi-d.capsule");
