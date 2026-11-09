@@ -1,0 +1,73 @@
+# Two native realizations of one Identity K that both declare the same
+# Run-scoped filesystem state slot.
+#
+# This fixture exists for the cross-Derivation save-continuity acceptance
+# (PR8, DESIGN §9 state row): "a fixture where the two Ds declare the same
+# slot". The slot is `save`, delivered by path (`mount_required = false`) so
+# the native Adapter hands each Run `ATO_STATE_PATH_SAVE`; neither route needs
+# a mount namespace, and both really write the same host directory when they
+# run.
+#
+# Why there is no static-web route here: in v0 a static-web route has no
+# filesystem-state delivery at all (the served tree is read-only and the web
+# route's durable state is browser `localStorage`, captured from a live
+# browser). A web route that declared this slot would be a declaration nothing
+# delivers, so this fixture does not carry one. The multi-derivation fixture
+# (`samples/native-desktop-multi-d`) stays the three-route K fixture.
+#
+# The Contract is the same as the multi-D fixture: GET /proof.txt with an exact
+# body digest. Declaring state changes no Contract byte; `derivation.state` is
+# part of D, not K.
+schema = "ato.capsule/2"
+
+[application]
+title = "Native desktop stateful"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "save"
+use = "ato.state.filesystem@1"
+mount = "/state/save"
+access = "read-write"
+mount_required = false
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "proof"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/proof.txt"
+status = 200
+body_digest = "sha256:9113378dd00cb2c890c36562b05589dfb3990ba989db0edc483e2afbe632865e"
+
+[[derivation]]
+id = "native-macos"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "artifacts/app-macos.tar.gz"
+os = "macos"
+arch = "aarch64"
+entry = "app/run.sh"
+signature = "require-valid-or-local-override"
+
+[[derivation]]
+id = "native-windows"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "artifacts/app-windows.tar.gz"
+os = "windows"
+arch = "x86_64"
+entry = "app/run.bat"
+
+[effects]
+default = "pure"
