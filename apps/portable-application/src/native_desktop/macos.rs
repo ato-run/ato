@@ -1059,8 +1059,38 @@ time.sleep(0.3)
     fn the_adapter_launches_a_native_artifact_serves_its_port_and_reaps_it() {
         let facts = ato_host_facts::NativeFacts::probe();
         if !facts.sandbox_tool {
+            // The same measured fact must refuse the route before anything is
+            // materialized or launched; prove the refusal instead of skipping.
+            let scratch = tempfile::tempdir().unwrap();
+            let descriptor = ato_formation::native_desktop::NativeDescriptor {
+                os: ato_formation::native_desktop::NativeOs::Macos,
+                arch: ato_formation::native_desktop::NativeArch::Aarch64,
+                artifact: format!("sha256:{}", "a".repeat(64)),
+                entry: "app/run.sh".to_owned(),
+                format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+                signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+            };
+            let ports = vec![crate::ValidatedNativePort {
+                id: "app.http".to_owned(),
+                guest_port: 18080,
+            }];
+            let environment = BTreeMap::new();
+            let request = NativeStart {
+                artifact_bytes: Vec::new(),
+                descriptor: &descriptor,
+                ports: &ports,
+                workspace: scratch.path().to_path_buf(),
+                runtime_root: scratch.path(),
+                state_paths: Vec::new(),
+                environment: &environment,
+                local_override: true,
+                declares_egress: false,
+            };
+            let refusal = prepare(&request, &scratch.path().join("native")).unwrap_err();
+            assert_eq!(refusal.code, "native_sandbox_unavailable");
             eprintln!(
-                "NOTE: live native launch not exercised: this process cannot apply a profile ({})",
+                "NOTE: live native launch not exercised: this process cannot apply a profile ({}); \
+                 the route is refused for that measured fact",
                 facts
                     .sandbox_detail
                     .as_deref()
