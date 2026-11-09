@@ -3,7 +3,7 @@
 # Multi-platform Desktop bundle pipeline (post-PR-9, post-monorepo M6).
 #
 # Active build matrix:
-#   - macos-14     → aarch64-apple-darwin (.dmg)
+#   - macos-15     → aarch64-apple-darwin (.dmg)
 #   - windows-2022 → x86_64-pc-windows-msvc (.msi via WiX 3.x)
 #   - ubuntu-22.04 → x86_64-unknown-linux-gnu (.AppImage)
 #
@@ -53,7 +53,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: darwin-arm64
             rust_target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
