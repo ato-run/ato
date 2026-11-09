@@ -452,7 +452,7 @@ async fn sync_directory(path: &Path) -> Result<(), StorageError> {
     #[cfg(windows)]
     {
         let _ = path;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
