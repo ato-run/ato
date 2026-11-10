@@ -81,6 +81,29 @@ enum Command {
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
+    /// Poll a hosted relay and answer the requests addressed to this origin.
+    Relay {
+        #[arg(long)]
+        db: PathBuf,
+        /// Relay base URL, e.g. http://127.0.0.1:8788.
+        #[arg(long)]
+        relay_url: String,
+        /// Origin id returned by the relay registration.
+        #[arg(long)]
+        origin_id: String,
+        /// Fencing epoch the origin was registered with.
+        #[arg(long)]
+        origin_epoch: i64,
+        /// Coordinator token (the origin's own API bearer).
+        #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
+        token: String,
+        /// Origin token issued by the relay registration.
+        #[arg(long, env = "ATO_RELAY_TOKEN")]
+        relay_token: String,
+        /// Handle at most one step and exit (tests/one-shot use).
+        #[arg(long)]
+        once: bool,
+    },
     /// Report whether the background service is running.
     Status {
         #[arg(long)]
@@ -124,6 +147,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let dir = state_dir.unwrap_or_else(service::default_state_dir);
             let stopped = service::stop(&dir, token.as_deref())?;
             println!("{}", if stopped { "stopped" } else { "not running" });
+            Ok(())
+        }
+        Command::Relay {
+            db,
+            relay_url,
+            origin_id,
+            origin_epoch,
+            token,
+            relay_token,
+            once,
+        } => {
+            let coordinator = Coordinator::open(&db)?;
+            let origin = ato_coordinator::relay::Origin::new(coordinator, origin_epoch, token);
+            let mut transport = ato_coordinator::relay::HttpRelayTransport::new(
+                &relay_url,
+                &origin_id,
+                &relay_token,
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let mut relay_loop = ato_coordinator::relay::RelayLoop::new();
+            loop {
+                let step = runtime.block_on(relay_loop.step(&origin, &mut transport));
+                println!("{step:?}");
+                if once {
+                    break;
+                }
+                match step {
+                    ato_coordinator::relay::RelayStep::Idle => {
+                        std::thread::sleep(std::time::Duration::from_millis(500))
+                    }
+                    // An unreachable relay executes nothing; wait and retry.
+                    ato_coordinator::relay::RelayStep::Unavailable => {
+                        std::thread::sleep(std::time::Duration::from_secs(1))
+                    }
+                    ato_coordinator::relay::RelayStep::Answered { .. } => {}
+                }
+            }
             Ok(())
         }
         Command::Status { state_dir } => {

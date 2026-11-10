@@ -133,63 +133,6 @@ impl Origin {
 /// envelope (`null` when idle) and `reply <json>` returns the origin's
 /// decision. Production uses an HTTPS long-poll; TLS is not implemented here,
 /// so this transport is for a local relay only (development and tests).
-pub struct TcpRelayTransport {
-    stream: std::net::TcpStream,
-    reader: std::io::BufReader<std::net::TcpStream>,
-}
-
-impl TcpRelayTransport {
-    pub fn connect(addr: &str) -> Result<Self, RelayError> {
-        let stream = std::net::TcpStream::connect(addr).map_err(|_| RelayError::Unavailable)?;
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .ok();
-        stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-            .ok();
-        let reader =
-            std::io::BufReader::new(stream.try_clone().map_err(|_| RelayError::Unavailable)?);
-        Ok(Self { stream, reader })
-    }
-
-    fn send(&mut self, line: &str) -> Result<(), RelayError> {
-        use std::io::Write;
-        writeln!(self.stream, "{line}").map_err(|_| RelayError::Unavailable)
-    }
-
-    fn receive(&mut self) -> Result<String, RelayError> {
-        use std::io::BufRead;
-        let mut line = String::new();
-        self.reader
-            .read_line(&mut line)
-            .map_err(|_| RelayError::Unavailable)?;
-        Ok(line.trim_end().to_owned())
-    }
-}
-
-impl RelayTransport for TcpRelayTransport {
-    fn poll(&mut self) -> Result<Option<RelayRequest>, RelayError> {
-        self.send("poll")?;
-        let line = self.receive()?;
-        if line == "null" {
-            return Ok(None);
-        }
-        serde_json::from_str(&line)
-            .map(Some)
-            .map_err(|_| RelayError::Refused("invalid_envelope"))
-    }
-
-    fn reply(&mut self, response: RelayResponse) -> Result<(), RelayError> {
-        let payload = serde_json::to_string(&response)
-            .map_err(|_| RelayError::Refused("invalid_envelope"))?;
-        self.send(&format!("reply {payload}"))?;
-        if self.receive()? != "ok" {
-            return Err(RelayError::Unavailable);
-        }
-        Ok(())
-    }
-}
-
 /// The relay connection. The origin only ever calls these two methods; the
 /// transport is responsible for keeping the payload opaque (no logging, no
 /// persistence).
@@ -259,6 +202,175 @@ impl RelayLoop {
                 RelayStep::Unavailable
             }
         }
+    }
+}
+
+pub struct TcpRelayTransport {
+    stream: std::net::TcpStream,
+    reader: std::io::BufReader<std::net::TcpStream>,
+}
+
+impl TcpRelayTransport {
+    pub fn connect(addr: &str) -> Result<Self, RelayError> {
+        let stream = std::net::TcpStream::connect(addr).map_err(|_| RelayError::Unavailable)?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        let reader =
+            std::io::BufReader::new(stream.try_clone().map_err(|_| RelayError::Unavailable)?);
+        Ok(Self { stream, reader })
+    }
+
+    fn send(&mut self, line: &str) -> Result<(), RelayError> {
+        use std::io::Write;
+        writeln!(self.stream, "{line}").map_err(|_| RelayError::Unavailable)
+    }
+
+    fn receive(&mut self) -> Result<String, RelayError> {
+        use std::io::BufRead;
+        let mut line = String::new();
+        self.reader
+            .read_line(&mut line)
+            .map_err(|_| RelayError::Unavailable)?;
+        Ok(line.trim_end().to_owned())
+    }
+}
+
+impl RelayTransport for TcpRelayTransport {
+    fn poll(&mut self) -> Result<Option<RelayRequest>, RelayError> {
+        self.send("poll")?;
+        let line = self.receive()?;
+        if line == "null" {
+            return Ok(None);
+        }
+        serde_json::from_str(&line)
+            .map(Some)
+            .map_err(|_| RelayError::Refused("invalid_envelope"))
+    }
+
+    fn reply(&mut self, response: RelayResponse) -> Result<(), RelayError> {
+        let payload = serde_json::to_string(&response)
+            .map_err(|_| RelayError::Refused("invalid_envelope"))?;
+        self.send(&format!("reply {payload}"))?;
+        if self.receive()? != "ok" {
+            return Err(RelayError::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+/// HTTP transport for a hosted relay (`ato-api`'s /v1/relay endpoints).
+///
+/// Plain HTTP only: it is for a relay reachable over a local/trusted network and
+/// for tests. Production HTTPS and E2EE negotiation are follow-up slices.
+pub struct HttpRelayTransport {
+    base: String,
+    origin_id: String,
+    token: String,
+}
+
+impl HttpRelayTransport {
+    pub fn new(base: &str, origin_id: &str, token: &str) -> Self {
+        Self {
+            base: base.trim_end_matches('/').to_owned(),
+            origin_id: origin_id.to_owned(),
+            token: token.to_owned(),
+        }
+    }
+
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), RelayError> {
+        use std::io::{Read, Write};
+        let address = self
+            .base
+            .strip_prefix("http://")
+            .ok_or(RelayError::Unavailable)?;
+        let (host, port) = match address.split_once(':') {
+            Some((host, port)) => (host.to_owned(), port.parse::<u16>().unwrap_or(80)),
+            None => (address.to_owned(), 80),
+        };
+        let mut stream = std::net::TcpStream::connect((host.as_str(), port))
+            .map_err(|_| RelayError::Unavailable)?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .ok();
+        let payload = body.unwrap_or("");
+        let request = format!(
+            "{method} {path} HTTP/1.1
+Host: {host}
+Authorization: Bearer {}
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{payload}",
+            self.token,
+            payload.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|_| RelayError::Unavailable)?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|_| RelayError::Unavailable)?;
+        let status = response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .ok_or(RelayError::Unavailable)?;
+        let body = if let Some(index) = response.find("\r\n\r\n") {
+            response[index + 4..].to_owned()
+        } else if let Some(index) = response.find("\n\n") {
+            response[index + 2..].to_owned()
+        } else {
+            String::new()
+        };
+        Ok((status, body))
+    }
+}
+
+impl RelayTransport for HttpRelayTransport {
+    fn poll(&mut self) -> Result<Option<RelayRequest>, RelayError> {
+        let path = format!("/v1/relay/origins/{}/next", self.origin_id);
+        let (status, body) = self.request("GET", &path, None)?;
+        if status == 204 {
+            return Ok(None);
+        }
+        if status != 200 {
+            return Err(RelayError::Unavailable);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|_| RelayError::Refused("invalid_envelope"))?;
+        let envelope = value
+            .get("envelope")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(RelayError::Refused("invalid_envelope"))?;
+        serde_json::from_str(envelope)
+            .map(Some)
+            .map_err(|_| RelayError::Refused("invalid_envelope"))
+    }
+
+    fn reply(&mut self, response: RelayResponse) -> Result<(), RelayError> {
+        let reply = serde_json::to_string(&response)
+            .map_err(|_| RelayError::Refused("invalid_envelope"))?;
+        let body = serde_json::json!({
+            "request_id": response.request_id,
+            "reply": reply,
+        });
+        let path = format!("/v1/relay/origins/{}/replies", self.origin_id);
+        let (status, _) = self.request("POST", &path, Some(&body.to_string()))?;
+        if status != 200 {
+            return Err(RelayError::Unavailable);
+        }
+        Ok(())
     }
 }
 
@@ -500,5 +612,130 @@ mod tests {
             .await;
         assert_eq!(created.status, 201);
         assert!(created.body.contains("resource_id"), "{}", created.body);
+    }
+
+    #[test]
+    fn answers_through_an_http_relay() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::{Arc, Mutex};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let recorded: Arc<Mutex<Vec<RelayResponse>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&recorded);
+        let server = std::thread::spawn(move || {
+            let mut served_poll = false;
+            for _ in 0..3 {
+                let Ok((socket, _)) = listener.accept() else {
+                    break;
+                };
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut writer = socket;
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut headers = Vec::new();
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                    headers.push(line);
+                }
+                let mut body = vec![0u8; content_length];
+                if content_length > 0 {
+                    use std::io::Read;
+                    reader.read_exact(&mut body).unwrap();
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
+                if request_line.contains("/next") {
+                    if served_poll {
+                        write!(
+                            writer,
+                            "HTTP/1.1 204 No Content
+Connection: close
+
+"
+                        )
+                        .unwrap();
+                    } else {
+                        served_poll = true;
+                        let envelope = serde_json::to_string(&request(
+                            "POST",
+                            "/v1/data-resources",
+                            r#"{"protocol":"todo.board@1","document":{}}"#,
+                        ))
+                        .unwrap();
+                        let response_body = serde_json::json!({
+                            "request_id": "http-1",
+                            "origin_epoch": 7,
+                            "envelope": envelope,
+                        })
+                        .to_string();
+                        write!(
+                            writer,
+                            "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+{}",
+                            response_body.len(),
+                            response_body
+                        )
+                        .unwrap();
+                    }
+                } else if request_line.contains("/replies") {
+                    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let response: RelayResponse =
+                        serde_json::from_str(reply["reply"].as_str().unwrap()).unwrap();
+                    record.lock().unwrap().push(response);
+                    let response_body = r#"{"status":"recorded"}"#;
+                    write!(
+                        writer,
+                        "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+{}",
+                        response_body.len(),
+                        response_body
+                    )
+                    .unwrap();
+                }
+                let _ = writer.flush();
+            }
+        });
+
+        let origin = origin();
+        let mut transport = HttpRelayTransport::new(&base, "relay-1", "origin-token");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut loop_ = RelayLoop::new();
+        assert_eq!(
+            runtime.block_on(loop_.step(&origin, &mut transport)),
+            RelayStep::Answered {
+                request_id: "req-1".into(),
+                status: 201
+            }
+        );
+        assert_eq!(
+            runtime.block_on(loop_.step(&origin, &mut transport)),
+            RelayStep::Idle
+        );
+        drop(transport);
+        server.join().unwrap();
+        let replies = recorded.lock().unwrap();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].status, 201);
+        assert!(
+            replies[0].body.contains("resource_id"),
+            "{}",
+            replies[0].body
+        );
     }
 }
