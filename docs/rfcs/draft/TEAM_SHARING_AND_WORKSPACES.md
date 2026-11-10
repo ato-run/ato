@@ -145,6 +145,52 @@ every member's instance id, and a member who joins later would get nothing.
   reference and embedding a snapshot; a shared team Resource defaults to a
   reference.
 
+
+### P1 migration cannot rebuild data_resources inside a D1 migration transaction
+
+A working prototype of the P1 migration was built and reverted. It
+
+1. drops every trigger whose body names `data_resources` (29 exist; SQLite
+   resolves trigger bodies at RENAME time and refuses the rename while the
+   named table is missing),
+2. creates `data_resources_0408` with `owner_kind` accepting `organization`
+   plus `billing_organization_id`, copies the rows, drops the old table,
+   renames the new one, then recreates the indexes and triggers.
+
+It applies cleanly on an empty replay, but fails against the migration
+semantics this repository tests and ships:
+
+- `PRAGMA foreign_keys = OFF` (the 0177 pattern) is a no-op inside the
+  transaction `applyD1Migrations` runs, so foreign keys stay enforced.
+- Twelve tables reference `data_resources`: `instance_states`,
+  `instance_state_slots`, `instance_data_bindings`, `data_personal_slots`
+  (ON DELETE RESTRICT) and `data_resource_grants`,
+  `data_document_revisions`, `data_document_heads`,
+  `data_resource_operations`, `data_resource_outbox`,
+  `data_resource_invalidations`, `data_resource_descriptions`,
+  `instance_data_migrations` (CASCADE).
+- `DROP TABLE data_resources` with foreign keys on therefore either fails on a
+  RESTRICT child or deletes CASCADE children. RENAME tricks do not help:
+  SQLite still checks FKs on `ALTER TABLE ... RENAME`.
+
+Evidence: the full `drizzle/*.sql` replay plus the upgrade path in
+`src/tests/data-resource-model.test.ts` (migrations applied over legacy rows)
+fails with `D1_ERROR: FOREIGN KEY constraint failed` right after the rebuild's
+DROP.
+
+Options for P1, to be decided explicitly:
+
+| Option | Shape | Trade-off |
+|---|---|---|
+| A. Coordinated rebuild | one migration rebuilds `data_resources` and every child table (copy to `*_0408`, drop, recreate with the new CHECK, restore FKs and triggers) | correct end state; large, needs a staging rehearsal and a downgrade plan |
+| B. Versioned registry | new table with the new identity model; readers/writers move over; legacy backends stay on the old table until removed | clean model; two-table transition and dual read paths |
+| C. Companion table | `ALTER TABLE ... ADD COLUMN billing_organization_id` + `data_resource_organizations(resource_id, organization_id, created_by_user_id)` | purely additive and small; stored `owner_kind` no longer matches the API model, so authorization and billing special-case it |
+| D. Assume production D1 runs statements outside a transaction | keep the rebuild, skip the batched path | unverified production semantics; harness and production would diverge — not acceptable without evidence |
+
+Recommendation: A for the model, scheduled as its own migration with a staging
+rehearsal; C only if team sharing is needed before A lands. P2 (organization
+grants) needs no table rebuild and can proceed independently.
+
 ## Detected mismatches
 
 - `data_resources` CHECK constraints cannot be altered in SQLite; P1 needs a
