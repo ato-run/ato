@@ -280,6 +280,80 @@ fn binding_invoke_and_revoke_print_the_authority_result() {
     assert!(stdout.contains("binding dbind_1: revoked"), "{stdout}");
 }
 
+fn capturing_stub(
+    responses: Vec<(u16, &'static str)>,
+) -> (
+    u16,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    thread::JoinHandle<()>,
+) {
+    use std::sync::{Arc, Mutex};
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let port = listener.local_addr().expect("stub addr").port();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&requests);
+    let handle = thread::spawn(move || {
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0u8; 16384];
+            let read = stream.read(&mut buffer).expect("read");
+            record
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+            let response = format!(
+                "HTTP/1.1 {status} OK
+content-type: application/json
+content-length: {}
+connection: close
+
+{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        }
+    });
+    (port, requests, handle)
+}
+
+#[test]
+fn binding_invoke_with_arguments_sends_them_instead_of_a_document() {
+    let (port, requests, handle) = capturing_stub(vec![(
+        200,
+        r#"{"resource_id":"dres_1","revision":3,"generation":0,"content_digest":"sha256:x","replayed":false,"result":{"task_id":"t"},"receipt":{"revision":3}}"#,
+    )]);
+    let output = ato()
+        .args([
+            "data",
+            "binding",
+            "invoke",
+            "dbind_1",
+            "--operation",
+            "todo_create",
+            "--operation-id",
+            "op-cli",
+            "--expected-revision",
+            "2",
+            "--arguments",
+            r#"{"title":"From the CLI","at":"2026-11-10T00:00:00.000Z"}"#,
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data binding invoke");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("committed revision 3"), "{stdout}");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(request.contains(r#""arguments""#), "{request}");
+    assert!(!request.contains(r#""document""#), "{request}");
+}
+
 #[test]
 fn quota_prints_usage_and_limit() {
     let (port, handle) = stub(vec![(

@@ -142,6 +142,10 @@ pub enum BindingCommand {
         expected_revision: i64,
         #[arg(long, default_value_t = 0)]
         expected_generation: i64,
+        /// Operation arguments as JSON. When present the Coordinator runs the
+        /// registered handler; otherwise the document is committed directly.
+        #[arg(long)]
+        arguments: Option<String>,
         #[arg(long, default_value = "{}")]
         document: String,
         #[command(flatten)]
@@ -219,6 +223,7 @@ pub fn run(args: DataArgs) -> Result<()> {
                 operation_id,
                 expected_revision,
                 expected_generation,
+                arguments,
                 document,
                 coordinator,
             } => binding_invoke(
@@ -228,6 +233,7 @@ pub fn run(args: DataArgs) -> Result<()> {
                 &operation_id,
                 expected_revision,
                 expected_generation,
+                arguments.as_deref(),
                 &document,
             ),
             BindingCommand::Revoke {
@@ -634,20 +640,30 @@ fn binding_invoke(
     operation_id: &str,
     expected_revision: i64,
     expected_generation: i64,
+    arguments: Option<&str>,
     document: &str,
 ) -> Result<()> {
-    let document: Value = serde_json::from_str(document).context("parse --document as JSON")?;
+    let mut body = json!({
+        "operation": operation,
+        "operation_id": operation_id,
+        "expected_revision": expected_revision,
+        "expected_generation": expected_generation,
+    });
+    match arguments {
+        Some(arguments) => {
+            body["arguments"] =
+                serde_json::from_str(arguments).context("parse --arguments as JSON")?;
+        }
+        None => {
+            body["document"] =
+                serde_json::from_str(document).context("parse --document as JSON")?;
+        }
+    }
     let value = request(
         coordinator,
         reqwest::Method::POST,
         &format!("/v1/bindings/{binding_id}/operations"),
-        Some(json!({
-            "operation": operation,
-            "operation_id": operation_id,
-            "expected_revision": expected_revision,
-            "expected_generation": expected_generation,
-            "document": document,
-        })),
+        Some(body),
     )?;
     if coordinator.json {
         return print_json(&value);
