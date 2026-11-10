@@ -30,16 +30,19 @@ use crate::process_group::{ProcessServiceGroup, ServiceSpec};
 const PORT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Where a signature tool is, if this host has it.
+///
+/// Security-boundary tools resolve from their one absolute OS path, never
+/// `PATH`: a fake earlier on `PATH` could fake a sandbox or a signature.
 fn codesign_tool() -> Option<PathBuf> {
-    ato_host_facts::find_tool("codesign", &["/usr/bin/codesign"])
+    ato_host_facts::trusted_tool(&[ato_host_facts::CODESIGN_PATH])
 }
 
 fn spctl_tool() -> Option<PathBuf> {
-    ato_host_facts::find_tool("spctl", &["/usr/sbin/spctl"])
+    ato_host_facts::trusted_tool(&[ato_host_facts::SPCTL_PATH])
 }
 
 fn seatbelt_launcher() -> Option<PathBuf> {
-    ato_host_facts::find_tool("sandbox-exec", &["/usr/bin/sandbox-exec"])
+    ato_host_facts::trusted_tool(&[ato_host_facts::SEATBELT_LAUNCHER_PATH])
 }
 
 /// Whether this process can actually apply a Seatbelt profile.
@@ -1098,6 +1101,7 @@ time.sleep(0.3)
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+                signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
             };
             let ports = vec![crate::ValidatedNativePort {
                 id: "app.http".to_owned(),
@@ -1170,6 +1174,7 @@ time.sleep(0.3)
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+                signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
             };
             // The interpreter has to be inside the read-only set; use the
             // system python rather than whatever PATH this test inherited.
