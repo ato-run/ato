@@ -1524,6 +1524,40 @@ pub(crate) fn register_all_declaration(
     protocol_register_all(coordinator, file, protocol, publisher)
 }
 
+/// Read the whole saved DataResource set from a Coordinator.
+pub(crate) fn export_resources(coordinator: &CoordinatorArgs) -> Result<Value> {
+    request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources/export",
+        None,
+    )
+}
+
+/// Create one Resource with a document (used to restore a checkpoint).
+pub(crate) fn create_resource_with_document(
+    coordinator: &CoordinatorArgs,
+    protocol: &str,
+    display_name: &str,
+    document: &Value,
+) -> Result<String> {
+    let created = request(
+        coordinator,
+        reqwest::Method::POST,
+        "/v1/data-resources",
+        Some(json!({
+            "protocol": protocol,
+            "display_name": display_name,
+            "document": document,
+        })),
+    )?;
+    created
+        .get("resource_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context("the Coordinator returned no resource_id")
+}
+
 /// Ensure one Resource exists for `protocol`/`display_name` and return its id.
 pub(crate) fn ensure_resource(
     coordinator: &CoordinatorArgs,

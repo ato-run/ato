@@ -140,6 +140,7 @@ fn browser_checkpoint(
             pane: Vec::new(),
         },
         pane,
+        data: None,
     }
 }
 
@@ -264,7 +265,7 @@ fn checkpoint_capture_resume_round_trips_local_state() {
         "ato.browser-instance-state@1"
     );
     let path = directory.path().join("checkpoint.toml");
-    ato_cli::workspace::save_workspace_checkpoint(&path, &running).unwrap();
+    ato_cli::workspace::save_workspace_checkpoint(&path, &running, None).unwrap();
     let loaded = ato_cli::workspace::load_workspace_checkpoint(&path).unwrap();
     assert_eq!(
         loaded.state["board"].get("todos").map(String::as_str),
@@ -314,7 +315,7 @@ fn capture_reads_the_shell_view_state_from_its_state_bridge() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
     let path = directory.path().join("checkpoint.toml");
-    ato_cli::workspace::save_workspace_checkpoint(&path, &running).unwrap();
+    ato_cli::workspace::save_workspace_checkpoint(&path, &running, None).unwrap();
     let read = ato_cli::workspace::read_checkpoint(&path).unwrap();
     assert_eq!(read.view.split, vec![0.3, 0.7]);
     assert_eq!(read.view.active_pane, "calendar");
@@ -326,7 +327,7 @@ fn a_tampered_snapshot_object_is_refused_on_load() {
     let (file, _) = two_pane_workspace(directory.path());
     let running = ato_cli::workspace::start(&file, None, None, None).expect("the workspace starts");
     let path = directory.path().join("checkpoint.toml");
-    ato_cli::workspace::save_workspace_checkpoint(&path, &running).unwrap();
+    ato_cli::workspace::save_workspace_checkpoint(&path, &running, None).unwrap();
     assert!(ato_cli::workspace::load_workspace_checkpoint(&path).is_ok());
 
     let state_directory = directory.path().join("checkpoint.toml.state");

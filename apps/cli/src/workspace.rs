@@ -153,6 +153,10 @@ pub struct WorkspaceCheckpointV1 {
     pub view: WorkspaceViewStateV1,
     /// One entry per pane, sorted by `pane_id`.
     pub pane: Vec<WorkspaceCheckpointPaneV1>,
+    /// Saved DataResource documents (`ato.workspace-data/1`), when the
+    /// workspace was served by a Coordinator. Browser-only panes omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -395,6 +399,9 @@ impl WorkspaceCheckpointV1 {
             }
             validate_captured_snapshot(&pane.snapshot, &pane.snapshot_ref)?;
         }
+        if let Some(data) = &self.data {
+            validate_saved_data(data)?;
+        }
         let mut previous_view: Option<&str> = None;
         for view in &self.view.pane {
             validate_pane_id(&view.pane_id)?;
@@ -471,6 +478,34 @@ fn validate_instance_id(value: &str) -> Result<()> {
         .any(|byte| byte.is_ascii_control() || byte == b'/')
     {
         bail!("checkpoint instance_id contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_saved_data(data: &serde_json::Value) -> Result<()> {
+    if data.get("schema").and_then(serde_json::Value::as_str) != Some("ato.workspace-data/1") {
+        bail!("checkpoint data must declare `schema: ato.workspace-data/1`");
+    }
+    let resources = data
+        .get("resources")
+        .and_then(serde_json::Value::as_array)
+        .context("checkpoint data has no `resources` list")?;
+    for resource in resources {
+        for field in ["protocol", "display_name"] {
+            if resource
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                bail!("checkpoint data resource has no `{field}`");
+            }
+        }
+        if !resource
+            .get("document")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            bail!("checkpoint data resource document must be an object");
+        }
     }
     Ok(())
 }
@@ -716,8 +751,10 @@ pub fn write_checkpoint_atomic(path: &Path, checkpoint: &WorkspaceCheckpointV1) 
 pub fn save_workspace_checkpoint(
     path: &Path,
     running: &RunningWorkspace,
+    data: Option<serde_json::Value>,
 ) -> Result<WorkspaceCheckpointV1> {
-    let (checkpoint, objects) = running.capture()?;
+    let (mut checkpoint, objects) = running.capture()?;
+    checkpoint.data = data;
     let directory = checkpoint_state_directory(path);
     std::fs::create_dir_all(&directory).with_context(|| {
         format!(
@@ -886,12 +923,36 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 })?;
                 let generated = crate::data::CoordinatorArgs {
                     coordinator: pane_base.clone().expect("local data has a pane base"),
-                    token: Some(token),
+                    token: Some(token.clone()),
                     origin: None,
                     json: false,
                 };
+                if let Some(saved) = checkpoint
+                    .as_ref()
+                    .and_then(|loaded| loaded.checkpoint.data.as_ref())
+                    && let Some(resources) =
+                        saved.get("resources").and_then(serde_json::Value::as_array)
+                {
+                    for resource in resources {
+                        let protocol = resource["protocol"].as_str().unwrap_or_default();
+                        let display_name = resource["display_name"].as_str().unwrap_or_default();
+                        let document = resource
+                            .get("document")
+                            .cloned()
+                            .unwrap_or_else(|| json!({}));
+                        crate::data::create_resource_with_document(
+                            &generated,
+                            protocol,
+                            display_name,
+                            &document,
+                        )
+                        .with_context(|| {
+                            format!("failed to restore the `{display_name}` Resource")
+                        })?;
+                    }
+                }
                 running.provision(&args.file, &generated)?;
-                Some((server, database))
+                Some((server, database, token))
             } else {
                 None
             };
@@ -906,7 +967,43 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
             }
             wait_for_shutdown()?;
             if let Some(path) = args.checkpoint_out.as_deref() {
-                let checkpoint = save_workspace_checkpoint(path, &running)?;
+                let data = if let (Some((_, _, token)), Some(base)) =
+                    (_local_data.as_ref(), pane_base.as_ref())
+                {
+                    let export = crate::data::CoordinatorArgs {
+                        coordinator: base.clone(),
+                        token: Some(token.clone()),
+                        origin: None,
+                        json: false,
+                    };
+                    let mut exported = crate::data::export_resources(&export)?;
+                    let workspace_name = args
+                        .file
+                        .file_stem()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "workspace".to_owned());
+                    if let Some(resources) = exported
+                        .get_mut("resources")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for resource in resources.iter_mut() {
+                            if let Some(protocol) =
+                                resource.get("protocol").and_then(serde_json::Value::as_str)
+                            {
+                                resource["display_name"] = serde_json::Value::String(format!(
+                                    "workspace:{workspace_name}:{protocol}"
+                                ));
+                            }
+                        }
+                    }
+                    Some(json!({
+                        "schema": "ato.workspace-data/1",
+                        "resources": exported.get("resources").cloned().unwrap_or_else(|| json!([])),
+                    }))
+                } else {
+                    None
+                };
+                let checkpoint = save_workspace_checkpoint(path, &running, data)?;
                 println!(
                     "checkpoint: {} ({} panes)",
                     path.display(),
@@ -1558,6 +1655,7 @@ impl RunningWorkspace {
                 pane: view_panes,
             },
             pane,
+            data: None,
         };
         checkpoint.validate()?;
         Ok((checkpoint, objects))
