@@ -355,6 +355,42 @@ fn binding_invoke_with_arguments_sends_them_instead_of_a_document() {
 }
 
 #[test]
+fn uses_the_stored_login_token_when_none_is_passed() {
+    use std::fs;
+    let (port, requests, handle) = capturing_stub(vec![(
+        200,
+        r#"{"status":"ok","schema_version":1,"resources":0}"#,
+    )]);
+    let home = tempfile::tempdir().unwrap();
+    let origin = format!("http://127.0.0.1:{port}");
+    fs::write(
+        home.path().join("credentials.json"),
+        serde_json::json!({
+            "credentials": {
+                origin.clone(): {
+                    "token": "stored-login-token",
+                    "handle": "alice",
+                    "user_id": "u1",
+                    "registry_url": origin,
+                    "expires_at": 9999999999u64
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ato"))
+        .env("ATO_HOME", home.path())
+        .args(["data", "health", "--coordinator", &origin])
+        .output()
+        .expect("run ato data health with stored token");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(request.contains("Bearer stored-login-token"), "{request}");
+}
+
+#[test]
 fn quota_prints_usage_and_limit() {
     let (port, handle) = stub(vec![(
         200,

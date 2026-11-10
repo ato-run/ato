@@ -56,9 +56,11 @@ pub struct CoordinatorArgs {
         default_value = "http://127.0.0.1:8788"
     )]
     pub coordinator: String,
-    /// Bearer token for the Coordinator.
+    /// Bearer token for the Coordinator. When omitted, the token stored by
+    /// ato login for the same API origin is used, so the CLI and the PWA act
+    /// as the same identity.
     #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
-    pub token: String,
+    pub token: Option<String>,
     /// Emit the raw JSON response instead of a human-readable summary.
     #[arg(long)]
     pub json: bool,
@@ -284,6 +286,10 @@ fn base(coordinator: &CoordinatorArgs) -> String {
     coordinator.coordinator.trim_end_matches('/').to_owned()
 }
 
+fn bearer(coordinator: &CoordinatorArgs) -> Result<String> {
+    crate::auth_device::resolve_token(coordinator.token.clone(), &coordinator.coordinator)
+}
+
 fn request(
     coordinator: &CoordinatorArgs,
     method: reqwest::Method,
@@ -296,7 +302,7 @@ fn request(
         .context("build coordinator client")?;
     let mut request = client
         .request(method, format!("{}{path}", base(coordinator)))
-        .header("authorization", format!("Bearer {}", coordinator.token));
+        .header("authorization", format!("Bearer {}", bearer(coordinator)?));
     if let Some(body) = body {
         request = request.json(&body);
     }
