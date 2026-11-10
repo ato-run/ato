@@ -15,9 +15,20 @@ build Rust, and you do not need an ato.run account.
 
 ## 2. Get the sample workspace
 
-Download the three sample capsules (`todo.capsule`, `calendar.capsule`,
-`excalidraw.capsule`) and a `workspace.toml` that pins their SHA-256 digests.
-The capsules are prebuilt: no `npm`, no `cargo`, no sample source.
+The release carries a prebuilt bundle (three capsules plus a `workspace.toml`
+that pins their SHA-256 digests); no `npm`, no `cargo`, no sample source:
+
+```sh
+curl -LO https://github.com/ato-run/ato-samples/releases/download/<tag>/ato-oss-quick-start-<version>.tar.gz
+curl -LO https://github.com/ato-run/ato-samples/releases/download/<tag>/ato-oss-quick-start-<version>.tar.gz.sha256
+shasum -a 256 -c ato-oss-quick-start-<version>.tar.gz.sha256
+tar xzf ato-oss-quick-start-<version>.tar.gz
+cd ato-oss-quick-start-<version>
+```
+
+The bundle is built by `.github/workflows/quickstart-bundle.yml` in
+`ato-run/ato-samples`; until that release is published, use the capsules from a
+local build of the sample sources.
 
 ## 3. Open it
 
