@@ -33,6 +33,8 @@ pub type Body = Full<Bytes>;
 
 /// Envelope served by GET /v1/data-resources/{id}/export.
 const EXPORT_SCHEMA: &str = "ato.data.export/v1";
+/// Envelope served by GET /v1/data-resources/export (the whole saved state).
+const EXPORT_SET_SCHEMA: &str = "ato.data.export-set/v1";
 
 /// When set, the Coordinator serves a static app and its Data Ports bridge.
 #[derive(Debug, Clone)]
@@ -345,6 +347,43 @@ pub async fn handle_request(
             };
             match coordinator.quota("local") {
                 Ok(quota) => json_response(StatusCode::OK, json!(quota)),
+                Err(error) => error_response(error),
+            }
+        }
+        // The whole owner's saved state as one file a snapshot can carry.
+        (&Method::GET, ["v1", "data-resources", "export"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.list_resources("local") {
+                Ok(resources) => {
+                    let mut exported = Vec::new();
+                    for resource in resources {
+                        match coordinator.read_resource("local", &resource.resource_id) {
+                            Ok(snapshot) => exported.push(json!({
+                                "schema": EXPORT_SCHEMA,
+                                "resource_id": snapshot.resource_id,
+                                "protocol": snapshot.protocol,
+                                "revision": snapshot.revision,
+                                "generation": snapshot.generation,
+                                "content_digest": snapshot.content_digest,
+                                "byte_size": snapshot.byte_size,
+                                "document": snapshot.document,
+                            })),
+                            Err(error) => return error_response(error),
+                        }
+                    }
+                    json_response(
+                        StatusCode::OK,
+                        json!({ "schema": EXPORT_SET_SCHEMA, "resources": exported }),
+                    )
+                }
                 Err(error) => error_response(error),
             }
         }
@@ -1779,5 +1818,41 @@ export function createTask({ arguments: args, state }) {
         assert_eq!(export["protocol"], "todo.board@1");
         assert_eq!(export["content_digest"], created["content_digest"]);
         assert_eq!(export["document"]["tasks"]["t1"]["id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn exports_the_whole_saved_state() {
+        let state = state();
+        for document in [json!({"tasks": {}}), json!({"tasks": {"t1": {"id": "t1"}}})] {
+            let (status, _) = call(
+                &state,
+                Method::POST,
+                "/v1/data-resources",
+                Some("Bearer test-token"),
+                json!({"protocol": "todo.board@1", "document": document}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (status, export) = call(
+            &state,
+            Method::GET,
+            "/v1/data-resources/export",
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(export["schema"], "ato.data.export-set/v1");
+        assert_eq!(export["resources"].as_array().unwrap().len(), 2);
+        for resource in export["resources"].as_array().unwrap() {
+            assert_eq!(resource["schema"], "ato.data.export/v1");
+            assert!(
+                resource["content_digest"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("sha256:")
+            );
+        }
     }
 }
