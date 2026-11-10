@@ -481,6 +481,43 @@ fn resource_export_writes_the_document_with_its_digest() {
 }
 
 #[test]
+fn resource_import_refuses_a_tampered_digest_before_contacting_the_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("tampered.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "schema": "ato.data.export/v1",
+            "resource_id": "dres_1",
+            "protocol": "todo.board@1",
+            "revision": 2,
+            "content_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "document": {"tasks": {"t1": {"id": "t1"}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Port 1 is closed: reaching the network at all would be a different error.
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "import",
+            "--file",
+            file.to_str().unwrap(),
+            "--coordinator",
+            "http://127.0.0.1:1",
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource import");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("export_digest_mismatch"), "{stderr}");
+}
+
+#[test]
 fn resource_import_creates_a_new_resource_from_the_export() {
     let (port, requests, handle) = capturing_stub(vec![(
         201,
@@ -495,7 +532,7 @@ fn resource_import_creates_a_new_resource_from_the_export() {
             "resource_id": "dres_1",
             "protocol": "todo.board@1",
             "revision": 2,
-            "content_digest": "sha256:abc123",
+            "content_digest": "sha256:7bc5dfb0f7c8e326912b6c10a55446463d90d87b80719f7ebe74c194e1387c0c",
             "document": {"tasks": {"t1": {"id": "t1"}}}
         })
         .to_string(),
