@@ -36,6 +36,12 @@ pub const SCHEMA_VERSION: i64 = 5;
 pub const DEFAULT_QUOTA_BYTES: i64 = 64 * 1024 * 1024;
 pub const DEFAULT_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
+/// One document may not exceed 16 MiB, and a Resource may not accumulate more
+/// than 16 active bindings; both bound what one caller can make the Coordinator
+/// store.
+pub const DEFAULT_MAX_DOCUMENT_BYTES: i64 = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_BINDINGS: i64 = 16;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS resources (
   id TEXT PRIMARY KEY,
@@ -263,6 +269,8 @@ pub struct Coordinator {
     conn: Connection,
     quota_limit_bytes: i64,
     retention_seconds: i64,
+    max_document_bytes: i64,
+    max_bindings: i64,
 }
 
 impl Coordinator {
@@ -306,6 +314,8 @@ impl Coordinator {
             conn,
             quota_limit_bytes: DEFAULT_QUOTA_BYTES,
             retention_seconds: DEFAULT_RETENTION_SECONDS,
+            max_document_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
+            max_bindings: DEFAULT_MAX_BINDINGS,
         })
     }
 
@@ -313,6 +323,13 @@ impl Coordinator {
     pub fn with_limits(mut self, quota_limit_bytes: i64, retention_seconds: i64) -> Self {
         self.quota_limit_bytes = quota_limit_bytes;
         self.retention_seconds = retention_seconds;
+        self
+    }
+
+    /// Override the per-document byte cap and the binding cap (tests).
+    pub fn with_resource_limits(mut self, max_document_bytes: i64, max_bindings: i64) -> Self {
+        self.max_document_bytes = max_document_bytes;
+        self.max_bindings = max_bindings;
         self
     }
 
@@ -358,6 +375,9 @@ impl Coordinator {
     ) -> Result<ResourceSnapshot, CoordinatorError> {
         validate_protocol(protocol)?;
         let (document_json, content_digest, byte_size) = encode_document(&document)?;
+        if byte_size > self.max_document_bytes {
+            return Err(CoordinatorError::QuotaExceeded);
+        }
         let quota = self.quota(owner_id)?;
         if quota.used_bytes + byte_size > self.quota_limit_bytes {
             return Err(CoordinatorError::QuotaExceeded);
@@ -708,6 +728,14 @@ impl Coordinator {
         }
         if !matches!(access, "read" | "read_write" | "operations") {
             return Err(CoordinatorError::Invalid("invalid_access"));
+        }
+        let active: i64 = self.conn.query_row(
+            "SELECT count(*) FROM bindings WHERE resource_id=? AND status='active'",
+            params![resource_id],
+            |row| row.get(0),
+        )?;
+        if active >= self.max_bindings {
+            return Err(CoordinatorError::Invalid("binding_limit_reached"));
         }
         let resource = self.read_resource("local", resource_id)?;
         if resource.protocol != protocol {
@@ -1879,5 +1907,50 @@ export function createTask({ arguments: args, state }) {
         assert_eq!(todo[0].operation, "todo_create");
         assert_eq!(todo[0].publisher, "alice/app");
         assert!(!todo[0].expose_mcp);
+    }
+
+    #[test]
+    fn bounds_one_document_and_one_resource_bindings() {
+        let mut coordinator = Coordinator::open_in_memory()
+            .unwrap()
+            .with_resource_limits(64, 2);
+        let too_large = coordinator.create_resource(
+            "local",
+            "todo.board@1",
+            None,
+            serde_json::json!({"tasks": {"a": "x".repeat(128)}}),
+        );
+        assert!(matches!(too_large, Err(CoordinatorError::QuotaExceeded)));
+
+        let created = coordinator
+            .create_resource(
+                "local",
+                "todo.board@1",
+                None,
+                serde_json::json!({"tasks": {}}),
+            )
+            .unwrap();
+        for port in ["tasks", "tasks-2"] {
+            coordinator
+                .bind_resource(
+                    &created.resource_id,
+                    port,
+                    "todo.board@1",
+                    "read",
+                    Vec::new(),
+                )
+                .unwrap();
+        }
+        let third = coordinator.bind_resource(
+            &created.resource_id,
+            "tasks-3",
+            "todo.board@1",
+            "read",
+            Vec::new(),
+        );
+        assert!(matches!(
+            third,
+            Err(CoordinatorError::Invalid("binding_limit_reached"))
+        ));
     }
 }
