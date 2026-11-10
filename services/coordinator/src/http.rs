@@ -360,6 +360,21 @@ pub async fn handle_request(
                 Err(error) => error_response(error),
             }
         }
+        (&Method::GET, ["v1", "data-resources", id, "document"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.read_resource("local", id) {
+                Ok(snapshot) => json_response(StatusCode::OK, json!(snapshot)),
+                Err(error) => error_response(error),
+            }
+        }
         (&Method::POST, ["v1", "data-resources", id, "operations"]) => {
             let input: Value = match serde_json::from_slice(body) {
                 Ok(value) => value,
@@ -1680,5 +1695,31 @@ export function createTask({ arguments: args, state }) {
         let pong: Value = serde_json::from_str(&pong).unwrap();
         assert_eq!(pong["id"], 9);
         assert_eq!(pong["result"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn exports_a_document_with_its_digest() {
+        let state = state();
+        let (_, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {"tasks": {"t1": {"id": "t1"}}}}),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap().to_owned();
+        let (status, exported) = call(
+            &state,
+            Method::GET,
+            &format!("/v1/data-resources/{resource_id}/document"),
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(exported["revision"], 1);
+        assert_eq!(exported["document"]["tasks"]["t1"]["id"], "t1");
+        assert_eq!(exported["content_digest"], created["content_digest"]);
     }
 }
