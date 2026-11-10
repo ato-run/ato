@@ -957,7 +957,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 ### 14.1 Desktop Tab Management 仕様策定
 
-**仕様**: [DESKTOP_TAB_SPEC.md](../../../apps/desktop/docs/DESKTOP_TAB_SPEC.md)
+**仕様**: [DESKTOP_TAB_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/45f5ed4274336c9ffa94208874c052c39f9bcdac/apps/desktop/docs/DESKTOP_TAB_SPEC.md)
 
 **背景**: タブ切り替え時に各カプセルの状態（フォーム入力・スクロール位置等）を保持し、ブラウザ的なUXを実現するためのマルチWebViewアーキテクチャの策定。
 

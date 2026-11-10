@@ -1,6 +1,6 @@
 # Copilot Instructions — capsuled-dev
 
-> This file supplements `AGENTS.md` (workspace root). Read `AGENTS.md` first — it covers the philosophy, repo layout, build/test commands, and code style. This file adds **stack-specific patterns** for GPUI, Wry, TypeScript, and the bridge/IPC layer.
+> This file supplements `AGENTS.md` (workspace root). Read `AGENTS.md` first — it covers the philosophy, repo layout, build/test commands, and code style. This file adds **stack-specific patterns** for Rust, TypeScript, and the bridge/IPC layer.
 
 
 ---
@@ -9,7 +9,7 @@
 ## Identity
 
 You are a full-stack systems engineer who is equally fluent in:
-- **Rust (native)** — GPUI UI framework, Wry WebView host, async Tokio, `anyhow`/`thiserror`, `objc2` for macOS FFI
+- **Rust (native)** — async Tokio, `anyhow`/`thiserror`, `objc2` for macOS FFI
 - **Rust (web)** — Cloudflare Workers via `worker` crate, Axum/Hono-style routing, Wasm targets
 - **TypeScript/React** — Cloudflare Workers with Hono, Astro, React 18+, `@assistant-ui/react`, Zod
 
@@ -17,131 +17,7 @@ Apply **YAGNI** rigorously: ship the minimum code that satisfies the spec. No sp
 
 ---
 
-## GPUI Patterns (`apps/desktop`)
 
-### Core types
-
-| Concept | Type | Notes |
-|---------|------|-------|
-| Shared stateful component | `Entity<T>` | Never `Arc<Mutex<T>>` for UI state |
-| Weak reference | `WeakEntity<T>` | Use inside closures to avoid retain cycles |
-| UI element return | `impl IntoElement` | All `render()` returns |
-| Per-component state | `Context<Self>` | Passed to `render()` and event handlers |
-| Cross-component mutation | `cx.update_entity(&handle, |s, cx| …)` | |
-| Async work | `cx.spawn(|weak, cx| async move { … })` | Use `WeakEntity`, check `upgrade()` before mutating |
-
-### `Render` trait
-
-```rust
-impl Render for MyComponent {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .bg(theme.panel_bg)
-            .child(self.render_inner(window, cx))
-    }
-}
-```
-
-### Layout primitives
-
-```rust
-// sizes
-px(48.0)   size(px(24.0), px(24.0))   point(px(0.0), px(0.0))
-// colors
-hsla(0.0, 0.0, 0.15, 1.0)   // h(0-1), s(0-1), l(0-1), a(0-1)
-// gradients
-linear_gradient(0.0, linear_color_stop(start_color, 0.0), linear_color_stop(end_color, 1.0))
-```
-
-### Actions
-
-```rust
-actions!(
-    ato_desktop,
-    [FocusCommandBar, ShowSettings, ToggleOverview]
-);
-
-// Typed action with payload:
-#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
-#[action(namespace = ato_desktop, no_json)]
-pub struct SelectTask { pub task_id: usize }
-```
-
-### Theme
-
-- `Theme` holds only `Hsla` values. No business logic, no layout constants.
-- Access via `let theme = Theme::from_mode(state.theme_mode);` at render site.
-- Never reach into global state for colors — always pass `theme: &Theme` explicitly.
-
-### GPUI ↔ Wry integration
-
-GPUI does **not** manage the Wry event loop directly. The desktop app embeds native `WKWebView`/`WebView2`/`WebKitGTK` windows positioned beneath GPUI chrome. `WebViewManager` in `webview.rs` owns all `WebView` handles.
-
----
-
-## Wry Patterns (`apps/desktop/src/webview.rs`)
-
-### Building a WebView
-
-```rust
-let webview = WebViewBuilder::new()
-    .with_url(url)?
-    .with_initialization_script(include_str!("../js/agent.js"))  // injected before page JS
-    .with_ipc_handler({
-        let tx = ipc_tx.clone();
-        move |req: Request<String>| { let _ = tx.send(req.body().clone()); }
-    })
-    .with_navigation_handler(|url| allow_navigation(&url))
-    .build_as_child(&parent_window)?;
-```
-
-### ⚠️ Critical: evaluate_script timing
-
-`evaluate_script_with_callback` **silently drops callbacks** if called before `PageLoadEvent::Finished`. Always guard:
-
-```rust
-fn on_page_load(event: PageLoadEvent, url: &str, state: &mut MyState) {
-    if matches!(event, PageLoadEvent::Finished) {
-        webview.evaluate_script_with_callback("snapshotDOM()", |result| {
-            // safe to use result here
-        }).ok();
-    }
-}
-```
-
-### JS injection (not CDP)
-
-- WKWebView/WebKitGTK do **not** expose Chrome DevTools Protocol. CDP is macOS/Linux-incompatible.
-- Use `with_initialization_script()` for persistent injection (runs on every navigation).
-- Use `evaluate_script_with_callback()` for one-shot evaluation (only after `PageLoadEvent::Finished`).
-
-### macOS native APIs via objc2
-
-```rust
-#[cfg(target_os = "macos")]
-use objc2::{msg_send, sel};
-#[cfg(target_os = "macos")]
-use objc2_app_kit::NSView;
-#[cfg(target_os = "macos")]
-use wry::WebViewExtMacOS;
-
-// Take a native snapshot (preferred over html2canvas)
-#[cfg(target_os = "macos")]
-fn take_wkwebview_snapshot(webview: &WebView) { /* use WKWebView.takeSnapshotWithConfiguration */ }
-```
-
-### Screenshots
-
-- **macOS**: Use `WKWebView.takeSnapshotWithConfiguration` via `objc2_app_kit` — NOT `html2canvas`.
-- **Linux**: Use `webkit_web_view_get_snapshot` via GLib/GTK bindings.
-- `html2canvas` is forbidden: it misrenders fonts, SVGs, and cross-origin content.
-
----
-
-## Bridge / IPC Patterns
 
 ### Message envelope convention
 
@@ -183,18 +59,6 @@ Never perform a capability without an explicit grant. `Safe by default` from the
 ```
 
 Use a PID-qualified path to avoid socket collisions when multiple instances run concurrently.
-
----
-
-## State Architecture (`apps/desktop/src/state/`)
-
-- `AppState` is the single source of truth for UI and session state.
-- State is **read-only during render** — mutate only through actions/events.
-- Three distinct layers — never mix them:
-  1. **Declared**: `capsule.toml` manifest
-  2. **Resolved**: `ato.lock.json` (computed at build/install time)
-  3. **Runtime**: `AppState` (ephemeral, local to this process)
-- `ShellEvent` carries async events from background threads into the GPUI event loop via `cx.spawn`.
 
 ---
 
@@ -381,5 +245,5 @@ Never backport from `nightly` to `release/*`.
 - Commit per logical change, not per file touched.
 - Commit in small, coherent chunks during implementation so progress is saved incrementally.
 - Do not hardcode a commit author identity. Use the currently authenticated `gh` user for GitHub operations, and use the current repository/global `git config user.name` and `git config user.email` for local commits. Do not add any `Co-Authored-By` lines.
-- Message format: `<scope>(<app>): <what changed>` — e.g., `fix(ato-desktop): guard evaluate_script after PageLoadEvent::Finished`
+- Message format: `<scope>(<app>): <what changed>` — e.g., `fix(cli): reject an unknown capsule profile`
 - When merging pull requests, **do not use squash merge**. Preserve commits and merge as-is.
