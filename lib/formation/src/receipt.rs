@@ -948,6 +948,8 @@ mod tests {
             materialized_tree_digest: format!("sha256:{}", "b".repeat(64)),
             entry: "app/run.sh".to_owned(),
             signature_policy: "require-valid-or-local-override".to_owned(),
+            signature_target: "executable".to_owned(),
+            verified_target: "app/run.sh".to_owned(),
             codesign_verify: "valid".to_owned(),
             signature_kind: "adhoc".to_owned(),
             codesign_detail: None,

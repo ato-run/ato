@@ -160,6 +160,7 @@ struct HubState {
     requests: Vec<RecordedRequest>,
     get_behavior: GetBehavior,
     put_token: Option<String>,
+    get_token: Option<String>,
 }
 
 struct TestHub {
@@ -176,6 +177,7 @@ impl TestHub {
             requests: Vec::new(),
             get_behavior: GetBehavior::Serve,
             put_token: put_token.map(str::to_owned),
+            get_token: None,
         }));
         let shared = state.clone();
         thread::spawn(move || {
@@ -194,6 +196,12 @@ impl TestHub {
 
     fn set_get_behavior(&self, behavior: GetBehavior) {
         self.state.lock().unwrap().get_behavior = behavior;
+    }
+
+    /// Require `Authorization: Bearer <token>` on GET (a coordinator started
+    /// with anonymous reads disabled).
+    fn require_get_token(&self, token: &str) {
+        self.state.lock().unwrap().get_token = Some(token.to_owned());
     }
 
     fn requests(&self) -> Vec<RecordedRequest> {
@@ -290,25 +298,36 @@ fn route(
             let created = state.objects.insert(id, body.to_vec()).is_none();
             (if created { 201 } else { 200 }, Vec::new(), Vec::new())
         }
-        "GET" => match state.get_behavior.clone() {
-            GetBehavior::Redirect(location) => {
-                (302, vec![("location".to_owned(), location)], Vec::new())
-            }
-            GetBehavior::Corrupt => match state.objects.get(&id) {
-                Some(bytes) => {
-                    let mut corrupted = bytes.clone();
-                    let last = corrupted.len() - 1;
-                    corrupted[last] ^= 0x80;
-                    (200, Vec::new(), corrupted)
+        "GET" => {
+            if let Some(expected) = state.get_token.as_deref() {
+                let presented = headers
+                    .iter()
+                    .find(|(name, _)| name == "authorization")
+                    .map(|(_, value)| value.as_str());
+                if presented != Some(&format!("Bearer {expected}")) {
+                    return (401, Vec::new(), b"unauthorized".to_vec());
                 }
-                None => (404, Vec::new(), b"not found".to_vec()),
-            },
-            GetBehavior::Missing => (404, Vec::new(), b"not found".to_vec()),
-            GetBehavior::Serve => match state.objects.get(&id) {
-                Some(bytes) => (200, Vec::new(), bytes.clone()),
-                None => (404, Vec::new(), b"not found".to_vec()),
-            },
-        },
+            }
+            match state.get_behavior.clone() {
+                GetBehavior::Redirect(location) => {
+                    (302, vec![("location".to_owned(), location)], Vec::new())
+                }
+                GetBehavior::Corrupt => match state.objects.get(&id) {
+                    Some(bytes) => {
+                        let mut corrupted = bytes.clone();
+                        let last = corrupted.len() - 1;
+                        corrupted[last] ^= 0x80;
+                        (200, Vec::new(), corrupted)
+                    }
+                    None => (404, Vec::new(), b"not found".to_vec()),
+                },
+                GetBehavior::Missing => (404, Vec::new(), b"not found".to_vec()),
+                GetBehavior::Serve => match state.objects.get(&id) {
+                    Some(bytes) => (200, Vec::new(), bytes.clone()),
+                    None => (404, Vec::new(), b"not found".to_vec()),
+                },
+            }
+        }
         _ => (405, Vec::new(), b"method not allowed".to_vec()),
     }
 }
@@ -811,4 +830,188 @@ fn pull_never_runs_or_imports_the_capsule() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(entries, vec![std::ffi::OsString::from("pulled.capsule")]);
+}
+
+fn pull_with_env_token(
+    command: &mut AssertCommand,
+    link: &str,
+    output: &Path,
+    token: &str,
+    configured_hub: Option<&str>,
+) -> Output {
+    command
+        .args(["hub", "pull", link, "--allow-loopback-http", "--output"])
+        .arg(output);
+    if let Some(configured_hub) = configured_hub {
+        command.args(["--hub-url", configured_hub]);
+    }
+    command
+        .env("ATO_HUB_TOKEN", token)
+        .output()
+        .expect("ato hub pull runs")
+}
+
+fn get_requests(hub: &TestHub) -> Vec<RecordedRequest> {
+    hub.requests()
+        .into_iter()
+        .filter(|request| request.method == "GET")
+        .collect()
+}
+
+#[test]
+fn env_token_is_withheld_from_a_foreign_hub() {
+    let directory = tempfile::tempdir().unwrap();
+    let capsule = v3_bundle(directory.path());
+    let hub = TestHub::start(Some(PUT_TOKEN));
+    hub.require_get_token("read-token");
+    let link = link_from(&push(&mut ato(), &capsule, &hub));
+
+    let output = directory.path().join("pulled.capsule");
+    let pulled = pull_with_env_token(
+        &mut ato(),
+        &link,
+        &output,
+        "read-token",
+        Some("https://other.example"),
+    );
+    assert!(!pulled.status.success());
+    let message = stderr(&pulled);
+    assert!(
+        message.contains("--token explicitly"),
+        "the credential rule must be named: {message}"
+    );
+    assert!(
+        !message.contains("read-token"),
+        "the withheld env token must never be echoed: {message}"
+    );
+    assert!(!output.exists());
+
+    let gets = get_requests(&hub);
+    assert_eq!(gets.len(), 1);
+    assert_eq!(
+        gets[0].header("authorization"),
+        None,
+        "a foreign hub must never receive the environment token"
+    );
+}
+
+#[test]
+fn env_token_is_withheld_when_no_hub_is_configured() {
+    let directory = tempfile::tempdir().unwrap();
+    let capsule = v3_bundle(directory.path());
+    let hub = TestHub::start(Some(PUT_TOKEN));
+    hub.require_get_token("read-token");
+    let link = link_from(&push(&mut ato(), &capsule, &hub));
+
+    let output = directory.path().join("pulled.capsule");
+    let pulled = pull_with_env_token(&mut ato(), &link, &output, "read-token", None);
+    assert!(!pulled.status.success());
+    assert!(
+        stderr(&pulled).contains("--token explicitly"),
+        "{}",
+        stderr(&pulled)
+    );
+    assert!(!stderr(&pulled).contains("read-token"));
+    assert!(!output.exists());
+    let gets = get_requests(&hub);
+    assert_eq!(gets.len(), 1);
+    assert_eq!(gets[0].header("authorization"), None);
+}
+
+#[test]
+fn env_token_is_sent_to_the_configured_hub_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let capsule = v3_bundle(directory.path());
+    let hub = TestHub::start(Some(PUT_TOKEN));
+    hub.require_get_token("read-token");
+    let link = link_from(&push(&mut ato(), &capsule, &hub));
+
+    // `--hub-url` with a trailing slash normalizes to the same hub.
+    let flag_output = directory.path().join("via-flag.capsule");
+    let via_flag = pull_with_env_token(
+        &mut ato(),
+        &link,
+        &flag_output,
+        "read-token",
+        Some(&format!("{}/", hub.base_url())),
+    );
+    assert_success(&via_flag);
+    assert!(flag_output.is_file());
+
+    // `ATO_HUB_URL` is the same configured hub.
+    let env_output = directory.path().join("via-env.capsule");
+    let via_env = ato()
+        .args(["hub", "pull", &link, "--allow-loopback-http", "--output"])
+        .arg(&env_output)
+        .env("ATO_HUB_URL", hub.base_url())
+        .env("ATO_HUB_TOKEN", "read-token")
+        .output()
+        .expect("ato hub pull runs");
+    assert_success(&via_env);
+    assert!(env_output.is_file());
+
+    let gets = get_requests(&hub);
+    assert_eq!(gets.len(), 2);
+    for request in gets {
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer read-token"),
+            "a configured hub receives the environment token"
+        );
+    }
+}
+
+#[test]
+fn a_different_path_on_the_same_origin_is_not_the_configured_hub() {
+    let directory = tempfile::tempdir().unwrap();
+    let capsule = v3_bundle(directory.path());
+    let hub = TestHub::start(Some(PUT_TOKEN));
+    hub.require_get_token("read-token");
+    let link = link_from(&push(&mut ato(), &capsule, &hub));
+
+    let output = directory.path().join("pulled.capsule");
+    let pulled = pull_with_env_token(
+        &mut ato(),
+        &link,
+        &output,
+        "read-token",
+        Some(&format!("{}/other", hub.base_url())),
+    );
+    assert!(!pulled.status.success());
+    assert!(
+        stderr(&pulled).contains("--token explicitly"),
+        "{}",
+        stderr(&pulled)
+    );
+    assert!(!output.exists());
+    let gets = get_requests(&hub);
+    assert_eq!(gets.len(), 1);
+    assert_eq!(gets[0].header("authorization"), None);
+}
+
+#[test]
+fn explicit_token_is_sent_even_to_a_non_configured_hub() {
+    let directory = tempfile::tempdir().unwrap();
+    let capsule = v3_bundle(directory.path());
+    let hub = TestHub::start(Some(PUT_TOKEN));
+    hub.require_get_token("read-token");
+    let link = link_from(&push(&mut ato(), &capsule, &hub));
+
+    let output = directory.path().join("pulled.capsule");
+    let pulled = ato()
+        .args(["hub", "pull", &link, "--allow-loopback-http"])
+        .args(["--token", "read-token"])
+        .args(["--hub-url", "https://other.example", "--output"])
+        .arg(&output)
+        .output()
+        .expect("ato hub pull runs");
+    assert_success(&pulled);
+    assert!(output.is_file());
+    let gets = get_requests(&hub);
+    assert_eq!(gets.len(), 1);
+    assert_eq!(
+        gets[0].header("authorization"),
+        Some("Bearer read-token"),
+        "an explicit --token is the user's choice for this link"
+    );
 }
