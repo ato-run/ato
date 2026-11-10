@@ -1832,6 +1832,7 @@ mod tests {
                     snapshot: snapshot.clone(),
                 },
             ],
+            data: None,
         };
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("checkpoint.toml");
