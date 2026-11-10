@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
