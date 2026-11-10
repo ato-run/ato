@@ -26,7 +26,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Bumped when the on-disk schema changes in a way that needs a migration.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// Default per-owner quota (64 MiB) and operation-result retention (30 days).
+pub const DEFAULT_QUOTA_BYTES: i64 = 64 * 1024 * 1024;
+pub const DEFAULT_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS resources (
@@ -79,6 +83,7 @@ CREATE TABLE IF NOT EXISTS operation_results (
   receipt_json TEXT NOT NULL,
   revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (resource_id, operation_id)
 );
 CREATE TABLE IF NOT EXISTS outbox (
@@ -134,6 +139,8 @@ pub enum CoordinatorError {
     Invalid(&'static str),
     #[error("{0}")]
     Forbidden(&'static str),
+    #[error("quota_exceeded")]
+    QuotaExceeded,
     #[error("storage_error: {0}")]
     Storage(#[from] rusqlite::Error),
     #[error("json_error: {0}")]
@@ -192,8 +199,17 @@ pub struct Binding {
     pub binding_epoch: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quota {
+    pub used_bytes: i64,
+    pub limit_bytes: i64,
+    pub resources: i64,
+}
+
 pub struct Coordinator {
     conn: Connection,
+    quota_limit_bytes: i64,
+    retention_seconds: i64,
 }
 
 impl Coordinator {
@@ -208,8 +224,58 @@ impl Coordinator {
     fn init(conn: Connection) -> Result<Self, CoordinatorError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        // Databases created before schema 2 lack the retention column; adding
+        // it is idempotent and keeps the file usable without a rebuild.
+        let _ = conn.execute(
+            "ALTER TABLE operation_results ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            quota_limit_bytes: DEFAULT_QUOTA_BYTES,
+            retention_seconds: DEFAULT_RETENTION_SECONDS,
+        })
+    }
+
+    /// Override the per-owner quota (bytes) and the operation-result retention.
+    pub fn with_limits(mut self, quota_limit_bytes: i64, retention_seconds: i64) -> Self {
+        self.quota_limit_bytes = quota_limit_bytes;
+        self.retention_seconds = retention_seconds;
+        self
+    }
+
+    /// Bytes currently stored for an owner, the configured limit and the
+    /// number of active Resources.
+    pub fn quota(&self, owner_id: &str) -> Result<Quota, CoordinatorError> {
+        let used_bytes: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(d.byte_size), 0)
+             FROM resources r
+             JOIN document_heads h ON h.resource_id=r.id
+             JOIN document_revisions d ON d.resource_id=r.id AND d.revision=h.head_revision
+             WHERE r.owner_id=? AND r.status='active'",
+            params![owner_id],
+            |row| row.get(0),
+        )?;
+        let resources: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM resources WHERE owner_id=? AND status='active'",
+            params![owner_id],
+            |row| row.get(0),
+        )?;
+        Ok(Quota {
+            used_bytes,
+            limit_bytes: self.quota_limit_bytes,
+            resources,
+        })
+    }
+
+    /// Delete operation results whose retention expired. Returns the count.
+    pub fn gc_expired_results(&mut self) -> Result<usize, CoordinatorError> {
+        let deleted = self.conn.execute(
+            "DELETE FROM operation_results WHERE expires_at > 0 AND expires_at <= ?",
+            params![now()],
+        )?;
+        Ok(deleted)
     }
 
     pub fn create_resource(
@@ -221,6 +287,10 @@ impl Coordinator {
     ) -> Result<ResourceSnapshot, CoordinatorError> {
         validate_protocol(protocol)?;
         let (document_json, content_digest, byte_size) = encode_document(&document)?;
+        let quota = self.quota(owner_id)?;
+        if quota.used_bytes + byte_size > self.quota_limit_bytes {
+            return Err(CoordinatorError::QuotaExceeded);
+        }
         let resource_id = new_id("dres");
         let now = now();
         let tx = self.conn.transaction()?;
@@ -323,6 +393,12 @@ impl Coordinator {
             return Err(CoordinatorError::Invalid("invalid_operation_id"));
         }
         let (document_json, content_digest, byte_size) = encode_document(&input.document)?;
+        let quota = self.quota(owner_id)?;
+        // Conservative: the replaced head is not subtracted, so a commit can
+        // never push the owner past the limit even transiently.
+        if quota.used_bytes + byte_size > self.quota_limit_bytes {
+            return Err(CoordinatorError::QuotaExceeded);
+        }
         let fingerprint = fingerprint(&input)?;
         let tx = self.conn.transaction()?;
         let head = tx
@@ -407,8 +483,8 @@ impl Coordinator {
             "content_digest": content_digest,
         });
         tx.execute(
-            "INSERT INTO operation_results(resource_id,operation_id,fingerprint,result_json,receipt_json,revision,created_at)
-             VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO operation_results(resource_id,operation_id,fingerprint,result_json,receipt_json,revision,created_at,expires_at)
+             VALUES (?,?,?,?,?,?,?,?)",
             params![
                 resource_id,
                 input.operation_id,
@@ -416,7 +492,8 @@ impl Coordinator {
                 serde_json::to_string(&result)?,
                 serde_json::to_string(&receipt)?,
                 next_revision,
-                now
+                now,
+                now + self.retention_seconds
             ],
         )?;
         tx.execute(
@@ -879,5 +956,61 @@ mod tests {
         let read = coordinator.read_resource("alice", &resource_id).unwrap();
         assert_eq!(read.revision, 2);
         assert_eq!(read.document, board("second"));
+    }
+
+    #[test]
+    fn refuses_a_create_over_the_quota() {
+        let mut coordinator = Coordinator::open_in_memory()
+            .unwrap()
+            .with_limits(8, DEFAULT_RETENTION_SECONDS);
+        let error = coordinator
+            .create_resource("alice", "todo.board@1", None, board("first"))
+            .expect_err("quota must refuse the create");
+        assert!(matches!(error, CoordinatorError::QuotaExceeded));
+        assert_eq!(coordinator.quota("alice").unwrap().resources, 0);
+    }
+
+    #[test]
+    fn reports_quota_usage() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        let created = coordinator
+            .create_resource("alice", "todo.board@1", None, board("first"))
+            .unwrap();
+        let quota = coordinator.quota("alice").unwrap();
+        assert_eq!(quota.resources, 1);
+        assert_eq!(quota.used_bytes, created.byte_size);
+        assert_eq!(quota.limit_bytes, DEFAULT_QUOTA_BYTES);
+    }
+
+    #[test]
+    fn gc_deletes_expired_operation_results() {
+        let mut coordinator = Coordinator::open_in_memory()
+            .unwrap()
+            .with_limits(DEFAULT_QUOTA_BYTES, 0);
+        let created = coordinator
+            .create_resource("alice", "todo.board@1", None, board("first"))
+            .unwrap();
+        coordinator
+            .commit(
+                "alice",
+                &created.resource_id,
+                CommitInput {
+                    operation_id: "op-1".into(),
+                    expected_revision: 1,
+                    expected_generation: 0,
+                    document: board("second"),
+                },
+            )
+            .unwrap();
+        assert_eq!(coordinator.gc_expired_results().unwrap(), 1);
+        assert_eq!(coordinator.gc_expired_results().unwrap(), 0);
+        // The revision itself is untouched; only the replay record expired.
+        assert_eq!(
+            coordinator
+                .read_resource("alice", &created.resource_id)
+                .unwrap()
+                .revision,
+            2
+        );
     }
 }
