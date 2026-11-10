@@ -14,7 +14,7 @@ Japanese/mixed source documents are labelled below and retain their original tex
 | [Internal plans/research/handoffs/dashboards](../../internal/README.md) | Archive; test-isolation guide remains current separately |
 | [Dev notes](../../dev-notes/) | Archive; past Desktop/installation audits |
 | [Receipts](../../receipts/) | Archive; dated implementation acceptance evidence |
-| [AODD](../../aodd/) | Archive; historical acceptance and community-publish records |
+| [AODD](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/docs/aodd) | Archive; historical acceptance and community-publish records |
 | [AODD desktop Focus View evidence (claudedocs)](claudedocs/README.md) | Archive; 50 YAML receipts + 103 screenshots, 2026-05-09..05-16, for the retired GPUI + Wry shell; moved from `claudedocs/` in the 2026-10-28 cleanup |
 | [Recipe evaluations](../../recipes/) | Archive for dated evaluations/plans; bounded behavior notes retain their individual status |
 | [Raw ops evidence](../../ops/README.md) | Archive; original JSON/log/image/archive paths preserved |
