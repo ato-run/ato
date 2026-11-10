@@ -84,7 +84,7 @@ try {
   assert.equal(invoked.body.revision, 2);
 
   const file = join(work, "saved-state.json");
-  const exported = await run(ato, ["data", "resource", "export-set", "--out", file, "--coordinator", "http://127.0.0.1:8791", "--token", token]);
+  const exported = await run(ato, ["data", "resource", "export-set", "--out", file, "--canonical", "--coordinator", "http://127.0.0.1:8791", "--token", token]);
   assert.equal(exported.code, 0, exported.stderr);
   const envelope = JSON.parse(await readFile(file, "utf8"));
   assert.equal(envelope.schema, "ato.data.export-set/v1");
