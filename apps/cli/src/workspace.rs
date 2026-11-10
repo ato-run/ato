@@ -173,10 +173,11 @@ pub struct WorkspaceCheckpointPaneV1 {
     /// Optional receipt of the Run that produced the checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_ref: Option<String>,
-    /// Captured, app-opaque local state (a browser `localStorage` map in the
-    /// v0 shell). This is local orchestration data, never K or a Receipt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<serde_json::Value>,
+    /// The canonical `ato.portable-instance-snapshot/1` document this pane
+    /// saved. It carries one `ato.browser-instance-state@1` resource whose
+    /// bytes are stored beside the checkpoint. Local orchestration data,
+    /// never K and never a Receipt.
+    pub snapshot: serde_json::Value,
 }
 
 /// One validated pane of an inspected workspace.
@@ -263,9 +264,7 @@ impl WorkspaceCheckpointV1 {
             if let Some(receipt) = &pane.receipt_ref {
                 validate_sha256(receipt, "checkpoint receipt_ref")?;
             }
-            if let Some(state) = &pane.state {
-                validate_captured_state(state)?;
-            }
+            validate_captured_snapshot(&pane.snapshot, &pane.snapshot_ref)?;
         }
         let mut previous_view: Option<&str> = None;
         for view in &self.view.pane {
@@ -347,15 +346,67 @@ fn validate_instance_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_captured_state(state: &serde_json::Value) -> Result<()> {
-    let Some(object) = state.as_object() else {
-        bail!("checkpoint pane state must be a JSON object of string values");
-    };
-    if object.len() > 4096 {
-        bail!("checkpoint pane state has too many entries");
+type BrowserState = BTreeMap<String, String>;
+
+/// Build the canonical `InstanceSnapshotV1` document for one pane's browser
+/// state. The returned object bytes are the resource this snapshot names; the
+/// snapshot bytes give the `snapshot_ref` the checkpoint records.
+fn browser_snapshot(local_storage: &BrowserState) -> Result<(serde_json::Value, Vec<u8>, String)> {
+    let encoded = ato_portable_application::instance_snapshot::encode_browser_state(local_storage)
+        .context("failed to encode the pane's browser state")?;
+    let content_ref = sha256_hex(&encoded);
+    let snapshot = json!({
+        "schema": ato_portable_application::instance_snapshot::INSTANCE_SNAPSHOT_SCHEMA,
+        "resources": [{
+            "slot": "browser",
+            "protocol": ato_portable_application::instance_snapshot::BROWSER_INSTANCE_STATE_PROTOCOL,
+            "content_ref": content_ref,
+        }],
+        "assets": [],
+    });
+    let snapshot_bytes =
+        serde_jcs::to_vec(&snapshot).context("failed to canonicalize the pane snapshot")?;
+    let snapshot_ref = sha256_hex(&snapshot_bytes);
+    Ok((snapshot, encoded, snapshot_ref))
+}
+
+/// Build the snapshot document and its reference for a browser-state map.
+/// Used by the runtime wiring and by tests that write checkpoint fixtures.
+pub fn browser_snapshot_for(
+    local_storage: &BTreeMap<String, String>,
+) -> Result<(serde_json::Value, String)> {
+    browser_snapshot(local_storage).map(|(snapshot, _object, reference)| (snapshot, reference))
+}
+
+fn validate_captured_snapshot(snapshot: &serde_json::Value, snapshot_ref: &str) -> Result<()> {
+    let typed: ato_portable_application::instance_snapshot::InstanceSnapshotV1 =
+        serde_json::from_value(snapshot.clone())
+            .context("checkpoint pane snapshot must be a valid InstanceSnapshotV1")?;
+    if typed.schema != ato_portable_application::instance_snapshot::INSTANCE_SNAPSHOT_SCHEMA {
+        bail!("checkpoint pane snapshot schema must be `ato.portable-instance-snapshot/1`");
     }
-    if object.values().any(|value| !value.is_string()) {
-        bail!("checkpoint pane state values must be strings");
+    if typed.resources.len() != 1
+        || typed.resources[0].protocol
+            != ato_portable_application::instance_snapshot::BROWSER_INSTANCE_STATE_PROTOCOL
+    {
+        bail!("checkpoint pane snapshot must carry exactly one browser instance-state resource");
+    }
+    if typed.resources[0].slot.is_empty()
+        || !typed.resources[0]
+            .slot
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("checkpoint pane snapshot resource slot is not a valid slot");
+    }
+    validate_sha256(&typed.resources[0].content_ref, "snapshot content_ref")?;
+    if !typed.assets.is_empty() || !typed.asset_bindings.is_empty() {
+        bail!("workspace checkpoint v0 snapshots carry no assets");
+    }
+    let canonical =
+        serde_jcs::to_vec(snapshot).context("failed to canonicalize the pane snapshot")?;
+    if sha256_hex(&canonical) != snapshot_ref {
+        bail!("checkpoint snapshot_ref does not match its snapshot bytes");
     }
     Ok(())
 }
@@ -524,6 +575,86 @@ pub fn write_checkpoint_atomic(path: &Path, checkpoint: &WorkspaceCheckpointV1) 
     Ok(())
 }
 
+/// Write the objects a checkpoint names, then the checkpoint itself.
+///
+/// Objects go first: the checkpoint is the commit point, so it never references
+/// bytes that were not written. Each object is written atomically in the same
+/// directory and verified by its `sha256` name.
+pub fn save_workspace_checkpoint(
+    path: &Path,
+    running: &RunningWorkspace,
+) -> Result<WorkspaceCheckpointV1> {
+    let (checkpoint, objects) = running.capture()?;
+    let directory = checkpoint_state_directory(path);
+    std::fs::create_dir_all(&directory).with_context(|| {
+        format!(
+            "failed to create the checkpoint state directory {}",
+            directory.display()
+        )
+    })?;
+    for (reference, bytes) in &objects {
+        let hex = reference
+            .strip_prefix("sha256:")
+            .with_context(|| format!("snapshot object reference `{reference}` is not sha256"))?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".ato-workspace-object-")
+            .tempfile_in(&directory)
+            .context("failed to create a temporary snapshot object")?;
+        use std::io::Write as _;
+        temporary
+            .write_all(bytes)
+            .context("failed to write a snapshot object")?;
+        temporary
+            .as_file()
+            .sync_all()
+            .context("failed to fsync a snapshot object")?;
+        temporary.persist(directory.join(hex)).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to move the snapshot object into place: {}",
+                error.error
+            )
+        })?;
+    }
+    write_checkpoint_atomic(path, &checkpoint)?;
+    Ok(checkpoint)
+}
+
+/// Read a checkpoint and the snapshot objects it names, verifying every digest.
+pub fn load_workspace_checkpoint(path: &Path) -> Result<LoadedWorkspaceCheckpoint> {
+    let checkpoint = read_checkpoint(path)?;
+    let directory = checkpoint_state_directory(path);
+    let mut state = BTreeMap::new();
+    for pane in &checkpoint.pane {
+        let reference = snapshot_content_ref(&pane.snapshot)?;
+        let hex = reference.strip_prefix("sha256:").with_context(|| {
+            format!("pane `{}` snapshot content_ref is not sha256", pane.pane_id)
+        })?;
+        let object_path = directory.join(hex);
+        let bytes = std::fs::read(&object_path).with_context(|| {
+            format!(
+                "pane `{}` snapshot object {} is missing",
+                pane.pane_id,
+                object_path.display()
+            )
+        })?;
+        if sha256_hex(&bytes) != reference {
+            bail!(
+                "pane `{}` snapshot object does not match its content_ref",
+                pane.pane_id
+            );
+        }
+        let storage = ato_portable_application::instance_snapshot::decode_browser_state(&bytes)
+            .with_context(|| {
+                format!(
+                    "pane `{}` snapshot object is not browser state",
+                    pane.pane_id
+                )
+            })?;
+        state.insert(pane.pane_id.clone(), storage);
+    }
+    Ok(LoadedWorkspaceCheckpoint { checkpoint, state })
+}
+
 pub fn run(args: WorkspaceArgs) -> Result<()> {
     match args.command {
         WorkspaceCommand::Inspect(args) => {
@@ -572,7 +703,7 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
             let checkpoint = args
                 .checkpoint
                 .as_deref()
-                .map(read_checkpoint)
+                .map(load_workspace_checkpoint)
                 .transpose()?;
             let running = start(&args.file, checkpoint.as_ref())?;
             println!("workspace: {}", running.shell_url);
@@ -586,9 +717,12 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
             }
             wait_for_shutdown()?;
             if let Some(path) = args.checkpoint_out.as_deref() {
-                let checkpoint = running.capture()?;
-                write_checkpoint_atomic(path, &checkpoint)?;
-                println!("checkpoint: {}", path.display());
+                let checkpoint = save_workspace_checkpoint(path, &running)?;
+                println!(
+                    "checkpoint: {} ({} panes)",
+                    path.display(),
+                    checkpoint.pane.len()
+                );
             }
             drop(running);
             Ok(())
@@ -773,31 +907,40 @@ fn pane_spa_fallback(selected: &ato_portable_application::ValidatedPortableAppli
         .unwrap_or(false)
 }
 
-/// Read a checkpoint's captured per-pane state as a localStorage map.
-fn pane_local_storage(
-    checkpoint: Option<&WorkspaceCheckpointV1>,
+/// A checkpoint whose snapshot resources were read and verified.
+#[derive(Debug, Clone)]
+pub struct LoadedWorkspaceCheckpoint {
+    pub checkpoint: WorkspaceCheckpointV1,
+    /// Resumed per-pane browser state, keyed by pane id.
+    pub state: BTreeMap<String, BrowserState>,
+}
+
+fn checkpoint_state_directory(checkpoint: &Path) -> PathBuf {
+    let name = checkpoint
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "checkpoint".to_owned());
+    checkpoint.with_file_name(format!("{name}.state"))
+}
+
+fn snapshot_content_ref(snapshot: &serde_json::Value) -> Result<&str> {
+    snapshot
+        .get("resources")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|resources| resources.first())
+        .and_then(|resource| resource.get("content_ref"))
+        .and_then(serde_json::Value::as_str)
+        .context("checkpoint pane snapshot has no browser resource content_ref")
+}
+
+fn pane_state<'a>(
+    checkpoint: Option<&'a LoadedWorkspaceCheckpoint>,
     pane_id: &str,
-) -> Result<BTreeMap<String, String>> {
-    let Some(checkpoint) = checkpoint else {
-        return Ok(BTreeMap::new());
-    };
-    let Some(entry) = checkpoint.pane.iter().find(|pane| pane.pane_id == pane_id) else {
-        return Ok(BTreeMap::new());
-    };
-    let Some(state) = &entry.state else {
-        return Ok(BTreeMap::new());
-    };
-    let object = state
-        .as_object()
-        .context("checkpoint pane state must be a JSON object")?;
-    let mut map = BTreeMap::new();
-    for (key, value) in object {
-        let value = value
-            .as_str()
-            .context("checkpoint pane state values must be strings")?;
-        map.insert(key.clone(), value.to_owned());
-    }
-    Ok(map)
+) -> &'a BrowserState {
+    static EMPTY: std::sync::OnceLock<BrowserState> = std::sync::OnceLock::new();
+    checkpoint
+        .and_then(|checkpoint| checkpoint.state.get(pane_id))
+        .unwrap_or_else(|| EMPTY.get_or_init(BTreeMap::new))
 }
 
 fn shell_html(
@@ -970,26 +1113,29 @@ fn html_escape(value: &str) -> String {
 /// tree, served on its own origin (so its browser state is separate), and the
 /// shell is a page with one iframe per pane. No Capsule identity is created or
 /// changed.
-pub fn start(file: &Path, checkpoint: Option<&WorkspaceCheckpointV1>) -> Result<RunningWorkspace> {
+pub fn start(
+    file: &Path,
+    checkpoint: Option<&LoadedWorkspaceCheckpoint>,
+) -> Result<RunningWorkspace> {
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read workspace {}", file.display()))?;
     let manifest = parse_manifest(&text)?;
     let base = file.parent().unwrap_or_else(|| Path::new("."));
     let workspace_digest = sha256_hex(text.as_bytes());
-    if let Some(checkpoint) = checkpoint
-        && checkpoint.workspace_digest != workspace_digest
+    if let Some(loaded) = checkpoint
+        && loaded.checkpoint.workspace_digest != workspace_digest
     {
         bail!(
             "checkpoint was taken from a different workspace file ({} != {})",
-            checkpoint.workspace_digest,
+            loaded.checkpoint.workspace_digest,
             workspace_digest
         );
     }
     let view = checkpoint
-        .map(|checkpoint| ShellViewState {
-            direction: checkpoint.view.direction,
-            split: checkpoint.view.split.clone(),
-            active_pane: checkpoint.view.active_pane.clone(),
+        .map(|loaded| ShellViewState {
+            direction: loaded.checkpoint.view.direction,
+            split: loaded.checkpoint.view.split.clone(),
+            active_pane: loaded.checkpoint.view.active_pane.clone(),
         })
         .unwrap_or_else(|| ShellViewState::for_manifest(&manifest));
 
@@ -1008,7 +1154,7 @@ pub fn start(file: &Path, checkpoint: Option<&WorkspaceCheckpointV1>) -> Result<
         let token = random_token()?;
         let state = ato_runtime_attempt::static_server::StaticApplicationState {
             persistence_token: token.clone(),
-            local_storage: pane_local_storage(checkpoint, &pane.id)?,
+            local_storage: pane_state(checkpoint, &pane.id).clone(),
             assets: Vec::new(),
         };
         let server = ato_runtime_attempt::static_server::StaticApplicationServer::listen(
@@ -1065,7 +1211,11 @@ pub fn start(file: &Path, checkpoint: Option<&WorkspaceCheckpointV1>) -> Result<
 
 impl RunningWorkspace {
     /// Capture the state the panes actually hold and the shell view state.
-    pub fn capture(&self) -> Result<WorkspaceCheckpointV1> {
+    ///
+    /// Returns the checkpoint plus the snapshot resource objects it names; the
+    /// caller writes both (`save_workspace_checkpoint`) so a checkpoint never
+    /// points at bytes that do not exist.
+    pub fn capture(&self) -> Result<(WorkspaceCheckpointV1, BTreeMap<String, Vec<u8>>)> {
         let view = self
             .shell
             .local_storage()?
@@ -1073,18 +1223,21 @@ impl RunningWorkspace {
             .and_then(|value| serde_json::from_str::<ShellViewState>(&value).ok())
             .unwrap_or_else(|| ShellViewState::for_manifest(&self.manifest));
         let mut pane = Vec::with_capacity(self.panes.len());
+        let mut objects = BTreeMap::new();
         for runtime in &self.panes {
             let storage = runtime.server.local_storage()?.unwrap_or_default();
-            let state = serde_json::to_value(&storage)
-                .context("failed to encode the captured pane state")?;
-            let bytes =
-                serde_jcs::to_vec(&state).context("failed to canonicalize the pane state")?;
+            let (snapshot, object, snapshot_ref) = browser_snapshot(&storage)?;
+            let content_ref = snapshot["resources"][0]["content_ref"]
+                .as_str()
+                .expect("browser_snapshot always names a content_ref")
+                .to_owned();
+            objects.insert(content_ref, object);
             pane.push(WorkspaceCheckpointPaneV1 {
                 pane_id: runtime.pane_id.clone(),
                 instance_id: format!("ephemeral-{}", runtime.pane_id),
-                snapshot_ref: sha256_hex(&bytes),
+                snapshot_ref,
                 receipt_ref: None,
-                state: Some(state),
+                snapshot,
             });
         }
         pane.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
@@ -1109,7 +1262,7 @@ impl RunningWorkspace {
             pane,
         };
         checkpoint.validate()?;
-        Ok(checkpoint)
+        Ok((checkpoint, objects))
     }
 
     /// The shell origin's state-bridge token (same purpose as a pane's).
@@ -1235,6 +1388,7 @@ mod tests {
 
     #[test]
     fn checkpoint_round_trips_atomically_and_requires_sorted_panes() {
+        let (snapshot, _object, snapshot_ref) = browser_snapshot(&BTreeMap::new()).unwrap();
         let checkpoint = WorkspaceCheckpointV1 {
             schema: WORKSPACE_CHECKPOINT_SCHEMA.to_owned(),
             workspace_digest: sha256_hex(b"workspace"),
@@ -1252,16 +1406,16 @@ mod tests {
                 WorkspaceCheckpointPaneV1 {
                     pane_id: "board".to_owned(),
                     instance_id: "instance-1".to_owned(),
-                    snapshot_ref: sha256_hex(b"snapshot"),
+                    snapshot_ref: snapshot_ref.clone(),
                     receipt_ref: None,
-                    state: None,
+                    snapshot: snapshot.clone(),
                 },
                 WorkspaceCheckpointPaneV1 {
                     pane_id: "todo".to_owned(),
                     instance_id: "instance-2".to_owned(),
-                    snapshot_ref: sha256_hex(b"snapshot-2"),
+                    snapshot_ref: snapshot_ref.clone(),
                     receipt_ref: Some(sha256_hex(b"receipt")),
-                    state: None,
+                    snapshot: snapshot.clone(),
                 },
             ],
         };

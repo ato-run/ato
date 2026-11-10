@@ -110,17 +110,45 @@ fn inspect_refuses_an_unknown_workspace_schema_before_reading_capsules() {
         .stderr(predicates::str::contains("unsupported workspace schema"));
 }
 
+fn browser_checkpoint(
+    active: &str,
+    pane_ids: &[&str],
+) -> ato_cli::workspace::WorkspaceCheckpointV1 {
+    use ato_cli::workspace::{
+        Direction, WorkspaceCheckpointPaneV1, WorkspaceCheckpointV1, WorkspaceViewStateV1,
+    };
+    let (snapshot, snapshot_ref) =
+        ato_cli::workspace::browser_snapshot_for(&std::collections::BTreeMap::new()).unwrap();
+    let pane = pane_ids
+        .iter()
+        .enumerate()
+        .map(|(index, pane_id)| WorkspaceCheckpointPaneV1 {
+            pane_id: (*pane_id).to_owned(),
+            instance_id: format!("instance-{index}"),
+            snapshot_ref: snapshot_ref.clone(),
+            receipt_ref: None,
+            snapshot: snapshot.clone(),
+        })
+        .collect();
+    WorkspaceCheckpointV1 {
+        schema: "ato.workspace-checkpoint/1".to_owned(),
+        workspace_digest: format!("sha256:{}", "a".repeat(64)),
+        view: WorkspaceViewStateV1 {
+            direction: Direction::Horizontal,
+            split: vec![0.5, 0.5],
+            active_pane: active.to_owned(),
+            pane: Vec::new(),
+        },
+        pane,
+    }
+}
+
 #[test]
 fn checkpoint_subcommand_validates_a_checkpoint_file() {
     let directory = tempfile::tempdir().unwrap();
-    let checkpoint = format!(
-        "schema = \"ato.workspace-checkpoint/1\"\nworkspace_digest = \"sha256:{zeros}\"\n\n[view]\ndirection = \"horizontal\"\nsplit = [0.5, 0.5]\nactive_pane = \"board\"\n\n\
-         [[pane]]\npane_id = \"board\"\ninstance_id = \"instance-1\"\nsnapshot_ref = \"sha256:{zeros}\"\n\n\
-         [[pane]]\npane_id = \"todo\"\ninstance_id = \"instance-2\"\nsnapshot_ref = \"sha256:{zeros}\"\n",
-        zeros = "a".repeat(64)
-    );
+    let checkpoint = browser_checkpoint("board", &["board", "todo"]);
     let path = directory.path().join("checkpoint.toml");
-    std::fs::write(&path, checkpoint).unwrap();
+    std::fs::write(&path, toml::to_string(&checkpoint).unwrap()).unwrap();
     Command::cargo_bin("ato")
         .unwrap()
         .args(["workspace", "checkpoint", "--json", path.to_str().unwrap()])
@@ -132,14 +160,9 @@ fn checkpoint_subcommand_validates_a_checkpoint_file() {
 #[test]
 fn checkpoint_subcommand_refuses_unsorted_panes() {
     let directory = tempfile::tempdir().unwrap();
-    let checkpoint = format!(
-        "schema = \"ato.workspace-checkpoint/1\"\nworkspace_digest = \"sha256:{zeros}\"\n\n[view]\ndirection = \"horizontal\"\nsplit = [0.5, 0.5]\nactive_pane = \"todo\"\n\n\
-         [[pane]]\npane_id = \"todo\"\ninstance_id = \"instance-1\"\nsnapshot_ref = \"sha256:{zeros}\"\n\n\
-         [[pane]]\npane_id = \"board\"\ninstance_id = \"instance-2\"\nsnapshot_ref = \"sha256:{zeros}\"\n",
-        zeros = "b".repeat(64)
-    );
+    let checkpoint = browser_checkpoint("todo", &["todo", "board"]);
     let path = directory.path().join("checkpoint.toml");
-    std::fs::write(&path, checkpoint).unwrap();
+    std::fs::write(&path, toml::to_string(&checkpoint).unwrap()).unwrap();
     Command::cargo_bin("ato")
         .unwrap()
         .args(["workspace", "checkpoint", path.to_str().unwrap()])
@@ -223,23 +246,33 @@ fn checkpoint_capture_resume_round_trips_local_state() {
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-    let checkpoint = running.capture().expect("the workspace captures");
+    let (checkpoint, objects) = running.capture().expect("the workspace captures");
     checkpoint.validate().unwrap();
+    assert_eq!(
+        objects.len(),
+        2,
+        "each pane contributes one snapshot object"
+    );
     let board = checkpoint
         .pane
         .iter()
         .find(|pane| pane.pane_id == "board")
         .unwrap();
+    assert_eq!(board.snapshot["schema"], "ato.portable-instance-snapshot/1");
     assert_eq!(
-        board.state.as_ref().unwrap()["todos"],
-        serde_json::Value::String("[1,2]".to_owned())
+        board.snapshot["resources"][0]["protocol"],
+        "ato.browser-instance-state@1"
     );
     let path = directory.path().join("checkpoint.toml");
-    ato_cli::workspace::write_checkpoint_atomic(&path, &checkpoint).unwrap();
+    ato_cli::workspace::save_workspace_checkpoint(&path, &running).unwrap();
+    let loaded = ato_cli::workspace::load_workspace_checkpoint(&path).unwrap();
+    assert_eq!(
+        loaded.state["board"].get("todos").map(String::as_str),
+        Some("[1,2]")
+    );
     drop(running);
 
-    let resumed =
-        ato_cli::workspace::start(&file, Some(&checkpoint)).expect("the workspace resumes");
+    let resumed = ato_cli::workspace::start(&file, Some(&loaded)).expect("the workspace resumes");
     let board = resumed
         .panes
         .iter()
@@ -279,11 +312,32 @@ fn capture_reads_the_shell_view_state_from_its_state_bridge() {
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-    let checkpoint = running.capture().expect("the workspace captures");
-    assert_eq!(checkpoint.view.split, vec![0.3, 0.7]);
-    assert_eq!(checkpoint.view.active_pane, "calendar");
     let path = directory.path().join("checkpoint.toml");
-    ato_cli::workspace::write_checkpoint_atomic(&path, &checkpoint).unwrap();
+    ato_cli::workspace::save_workspace_checkpoint(&path, &running).unwrap();
     let read = ato_cli::workspace::read_checkpoint(&path).unwrap();
     assert_eq!(read.view.split, vec![0.3, 0.7]);
+    assert_eq!(read.view.active_pane, "calendar");
+}
+
+#[test]
+fn a_tampered_snapshot_object_is_refused_on_load() {
+    let directory = tempfile::tempdir().unwrap();
+    let (file, _) = two_pane_workspace(directory.path());
+    let running = ato_cli::workspace::start(&file, None).expect("the workspace starts");
+    let path = directory.path().join("checkpoint.toml");
+    ato_cli::workspace::save_workspace_checkpoint(&path, &running).unwrap();
+    assert!(ato_cli::workspace::load_workspace_checkpoint(&path).is_ok());
+
+    let state_directory = directory.path().join("checkpoint.toml.state");
+    let object = std::fs::read_dir(&state_directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .expect("one snapshot object");
+    std::fs::write(&object, b"{\"version\":1,\"local_storage\":[]}").unwrap();
+    let error = ato_cli::workspace::load_workspace_checkpoint(&path).unwrap_err();
+    assert!(
+        error.to_string().contains("content_ref"),
+        "unexpected error: {error}"
+    );
 }
