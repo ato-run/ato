@@ -41,6 +41,10 @@ pub enum DataCommand {
         #[command(subcommand)]
         command: ProtocolCommand,
     },
+    /// Report the Coordinator's quota usage.
+    Quota(CoordinatorArgs),
+    /// Delete expired operation-result records (retention GC).
+    Gc(CoordinatorArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -174,6 +178,8 @@ pub enum ProtocolCommand {
 pub fn run(args: DataArgs) -> Result<()> {
     match args.command {
         DataCommand::Health(coordinator) => health(&coordinator),
+        DataCommand::Quota(coordinator) => quota(&coordinator),
+        DataCommand::Gc(coordinator) => gc(&coordinator),
         DataCommand::Resource { command } => match command {
             ResourceCommand::List(coordinator) => list(&coordinator),
             ResourceCommand::Inspect {
@@ -503,6 +509,55 @@ fn invoke(
     if let Some(receipt) = value.get("receipt") {
         println!("receipt: {}", serde_json::to_string(receipt)?);
     }
+    Ok(())
+}
+
+fn quota(coordinator: &CoordinatorArgs) -> Result<()> {
+    let value = request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources/quota",
+        None,
+    )?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    println!(
+        "used_bytes: {}",
+        value
+            .get("used_bytes")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+    );
+    println!(
+        "limit_bytes: {}",
+        value
+            .get("limit_bytes")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+    );
+    println!(
+        "resources: {}",
+        value
+            .get("resources")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
+fn gc(coordinator: &CoordinatorArgs) -> Result<()> {
+    let value = request(coordinator, reqwest::Method::POST, "/control/gc", None)?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    println!(
+        "deleted_results: {}",
+        value
+            .get("deleted_results")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+    );
     Ok(())
 }
 
