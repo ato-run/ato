@@ -168,3 +168,22 @@ PASS
   `error: failed to create the checkpoint state directory …`;
 - a busy local-data port fails with
   `error: port 18910 is already in use; pass --local-data-port <port>`.
+
+## Walkthrough-as-written (bundle from the sample workflow)
+
+The prebuilt bundle was built with the ato-samples
+`tools/build-quickstart-bundle.sh` (operation-scoped sample sources) and the
+quick-start steps were executed literally:
+
+```text
+ato-oss-quick-start-dev.tar.gz: OK          # shasum -a 256 -c
+ato-oss-quick-start-dev/                    # tar extracts into a named directory
+  README.md  workspace.toml  todo.capsule  calendar.capsule  excalidraw.capsule
+shell=http://127.0.0.1:… iframes=3           # ato workspace open --local-data
+CK_OK                                        # Stop and save wrote the checkpoint
+```
+
+The first attempt exposed a documentation/bundle mismatch (the tarball used to
+extract its files at the top level, while the guide says
+`cd ato-oss-quick-start-<version>`); the builder now packages a top-level
+directory so the written steps work unchanged.
