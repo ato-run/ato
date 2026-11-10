@@ -193,11 +193,18 @@ mod tests {
 
     #[test]
     fn refuses_a_corrupt_archive() {
-        let zip = write_zip(&[("data.json", b"{}".as_slice())]);
-        let mut tampered = zip.clone();
-        let index = tampered.len() - 30;
-        tampered[index] ^= 0xFF;
-        assert!(read_zip(&tampered).is_err());
+        let payload = b"{\"payload\":true}";
+        let mut zip = write_zip(&[("data.json", payload.as_slice())]);
+        // Flip one byte of the stored payload so the CRC no longer matches.
+        let index = zip
+            .windows(payload.len())
+            .position(|window| window == payload)
+            .expect("payload is stored verbatim");
+        zip[index] ^= 0xFF;
+        assert!(matches!(
+            read_zip(&zip),
+            Err(error) if error.starts_with("zip_crc_mismatch")
+        ));
         assert!(read_zip(b"PK\x03\x04broken").is_err());
     }
 }
