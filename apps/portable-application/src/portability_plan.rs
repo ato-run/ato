@@ -68,6 +68,11 @@ pub fn plan_portable_export(
     for route in &routes {
         match route.realization {
             PortableRealizationKind::StaticWeb => {}
+            PortableRealizationKind::NativeDesktop => {
+                if let Some(native) = &route.native {
+                    capabilities.insert(format!("native-desktop:{}", native.descriptor.platform()));
+                }
+            }
             PortableRealizationKind::LocalProcess => {
                 if let Some(version) = route.derivation.runtimes.get(PYTHON_RUNTIME) {
                     capabilities.insert(format!("python:{version}"));

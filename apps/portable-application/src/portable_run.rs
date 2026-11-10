@@ -228,6 +228,16 @@ pub fn execution_requirements_for(
         PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
             ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
         }
+        PortableRealizationKind::NativeDesktop => {
+            let native = validated
+                .native
+                .as_ref()
+                .expect("a NativeDesktop route carries its validated descriptor");
+            ato_host_facts::ExecutionRequirements::native_desktop(
+                native.descriptor.os.as_str(),
+                native.descriptor.arch.as_str(),
+            )
+        }
     };
     // A state slot that declares it can be found through
     // `ATO_STATE_PATH_<ID>` does not need the Linux sandbox's mount namespace,
@@ -413,6 +423,12 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
             }
             PortableRealizationKind::ProcessServiceGroup => {
                 self.start_process_group(workspace, &state_mounts, &input_mounts)?
+            }
+            PortableRealizationKind::NativeDesktop => {
+                return Err(RealizeFailure::Execution(anyhow::anyhow!(
+                    "native desktop realization is not available in this build: the selected \
+                     Derivation was admitted for this host but no native Adapter is compiled in"
+                )));
             }
         };
         realized.execution.dependency_fetches = dependency_fetches;

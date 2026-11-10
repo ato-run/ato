@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PortableRealizationKind::OciContainer => "oci_derivation_ref",
             PortableRealizationKind::OciServiceGroup => "oci_service_group_derivation_ref",
             PortableRealizationKind::ProcessServiceGroup => "process_service_group_derivation_ref",
+            PortableRealizationKind::NativeDesktop => "native_desktop_derivation_ref",
         };
         println!("{name}={}", route.derivation_ref);
     }
