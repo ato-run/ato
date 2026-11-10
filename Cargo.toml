@@ -41,7 +41,6 @@ members = [
     "extensions/contracts",
     "extensions/planner",
     "tools/snapshot-builder",
-    "tools/legacy-vm-inspector",
     "tools/arch-check",
     "tools/cert-export",
     "tools/receipt-authority",
