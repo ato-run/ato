@@ -8,11 +8,15 @@
 //! - `GET  /v1/data-resources`
 //! - `GET  /v1/data-resources/{id}`
 //! - `POST /v1/data-resources/{id}/operations`
+//! - `POST /v1/protocols/{protocol}/operations` (publisher-owned registry)
+//! - `POST /v1/data-resources/{id}/bindings`
+//! - `GET  /v1/bindings/{id}/document`
+//! - `POST /v1/bindings/{id}/operations`
+//! - `DELETE /v1/bindings/{id}`
 //! - `POST /control/shutdown`
 //!
-//! Authentication is a single bearer token for the local coordinator. Ports,
-//! Bindings, operation grants and the hosted conformance suite are follow-up
-//! slices; this surface deliberately exposes only the Resource store.
+//! Authentication is a single bearer token for the local coordinator. The
+//! hosted conformance suite and quota/retention/GC are follow-up slices.
 
 use std::sync::Mutex;
 
