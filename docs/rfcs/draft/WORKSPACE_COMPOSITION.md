@@ -213,3 +213,28 @@ Proposed shape, keeping the existing single-app mode intact:
 
 Open question for review: whether the shell should be a Coordinator-served page
 or the CLI should keep a separate shell origin and inject each pane's base URL.
+
+## Bootstrap dependency (2026-11-10)
+
+The workspace data bootstrap needs the declaration compiler that is being added
+in the selfhost registration increment (`ato data protocol register-all`, PR
+#1742): parse `ato.operations/v2`, register each module-backed operation and
+reuse the same idempotency rule. Implementing a second parser inside the
+workspace command would create two sources of truth for the declaration, so the
+bootstrap is stacked on that branch and reuses it.
+
+Bootstrap sequence per `ato workspace open --coordinator <url>`:
+
+1. materialize each pane's verified tree (already required for serving);
+2. read the pane's `ato.data.toml` and `ato.operations.yaml` from that tree;
+3. for the pane that owns a `read_write` Port, register the declared operations
+   (idempotent by module digest) and ensure one Resource for the protocol
+   (idempotent by protocol + display name);
+4. bind every pane's operation-only Port to that Resource with
+   `instance_id = "<pane id>"`, using the Port's declared operation list;
+5. start the Coordinator in workspace mode (`--workspace-app`) if the caller did
+   not already point at one, and serve the shell from it.
+
+Steps 3–4 must be safe to re-run: a second open reports `unchanged` rather than
+duplicating Resources or bindings. A failure in any step stops the open before
+the shell is exposed.
