@@ -65,6 +65,12 @@ pub struct OpenArgs {
     /// Print the shell URL without opening a browser.
     #[arg(long)]
     pub no_open: bool,
+    /// Provision pane DataResources on this Coordinator before serving.
+    #[arg(long)]
+    pub coordinator: Option<String>,
+    /// Bearer token for `--coordinator`.
+    #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -826,7 +832,16 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 .as_deref()
                 .map(load_workspace_checkpoint)
                 .transpose()?;
-            let running = start(&args.file, checkpoint.as_ref())?;
+            let coordinator = args
+                .coordinator
+                .as_deref()
+                .map(|url| crate::data::CoordinatorArgs {
+                    coordinator: url.to_owned(),
+                    token: args.token.clone(),
+                    origin: None,
+                    json: false,
+                });
+            let running = start(&args.file, checkpoint.as_ref(), coordinator.as_ref())?;
             println!("workspace: {}", running.shell_url);
             if !args.no_open {
                 crate::open_browser(&running.shell_url)?;
@@ -1234,9 +1249,106 @@ fn html_escape(value: &str) -> String {
 /// tree, served on its own origin (so its browser state is separate), and the
 /// shell is a page with one iframe per pane. No Capsule identity is created or
 /// changed.
+struct PaneProvision {
+    pane_id: String,
+    ports: Vec<DataPortDeclaration>,
+    operations_file: Option<PathBuf>,
+}
+
+fn read_pane_provisions(pane_id: &str, destination: &Path) -> Result<PaneProvision> {
+    let declaration = destination.join("ato.data.toml");
+    let ports = if declaration.is_file() {
+        let text = std::fs::read_to_string(&declaration)
+            .with_context(|| format!("pane `{pane_id}` ato.data.toml is not readable"))?;
+        let parsed: DataPortDeclarationFile =
+            toml::from_str(&text).context("pane ato.data.toml is not valid TOML")?;
+        if !matches!(
+            parsed.schema.as_str(),
+            "ato.data-ports/1" | "ato.data-ports/2"
+        ) {
+            bail!("pane `{pane_id}` ato.data.toml has an unsupported schema");
+        }
+        parsed.port
+    } else {
+        Vec::new()
+    };
+    let operations_file = destination.join("ato.operations.yaml");
+    Ok(PaneProvision {
+        pane_id: pane_id.to_owned(),
+        ports,
+        operations_file: operations_file.is_file().then_some(operations_file),
+    })
+}
+
+fn provision_panes(
+    file: &Path,
+    coordinator: &crate::data::CoordinatorArgs,
+    provisions: &[PaneProvision],
+) -> Result<()> {
+    let workspace_name = file
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workspace".to_owned());
+    let mut resources: BTreeMap<String, String> = BTreeMap::new();
+    for provision in provisions {
+        for port in provision
+            .ports
+            .iter()
+            .filter(|port| port.access == "read_write")
+        {
+            if let Some(operations) = &provision.operations_file {
+                crate::data::register_all_declaration(
+                    coordinator,
+                    operations,
+                    &port.protocol,
+                    &provision.pane_id,
+                )
+                .with_context(|| {
+                    format!(
+                        "pane `{}` operations could not be registered",
+                        provision.pane_id
+                    )
+                })?;
+            }
+            let display_name = format!("workspace:{workspace_name}:{}", port.protocol);
+            let resource =
+                crate::data::ensure_resource(coordinator, &port.protocol, &display_name)?;
+            resources.insert(port.protocol.clone(), resource);
+        }
+    }
+    for provision in provisions {
+        for port in &provision.ports {
+            let Some(resource) = resources.get(&port.protocol) else {
+                eprintln!(
+                    "workspace: pane `{}` Port `{}` has no owner Resource in this workspace",
+                    provision.pane_id, port.name
+                );
+                continue;
+            };
+            crate::data::ensure_binding(
+                coordinator,
+                &provision.pane_id,
+                resource,
+                &port.name,
+                &port.protocol,
+                &port.access,
+                &port.operations,
+            )
+            .with_context(|| {
+                format!(
+                    "pane `{}` Port `{}` could not be bound",
+                    provision.pane_id, port.name
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub fn start(
     file: &Path,
     checkpoint: Option<&LoadedWorkspaceCheckpoint>,
+    coordinator: Option<&crate::data::CoordinatorArgs>,
 ) -> Result<RunningWorkspace> {
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read workspace {}", file.display()))?;
@@ -1266,11 +1378,13 @@ pub fn start(
         .context("failed to create the workspace runtime directory")?;
     let mut panes = Vec::with_capacity(manifest.pane.len());
     let mut pane_urls = BTreeMap::new();
+    let mut provisions = Vec::with_capacity(manifest.pane.len());
     for pane in &manifest.pane {
         let loaded = load_pane_capsule(base, pane)?;
         let destination = runtime_root.path().join(&pane.id);
         ato_portable_application::materialize_tree(&loaded.bundle, &loaded.selected, &destination)
             .with_context(|| format!("pane `{}` tree could not be materialized", pane.id))?;
+        provisions.push(read_pane_provisions(&pane.id, &destination)?);
         let routes = pane_routes(&destination, &loaded.selected)?;
         let token = random_token()?;
         let state = ato_runtime_attempt::static_server::StaticApplicationState {
@@ -1291,6 +1405,10 @@ pub fn start(
             server,
             persistence_token: token,
         });
+    }
+
+    if let Some(coordinator) = coordinator {
+        provision_panes(file, coordinator, &provisions)?;
     }
 
     let shell_directory = runtime_root.path().join("__workspace_shell");

@@ -187,7 +187,7 @@ fn two_pane_workspace(directory: &Path) -> (PathBuf, Vec<u8>) {
 fn open_serves_the_shell_and_every_pane() {
     let directory = tempfile::tempdir().unwrap();
     let (file, _) = two_pane_workspace(directory.path());
-    let running = ato_cli::workspace::start(&file, None).expect("the workspace starts");
+    let running = ato_cli::workspace::start(&file, None, None).expect("the workspace starts");
     assert_eq!(running.panes.len(), 2);
 
     let client = reqwest::blocking::Client::builder()
@@ -220,7 +220,7 @@ fn open_serves_the_shell_and_every_pane() {
 fn checkpoint_capture_resume_round_trips_local_state() {
     let directory = tempfile::tempdir().unwrap();
     let (file, _) = two_pane_workspace(directory.path());
-    let running = ato_cli::workspace::start(&file, None).expect("the workspace starts");
+    let running = ato_cli::workspace::start(&file, None, None).expect("the workspace starts");
 
     // Drive one pane's state bridge the way its page would.
     let token = running
@@ -272,7 +272,8 @@ fn checkpoint_capture_resume_round_trips_local_state() {
     );
     drop(running);
 
-    let resumed = ato_cli::workspace::start(&file, Some(&loaded)).expect("the workspace resumes");
+    let resumed =
+        ato_cli::workspace::start(&file, Some(&loaded), None).expect("the workspace resumes");
     let board = resumed
         .panes
         .iter()
@@ -286,7 +287,7 @@ fn checkpoint_capture_resume_round_trips_local_state() {
 fn capture_reads_the_shell_view_state_from_its_state_bridge() {
     let directory = tempfile::tempdir().unwrap();
     let (file, _) = two_pane_workspace(directory.path());
-    let running = ato_cli::workspace::start(&file, None).expect("the workspace starts");
+    let running = ato_cli::workspace::start(&file, None, None).expect("the workspace starts");
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -323,7 +324,7 @@ fn capture_reads_the_shell_view_state_from_its_state_bridge() {
 fn a_tampered_snapshot_object_is_refused_on_load() {
     let directory = tempfile::tempdir().unwrap();
     let (file, _) = two_pane_workspace(directory.path());
-    let running = ato_cli::workspace::start(&file, None).expect("the workspace starts");
+    let running = ato_cli::workspace::start(&file, None, None).expect("the workspace starts");
     let path = directory.path().join("checkpoint.toml");
     ato_cli::workspace::save_workspace_checkpoint(&path, &running).unwrap();
     assert!(ato_cli::workspace::load_workspace_checkpoint(&path).is_ok());

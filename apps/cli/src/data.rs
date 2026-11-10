@@ -1514,6 +1514,97 @@ fn plan_operations(file: &Path, protocol: &str) -> Result<Vec<PlannedOperation>>
     Ok(planned)
 }
 
+/// Register every operation an `ato.operations.yaml` declares (CLI-shared).
+pub(crate) fn register_all_declaration(
+    coordinator: &CoordinatorArgs,
+    file: &Path,
+    protocol: &str,
+    publisher: &str,
+) -> Result<()> {
+    protocol_register_all(coordinator, file, protocol, publisher)
+}
+
+/// Ensure one Resource exists for `protocol`/`display_name` and return its id.
+pub(crate) fn ensure_resource(
+    coordinator: &CoordinatorArgs,
+    protocol: &str,
+    display_name: &str,
+) -> Result<String> {
+    let listed = request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources",
+        None,
+    )?;
+    if let Some(id) = listed
+        .get("resources")
+        .and_then(Value::as_array)
+        .and_then(|resources| {
+            resources.iter().find(|resource| {
+                resource.get("protocol").and_then(Value::as_str) == Some(protocol)
+                    && resource.get("display_name").and_then(Value::as_str) == Some(display_name)
+            })
+        })
+        .and_then(|resource| resource.get("resource_id").and_then(Value::as_str))
+    {
+        return Ok(id.to_owned());
+    }
+    let created = request(
+        coordinator,
+        reqwest::Method::POST,
+        "/v1/data-resources",
+        Some(json!({
+            "protocol": protocol,
+            "display_name": display_name,
+            "document": {},
+        })),
+    )?;
+    created
+        .get("resource_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context("the Coordinator returned no resource_id")
+}
+
+/// Ensure an instance-scoped binding exists for one Port, reusing an equal one.
+pub(crate) fn ensure_binding(
+    coordinator: &CoordinatorArgs,
+    instance_id: &str,
+    resource_id: &str,
+    port: &str,
+    protocol: &str,
+    access: &str,
+    operations: &[String],
+) -> Result<()> {
+    let listed = request(coordinator, reqwest::Method::GET, "/v1/bindings", None)?;
+    let exists = listed
+        .get("bindings")
+        .and_then(Value::as_array)
+        .is_some_and(|bindings| {
+            bindings.iter().any(|binding| {
+                binding.get("instance_id").and_then(Value::as_str) == Some(instance_id)
+                    && binding.get("port_name").and_then(Value::as_str) == Some(port)
+                    && binding.get("protocol").and_then(Value::as_str) == Some(protocol)
+            })
+        });
+    if exists {
+        return Ok(());
+    }
+    request(
+        coordinator,
+        reqwest::Method::POST,
+        &format!("/v1/data-resources/{resource_id}/bindings"),
+        Some(json!({
+            "port": port,
+            "protocol": protocol,
+            "access": access,
+            "operations": operations,
+            "instance_id": instance_id,
+        })),
+    )?;
+    Ok(())
+}
+
 fn protocol_register_all(
     coordinator: &CoordinatorArgs,
     file: &Path,
