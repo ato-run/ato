@@ -679,6 +679,21 @@ pub fn inspect(file: &Path) -> Result<InspectedWorkspace> {
     })
 }
 
+/// The v0 shell serves only trees over HTTP; other realizations need a surface
+/// host, so refuse them by name instead of serving something wrong.
+fn ensure_static_web_pane(
+    pane_id: &str,
+    realization: ato_portable_application::PortableRealizationKind,
+) -> Result<()> {
+    if realization == ato_portable_application::PortableRealizationKind::StaticWeb {
+        return Ok(());
+    }
+    bail!(
+        "pane `{pane_id}` is a {} route; the workspace shell serves Static Web panes only, and native/process panes need their own surface host",
+        realization_label(realization)
+    )
+}
+
 fn realization_label(
     realization: ato_portable_application::PortableRealizationKind,
 ) -> &'static str {
@@ -1701,15 +1716,7 @@ pub fn start(
     let mut provisions = Vec::with_capacity(manifest.pane.len());
     for pane in &manifest.pane {
         let loaded = load_pane_capsule(base, pane)?;
-        if loaded.selected.realization
-            != ato_portable_application::PortableRealizationKind::StaticWeb
-        {
-            bail!(
-                "pane `{}` is a {} route; the workspace shell serves Static Web panes only, and native/process panes need their own surface host",
-                pane.id,
-                realization_label(loaded.selected.realization)
-            );
-        }
+        ensure_static_web_pane(&pane.id, loaded.selected.realization)?;
         let destination = runtime_root.path().join(&pane.id);
         ato_portable_application::materialize_tree(&loaded.bundle, &loaded.selected, &destination)
             .with_context(|| format!("pane `{}` tree could not be materialized", pane.id))?;
@@ -1987,6 +1994,19 @@ mod tests {
                 .to_string()
                 .contains("sha256")
         );
+    }
+
+    #[test]
+    fn only_static_web_panes_are_served() {
+        use ato_portable_application::PortableRealizationKind as Kind;
+        assert!(ensure_static_web_pane("board", Kind::StaticWeb).is_ok());
+        let native = ensure_static_web_pane("board", Kind::NativeDesktop).unwrap_err();
+        assert!(native.to_string().contains("native_desktop"), "{native}");
+        assert!(
+            native.to_string().contains("need their own surface host"),
+            "{native}"
+        );
+        assert!(ensure_static_web_pane("board", Kind::OciContainer).is_err());
     }
 
     #[test]
