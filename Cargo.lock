@@ -436,13 +436,19 @@ dependencies = [
 name = "ato-coordinator"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "clap",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

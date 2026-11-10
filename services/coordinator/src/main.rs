@@ -1,0 +1,147 @@
+//! `ato-coordinator` — the resident selfhost Coordinator process (G3).
+//!
+//! `init` creates/migrates the SQLite database, `serve` runs the HTTP API, and
+//! `health` asks a running process for its status. The database file is the
+//! authority; stopping the process does not lose a committed revision.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use clap::{Parser, Subcommand};
+use http_body_util::BodyExt;
+use hyper::Request;
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::net::TcpListener;
+use tokio::sync::watch;
+
+use ato_coordinator::Coordinator;
+use ato_coordinator::http::{ApiState, handle_request};
+
+#[derive(Parser)]
+#[command(
+    name = "ato-coordinator",
+    about = "Selfhost JSON-first SQLite Coordinator for DataResources"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Create or migrate the SQLite database and exit.
+    Init {
+        #[arg(long)]
+        db: PathBuf,
+    },
+    /// Serve the HTTP API.
+    Serve {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8788")]
+        addr: String,
+        #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
+        token: String,
+    },
+    /// Ask a running coordinator for its health.
+    Health {
+        #[arg(long, default_value = "http://127.0.0.1:8788")]
+        url: String,
+    },
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match Cli::parse().command {
+        Command::Init { db } => {
+            Coordinator::open(&db)?;
+            println!("initialized {}", db.display());
+            Ok(())
+        }
+        Command::Health { url } => {
+            let address = url
+                .strip_prefix("http://")
+                .unwrap_or(&url)
+                .trim_end_matches('/')
+                .to_owned();
+            let mut stream = TcpStream::connect(&address)?;
+            write!(
+                stream,
+                "GET /health HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+            )?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            let body = response
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            println!("{body}");
+            Ok(())
+        }
+        Command::Serve { db, addr, token } => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(serve(db, addr, token))
+        }
+    }
+}
+
+async fn serve(db: PathBuf, addr: String, token: String) -> Result<(), Box<dyn std::error::Error>> {
+    let coordinator = Coordinator::open(&db)?;
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let state = Arc::new(ApiState {
+        coordinator: Mutex::new(coordinator),
+        token,
+        shutdown: shutdown_tx,
+    });
+    let listener = TcpListener::bind(&addr).await?;
+    println!("listening on http://{}", listener.local_addr()?);
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let state = Arc::clone(&state);
+                        async move {
+                            let (parts, body) = request.into_parts();
+                            let bytes = body
+                                .collect()
+                                .await
+                                .map(|collected| collected.to_bytes())
+                                .unwrap_or_default();
+                            let authorization = parts
+                                .headers
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok());
+                            let response = handle_request(
+                                &state,
+                                &parts.method,
+                                parts.uri.path(),
+                                authorization,
+                                &bytes,
+                            )
+                            .await;
+                            Ok::<_, std::convert::Infallible>(response)
+                        }
+                    });
+                    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(io, service)
+                        .await;
+                });
+            }
+        }
+    }
+    Ok(())
+}
