@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Bumped when the on-disk schema changes in a way that needs a migration.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Default per-owner quota (64 MiB) and operation-result retention (30 days).
 pub const DEFAULT_QUOTA_BYTES: i64 = 64 * 1024 * 1024;
@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS protocol_operations (
   created_at INTEGER NOT NULL,
   module_source TEXT,
   module_export TEXT,
+  expose_mcp INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (protocol_ref, operation)
 );
 CREATE TRIGGER IF NOT EXISTS protocol_operation_claim_guard
@@ -213,6 +214,14 @@ pub struct Binding {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpTool {
+    pub protocol: String,
+    pub operation: String,
+    pub semantics: String,
+    pub access: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvokeOutcome {
     pub revision: i64,
     pub generation: i64,
@@ -263,6 +272,10 @@ impl Coordinator {
         );
         let _ = conn.execute(
             "ALTER TABLE protocol_operations ADD COLUMN module_export TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE protocol_operations ADD COLUMN expose_mcp INTEGER NOT NULL DEFAULT 0",
             [],
         );
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1005,6 +1018,43 @@ impl Coordinator {
         })
     }
 
+    /// Publish or withdraw an operation to MCP clients.
+    pub fn set_operation_exposure(
+        &mut self,
+        protocol: &str,
+        operation: &str,
+        expose_mcp: bool,
+    ) -> Result<(), CoordinatorError> {
+        let changed = self.conn.execute(
+            "UPDATE protocol_operations SET expose_mcp=? WHERE protocol_ref=? AND operation=?",
+            params![expose_mcp as i64, protocol, operation],
+        )?;
+        if changed == 0 {
+            return Err(CoordinatorError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Operations published to MCP clients, with their declared semantics.
+    pub fn mcp_tools(&self) -> Result<Vec<McpTool>, CoordinatorError> {
+        let mut statement = self.conn.prepare(
+            "SELECT protocol_ref,operation,semantics,access FROM protocol_operations\n             WHERE expose_mcp=1 ORDER BY protocol_ref, operation",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(McpTool {
+                protocol: row.get(0)?,
+                operation: row.get(1)?,
+                semantics: row.get(2)?,
+                access: row.get(3)?,
+            })
+        })?;
+        let mut tools = Vec::new();
+        for row in rows {
+            tools.push(row?);
+        }
+        Ok(tools)
+    }
+
     /// Active bindings serving one app instance, for the bridge's requirements.
     pub fn bindings_for_instance(
         &self,
@@ -1547,6 +1597,38 @@ export function createTask({ arguments: args, state }) {
         assert!(matches!(
             refused,
             Err(CoordinatorError::Forbidden("operation_not_granted"))
+        ));
+    }
+
+    #[test]
+    fn publishes_and_withdraws_operations_for_mcp() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        coordinator
+            .register_handler_operation(
+                "todo.board@1",
+                "todo_create",
+                "evolution",
+                "read_write",
+                HANDLER_MODULE,
+                "createTask",
+                "alice/app",
+            )
+            .unwrap();
+        assert!(coordinator.mcp_tools().unwrap().is_empty());
+        coordinator
+            .set_operation_exposure("todo.board@1", "todo_create", true)
+            .unwrap();
+        let tools = coordinator.mcp_tools().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].operation, "todo_create");
+        assert_eq!(tools[0].semantics, "evolution");
+        coordinator
+            .set_operation_exposure("todo.board@1", "todo_create", false)
+            .unwrap();
+        assert!(coordinator.mcp_tools().unwrap().is_empty());
+        assert!(matches!(
+            coordinator.set_operation_exposure("todo.board@1", "missing", true),
+            Err(CoordinatorError::NotFound)
         ));
     }
 }
