@@ -20,6 +20,7 @@ use tokio::sync::watch;
 
 use ato_coordinator::Coordinator;
 use ato_coordinator::http::{ApiState, handle_request};
+use ato_coordinator::service;
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +53,40 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:8788")]
         url: String,
     },
+    /// Start the Coordinator as a background service.
+    Start {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8788")]
+        addr: String,
+        #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
+        token: String,
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Stop the background service.
+    Stop {
+        #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
+        token: Option<String>,
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Report whether the background service is running.
+    Status {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Restart the background service.
+    Restart {
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long)]
+        addr: Option<String>,
+        #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
+        token: String,
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -59,6 +94,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Init { db } => {
             Coordinator::open(&db)?;
             println!("initialized {}", db.display());
+            Ok(())
+        }
+        Command::Start {
+            db,
+            addr,
+            token,
+            state_dir,
+        } => {
+            let dir = state_dir.unwrap_or_else(service::default_state_dir);
+            let state = service::start(&db, &addr, &token, &dir)?;
+            println!(
+                "started pid={} addr={} db={}",
+                state.pid, state.addr, state.db
+            );
+            Ok(())
+        }
+        Command::Stop { token, state_dir } => {
+            let dir = state_dir.unwrap_or_else(service::default_state_dir);
+            let stopped = service::stop(&dir, token.as_deref())?;
+            println!("{}", if stopped { "stopped" } else { "not running" });
+            Ok(())
+        }
+        Command::Status { state_dir } => {
+            let dir = state_dir.unwrap_or_else(service::default_state_dir);
+            match service::status(&dir)? {
+                Some((state, health)) => {
+                    println!(
+                        "running pid={} addr={} db={}",
+                        state.pid, state.addr, state.db
+                    );
+                    match health {
+                        Some(body) => println!("health: {body}"),
+                        None => println!("health: unreachable"),
+                    }
+                }
+                None => println!("stopped"),
+            }
+            Ok(())
+        }
+        Command::Restart {
+            db,
+            addr,
+            token,
+            state_dir,
+        } => {
+            let dir = state_dir.unwrap_or_else(service::default_state_dir);
+            let prior = service::read_state(&dir)?;
+            let db = db
+                .or_else(|| prior.as_ref().map(|state| PathBuf::from(&state.db)))
+                .ok_or("restart needs --db (no previous service state)")?;
+            let addr = addr
+                .or_else(|| prior.as_ref().map(|state| state.addr.clone()))
+                .unwrap_or_else(|| "127.0.0.1:8788".to_owned());
+            service::stop(&dir, Some(&token))?;
+            let state = service::start(&db, &addr, &token, &dir)?;
+            println!(
+                "restarted pid={} addr={} db={}",
+                state.pid, state.addr, state.db
+            );
             Ok(())
         }
         Command::Health { url } => {

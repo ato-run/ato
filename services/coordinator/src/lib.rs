@@ -16,6 +16,7 @@
 //! Nothing here is wired into the CLI or Desktop yet.
 
 pub mod http;
+pub mod service;
 
 use std::path::Path;
 
