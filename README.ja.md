@@ -26,14 +26,26 @@ Atoは、参照可能な地点から作業を保存・共有・継続するた�
 
 ### CLIを試す
 
-[rust-toolchain.toml](rust-toolchain.toml)で指定されたRustツールチェーンをインストールし、リポジトリをcloneしてCLIをビルドし、同梱の静的アプリケーションbundleを実行します。
+公開済みCLIをインストールします（Rustツールチェーンやリポジトリのビルドは不要です）。
+
+```sh
+# macOS / Linux（Homebrew）
+brew install ato-run/ato/ato-cli
+# Windows: 最新リリースの ato-cli-x86_64-pc-windows-msvc.msi を実行
+# Homebrewを使わないLinux / macOS:
+# curl --proto '=https' --tlsv1.2 -LsSf \
+#   https://github.com/ato-run/ato/releases/latest/download/ato-cli-installer.sh | sh
+ato version --json
+```
+
+検証済みのサンプルbundleはリポジトリに同梱されるため、最初の実行にはcheckoutが必要です。
+CLI自体のインストール・ビルド手順は[Getting started](docs/guides/getting-started.md)を参照してください。
 
 ```sh
 git clone https://github.com/ato-run/ato.git
 cd ato
-cargo build -p ato-cli --bin ato --locked
 mkdir -p .tmp/getting-started
-target/debug/ato run samples/interop-static.capsule --no-open \
+ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 
