@@ -142,3 +142,24 @@ Procedure for the real move therefore becomes:
 
 The 11 literal references listed above remain correct as a starting point, but
 the audit worklist governs completion.
+
+## Failure split from the removal dry run (dev fd0691510)
+
+With the allowlist copied out of `docs/archive` and the tree removed, the audit
+reported **302** failures: **273 archive-related** (the real move worklist) and
+**29 that are not about the archive** but were previously masked by the
+allowlist's historical scoping. The non-archive sources are:
+
+- `docs/internal/research/capsulize-vikunja-memos-libretranslate.md` (7)
+- `docs/internal/research/ato-runtime-boundary-what-can-run.md` (6)
+- `docs/internal/dashboards/v0.5-readiness-dashboard.md` (5)
+- `apps/desktop/docs/DESKTOP_TAB_SPEC.md` (3, e.g. `DESKTOP_SPEC.md`)
+- `extensions/providers/nacelle/samples/simple-todo/README.md` (3)
+- `docs/internal/plans/monorepo-consolidation-plan.md` (1)
+- plus a few one-off targets under `docs/`, `apps/`, `extensions/`, `crates/`
+
+So the move change must (a) rewrite the 273 archive links/URLs and (b) either
+fix those 29 pre-existing broken links or re-baseline them explicitly in the
+new `docs/ops/archive-link-audit.json` (with a reviewed entry), instead of
+letting the allowlist silently mask them from `apps/desktop` onward. Record the
+baseline commit (`fd0691510`) with the counts in the move PR.
