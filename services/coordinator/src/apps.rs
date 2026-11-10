@@ -7,6 +7,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+// The hosted runtime injects a context script before the app's scripts;
+// selfhost must do the same or the app's client has nothing to call.
 pub const DATA_PORTS_BRIDGE_PATH: &str = "/__ato/data-ports/bridge-v1.js";
 pub const DATA_PORTS_BRIDGE_JS: &str = r#"(function(){
   if (window.atoDataPorts) return;
@@ -48,6 +50,75 @@ pub const DATA_PORTS_BRIDGE_JS: &str = r#"(function(){
     })
   });
 })();"#;
+
+pub const RUNTIME_CONTEXT_PATH: &str = "/__ato/runtime-context.js";
+
+/// The runtime context the hosted proxy injects into a served app: the
+/// operation handle the app's client uses and the state-change subscription the
+/// UI re-renders on. It is generated per app instance (the Port name is the
+/// declaration, not a global).
+pub fn runtime_context_js(port: &str) -> String {
+    // The Port name comes from the operator's serve flags; keep only characters
+    // that cannot break out of the generated string.
+    let port: String = port
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .collect();
+    format!(
+        r#"(function(){{
+  if (window.atoInstanceOperations) return;
+  var port = '{port}';
+  function invoke(operation, args, key) {{
+    return window.atoDataPorts.invoke(port, operation, args, key);
+  }}
+  window.atoInstanceOperations = Object.freeze({{
+    prepare: function(operation, args, key) {{
+      return Object.freeze({{ operation: operation, invoke: function() {{ return invoke(operation, args, key); }} }});
+    }},
+    invoke: invoke
+  }});
+  var subscribers = [];
+  window.__atoInstanceState = Object.freeze({{
+    subscribe: function(callback) {{ subscribers.push(callback); return function() {{}}; }},
+    notify: function() {{
+      subscribers.forEach(function(callback) {{ try {{ callback(); }} catch (_) {{}} }});
+    }}
+  }});
+  var bridgeInvoke = window.atoDataPorts.invoke;
+  window.atoDataPorts.invoke = function(target, operation, args, key) {{
+    return bridgeInvoke(target, operation, args, key).then(function(result) {{
+      try {{ window.__atoInstanceState.notify(); }} catch (_) {{}}
+      return result;
+    }});
+  }};
+}})();"#
+    )
+}
+
+/// Inject the bridge and the runtime context before the app's own scripts.
+pub fn inject_runtime(html: &str) -> String {
+    let tags = format!(
+        r#"<script src="{}"></script><script src="{}"></script>"#,
+        DATA_PORTS_BRIDGE_PATH, RUNTIME_CONTEXT_PATH
+    );
+    if let Some(index) = html.find("<script") {
+        let mut injected = String::with_capacity(html.len() + tags.len());
+        injected.push_str(&html[..index]);
+        injected.push_str(&tags);
+        injected.push_str(&html[index..]);
+        injected
+    } else if let Some(index) = html.rfind("</body>") {
+        let mut injected = String::with_capacity(html.len() + tags.len());
+        injected.push_str(&html[..index]);
+        injected.push_str(&tags);
+        injected.push_str(&html[index..]);
+        injected
+    } else {
+        format!("{tags}{html}")
+    }
+}
 
 /// Resolve a request path inside the app directory, refusing traversal and
 /// absolute components. `/` maps to `index.html`.
