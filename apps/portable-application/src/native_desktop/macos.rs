@@ -602,8 +602,19 @@ fn verify_port_ownership(
     owned_process_group: i32,
 ) -> Result<(), String> {
     for port in ports {
-        let pids = listening_pids(port.guest_port)
-            .map_err(|detail| format!("port ownership could not be proven: {detail}"))?;
+        // The kernel tables can trail a just-accepted connection by a moment,
+        // especially under a loaded test run; retry an *empty* lookup briefly
+        // rather than calling a live listener unowned. A listener that exists
+        // but belongs to another group is still refused immediately.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let pids = loop {
+            let pids = listening_pids(port.guest_port)
+                .map_err(|detail| format!("port ownership could not be proven: {detail}"))?;
+            if !pids.is_empty() || std::time::Instant::now() >= deadline {
+                break pids;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
         if pids.is_empty() {
             return Err(format!(
                 "no listener on 127.0.0.1:{} belongs to a process",
@@ -1267,6 +1278,38 @@ time.sleep(0.3)
         panic!("the tiny native child never started: {last_error:#?}");
     }
 
+    /// A listener that stays up until the group is stopped, for ownership
+    /// assertions that must not race the process exiting.
+    fn start_owned_listener(workspace: &Path) -> (ProcessServiceGroup, u16, u32) {
+        let mut last_error = None;
+        for _ in 0..8 {
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            let script = format!(
+                "import socket,time\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\nfor _ in range(50):\n    try:\n        s.bind(('127.0.0.1',{port}))\n        break\n    except OSError:\n        time.sleep(0.02)\ns.listen()\ntime.sleep(60)\n"
+            );
+            match ProcessServiceGroup::start(
+                workspace,
+                vec![ServiceSpec {
+                    name: "native".to_owned(),
+                    command: vec!["python3".to_owned(), "-c".to_owned(), script],
+                    cwd: PathBuf::new(),
+                    environment: BTreeMap::new(),
+                    readiness: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                    helpers: Vec::new(),
+                }],
+            ) {
+                Ok(group) => {
+                    let leader = group.pids()[0].1;
+                    return (group, port, leader);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        panic!("the owned listener never started: {last_error:#?}");
+    }
+
     #[test]
     fn the_owned_group_is_reaped_including_a_child_left_by_an_exited_leader() {
         let workspace = tempfile::tempdir().unwrap();
@@ -1698,8 +1741,7 @@ time.sleep(0.3)
     #[test]
     fn a_listener_must_belong_to_the_runs_own_process_group() {
         let workspace = tempfile::tempdir().unwrap();
-        let pid_file = workspace.path().join("child.pid");
-        let (group, port, leader) = start_tiny_child(workspace.path(), &pid_file);
+        let (group, port, leader) = start_owned_listener(workspace.path());
         let ports = vec![crate::ValidatedNativePort {
             id: "app.http".to_owned(),
             guest_port: port,
