@@ -94,3 +94,24 @@ script reports separately via `--install-cmd`.
   the 90-second acceptance still needs the packaged release on this host.
 - A cross-host continuation (checkpoint taken on macOS, resumed on Linux) has
   not been run yet.
+
+## Cross-host continuation: macOS → Linux x86_64
+
+The checkpoint taken on macOS (three panes, a created task, split
+`[0.4, 0.3, 0.3]`) and the same digest-pinned capsules were copied to
+`ubuntu-sugamo`; there the workspace resumed with:
+
+```sh
+ato workspace open ws3.toml --checkpoint ws3-ck.toml \
+  --local-data --local-data-port 18861 --no-open
+```
+
+- the calendar bridge returned the task created on macOS:
+  `{task_id:"task-op-1", title:"3-app", due_at:"2026-12-25"}`;
+- the shell carried the saved split (`0.4,0.3,0.3`) and three panes;
+- the checkpoint's Resource documents and pane snapshots were read from the
+  transferred `.state` directory with their digests verified.
+
+This is the **same-user continuation** path: the receiving host imports the
+DataResource documents into its own local Coordinator. Writer-authority
+hand-over between two live Coordinators (D5) is not exercised by this run.
