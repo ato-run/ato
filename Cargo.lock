@@ -311,6 +311,7 @@ dependencies = [
  "ato-compose",
  "ato-computation",
  "ato-contracts",
+ "ato-coordinator",
  "ato-formation",
  "ato-formation-worker",
  "ato-host-facts",

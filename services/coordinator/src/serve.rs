@@ -24,6 +24,8 @@ use crate::http::{ApiState, AppsConfig, WorkspaceApp, handle_request};
 /// Everything the in-process server needs. The database is the authority.
 pub struct ServeConfig {
     pub db: PathBuf,
+    /// Loopback address to bind (`127.0.0.1:0` for an ephemeral port).
+    pub listen: String,
     pub token: String,
     /// Root app served at `/` (the workspace shell), when present.
     pub apps: Option<AppsConfig>,
@@ -67,6 +69,7 @@ pub fn spawn(config: ServeConfig) -> std::io::Result<ServerHandle> {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let handle_shutdown = shutdown_tx.clone();
     let ServeConfig {
+        listen,
         token,
         apps,
         workspace,
@@ -83,7 +86,7 @@ pub fn spawn(config: ServeConfig) -> std::io::Result<ServerHandle> {
             return;
         };
         runtime.block_on(async move {
-            let listener = match TcpListener::bind("127.0.0.1:0").await {
+            let listener = match TcpListener::bind(&listen).await {
                 Ok(listener) => listener,
                 Err(error) => {
                     let _ = address_tx.send(Err(error));
@@ -175,6 +178,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let server = spawn(ServeConfig {
             db: directory.path().join("coordinator.db"),
+            listen: "127.0.0.1:0".to_owned(),
             token: "test-token".to_owned(),
             apps: None,
             workspace: Vec::new(),

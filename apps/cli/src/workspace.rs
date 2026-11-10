@@ -71,6 +71,14 @@ pub struct OpenArgs {
     /// Bearer token for `--coordinator`.
     #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
     pub token: Option<String>,
+    /// Host a Coordinator in this process and serve the panes through it, so
+    /// the sample apps can reach the Data Ports bridge.
+    #[arg(long)]
+    pub local_data: bool,
+    /// Loopback port for `--local-data` (must match the pane URLs the shell
+    /// embeds, so it is fixed rather than ephemeral).
+    #[arg(long, default_value_t = 18788)]
+    pub local_data_port: u16,
 }
 
 #[derive(Debug, Args)]
@@ -841,7 +849,52 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                     origin: None,
                     json: false,
                 });
-            let running = start(&args.file, checkpoint.as_ref(), coordinator.as_ref())?;
+            let pane_base = args
+                .local_data
+                .then(|| format!("http://127.0.0.1:{}", args.local_data_port));
+            let running = start(
+                &args.file,
+                checkpoint.as_ref(),
+                coordinator.as_ref(),
+                pane_base.as_deref(),
+            )?;
+            let _local_data = if args.local_data {
+                let database = tempfile::tempdir()
+                    .context("failed to create the workspace database directory")?;
+                let token = random_token()?;
+                let workspace = running
+                    .pane_directories()
+                    .into_iter()
+                    .map(|(pane_id, dir)| ato_coordinator::http::WorkspaceApp {
+                        prefix: pane_id.clone(),
+                        app: ato_coordinator::http::AppsConfig {
+                            dir,
+                            instance_id: pane_id,
+                            port: "tasks".to_owned(),
+                        },
+                    })
+                    .collect();
+                let server = ato_coordinator::serve::spawn(ato_coordinator::serve::ServeConfig {
+                    db: database.path().join("coordinator.db"),
+                    listen: format!("127.0.0.1:{}", args.local_data_port),
+                    token: token.clone(),
+                    apps: None,
+                    workspace,
+                })
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to start the local Coordinator: {error}")
+                })?;
+                let generated = crate::data::CoordinatorArgs {
+                    coordinator: pane_base.clone().expect("local data has a pane base"),
+                    token: Some(token),
+                    origin: None,
+                    json: false,
+                };
+                running.provision(&args.file, &generated)?;
+                Some((server, database))
+            } else {
+                None
+            };
             println!("workspace: {}", running.shell_url);
             if !args.no_open {
                 crate::open_browser(&running.shell_url)?;
@@ -1349,6 +1402,7 @@ pub fn start(
     file: &Path,
     checkpoint: Option<&LoadedWorkspaceCheckpoint>,
     coordinator: Option<&crate::data::CoordinatorArgs>,
+    pane_base: Option<&str>,
 ) -> Result<RunningWorkspace> {
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read workspace {}", file.display()))?;
@@ -1409,6 +1463,11 @@ pub fn start(
 
     if let Some(coordinator) = coordinator {
         provision_panes(file, coordinator, &provisions)?;
+    }
+    if let Some(base) = pane_base {
+        for pane in &manifest.pane {
+            pane_urls.insert(pane.id.clone(), format!("{base}/apps/{}/", pane.id));
+        }
     }
 
     let shell_directory = runtime_root.path().join("__workspace_shell");
@@ -1502,6 +1561,24 @@ impl RunningWorkspace {
         };
         checkpoint.validate()?;
         Ok((checkpoint, objects))
+    }
+
+    /// Materialized pane trees, keyed by pane id.
+    pub fn pane_directories(&self) -> Vec<(String, PathBuf)> {
+        self.manifest
+            .pane
+            .iter()
+            .map(|pane| (pane.id.clone(), self._runtime_root.path().join(&pane.id)))
+            .collect()
+    }
+
+    /// Provision the panes' DataResources on a running Coordinator.
+    pub fn provision(&self, file: &Path, coordinator: &crate::data::CoordinatorArgs) -> Result<()> {
+        let mut provisions = Vec::new();
+        for (pane_id, directory) in self.pane_directories() {
+            provisions.push(read_pane_provisions(&pane_id, &directory)?);
+        }
+        provision_panes(file, coordinator, &provisions)
     }
 
     /// The shell origin's state-bridge token (same purpose as a pane's).
