@@ -50,3 +50,31 @@ install, the sample acquisition, and the real-host runs (T1).
 - Windows x86_64 and Linux x86_64 hosts, and cross-host continuation (D4/D5).
 - A real browser session: bridge calls were made with HTTP requests, not by
   clicking the UI (the shell and bridge contract are the same).
+
+## Acceptance script
+
+`scripts/oss-quick-start/acceptance.sh` turns the steps above into one check:
+
+```sh
+scripts/oss-quick-start/acceptance.sh \
+  --ato path/to/ato --capsules path/to/capsule-dir --port 18846
+# optionally --install-cmd "<per-host install command>"
+```
+
+It builds the digest-pinned workspace, opens it with `--local-data`, asserts the
+three panes, the per-instance bindings and the operation results, checkpoints,
+resumes, asserts the restored data and split, and prints the phase times.
+
+Run on this macOS host (debug binary, three packed samples):
+
+```text
+PASS
+  install: 0ms      (not included; --install-cmd records it)
+  open:    4014ms
+  resume:  3753ms
+  total:   7767ms (excluding sample acquisition)
+```
+
+Both phases are far inside the 90-second basic budget; the remaining budget
+question is the one-time install and sample acquisition on each host, which the
+script reports separately via `--install-cmd`.
