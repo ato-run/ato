@@ -281,6 +281,21 @@ pub async fn handle_request(
                 Err(error) => error_response(error),
             }
         }
+        (&Method::GET, ["v1", "bindings"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.list_bindings() {
+                Ok(bindings) => json_response(StatusCode::OK, json!({ "bindings": bindings })),
+                Err(error) => error_response(error),
+            }
+        }
         (&Method::GET, ["v1", "data-resources", "quota"]) => {
             let coordinator = match state.coordinator.lock() {
                 Ok(coordinator) => coordinator,
@@ -1524,5 +1539,41 @@ export function createTask({ arguments: args, state }) {
         .await;
         let after: Value = serde_json::from_str(&after).unwrap();
         assert_eq!(after["result"]["isError"], true, "{after}");
+    }
+
+    #[tokio::test]
+    async fn lists_bindings_for_admin() {
+        let state = state();
+        let (_, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {}}),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap().to_owned();
+        let (status, _) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/data-resources/{resource_id}/bindings"),
+            Some("Bearer test-token"),
+            json!({"port": "tasks", "protocol": "todo.board@1", "access": "read"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, listed) = call(
+            &state,
+            Method::GET,
+            "/v1/bindings",
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["bindings"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["bindings"][0]["port_name"], "tasks");
+        let (status, _) = call(&state, Method::GET, "/v1/bindings", None, json!({})).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
