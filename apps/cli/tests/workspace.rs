@@ -341,3 +341,55 @@ fn a_tampered_snapshot_object_is_refused_on_load() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn inspect_reports_the_panes_declared_data_ports() {
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(
+        source.path().join("index.html"),
+        "<!doctype html><p>todo</p>",
+    )
+    .unwrap();
+    std::fs::write(
+        source.path().join("capsule.toml"),
+        "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[derive.step]]\nid = \"site\"\nuse = \"ato.browser@1\"\nop = \"serve\"\nsource = \"workspace\"\nentry = \"index.html\"\nspa_fallback = false\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"site\"\n\n[[contract.require]]\nid = \"root\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.path().join("ato.data.toml"),
+        "schema = \"ato.data-ports/2\"\n\n[[port]]\nname = \"tasks\"\nprotocol = \"todo.board@1\"\nscope = \"user\"\naccess = \"operations\"\noperations = [\"todo_list_due_dates\"]\nrequired = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.path().join("ato.operations.yaml"),
+        "schema: ato.operations/v2\noperations: []\n",
+    )
+    .unwrap();
+    let (bytes, _) = ato_portable_application::build_static_bundle_with_schema(
+        source.path(),
+        "todo",
+        ato_portable_application::PORTABLE_TREE_V2_SCHEMA,
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("app.capsule"), &bytes).unwrap();
+    let panes = format!(
+        "\n[[pane]]\nid = \"todo\"\ncapsule = \"app.capsule\"\ndigest = \"{}\"\n",
+        sha256(&bytes)
+    );
+    let file = write_workspace(directory.path(), &manifest("1.0", &panes));
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .args(["workspace", "inspect", "--json", file.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        value["panes"][0]["data_ports"][0],
+        "tasks:todo.board@1:operations"
+    );
+    assert_eq!(value["panes"][0]["operations_declared"], true);
+}
