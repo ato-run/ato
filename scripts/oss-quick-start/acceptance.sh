@@ -104,6 +104,19 @@ wait_shell() {
   echo "$url"
 }
 
+stop_workspace() { # pid html
+  local pid=$1 html=$2 stop
+  stop=$(grep -o 'http://127\.0\.0\.1:[0-9]*/stop?token=[a-f0-9]*' <<<"$html" | head -1)
+  if [ -n "$stop" ]; then
+    curl -fsS -X POST -o /dev/null "$stop" || true
+    for _ in $(seq 1 100); do
+      kill -0 "$pid" 2>/dev/null || return 0
+      sleep 0.1
+    done
+  fi
+  kill -INT "$pid" 2>/dev/null || true
+}
+
 invoke() { # pane port operation arguments
   curl -fsS -X POST "http://127.0.0.1:$port/apps/$1/__ato/data-ports/$2/invoke" \
     -H 'content-type: application/json' \
@@ -136,7 +149,7 @@ projection=$(invoke calendar tasks todo_list_due_dates '{}')
 grep -q '"title": "oss quick start"' <<<"$projection" || grep -q '"title":"oss quick start"' <<<"$projection" || fail "Calendar projection is missing the created task: $projection"
 invoke excalidraw scene scene_load '{}' >/dev/null
 
-kill -INT "$pid"
+stop_workspace "$pid" "$html"
 wait "$pid" || true
 [ -f "$workdir/checkpoint.toml" ] || fail "no checkpoint was written"
 
@@ -158,7 +171,7 @@ iframes=$(grep -o '<iframe' <<<"$html" | wc -l | tr -d ' ')
 [ "$iframes" -ge 3 ] || fail "resume shell lost panes (iframes=$iframes)"
 grep -q '0.4' <<<"$html" || fail "resume shell lost the saved split"
 
-kill -INT "$pid"
+stop_workspace "$pid" "$html"
 wait "$pid" || true
 
 total_ms=$(( install_ms + open_ms + resume_ms ))
