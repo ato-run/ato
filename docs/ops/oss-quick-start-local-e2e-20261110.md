@@ -187,3 +187,20 @@ The first attempt exposed a documentation/bundle mismatch (the tarball used to
 extract its files at the top level, while the guide says
 `cd ato-oss-quick-start-<version>`); the builder now packages a top-level
 directory so the written steps work unchanged.
+
+## Bundle built and verified on Linux x86_64
+
+The same `tools/build-quickstart-bundle.sh` ran on `ubuntu-sugamo` (Linux-built
+CLI, Linux sources for the samples and the Excalidraw dist) and produced
+`ato-oss-quick-start-dev.tar.gz` (3.96 MB) plus its `.sha256`. Extracting it and
+running the acceptance check on the same host:
+
+```text
+PASS
+  open:   4122ms
+  resume: 4138ms
+```
+
+So the distributable is not macOS-specific and the written steps work on a
+second OS. (The builder also learned to run outside a git checkout, which is how
+release CI may invoke it.)
