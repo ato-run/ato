@@ -449,6 +449,82 @@ fn protocol_list_prints_the_registry_view() {
 }
 
 #[test]
+fn resource_export_writes_the_document_with_its_digest() {
+    let snapshot = r#"{"resource_id":"dres_1","protocol":"todo.board@1","revision":2,"generation":0,"content_digest":"sha256:abc123","byte_size":17,"document":{"tasks":{"t1":{"id":"t1"}}}}"#;
+    let (port, handle) = stub(vec![(200, snapshot)]);
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("export.json");
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "export",
+            "dres_1",
+            "--out",
+            out.to_str().unwrap(),
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource export");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let export: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(export["schema"], "ato.data.export/v1");
+    assert_eq!(export["resource_id"], "dres_1");
+    assert_eq!(export["protocol"], "todo.board@1");
+    assert_eq!(export["revision"], 2);
+    assert_eq!(export["content_digest"], "sha256:abc123");
+    assert_eq!(export["document"]["tasks"]["t1"]["id"], "t1");
+}
+
+#[test]
+fn resource_import_creates_a_new_resource_from_the_export() {
+    let (port, requests, handle) = capturing_stub(vec![(
+        201,
+        r#"{"resource_id":"dres_2","revision":1,"content_digest":"sha256:def"}"#,
+    )]);
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("export.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "schema": "ato.data.export/v1",
+            "resource_id": "dres_1",
+            "protocol": "todo.board@1",
+            "revision": 2,
+            "content_digest": "sha256:abc123",
+            "document": {"tasks": {"t1": {"id": "t1"}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "import",
+            "--file",
+            file.to_str().unwrap(),
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource import");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dres_2"), "{stdout}");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(request.contains("todo.board@1"), "{request}");
+    assert!(request.contains("\"t1\""), "{request}");
+}
+
+#[test]
 fn quota_prints_usage_and_limit() {
     let (port, handle) = stub(vec![(
         200,
