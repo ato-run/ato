@@ -2,6 +2,7 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod data;
 mod desktop_control;
 mod formation_exploration;
 mod formation_input;
@@ -147,6 +148,11 @@ enum Commands {
     /// Form a local directory into a Capsule: build each candidate, observe it
     /// satisfying its Contract, and keep the verified artifact.
     Form(Box<FormArgs>),
+    /// Read and write DataResources on a Coordinator (hosted API or selfhost).
+    Data {
+        #[command(subcommand)]
+        command: data::DataCommand,
+    },
     /// Inspect repository execution evidence without building or launching it.
     FormInspect {
         path: PathBuf,
@@ -724,6 +730,7 @@ pub fn run() -> Result<()> {
         Commands::Upload(args) => upload(args),
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
+        Commands::Data { command } => data::run(data::DataArgs { command }),
         Commands::FormInspect {
             path,
             derivation,
