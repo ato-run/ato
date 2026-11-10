@@ -15,6 +15,7 @@
 //! conformance suite against the hosted D1 implementation are follow-up slices.
 //! Nothing here is wired into the CLI or Desktop yet.
 
+pub mod handlers;
 pub mod http;
 pub mod relay;
 pub mod service;
