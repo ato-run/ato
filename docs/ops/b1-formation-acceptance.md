@@ -1,6 +1,6 @@
 # B1 Formation Service v1 — acceptance closeout
 
-This page moved to [B1 Formation Service v1 — acceptance closeout](../archive/2026/ops/b1-formation-acceptance.md).
+This page moved to [B1 Formation Service v1 — acceptance closeout](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/b1-formation-acceptance.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

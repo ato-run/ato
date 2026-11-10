@@ -1,6 +1,6 @@
 # Contract-preserving Derivation transformation v0 — E2E evidence
 
-This page moved to [Contract-preserving Derivation transformation v0 — E2E evidence](../archive/2026/ops/contract-preserving-transformation-v0.md).
+This page moved to [Contract-preserving Derivation transformation v0 — E2E evidence](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/contract-preserving-transformation-v0.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

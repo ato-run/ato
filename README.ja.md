@@ -61,7 +61,7 @@ Atoは実験的なプロジェクトです。このリポジトリには計算�
 
 ## ロードマップと作業管理
 
-作業は[GitHub Issues](https://github.com/ato-run/ato/issues)（ボードを使う場合はGitHub Projects）で管理します。このリポジトリにMarkdownのロードマップは置きません。[アーカイブ済みのロードマップ](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)は履歴として残した資料で、更新しません。
+作業は[GitHub Issues](https://github.com/ato-run/ato/issues)（ボードを使う場合はGitHub Projects）で管理します。このリポジトリにMarkdownのロードマップは置きません。[アーカイブ済みのロードマップ](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)は履歴として残した資料で、更新しません。
 
 ## ドキュメント
 

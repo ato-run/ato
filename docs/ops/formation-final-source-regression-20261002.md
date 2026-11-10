@@ -1,6 +1,6 @@
 # Formation final Source and functional regression
 
-This page moved to [Formation final Source and functional regression](../archive/2026/ops/formation-final-source-regression-20261002.md).
+This page moved to [Formation final Source and functional regression](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-final-source-regression-20261002.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

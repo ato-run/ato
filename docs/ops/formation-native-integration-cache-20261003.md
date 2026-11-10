@@ -1,6 +1,6 @@
 # Formation統合SourceとCargo targetの照合
 
-This page moved to [Formation統合SourceとCargo targetの照合](../archive/2026/ops/formation-native-integration-cache-20261003.md).
+This page moved to [Formation統合SourceとCargo targetの照合](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-native-integration-cache-20261003.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

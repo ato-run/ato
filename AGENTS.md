@@ -194,7 +194,7 @@ feat/* (feature flag only) ──PR──▶ nightly
   protocol and implementation specifications, operations, archive). See
   `docs/README.md`.
 - Roadmap and work tracking are GitHub Issues/Projects. Do not add a Markdown
-  roadmap; `docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md` is historical.
+  roadmap; the archived `OPEN_ISSUES_ROADMAP.md` (ato-archive-2026-11) is historical.
 - Prefer an explicit `Status: Current|Draft|Archived` line; directory position
   (`rfcs/accepted`, `rfcs/draft`, `archive/`) carries status when a page has
   none. `Current` does not imply implemented, deployed or verified.

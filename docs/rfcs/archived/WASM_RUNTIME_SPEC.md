@@ -636,5 +636,5 @@ wasmtime-wasi = "20"  # オプション: WASI対応する場合
 ## 付録A: 関連仕様
 
 - [SYNC_SPEC.md](./SYNC_SPEC.md) - .sync フォーマット仕様
-- [CAPSULE_SPEC.md](../../archive/rfcs-legacy-accepted/CAPSULE_SPEC.md) - Capsule パッケージ仕様
-- [NACELLE_SPEC.md](../../archive/rfcs-legacy-accepted/NACELLE_SPEC.md) - Nacelle ランタイム仕様
+- [CAPSULE_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/CAPSULE_SPEC.md) - Capsule パッケージ仕様
+- [NACELLE_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/NACELLE_SPEC.md) - Nacelle ランタイム仕様

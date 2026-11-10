@@ -1,6 +1,6 @@
 # Formation汎用化 調査台帳
 
-This page moved to [Formation汎用化 調査台帳](../archive/2026/ops/formation-generalization-inventory-20261023.md).
+This page moved to [Formation汎用化 調査台帳](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-generalization-inventory-20261023.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.
