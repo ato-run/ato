@@ -725,6 +725,7 @@ pub struct RunningWorkspace {
     pub panes: Vec<WorkspacePaneRuntime>,
     pub shell_url: String,
     pub workspace_digest: String,
+    shell_persistence_token: String,
     manifest: WorkspaceManifestV1,
     _runtime_root: tempfile::TempDir,
 }
@@ -803,26 +804,13 @@ fn shell_html(
     pane_urls: &BTreeMap<String, String>,
     view: &ShellViewState,
 ) -> Result<String> {
-    let columns = match view.direction {
-        Direction::Horizontal => format!(
-            "grid-template-columns: {};",
-            view.split
-                .iter()
-                .map(|weight| format!("{weight}fr"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ),
-        Direction::Vertical => format!(
-            "grid-template-rows: {};",
-            view.split
-                .iter()
-                .map(|weight| format!("{weight}fr"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ),
+    let direction = match view.direction {
+        Direction::Horizontal => "row",
+        Direction::Vertical => "column",
     };
-    let mut frames = String::new();
-    for pane in &manifest.pane {
+    let mut panes = String::new();
+    let mut dividers = String::new();
+    for (index, pane) in manifest.pane.iter().enumerate() {
         let url = pane_urls
             .get(&pane.id)
             .with_context(|| format!("shell has no URL for pane `{}`", pane.id))?;
@@ -832,14 +820,35 @@ fn shell_html(
         } else {
             ""
         };
-        frames.push_str(&format!(
-            r#"<section class="pane{active}" data-pane="{id}"><header>{title}</header><iframe title="{title}" src="{url}/"></iframe></section>"#,
+        panes.push_str(&format!(
+            r#"<section class="pane{active}" data-pane="{id}" style="flex:{weight} 1 0"><header>{title}</header><iframe title="{title}" src="{url}/"></iframe></section>"#,
             id = html_escape(&pane.id),
+            weight = view.split[index],
             title = html_escape(title),
             url = html_escape(url),
         ));
+        if index + 1 < manifest.pane.len() {
+            dividers.push_str(&format!(
+                r#"<div class="divider" data-left="{index}" data-right="{next}"></div>"#,
+                index = index,
+                next = index + 1,
+            ));
+        }
+    }
+    // Interleave panes and dividers: pane, divider, pane, divider, pane.
+    let mut body = String::new();
+    let mut divider_iter = dividers.split_inclusive("/>").peekable();
+    let pane_list: Vec<&str> = panes.split_inclusive("</section>").collect();
+    for (index, pane) in pane_list.iter().enumerate() {
+        body.push_str(pane);
+        if index + 1 < pane_list.len() {
+            if let Some(divider) = divider_iter.next() {
+                body.push_str(divider);
+            }
+        }
     }
     let view_json = serde_json::to_string(view).context("failed to encode the shell view state")?;
+    let weights_json = serde_json::to_string(&view.split).context("failed to encode the split")?;
     Ok(format!(
         r#"<!doctype html>
 <html lang="en">
@@ -849,44 +858,98 @@ fn shell_html(
 <title>ato workspace</title>
 <style>
 html, body {{ height: 100%; margin: 0; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }}
-body {{ display: flex; flex-direction: column; }}
-header.bar {{ padding: 0.5rem 0.8rem; border-bottom: 1px solid #e6e8ea; color: #4a4f54; }}
-main {{ flex: 1; min-height: 0; display: grid; {columns} gap: 6px; padding: 6px; background: #f2f4f6; }}
-section.pane {{ min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; border: 1px solid #e0e3e6; border-radius: 8px; overflow: hidden; }}
+body {{ display: flex; flex-direction: column; background: #f2f4f6; }}
+header.bar {{ padding: 0.5rem 0.8rem; border-bottom: 1px solid #e6e8ea; color: #4a4f54; background: #fff; }}
+main {{ flex: 1; min-height: 0; display: flex; flex-direction: {direction}; gap: 0; }}
+section.pane {{ min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; border: 1px solid #e0e3e6; border-radius: 8px; overflow: hidden; margin: 6px; }}
 section.pane.active {{ border-color: #1f6feb; }}
 section.pane header {{ padding: 0.35rem 0.6rem; border-bottom: 1px solid #eef0f2; color: #6b7075; }}
 iframe {{ flex: 1; width: 100%; border: 0; }}
+divider, .divider {{ flex: 0 0 6px; cursor: {cursor}; background: #dfe3e7; }}
 </style>
 </head>
 <body>
-<header class="bar">ato workspace — edits are saved to this workspace's checkpoint when you stop it</header>
-<main>{frames}</main>
+<header class="bar">ato workspace — drag a divider to change the split; press Ctrl-C to stop</header>
+<main id="split" data-direction="{direction}">{body}</main>
 <script>
 (function () {{
   var key = "{key}";
   var fallback = {view_json};
+  var fallbackSplit = {weights_json};
   var current = fallback;
   try {{
     var stored = localStorage.getItem(key);
     if (stored) {{
       var parsed = JSON.parse(stored);
-      if (parsed && Array.isArray(parsed.split) && parsed.split.length === fallback.split.length) {{
-        current = parsed;
-      }}
+      if (parsed && Array.isArray(parsed.split) && parsed.split.length === fallbackSplit.length) current = parsed;
     }}
   }} catch (_) {{}}
   if (current.active_pane !== fallback.active_pane) current.active_pane = fallback.active_pane;
-  localStorage.setItem(key, JSON.stringify(current));
-  document.querySelectorAll("section.pane").forEach(function (pane) {{
-    pane.addEventListener("click", function () {{
+  var root = document.getElementById("split");
+  var sections = function () {{ return [].slice.call(root.querySelectorAll("section.pane")); }};
+  function apply() {{
+    sections().forEach(function (pane, index) {{
+      var weight = current.split[index] || fallbackSplit[index];
+      pane.style.flex = weight + " 1 0";
+    }});
+  }}
+  function persist() {{
+    try {{ localStorage.setItem(key, JSON.stringify(current)); }} catch (_) {{}}
+  }}
+  apply();
+  persist();
+  root.querySelectorAll("section.pane").forEach(function (pane) {{
+    pane.addEventListener("pointerdown", function () {{
       current.active_pane = pane.dataset.pane;
-      localStorage.setItem(key, JSON.stringify(current));
+      sections().forEach(function (other) {{ other.classList.toggle("active", other === pane); }});
+      persist();
+    }});
+  }});
+  var horizontal = root.dataset.direction === "row";
+  root.querySelectorAll(".divider").forEach(function (divider) {{
+    divider.addEventListener("pointerdown", function (event) {{
+      var left = Number(divider.dataset.left);
+      var right = Number(divider.dataset.right);
+      var paneNodes = sections();
+      var size = horizontal ? root.clientWidth : root.clientHeight;
+      var start = horizontal ? event.clientX : event.clientY;
+      var before = current.split.slice();
+      function move(moveEvent) {{
+        var delta = ((horizontal ? moveEvent.clientX : moveEvent.clientY) - start) / size;
+        var leftWeight = Math.max(0.05, before[left] + delta);
+        var rightWeight = Math.max(0.05, before[right] - delta);
+        var total = before[left] + before[right];
+        if (leftWeight + rightWeight !== total) {{
+          rightWeight = total - leftWeight;
+        }}
+        var next = before.slice();
+        next[left] = leftWeight;
+        next[right] = rightWeight;
+        current.split = next;
+        paneNodes[left].style.flex = next[left] + " 1 0";
+        paneNodes[right].style.flex = next[right] + " 1 0";
+      }}
+      function up() {{
+        persist();
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+      }}
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      event.preventDefault();
     }});
   }});
 }})();
 </script>
 </body>
 </html>"#,
+        direction = direction,
+        cursor = if matches!(view.direction, Direction::Horizontal) {
+            "col-resize"
+        } else {
+            "row-resize"
+        },
+        body = body,
         key = VIEW_STATE_KEY,
     ))
 }
@@ -972,6 +1035,7 @@ pub fn start(file: &Path, checkpoint: Option<&WorkspaceCheckpointV1>) -> Result<
         VIEW_STATE_KEY.to_owned(),
         serde_json::to_string(&view).context("failed to encode the shell view state")?,
     )]);
+    let shell_persistence_token = random_token()?;
     let shell = ato_runtime_attempt::static_server::StaticApplicationServer::listen(
         BTreeMap::from([(
             "/index.html".to_owned(),
@@ -980,7 +1044,7 @@ pub fn start(file: &Path, checkpoint: Option<&WorkspaceCheckpointV1>) -> Result<
         "/index.html".to_owned(),
         false,
         Some(ato_runtime_attempt::static_server::StaticApplicationState {
-            persistence_token: random_token()?,
+            persistence_token: shell_persistence_token.clone(),
             local_storage: shell_view_storage,
             assets: Vec::new(),
         }),
@@ -992,6 +1056,7 @@ pub fn start(file: &Path, checkpoint: Option<&WorkspaceCheckpointV1>) -> Result<
         panes,
         shell_url,
         workspace_digest,
+        shell_persistence_token,
         manifest,
         _runtime_root: runtime_root,
     })
@@ -1044,6 +1109,11 @@ impl RunningWorkspace {
         };
         checkpoint.validate()?;
         Ok(checkpoint)
+    }
+
+    /// The shell origin's state-bridge token (same purpose as a pane's).
+    pub fn shell_persistence_token(&self) -> &str {
+        &self.shell_persistence_token
     }
 
     /// Tokens are exposed so a test can drive the state bridge as a browser
