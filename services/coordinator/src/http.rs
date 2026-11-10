@@ -281,6 +281,40 @@ pub async fn handle_request(
                 Err(error) => error_response(error),
             }
         }
+        (&Method::GET, ["v1", "operations"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.list_operations(None) {
+                Ok(operations) => {
+                    json_response(StatusCode::OK, json!({ "operations": operations }))
+                }
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::GET, ["v1", "protocols", protocol, "operations"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.list_operations(Some(protocol)) {
+                Ok(operations) => {
+                    json_response(StatusCode::OK, json!({ "operations": operations }))
+                }
+                Err(error) => error_response(error),
+            }
+        }
         (&Method::GET, ["v1", "bindings"]) => {
             let coordinator = match state.coordinator.lock() {
                 Ok(coordinator) => coordinator,
@@ -1575,5 +1609,46 @@ export function createTask({ arguments: args, state }) {
         assert_eq!(listed["bindings"][0]["port_name"], "tasks");
         let (status, _) = call(&state, Method::GET, "/v1/bindings", None, json!({})).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn lists_operations_over_http() {
+        let state = state();
+        let (status, _) = call(
+            &state,
+            Method::POST,
+            "/v1/protocols/todo.board@1/operations",
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_create",
+                "semantics": "evolution",
+                "access": "read_write",
+                "module_source": "export function createTask(){}",
+                "module_export": "createTask",
+                "publisher": "alice/app"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, listed) = call(
+            &state,
+            Method::GET,
+            "/v1/protocols/todo.board@1/operations",
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["operations"][0]["operation"], "todo_create");
+        let (status, all) = call(
+            &state,
+            Method::GET,
+            "/v1/operations",
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(all["operations"].as_array().unwrap().len(), 1);
     }
 }

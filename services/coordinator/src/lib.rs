@@ -225,6 +225,17 @@ pub struct Binding {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationInfo {
+    pub protocol: String,
+    pub operation: String,
+    pub semantics: String,
+    pub access: String,
+    pub publisher: String,
+    pub implementation_digest: String,
+    pub expose_mcp: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpTool {
     pub protocol: String,
     pub operation: String,
@@ -1082,6 +1093,35 @@ impl Coordinator {
         Ok(tools)
     }
 
+    /// Registered Protocol operations, optionally only one protocol's.
+    pub fn list_operations(
+        &self,
+        protocol: Option<&str>,
+    ) -> Result<Vec<OperationInfo>, CoordinatorError> {
+        let mut statement = self.conn.prepare(
+            "SELECT protocol_ref,operation,semantics,access,publisher,implementation_digest,expose_mcp
+             FROM protocol_operations
+             WHERE (?1 IS NULL OR protocol_ref=?1)
+             ORDER BY protocol_ref, operation",
+        )?;
+        let rows = statement.query_map(params![protocol], |row| {
+            Ok(OperationInfo {
+                protocol: row.get(0)?,
+                operation: row.get(1)?,
+                semantics: row.get(2)?,
+                access: row.get(3)?,
+                publisher: row.get(4)?,
+                implementation_digest: row.get(5)?,
+                expose_mcp: row.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        let mut operations = Vec::new();
+        for row in rows {
+            operations.push(row?);
+        }
+        Ok(operations)
+    }
+
     /// Every binding (any status) for the admin/CLI view, newest first.
     pub fn list_bindings(&self) -> Result<Vec<Binding>, CoordinatorError> {
         let mut statement = self
@@ -1812,5 +1852,32 @@ export function createTask({ arguments: args, state }) {
         let bindings = coordinator.list_bindings().unwrap();
         assert_eq!(bindings.len(), 2);
         assert!(bindings.iter().any(|binding| binding.instance_id.is_some()));
+    }
+
+    #[test]
+    fn lists_registered_operations_per_protocol() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        for (protocol, operation) in [
+            ("todo.board@1", "todo_create"),
+            ("calendar.day@1", "calendar_plan"),
+        ] {
+            coordinator
+                .register_handler_operation(
+                    protocol,
+                    operation,
+                    "evolution",
+                    "read_write",
+                    HANDLER_MODULE,
+                    "createTask",
+                    "alice/app",
+                )
+                .unwrap();
+        }
+        assert_eq!(coordinator.list_operations(None).unwrap().len(), 2);
+        let todo = coordinator.list_operations(Some("todo.board@1")).unwrap();
+        assert_eq!(todo.len(), 1);
+        assert_eq!(todo[0].operation, "todo_create");
+        assert_eq!(todo[0].publisher, "alice/app");
+        assert!(!todo[0].expose_mcp);
     }
 }
